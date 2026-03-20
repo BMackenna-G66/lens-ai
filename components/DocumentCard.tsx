@@ -1,0 +1,367 @@
+
+
+import React, { useState, useRef } from 'react';
+import { ProcessedDocument, FileProcessingStatus, SupplementaryDocumentAnalysis, SupplementaryAnalysisStatus, RiskAnalysisStatus } from '../types';
+import { LoadingSpinner } from './LoadingSpinner';
+import { IconPdf, IconCheckCircle, IconXCircle, IconAlertTriangle, IconTrash, IconUpload, IconChevronDown, IconChevronUp, IconChatBubbleLeftRight, IconFiles } from './IconComponents';
+
+interface DocumentCardProps {
+  document: ProcessedDocument;
+  onDownloadPdf: () => void;
+  onRemove: () => void;
+  onAddSupplementaryFile: (primaryDocId: string, file: File) => void;
+  isApiKeyOk: boolean;
+  isChatActive: boolean;
+  onToggleChat: () => void;
+  onRequestRiskAnalysis: () => void;
+}
+
+const StatusIndicator: React.FC<{ status: FileProcessingStatus | SupplementaryAnalysisStatus, isSupplementary?: boolean }> = ({ status, isSupplementary }) => {
+  switch (status) {
+    case FileProcessingStatus.QUEUED:
+      return <span className="text-xs font-medium text-gray-700 bg-gray-200 px-2 py-1 rounded-full">En cola</span>;
+    case FileProcessingStatus.READING:
+    case FileProcessingStatus.ANALYZING:
+    case SupplementaryAnalysisStatus.ANALYZING:
+      return (
+        <div className="flex items-center space-x-1 text-xs font-medium text-blue-800 bg-blue-100 px-2 py-1 rounded-full">
+          <LoadingSpinner mini={true} /> <span>{isSupplementary ? "Comparando..." : "Procesando..."}</span>
+        </div>
+      );
+    case FileProcessingStatus.DETECTING_COUNTRY:
+      return (
+        <div className="flex items-center space-x-1 text-xs font-medium text-indigo-800 bg-indigo-100 px-2 py-1 rounded-full">
+          <LoadingSpinner mini={true} /> <span>Detectando país...</span>
+        </div>
+      );
+    case FileProcessingStatus.COMPLETED:
+    case SupplementaryAnalysisStatus.COMPLETED:
+      return (
+        <div className="flex items-center space-x-1 text-xs font-medium text-green-800 bg-green-100 px-2 py-1 rounded-full">
+         <IconCheckCircle className="w-3 h-3" /> <span>{isSupplementary ? "Comparado" : "Completado"}</span>
+        </div>
+      );
+    case FileProcessingStatus.ERROR:
+    case SupplementaryAnalysisStatus.ERROR:
+      return (
+         <div className="flex items-center space-x-1 text-xs font-medium text-red-800 bg-red-100 px-2 py-1 rounded-full">
+          <IconXCircle className="w-3 h-3" /> <span>Error</span>
+        </div>
+      );
+    default:
+      return <span className="text-xs font-medium text-gray-700 bg-gray-200 px-2 py-1 rounded-full">Pendiente</span>;
+  }
+};
+
+const SupplementaryAnalysisItem: React.FC<{ analysis: SupplementaryDocumentAnalysis }> = ({ analysis }) => {
+    const [isExpanded, setIsExpanded] = React.useState(true);
+    return (
+        <div className="mt-3 p-3 bg-slate-100 rounded-md">
+            <div className="flex justify-between items-center">
+                <h5 className="text-sm font-semibold text-primary-600 break-all">{analysis.supplementaryFileName}</h5>
+                <button onClick={() => setIsExpanded(!isExpanded)} className="text-slate-500 hover:text-slate-800">
+                    {isExpanded ? <IconChevronUp className="w-4 h-4" /> : <IconChevronDown className="w-4 h-4" />}
+                </button>
+            </div>
+             <div className="mt-1"><StatusIndicator status={analysis.status} isSupplementary={true} /></div>
+            {analysis.statusMessage && <p className="text-xs text-slate-500 mt-1">{analysis.statusMessage}</p>}
+            
+            {isExpanded && (
+                <>
+                    {analysis.status === SupplementaryAnalysisStatus.COMPLETED && analysis.comparisonResult && (
+                        <div className="mt-2 space-y-2 text-xs">
+                            <div>
+                                <strong className="text-slate-700">1. ¿Datos válidos vs. documento principal?</strong>
+                                <p className="text-slate-600 italic bg-slate-200 p-1.5 rounded text-justify">{analysis.comparisonResult.validezDocumentoSecundario}</p>
+                            </div>
+                            <div>
+                                <strong className="text-slate-700">2. ¿Existen diferencias?</strong>
+                                <p className="text-slate-600 italic bg-slate-200 p-1.5 rounded text-justify">{analysis.comparisonResult.diferenciasEncontradas}</p>
+                            </div>
+                        </div>
+                    )}
+                    {analysis.status === SupplementaryAnalysisStatus.ERROR && analysis.errorMessage && (
+                        <div className="mt-2 text-xs text-red-700 bg-red-100 p-1.5 rounded">
+                            <p className="font-medium">Error en Comparación:</p>
+                            <p>{analysis.errorMessage}</p>
+                        </div>
+                    )}
+                    {analysis.status === SupplementaryAnalysisStatus.ANALYZING && (
+                         <div className="mt-2 flex items-center space-x-2 text-xs text-slate-500">
+                            <LoadingSpinner mini={true} />
+                            <span>Analizando comparación con IA...</span>
+                        </div>
+                    )}
+                </>
+            )}
+        </div>
+    );
+};
+
+
+export const DocumentCard: React.FC<DocumentCardProps> = ({ 
+    document, 
+    onDownloadPdf, 
+    onRemove, 
+    onAddSupplementaryFile, 
+    isApiKeyOk,
+    isChatActive,
+    onToggleChat,
+    onRequestRiskAnalysis,
+}) => {
+  const [isExpanded, setIsExpanded] = useState(true);
+  const supplementaryFileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleSupplementaryFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      onAddSupplementaryFile(document.id, e.target.files[0]);
+      e.target.value = ''; 
+    }
+  };
+  
+  const isProcessingSupplementary = document.supplementaryAnalyses?.some(sa => sa.status === SupplementaryAnalysisStatus.ANALYZING) ?? false;
+  const isRemovalDisabled = document.status === FileProcessingStatus.ANALYZING ||
+                            document.status === FileProcessingStatus.READING ||
+                            document.status === FileProcessingStatus.DETECTING_COUNTRY ||
+                            isProcessingSupplementary ||
+                            document.riskAnalysisStatus === RiskAnalysisStatus.ANALYZING ||
+                            document.isChatLoading;
+  const isConsolidated = !!document.sourceFileNames && document.sourceFileNames.length > 0;
+  const isChatOnlyMode = document.purpose === 'chat_only';
+
+  return (
+    <div className="bg-white rounded-lg shadow-xl border border-slate-200 overflow-hidden transition-all duration-300 hover:shadow-2xl flex flex-col h-full">
+      <div className="p-5 border-b border-slate-200 flex justify-between items-start">
+        <div className="flex-grow min-w-0">
+          <div className="flex items-center">
+            {isConsolidated && <IconFiles className="w-5 h-5 mr-2 text-primary-500 flex-shrink-0" />}
+            <h3 className="text-lg font-semibold text-primary-600 break-all">{document.fileName}</h3>
+            {document.detectedCountry && document.detectedCountry !== 'unknown' && (
+              <span className="ml-2 mt-0.5 self-center whitespace-nowrap text-xs font-semibold bg-blue-600 text-blue-100 px-2 py-1 rounded-full capitalize">
+                {document.detectedCountry.replace(/_/g, ' ')}
+              </span>
+            )}
+          </div>
+          {isConsolidated && document.sourceFileNames && (
+            <div className="mt-1.5 max-h-24 overflow-y-auto custom-scrollbar pr-1">
+              <p className="text-xs text-slate-600 mb-0.5">Archivos fuente ({document.sourceFileNames.length}):</p>
+              <ul className="list-disc list-inside text-xs text-slate-500 pl-1">
+                {document.sourceFileNames.map((name, idx) => (
+                  <li key={idx} className="truncate text-ellipsis" title={name}>{name}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          <div className="mt-2"><StatusIndicator status={document.status} /></div>
+           {document.statusMessage && <p className="text-xs text-slate-500 mt-1">{document.statusMessage}</p>}
+        </div>
+        <div className="flex items-center space-x-1 ml-2 flex-shrink-0">
+            {document.status === FileProcessingStatus.COMPLETED && !isChatOnlyMode && (
+                <button
+                    onClick={() => setIsExpanded(!isExpanded)}
+                    title={isExpanded ? "Ocultar Ficha" : "Mostrar Ficha"}
+                    aria-label={isExpanded ? "Ocultar Ficha" : "Mostrar Ficha"}
+                    className="text-slate-500 hover:text-slate-900 transition-colors p-1 rounded-full"
+                >
+                    {isExpanded ? <IconChevronUp className="w-5 h-5" /> : <IconChevronDown className="w-5 h-5" />}
+                </button>
+            )}
+            <button
+            onClick={onRemove}
+            title="Eliminar este documento y sus análisis"
+            aria-label={`Eliminar análisis del documento ${document.fileName}`}
+            className="text-slate-500 hover:text-red-500 transition-colors p-1 rounded-full disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled={isRemovalDisabled}
+            >
+            <IconTrash className="w-5 h-5" />
+            </button>
+        </div>
+      </div>
+
+      <div className="flex-grow p-5">
+        {document.status === FileProcessingStatus.ERROR && document.errorMessage && (
+          <div className="h-full flex flex-col justify-center bg-red-50 text-red-800 p-3 rounded">
+            <div className="flex items-center space-x-2 mb-1">
+              <IconAlertTriangle className="w-5 h-5 text-red-600 flex-shrink-0" />
+              <p className="font-medium">Error de Análisis Principal:</p>
+            </div>
+            <p className="text-sm break-words">{document.errorMessage}</p>
+          </div>
+        )}
+
+        {document.status === FileProcessingStatus.COMPLETED && (
+            isChatOnlyMode ? (
+                 <div className="h-full flex flex-col items-center justify-center text-slate-500 bg-slate-50 rounded-lg p-4 min-h-[150px]">
+                    <IconChatBubbleLeftRight className="w-10 h-10 mb-2 text-primary-500" />
+                    <p className="font-semibold text-slate-800">Listo para chatear</p>
+                    <p className="text-sm text-center">Este documento se cargó para conversar. Usa el botón de chat para empezar.</p>
+                </div>
+            ) : isExpanded ? (
+                <>
+                    {document.extractedData.length > 0 && (
+                    <div className="mb-4">
+                        <table className="w-full text-sm text-left text-slate-700">
+                        <thead className="text-xs text-slate-500 uppercase bg-slate-100 sticky top-0 z-10">
+                            <tr>
+                            <th scope="col" className="py-2 px-3">Campo</th>
+                            <th scope="col" className="py-2 px-3">Valor Extraído</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {document.extractedData.map((item, index) => (
+                            <tr key={index} className={`${index % 2 === 0 ? 'bg-white' : 'bg-slate-50'} border-b border-slate-200 last:border-b-0`}>
+                                <td className="py-2 px-3 font-medium text-slate-800 whitespace-nowrap">{item.field}</td>
+                                <td className="py-2 px-3 text-slate-600 break-words">{item.value}</td>
+                            </tr>
+                            ))}
+                        </tbody>
+                        </table>
+                    </div>
+                    )}
+                    <div className="mt-4 pt-4 border-t border-slate-200">
+                        <h4 className="text-md font-semibold text-slate-800 mb-2">Análisis Comparativos</h4>
+                        <input
+                            type="file"
+                            accept=".pdf,.png,.txt" 
+                            ref={supplementaryFileInputRef}
+                            onChange={handleSupplementaryFileChange}
+                            className="hidden"
+                            id={`supplementary-upload-${document.id}`}
+                        />
+                        <button
+                            onClick={() => supplementaryFileInputRef.current?.click()}
+                            className="w-full bg-sky-500 hover:bg-sky-600 text-white font-semibold py-2 px-3 rounded-lg shadow-md transition duration-150 ease-in-out flex items-center justify-center space-x-2 text-sm mb-3 disabled:opacity-60 disabled:cursor-not-allowed"
+                            aria-label="Agregar documento complementario para comparar"
+                            disabled={isProcessingSupplementary || document.isChatLoading || !isApiKeyOk}
+                            title={!isApiKeyOk ? "La comparación requiere una API Key válida" : (isProcessingSupplementary ? "Procesando otro doc. complementario" : (document.isChatLoading ? "Chat ocupado": "Añadir doc. complementario (PDF/PNG/TXT)"))}
+                        >
+                            <IconUpload className="w-4 h-4" />
+                            <span>Agregar Doc. Complementario (PDF/PNG/TXT)</span>
+                        </button>
+                        
+                        {document.supplementaryAnalyses && document.supplementaryAnalyses.length > 0 ? (
+                            document.supplementaryAnalyses.map(analysis => (
+                                <SupplementaryAnalysisItem key={analysis.id} analysis={analysis} />
+                            ))
+                        ) : (
+                            <p className="text-xs text-slate-500 text-center">No hay documentos complementarios analizados.</p>
+                        )}
+                    </div>
+                    {/* Risk Analysis Section */}
+                    {document.riskAnalysisStatus !== RiskAnalysisStatus.PENDING && (
+                        <div className="mt-4 pt-4 border-t border-slate-200">
+                            <h4 className="text-md font-semibold text-slate-800 mb-2">Análisis de Riesgos Potenciales</h4>
+                            {document.riskAnalysisStatus === RiskAnalysisStatus.ANALYZING && (
+                                <div className="flex items-center space-x-2 text-sm text-slate-500">
+                                    <LoadingSpinner mini={true} />
+                                    <span>Analizando riesgos...</span>
+                                </div>
+                            )}
+                            {document.riskAnalysisStatus === RiskAnalysisStatus.COMPLETED && document.riskAnalysisResult && (
+                                <div className="space-y-3 text-xs">
+                                    {/* Suspicious Activity */}
+                                    <div className={`p-2 rounded-md ${document.riskAnalysisResult.suspiciousActivity.detected ? 'bg-amber-100' : 'bg-green-100'}`}>
+                                        <div className="flex items-center font-semibold">
+                                            {document.riskAnalysisResult.suspiciousActivity.detected 
+                                                ? <IconAlertTriangle className="w-4 h-4 mr-2 text-amber-500 flex-shrink-0" /> 
+                                                : <IconCheckCircle className="w-4 h-4 mr-2 text-green-500 flex-shrink-0" />}
+                                            <span className={document.riskAnalysisResult.suspiciousActivity.detected ? 'text-amber-800' : 'text-green-800'}>
+                                                Actividad Económica Sospechosa
+                                            </span>
+                                        </div>
+                                        <p className="mt-1 pl-6 text-slate-700">{document.riskAnalysisResult.suspiciousActivity.reason}</p>
+                                    </div>
+
+                                    {/* Suspicious Language */}
+                                    <div className={`p-2 rounded-md ${document.riskAnalysisResult.suspiciousLanguage.detected ? 'bg-amber-100' : 'bg-green-100'}`}>
+                                        <div className="flex items-center font-semibold">
+                                            {document.riskAnalysisResult.suspiciousLanguage.detected 
+                                                ? <IconAlertTriangle className="w-4 h-4 mr-2 text-amber-500 flex-shrink-0" /> 
+                                                : <IconCheckCircle className="w-4 h-4 mr-2 text-green-500 flex-shrink-0" />}
+                                            <span className={document.riskAnalysisResult.suspiciousLanguage.detected ? 'text-amber-800' : 'text-green-800'}>
+                                                Lenguaje Vago o No Estándar
+                                            </span>
+                                        </div>
+                                        <p className="mt-1 pl-6 text-slate-700">{document.riskAnalysisResult.suspiciousLanguage.reason}</p>
+                                    </div>
+                                </div>
+                            )}
+                            {document.riskAnalysisStatus === RiskAnalysisStatus.ERROR && document.riskAnalysisError && (
+                                <div className="mt-2 text-xs text-red-700 bg-red-100 p-2 rounded">
+                                    <p className="font-medium">Error en Análisis de Riesgos:</p>
+                                    <p>{document.riskAnalysisError}</p>
+                                </div>
+                            )}
+                        </div>
+                    )}
+                </>
+            ) : (
+                <div className="h-full flex flex-col items-center justify-center text-slate-400 py-8">
+                    <p className="font-semibold">Ficha de extracción oculta</p>
+                    <p className="text-sm text-slate-500">Haz clic en la flecha para mostrar los detalles.</p>
+                </div>
+            )
+        )}
+        
+        {(document.status === FileProcessingStatus.READING || document.status === FileProcessingStatus.ANALYZING || document.status === FileProcessingStatus.DETECTING_COUNTRY) && (
+           <div className="h-full flex flex-col items-center justify-center">
+              <LoadingSpinner />
+              <p className="mt-2 text-slate-500 text-sm">{document.statusMessage || (document.status === FileProcessingStatus.READING ? "Leyendo archivo..." : "Analizando con IA...")}</p>
+           </div>
+        )}
+         {document.status === FileProcessingStatus.QUEUED && (
+            <div className="h-full flex flex-col items-center justify-center text-slate-400">
+                <p>Esperando para procesar...</p>
+            </div>
+        )}
+
+      </div>
+
+      {document.status === FileProcessingStatus.COMPLETED && (
+          <div className="p-5 border-t border-slate-200 mt-auto bg-slate-50/50">
+            <div className="space-y-3">
+              <button
+                onClick={onToggleChat}
+                className="w-full bg-primary-500 hover:bg-primary-600 text-white font-semibold py-2 px-3 rounded-lg shadow-md transition duration-150 ease-in-out flex items-center justify-center space-x-2 text-sm disabled:opacity-60 disabled:cursor-not-allowed"
+                aria-expanded={isChatActive}
+                disabled={!isApiKeyOk || !document.rawTextContent || document.riskAnalysisStatus === RiskAnalysisStatus.ANALYZING}
+                title={!isApiKeyOk ? "El chat requiere una API Key válida" : (!document.rawTextContent ? "El documento principal no tiene contenido para chatear" : (isChatActive ? "Ocultar Chat" : "Chatear con Documentos"))}
+              >
+                <IconChatBubbleLeftRight className="w-4 h-4" />
+                <span>{isChatActive ? "Ocultar Chat" : "Chat con Documentos"}</span>
+                {isChatActive ? <IconChevronUp className="w-4 h-4 ml-1" /> : <IconChevronDown className="w-4 h-4 ml-1" />}
+              </button>
+
+              {!isChatOnlyMode && document.riskAnalysisStatus === RiskAnalysisStatus.PENDING && (
+                <button
+                    onClick={onRequestRiskAnalysis}
+                    className="w-full bg-amber-500 hover:bg-amber-600 text-white font-semibold py-2 px-3 rounded-lg shadow-md transition duration-150 ease-in-out flex items-center justify-center space-x-2 text-sm disabled:opacity-60 disabled:cursor-not-allowed"
+                    disabled={!isApiKeyOk || isProcessingSupplementary || document.isChatLoading}
+                    title={!isApiKeyOk ? "El análisis de riesgos requiere una API Key válida" : "Solicitar Análisis de Riesgos Potenciales"}
+                >
+                    <IconAlertTriangle className="w-4 h-4" />
+                    <span>Análisis de Riesgos</span>
+                </button>
+              )}
+
+              {!isChatOnlyMode && document.extractedData.length > 0 && (
+                 <button
+                    onClick={onDownloadPdf}
+                    className="w-full bg-rose-500 hover:bg-rose-600 text-white font-semibold py-2 px-4 rounded-lg shadow-md transition duration-150 ease-in-out flex items-center justify-center space-x-2"
+                    aria-label={`Descargar PDF de ${document.fileName}`}
+                  >
+                    <IconPdf className="w-5 h-5" />
+                    <span>Descargar Ficha PDF</span>
+                  </button>
+              )}
+            </div>
+             {isChatActive && (!isApiKeyOk || !document.rawTextContent) && ( 
+                <p className="text-xs text-amber-700 text-center p-2 mt-2 bg-amber-100 rounded">
+                    {!isApiKeyOk ? "El chat está deshabilitado: API Key no configurada." : "Chat no disponible: contenido del documento principal ausente."}
+                </p>
+             )}
+          </div>
+      )}
+    </div>
+  );
+};

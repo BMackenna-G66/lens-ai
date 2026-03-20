@@ -1,0 +1,6 @@
+{
+  "name": "Lens - AI",
+  "description": "An application to extract key information from Chilean public deeds using AI (Gemini). Users can upload PDF or TXT documents for analysis and download results in various formats.",
+  "requestFramePermissions": [],
+  "prompt": ""
+}
