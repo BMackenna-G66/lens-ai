@@ -108,7 +108,8 @@ export const KEYWORDS_BY_COUNTRY: CountryKeywords = {
     "peru": {
         "id_tributaria": [
             "RUC",
-            "Registro Único de Contribuyentes"
+            "Registro Único de Contribuyentes",
+            "Registro Unico de Contribuyentes"
         ],
         "razon_social": [
             "Denominación",
@@ -693,6 +694,70 @@ export const KEYWORDS_BY_COUNTRY: CountryKeywords = {
         "duracion": [
             "Duración",
             "Vigencia"
+        ]
+    },
+    "china": {
+        "id_tributaria": [
+            "Tax ID",
+            "Unified Social Credit Code",
+            "统一社会信用代码"
+        ],
+        "razon_social": [
+            "Name",
+            "Company Name",
+            "名称"
+        ],
+        "fecha_constitucion": [
+            "Date of Incorporation",
+            "Establishment Date",
+            "成立日期"
+        ],
+        "direccion": [
+            "Registered Address",
+            "住所"
+        ],
+        "representante_legal": [
+            "Legal Representative",
+            "法定代表人"
+        ],
+        "objeto_social": [
+            "Business Scope",
+            "经营范围"
+        ],
+        "capital_social": [
+            "Registered Capital",
+            "注册资本"
+        ],
+        "duracion": [
+            "Operating Period",
+            "Term",
+            "营业期限"
+        ],
+        "acciones": [
+            "Shares",
+            "Equity interest"
+        ],
+        "accionistas": [
+            "Shareholders",
+            "股东"
+        ],
+        "facultades": [
+            "Governance",
+            "Executive Director"
+        ],
+        "juntas": [
+            "Shareholders' Meetings"
+        ],
+        "resolucion_conflictos": [
+            "Dispute Resolution",
+            "Arbitration"
+        ],
+        "utilidades": [
+            "Profit Distribution"
+        ],
+        "comunicacion": [
+            "Official Communication",
+            "Notices"
         ]
     }
 };

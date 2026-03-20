@@ -9,7 +9,7 @@ interface AlertProps {
 }
 
 export const Alert: React.FC<AlertProps> = ({ type, message, onClose }) => {
-  let bgColor, textColor, borderColor, Icon, closeBtnHoverBg;
+  let bgColor, textColor, borderColor, Icon, ringColor;
 
   switch (type) {
     case 'info':
@@ -17,28 +17,28 @@ export const Alert: React.FC<AlertProps> = ({ type, message, onClose }) => {
       textColor = 'text-blue-800';
       borderColor = 'border-blue-500';
       Icon = IconInfoCircle;
-      closeBtnHoverBg = 'hover:bg-blue-200';
+      ringColor = 'focus:ring-blue-400';
       break;
     case 'error':
       bgColor = 'bg-red-100';
       textColor = 'text-red-800';
       borderColor = 'border-red-500';
       Icon = IconXCircleSolid;
-      closeBtnHoverBg = 'hover:bg-red-200';
+      ringColor = 'focus:ring-red-400';
       break;
     case 'warning':
       bgColor = 'bg-yellow-100';
       textColor = 'text-yellow-800';
       borderColor = 'border-yellow-500';
       Icon = IconAlertTriangleSolid;
-      closeBtnHoverBg = 'hover:bg-yellow-200';
+      ringColor = 'focus:ring-yellow-400';
       break;
     default:
       bgColor = 'bg-gray-100';
       textColor = 'text-gray-800';
       borderColor = 'border-gray-500';
       Icon = IconInfoCircle;
-      closeBtnHoverBg = 'hover:bg-gray-200';
+      ringColor = 'focus:ring-gray-400';
   }
 
   return (
@@ -49,7 +49,7 @@ export const Alert: React.FC<AlertProps> = ({ type, message, onClose }) => {
         {onClose && (
           <button
             onClick={onClose}
-            className={`ml-4 -mx-1.5 -my-1.5 ${bgColor} ${textColor} rounded-lg focus:ring-2 focus:ring-gray-400 p-1.5 ${closeBtnHoverBg} inline-flex h-8 w-8`}
+            className={`ml-4 -mx-1.5 -my-1.5 p-1.5 rounded-lg focus:ring-2 ${ringColor} inline-flex h-8 w-8`}
             aria-label="Cerrar"
           >
             <span className="sr-only">Cerrar</span>

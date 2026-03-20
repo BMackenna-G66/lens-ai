@@ -1,14 +1,14 @@
-
 import React, { useState, useCallback } from 'react';
 import { IconUpload } from './IconComponents';
 
 interface FileUploadProps {
   onFilesSelected: (files: File[]) => void;
   disabled?: boolean;
-  analysisMode: 'single' | 'consolidated'; // New prop
+  analysisMode: 'single' | 'consolidated';
+  id?: string; // New prop for unique ID
 }
 
-export const FileUpload: React.FC<FileUploadProps> = ({ onFilesSelected, disabled, analysisMode }) => {
+export const FileUpload: React.FC<FileUploadProps> = ({ onFilesSelected, disabled, analysisMode, id = 'fileInput' }) => {
   const [isDragging, setIsDragging] = useState(false);
 
   const handleDragEnter = useCallback((e: React.DragEvent<HTMLDivElement>) => {
@@ -47,15 +47,15 @@ export const FileUpload: React.FC<FileUploadProps> = ({ onFilesSelected, disable
         filesArray = [filesArray[0]];
       }
 
-      const acceptedFiles = filesArray.filter(file => 
+      const acceptedFiles = filesArray.filter((file: File) => 
         file.type === "application/pdf" || 
         file.type === "text/plain" ||
-        file.type === "image/png" 
+        file.type === "image/png" ||
+        file.type === "image/jpeg" ||
+        file.type === "image/jpg"
       );
 
       if (acceptedFiles.length !== filesArray.length) {
-        // This message might appear if the single selected file (after potentially filtering down to 1) is not accepted.
-        // Or if in consolidated mode, some of the multiple files are not accepted.
         console.warn("Algunos archivos fueron omitidos debido a su tipo no soportado o porque se excedió el límite para el modo individual.");
       }
       if (acceptedFiles.length > 0) {
@@ -69,17 +69,17 @@ export const FileUpload: React.FC<FileUploadProps> = ({ onFilesSelected, disable
     if (e.target.files && e.target.files.length > 0) {
       let filesArray = Array.from(e.target.files);
 
-      // Note: If input `multiple` is false, `e.target.files` should only contain one file.
-      // This check is more a safeguard.
       if (analysisMode === 'single' && filesArray.length > 1) {
          console.warn("Modo individual: Múltiples archivos seleccionados a través del diálogo (inesperado si 'multiple' es false), solo se procesará el primero.");
          filesArray = [filesArray[0]];
       }
 
-      const acceptedFiles = filesArray.filter(file => 
+      const acceptedFiles = filesArray.filter((file: File) => 
         file.type === "application/pdf" || 
         file.type === "text/plain" ||
-        file.type === "image/png"
+        file.type === "image/png" ||
+        file.type === "image/jpeg" ||
+        file.type === "image/jpg"
       );
 
        if (acceptedFiles.length !== filesArray.length) {
@@ -101,7 +101,7 @@ export const FileUpload: React.FC<FileUploadProps> = ({ onFilesSelected, disable
     : "Arrastra y suelta los archivos relacionados aquí, o ";
   const instructionTextLink = "haz clic para seleccionar";
   
-  const supportedFilesText = "PDF, DOC, DOCX, TXT. (Max. 10MB)";
+  const supportedFilesText = "Soportados: PDF, PNG, JPG, TXT.";
 
   return (
     <div 
@@ -110,16 +110,16 @@ export const FileUpload: React.FC<FileUploadProps> = ({ onFilesSelected, disable
       onDragLeave={handleDragLeave}
       onDragOver={handleDragOver}
       onDrop={handleDrop}
-      onClick={() => !disabled && document.getElementById('fileInput')?.click()}
+      onClick={() => !disabled && document.getElementById(id)?.click()}
       role="button"
       tabIndex={disabled ? -1 : 0}
       aria-label={`Área de carga de archivos. ${instructionTextStart} ${instructionTextLink}`}
     >
       <input
-        id="fileInput"
+        id={id}
         type="file"
-        multiple={analysisMode === 'consolidated'} // Dynamically set multiple attribute
-        accept=".pdf,.txt,.png,.doc,.docx"
+        multiple={analysisMode === 'consolidated'}
+        accept=".pdf,.txt,.png,.jpg,.jpeg"
         onChange={handleFileChange}
         className="hidden"
         disabled={disabled}

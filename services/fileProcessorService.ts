@@ -1,4 +1,3 @@
-
 import * as pdfjsLib from 'pdfjs-dist/build/pdf';
 import type { TextItem, PDFDocumentProxy } from 'pdfjs-dist/types/src/display/api';
 import Tesseract from 'tesseract.js';
@@ -31,15 +30,20 @@ const getTesseractWorker = async (): Promise<Tesseract.Worker> => {
 
 export const getTextFromFile = async (file: File): Promise<string> => {
   return new Promise((resolve, reject) => {
+    console.log(`Processing file type: ${file.type}`);
+    
     if (file.type === 'application/pdf') {
       extractTextFromPdfWithOcr(file).then(resolve).catch(reject);
     } else if (file.type === 'text/plain') {
       extractTextFromTxt(file).then(resolve).catch(reject);
-    } else if (file.type === 'image/png') {
-      extractTextFromPngWithOcr(file).then(resolve).catch(reject);
-    }
-     else {
-      reject(new Error('Tipo de archivo no soportado. Solo PDF, PNG y TXT.'));
+    } else if (
+        file.type === 'image/png' || 
+        file.type === 'image/jpeg' || 
+        file.type === 'image/jpg'
+    ) {
+      extractTextFromImageWithOcr(file).then(resolve).catch(reject);
+    } else {
+      reject(new Error(`Tipo de archivo no soportado (${file.type}). Solo se permiten PDF, PNG, JPG y TXT.`));
     }
   });
 };
@@ -61,41 +65,41 @@ const extractTextFromTxt = (file: File): Promise<string> => {
   });
 };
 
-const extractTextFromPngWithOcr = async (file: File): Promise<string> => {
-  console.log(`[extractTextFromPngWithOcr] Starting OCR text extraction for ${file.name}`);
+const extractTextFromImageWithOcr = async (file: File): Promise<string> => {
+  console.log(`[extractTextFromImageWithOcr] Starting OCR text extraction for ${file.name}`);
   try {
     const worker = await getTesseractWorker();
     
-    console.log(`[extractTextFromPngWithOcr] Performing OCR on image ${file.name}`);
+    console.log(`[extractTextFromImageWithOcr] Performing OCR on image ${file.name}`);
     const { data: { text: ocrText } } = await worker.recognize(file); // Tesseract can take a File object
     
     const trimmedOcrText = ocrText.trim();
     if (!trimmedOcrText) {
-        console.warn(`[extractTextFromPngWithOcr] No text could be extracted by OCR from ${file.name}.`);
-        throw new Error("OCR_NO_TEXT_DETECTED_PNG");
+        console.warn(`[extractTextFromImageWithOcr] No text could be extracted by OCR from ${file.name}.`);
+        throw new Error("OCR_NO_TEXT_DETECTED_IMG");
     }
     
-    console.log(`[extractTextFromPngWithOcr] Successfully extracted text via OCR from ${file.name}. Total length: ${trimmedOcrText.length}. Preview (first 200 chars): "${trimmedOcrText.substring(0, 200).replace(/\n/g, ' ')}"`);
+    console.log(`[extractTextFromImageWithOcr] Successfully extracted text via OCR from ${file.name}. Total length: ${trimmedOcrText.length}. Preview (first 200 chars): "${trimmedOcrText.substring(0, 200).replace(/\n/g, ' ')}"`);
     return trimmedOcrText;
 
   } catch (error: any) {
-    console.error(`[extractTextFromPngWithOcr] Error during PNG OCR for ${file.name}:`, error);
+    console.error(`[extractTextFromImageWithOcr] Error during Image OCR for ${file.name}:`, error);
     const originalErrorMessage = error instanceof Error ? error.message : String(error);
     if (error instanceof Error && error.stack) {
-        console.error("[extractTextFromPngWithOcr] Original error stack:", error.stack);
+        console.error("[extractTextFromImageWithOcr] Original error stack:", error.stack);
     }
 
-    if (originalErrorMessage === "OCR_NO_TEXT_DETECTED_PNG") {
-        throw new Error(`OCR no pudo detectar texto en la imagen PNG "${file.name}".`);
+    if (originalErrorMessage === "OCR_NO_TEXT_DETECTED_IMG") {
+        throw new Error(`OCR no pudo detectar texto en la imagen "${file.name}".`);
     }
     if (originalErrorMessage.toLowerCase().includes('failed to load script') || originalErrorMessage.toLowerCase().includes('networkerror')) {
-      throw new Error(`OCR_INIT_ERROR_PNG: Error al cargar recursos de OCR para PNG (posible problema de red o CDN): ${originalErrorMessage}`);
+      throw new Error(`OCR_INIT_ERROR_IMG: Error al cargar recursos de OCR (posible problema de red o CDN): ${originalErrorMessage}`);
     }
     if (originalErrorMessage.toLowerCase().includes('language')) {
-         throw new Error(`OCR_INIT_ERROR_PNG: Error al cargar datos de idioma para OCR de PNG: ${originalErrorMessage}`);
+         throw new Error(`OCR_INIT_ERROR_IMG: Error al cargar datos de idioma para OCR: ${originalErrorMessage}`);
     }
     
-    throw new Error(`OCR_PROCESSING_ERROR_PNG: ${originalErrorMessage}`);
+    throw new Error(`OCR_PROCESSING_ERROR_IMG: ${originalErrorMessage}`);
   }
 };
 

@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -5,9 +6,9 @@
   <link rel="icon" type="image/svg+xml" href="/vite.svg" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Legal Document Analyzer</title>
+
   <script src="https://cdn.tailwindcss.com"></script>
-  <link rel="stylesheet" href="/index.css">
-  <script>
+    <script>
     tailwind.config = {
       theme: {
         extend: {
@@ -35,13 +36,15 @@
     "@google/genai": "https://esm.sh/@google/genai@^1.3.0",
     "jspdf": "https://esm.sh/jspdf@^3.0.1",
     "jspdf-autotable": "https://esm.sh/jspdf-autotable@^5.0.2",
-    "tesseract.js": "https://esm.sh/tesseract.js@^5.1.0"
+    "tesseract.js": "https://esm.sh/tesseract.js@^5.1.0",
+    "dexie": "https://esm.sh/dexie@^4.0.7",
   }
 }
 </script>
+<link rel="stylesheet" href="/index.css">
 </head>
 <body>
   <div id="root"></div>
-  <script type="module" src="/index.tsx"></script>
+<script type="module" src="/index.tsx"></script>
 </body>
 </html>

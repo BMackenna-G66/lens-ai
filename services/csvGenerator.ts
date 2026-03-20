@@ -16,16 +16,16 @@ const escapeCsvValue = (value: string | undefined | null): string => {
 };
 
 export const generateCsv = (documents: ProcessedDocument[]): void => {
-  if (documents.length === 0) {
+  const docsToExport = documents.filter(doc => doc.purpose === 'extract' && doc.status === 'COMPLETED');
+
+  if (docsToExport.length === 0) {
     return;
   }
 
   const headers = ['FileName', ...PREDEFINED_FIELDS];
   let csvContent = headers.map(escapeCsvValue).join(',') + '\r\n';
 
-  documents.forEach(doc => {
-    if (doc.status !== 'COMPLETED') return;
-
+  docsToExport.forEach(doc => {
     const row: string[] = [doc.fileName];
     const dataMap = new Map(doc.extractedData.map(ef => [ef.field, ef.value]));
     

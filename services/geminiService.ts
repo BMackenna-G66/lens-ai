@@ -1,419 +1,164 @@
-
-
-import { GoogleGenAI, GenerateContentResponse } from "@google/genai";
-import { API_KEY_PLACEHOLDER, GEMINI_COMPARISON_PROMPT_TEMPLATE, GEMINI_CHAT_SYSTEM_INSTRUCTION, GEMINI_COUNTRY_DETECTION_PROMPT_TEMPLATE, GEMINI_RISK_ANALYSIS_PROMPT_TEMPLATE, GEMINI_LIMITES_PROMPT, GEMINI_CRYPTO_PROMPT, GEMINI_AML_PROMPT } from "../constants";
-import { ExtractedField, ComparisonResult, RiskAnalysisResult, LimitesResult, CryptoAnalysisResult, AMLResult } from "../types";
+import { GoogleGenAI, GenerateContentResponse, Type } from "@google/genai";
+import { API_KEY_PLACEHOLDER, PREDEFINED_FIELDS, GEMINI_COMPARISON_PROMPT_TEMPLATE, GEMINI_CHAT_SYSTEM_INSTRUCTION, GEMINI_COUNTRY_DETECTION_PROMPT_TEMPLATE, GEMINI_RISK_ANALYSIS_PROMPT_TEMPLATE, GEMINI_INTEGRITY_ANALYSIS_PROMPT_TEMPLATE, GEMINI_FINANCIAL_PROMPT_TEMPLATE, GEMINI_BANK_STATEMENT_PROMPT_TEMPLATE, GEMINI_CROSS_ANALYSIS_PROMPT_TEMPLATE, GEMINI_CRYPTO_FORENSIC_PROMPT, GEMINI_COMPLIANCE_AUDIT_PROMPT, GEMINI_TAX_FOLDER_PROMPT_TEMPLATE } from "../constants";
+import { ExtractedField, ComparisonResult, RiskAnalysisResult, IntegrityAnalysisResult, FinancialAnalysisResult, BankStatementAnalysisResult, CombinedAnalysisResult, CryptoWalletProfile, CryptoRiskAssessment, ComplianceAnalysisResult, TaxFolderAnalysisResult } from "../types";
 import { KEYWORDS_BY_COUNTRY } from "./countryKeywords";
 
-const API_KEY = process.env.API_KEY;
+const getApiKey = (): string | undefined => process.env.API_KEY;
 
-let ai: GoogleGenAI;
+export const hasValidApiKeys = (): boolean => {
+  const key = getApiKey();
+  return !!key && key !== API_KEY_PLACEHOLDER && !key.includes("YOUR_API_KEY");
+};
 
-if (API_KEY && API_KEY !== API_KEY_PLACEHOLDER) {
-  ai = new GoogleGenAI({ apiKey: API_KEY });
-} else {
-  console.error(`API_KEY for Gemini is not defined or is a placeholder (${API_KEY_PLACEHOLDER}). Gemini service will not be available.`);
-  // Initialize with placeholder to avoid crashing, but services will throw errors.
-  ai = new GoogleGenAI({ apiKey: API_KEY_PLACEHOLDER });
-}
-
-const primaryAnalysisModel = 'gemini-2.5-flash';
-const chatModel = 'gemini-2.5-flash';
+let aiInstance: GoogleGenAI | null = null;
+const getAiInstance = (): GoogleGenAI => {
+  const apiKey = getApiKey();
+  if (!apiKey || !hasValidApiKeys()) throw new Error("No hay una API Key de Gemini válida configurada.");
+  if (!aiInstance) aiInstance = new GoogleGenAI({ apiKey });
+  return aiInstance;
+};
 
 const extractJsonFromResponse = (text: string): string => {
-  // Strip markdown fences first
   const fenceRegex = /^```(?:json)?\s*\n?([\s\S]*?)\n?\s*```$/s;
   const fenceMatch = text.trim().match(fenceRegex);
   if (fenceMatch && fenceMatch[1]) return fenceMatch[1].trim();
-
-  // Find the first { or [ and the last matching } or ]
   const firstBrace = text.indexOf('{');
   const firstBracket = text.indexOf('[');
-
   if (firstBrace === -1 && firstBracket === -1) return text.trim();
-
+  let startIdx: number;
   let startChar: string;
   let endChar: string;
-  let startIdx: number;
-
-  if (firstBrace === -1) {
-    startChar = '['; endChar = ']'; startIdx = firstBracket;
-  } else if (firstBracket === -1) {
-    startChar = '{'; endChar = '}'; startIdx = firstBrace;
-  } else {
+  if (firstBrace === -1) { startChar = '['; endChar = ']'; startIdx = firstBracket; }
+  else if (firstBracket === -1) { startChar = '{'; endChar = '}'; startIdx = firstBrace; }
+  else {
     startIdx = Math.min(firstBrace, firstBracket);
     startChar = text[startIdx] === '{' ? '{' : '[';
     endChar = startChar === '{' ? '}' : ']';
   }
-
   const endIdx = text.lastIndexOf(endChar);
   if (endIdx > startIdx) return text.slice(startIdx, endIdx + 1);
-
   return text.trim();
 };
 
+async function executeWithRetry<T>(apiCall: (ai: GoogleGenAI) => Promise<T>): Promise<T> {
+  if (!hasValidApiKeys()) throw new Error("No hay API Keys de Gemini válidas configuradas.");
+  const ai = getAiInstance();
+  try {
+    return await apiCall(ai);
+  } catch (error: any) {
+    let cleanMessage = error.message || "Error desconocido de la API.";
+    if (cleanMessage.includes("API key not valid")) cleanMessage = "La API Key de Gemini no es válida.";
+    else if (cleanMessage.toLowerCase().includes("quota")) cleanMessage = "Se ha excedido la cuota de la API de Gemini.";
+    throw new Error(`El análisis falló. Error: ${cleanMessage}`);
+  }
+}
+
+const primaryAnalysisModel = 'gemini-2.5-flash';
+const chatModel = 'gemini-2.5-flash';
+const jsonConfig = { responseMimeType: "application/json", thinkingConfig: { thinkingBudget: 0 } } as const;
+
 export const detectCountryWithGemini = async (documentText: string): Promise<string> => {
-    if (!API_KEY || API_KEY === API_KEY_PLACEHOLDER) {
-        throw new Error("La API Key de Gemini no está configurada. No se puede detectar el país.");
-    }
-    const countryList = Object.keys(KEYWORDS_BY_COUNTRY);
-    const prompt = GEMINI_COUNTRY_DETECTION_PROMPT_TEMPLATE(documentText, countryList);
-
-    try {
-        const response: GenerateContentResponse = await ai.models.generateContent({
-            model: primaryAnalysisModel, // Use the flash model for speed
-            contents: prompt,
-            config: { thinkingConfig: { thinkingBudget: 0 } } // Disable thinking for this simple task
-        });
-
-        const text = response.text;
-        const country = text?.trim().toLowerCase() || 'unknown';
-        
-        if (countryList.includes(country) || country === 'unknown') {
-            console.log(`Country detected: ${country}`);
-            return country;
-        } else {
-            console.warn(`Gemini returned an invalid country key: '${country}'. Defaulting to 'unknown'.`);
-            return 'unknown';
-        }
-
-    } catch (error: any) {
-        console.error("Error calling Gemini API for country detection:", error);
-        throw new Error(`Error de la API de Gemini durante la detección de país: ${error.message || "Error desconocido"}`);
-    }
+  const countryList = Object.keys(KEYWORDS_BY_COUNTRY);
+  const prompt = GEMINI_COUNTRY_DETECTION_PROMPT_TEMPLATE(documentText, countryList);
+  return executeWithRetry(async (ai) => {
+    const response = await ai.models.generateContent({ model: chatModel, contents: prompt, config: { thinkingConfig: { thinkingBudget: 0 } } });
+    const country = response.text?.trim().toLowerCase() || 'unknown';
+    return (countryList.includes(country) || country === 'unknown') ? country : 'unknown';
+  });
 };
 
-
-export const analyzeDocumentWithGemini = async (prompt: string): Promise<string> => {
-  if (!API_KEY || API_KEY === API_KEY_PLACEHOLDER) {
-    console.error("Gemini API call attempted without a valid API Key for primary analysis.");
-    throw new Error("La API Key de Gemini no está configurada correctamente. No se puede procesar el documento.");
-  }
-  
-  try {
-    const response: GenerateContentResponse = await ai.models.generateContent({
-      model: primaryAnalysisModel,
-      contents: prompt,
-    });
-    
+export const analyzeDocumentWithGemini = async (prompt: string): Promise<{ extractedData: ExtractedField[]; rawResponse: string }> => {
+  const responseSchema = { type: Type.ARRAY, items: { type: Type.OBJECT, properties: { field: { type: Type.STRING, enum: PREDEFINED_FIELDS }, value: { type: Type.STRING } }, required: ['field', 'value'] } };
+  return executeWithRetry(async (ai) => {
+    const response = await ai.models.generateContent({ model: primaryAnalysisModel, contents: prompt, config: { responseMimeType: "application/json", responseSchema, thinkingConfig: { thinkingBudget: 0 } } });
     const text = response.text;
-    if (text === undefined || text === null) {
-        console.warn("Gemini API returned undefined or null text response for primary analysis.");
-        throw new Error("Respuesta vacía o inválida de la API de Gemini.");
-    }
-    return text;
-
-  } catch (error: any) {
-    console.error("Error calling Gemini API for primary analysis:", error);
-    if (error.message && error.message.toLowerCase().includes("api key not valid")) {
-        throw new Error("La API Key de Gemini no es válida. Por favor, verifique su configuración.");
-    }
-     if (error.message && error.message.toLowerCase().includes("quota")) {
-        throw new Error("Se ha excedido la cuota de la API de Gemini. Intente más tarde.");
-    }
-    throw new Error(`Error de la API de Gemini: ${error.message || "Error desconocido"}`);
-  }
+    if (!text?.trim()) throw new Error("Respuesta vacía de la API de Gemini.");
+    const parsedData: ExtractedField[] = JSON.parse(extractJsonFromResponse(text));
+    const extractedDataMap = new Map(parsedData.map(item => [item.field, item.value]));
+    return { extractedData: PREDEFINED_FIELDS.map(f => ({ field: f, value: extractedDataMap.get(f) || "No especificado" })), rawResponse: text };
+  });
 };
 
 export const analyzeDocumentComparisonWithGemini = async (primaryDocumentExtractedData: ExtractedField[], supplementaryDocumentText: string): Promise<ComparisonResult> => {
-  if (!API_KEY || API_KEY === API_KEY_PLACEHOLDER) {
-    console.error("Gemini API call attempted without a valid API Key for comparison analysis.");
-    throw new Error("La API Key de Gemini no está configurada correctamente. No se puede realizar la comparación.");
-  }
-
-  const primaryDataJson = JSON.stringify(primaryDocumentExtractedData.map(field => ({ [field.field]: field.value })).reduce((obj, item) => ({...obj, ...item}), {}));
+  const primaryDataJson = JSON.stringify(primaryDocumentExtractedData.map(f => ({ [f.field]: f.value })).reduce((obj, item) => ({...obj, ...item}), {}));
   const prompt = GEMINI_COMPARISON_PROMPT_TEMPLATE(primaryDataJson, supplementaryDocumentText);
-  
-  console.log("Sending comparison prompt to Gemini. Primary data (first 100 chars of JSON):", primaryDataJson.substring(0,100), "Supplementary text (first 100 chars):", supplementaryDocumentText.substring(0,100));
-
-  try {
-    const response: GenerateContentResponse = await ai.models.generateContent({
-      model: primaryAnalysisModel, // Comparison can use the same model
-      contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-        thinkingConfig: { thinkingBudget: 0 },
-      }
-    });
-
-    const text = response.text;
-    if (text === undefined || text === null || text.trim() === '') {
-        console.warn("Gemini API returned undefined, null, or empty text response for comparison analysis.");
-        throw new Error("Respuesta vacía o inválida de la API de Gemini para la comparación.");
-    }
-
-    const jsonStr = extractJsonFromResponse(text);
-
-    try {
-      const parsedData = JSON.parse(jsonStr) as ComparisonResult;
-      if (!parsedData.validezDocumentoSecundario || !parsedData.diferenciasEncontradas) {
-        console.error("Parsed JSON from Gemini for comparison is missing required fields. Raw text:", text, "Parsed:", parsedData);
-        throw new Error("La respuesta JSON de la IA para la comparación tiene un formato inesperado.");
-      }
-      console.log("Successfully parsed comparison result from Gemini:", parsedData);
-      return parsedData;
-    } catch (e) {
-      console.error("Failed to parse JSON response from Gemini for comparison. Raw text:", text, "Error:", e);
-      throw new Error(`La respuesta de la IA para la comparación no es un JSON válido: ${ (e as Error).message }`);
-    }
-
-  } catch (error: any) {
-    console.error("Error calling Gemini API for comparison analysis:", error);
-    if (error.message && error.message.toLowerCase().includes("api key not valid")) {
-        throw new Error("La API Key de Gemini no es válida. Por favor, verifique su configuración.");
-    }
-     if (error.message && error.message.toLowerCase().includes("quota")) {
-        throw new Error("Se ha excedido la cuota de la API de Gemini para comparación. Intente más tarde.");
-    }
-    if (error.message && (error.message.startsWith("La respuesta de la IA para la comparación no es un JSON válido") || error.message.startsWith("La respuesta JSON de la IA para la comparación tiene un formato inesperado"))) {
-        throw error;
-    }
-    throw new Error(`Error de la API de Gemini para comparación: ${error.message || "Error desconocido"}`);
-  }
+  return executeWithRetry(async (ai) => {
+    const response = await ai.models.generateContent({ model: primaryAnalysisModel, contents: prompt, config: jsonConfig });
+    if (!response.text) throw new Error("Respuesta vacía de la API.");
+    return JSON.parse(extractJsonFromResponse(response.text)) as ComparisonResult;
+  });
 };
 
-export const getChatResponse = async (
-  systemInstruction: string,
-  fullChatHistoryForGemini: { role: 'user' | 'model', parts: { text: string }[] }[],
-  newUserQuery: string
-): Promise<string> => {
-  if (!API_KEY || API_KEY === API_KEY_PLACEHOLDER) {
-    console.error("Gemini API call attempted without a valid API Key for chat.");
-    throw new Error("La API Key de Gemini no está configurada correctamente. No se puede usar el chat.");
-  }
-
-  try {
-    // Create a new chat session on each call, providing the full history.
-    // The @google/genai Chat object is stateful if retained, but recreating it with history is fine for stateless React components.
-    const chat = ai.chats.create({
-      model: chatModel,
-      config: { systemInstruction },
-      history: fullChatHistoryForGemini,
-    });
-
+export const getChatResponse = async (systemInstruction: string, fullChatHistoryForGemini: { role: 'user' | 'model', parts: { text: string }[] }[], newUserQuery: string): Promise<string> => {
+  return executeWithRetry(async (ai) => {
+    const chat = ai.chats.create({ model: chatModel, config: { systemInstruction }, history: fullChatHistoryForGemini });
     const responseStream = await chat.sendMessageStream({ message: newUserQuery });
-    
     let aggregatedResponse = "";
-    for await (const chunk of responseStream) { // chunk type is GenerateContentResponse
-        if (chunk && chunk.text) {
-            aggregatedResponse += chunk.text;
-        }
-    }
-
-    if (aggregatedResponse.trim() === "") {
-        console.warn("Gemini chat API returned an empty or whitespace-only response.");
-        // Fallback to a generic message if AI gives no text, rather than throwing error that breaks chat UX.
-        return "No se recibió una respuesta de la IA o la respuesta estaba vacía.";
-    }
-    
-    return aggregatedResponse;
-
-  } catch (error: any) {
-    console.error("Error calling Gemini API for chat:", error);
-    if (error.message && error.message.toLowerCase().includes("api key not valid")) {
-      throw new Error("La API Key de Gemini no es válida para el chat. Por favor, verifique su configuración.");
-    }
-    if (error.message && error.message.toLowerCase().includes("quota")) {
-      throw new Error("Se ha excedido la cuota de la API de Gemini para el chat. Intente más tarde.");
-    }
-    // Provide a more specific error message if the response was problematic but not an API key/quota issue
-    if (error.message && error.message.toLowerCase().includes("model output filtered")) {
-      return "La respuesta de la IA fue bloqueada o filtrada debido a políticas de seguridad. Intenta reformular tu pregunta.";
-    }
-    if (error.message && error.message.toLowerCase().includes("candidate was blocked")) {
-      return "La IA no pudo generar una respuesta para esta pregunta debido a restricciones de contenido. Intenta con otra pregunta.";
-    }
-    throw new Error(`Error en el chat con IA: ${error.message || "Error desconocido"}`);
-  }
+    for await (const chunk of responseStream) aggregatedResponse += chunk.text;
+    return aggregatedResponse || "No se recibió una respuesta de la IA.";
+  });
 };
-
 
 export const analyzeDocumentForRisks = async (documentText: string): Promise<RiskAnalysisResult> => {
-  if (!API_KEY || API_KEY === API_KEY_PLACEHOLDER) {
-    throw new Error("La API Key de Gemini no está configurada. No se puede realizar el análisis de riesgos.");
-  }
-  const prompt = GEMINI_RISK_ANALYSIS_PROMPT_TEMPLATE(documentText);
-
-  try {
-    const response: GenerateContentResponse = await ai.models.generateContent({
-      model: primaryAnalysisModel, // Can use the same model
-      contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-        thinkingConfig: { thinkingBudget: 0 },
-      }
-    });
-
-    const text = response.text;
-    if (!text || text.trim() === '') {
-      throw new Error("Respuesta vacía de la IA para el análisis de riesgos.");
-    }
-
-    const jsonStr = extractJsonFromResponse(text);
-
-    try {
-      const parsedData = JSON.parse(jsonStr) as RiskAnalysisResult;
-      // Basic validation
-      if (typeof parsedData.suspiciousActivity?.detected !== 'boolean' || typeof parsedData.suspiciousLanguage?.detected !== 'boolean') {
-         throw new Error("El JSON de la IA para el análisis de riesgos tiene un formato inesperado.");
-      }
-      return parsedData;
-    } catch (e) {
-      console.error("Failed to parse JSON response from Gemini for risk analysis. Raw text:", text, "Error:", e);
-      throw new Error(`La respuesta de la IA para el análisis de riesgos no es un JSON válido: ${ (e as Error).message }`);
-    }
-
-  } catch (error: any) {
-    console.error("Error calling Gemini API for risk analysis:", error);
-    throw new Error(`Error de la API de Gemini durante el análisis de riesgos: ${error.message || "Error desconocido"}`);
-  }
+  return executeWithRetry(async (ai) => {
+    const response = await ai.models.generateContent({ model: primaryAnalysisModel, contents: GEMINI_RISK_ANALYSIS_PROMPT_TEMPLATE(documentText), config: jsonConfig });
+    if (!response.text) throw new Error("Respuesta vacía de la IA.");
+    return JSON.parse(extractJsonFromResponse(response.text)) as RiskAnalysisResult;
+  });
 };
 
-export const analyzeLimitesTransaccionales = async (
-  country: string,
-  transactionType: string,
-  amount: string,
-  currency: string,
-  description: string
-): Promise<LimitesResult> => {
-  if (!API_KEY || API_KEY === API_KEY_PLACEHOLDER) {
-    throw new Error("La API Key de Gemini no está configurada. No se puede evaluar los límites transaccionales.");
-  }
-  const prompt = GEMINI_LIMITES_PROMPT(country, transactionType, amount, currency, description);
-
-  try {
-    const response: GenerateContentResponse = await ai.models.generateContent({
-      model: primaryAnalysisModel,
-      contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-        thinkingConfig: { thinkingBudget: 0 },
-      },
-    });
-
-    const text = response.text;
-    if (!text || text.trim() === '') {
-      throw new Error("Respuesta vacía de la IA para el análisis de límites transaccionales.");
-    }
-
-    const jsonStr = extractJsonFromResponse(text);
-
-    try {
-      const parsedData = JSON.parse(jsonStr) as LimitesResult;
-      if (typeof parsedData.cumple !== 'boolean' || !parsedData.nivelRiesgo) {
-        throw new Error("El JSON de la IA para límites transaccionales tiene un formato inesperado.");
-      }
-      return parsedData;
-    } catch (e) {
-      console.error("Failed to parse JSON response from Gemini for límites transaccionales. Raw text:", text, "Error:", e);
-      throw new Error(`La respuesta de la IA para límites transaccionales no es un JSON válido: ${(e as Error).message}`);
-    }
-  } catch (error: any) {
-    console.error("Error calling Gemini API for límites transaccionales:", error);
-    if (error.message && error.message.toLowerCase().includes("api key not valid")) {
-      throw new Error("La API Key de Gemini no es válida. Por favor, verifique su configuración.");
-    }
-    if (error.message && error.message.toLowerCase().includes("quota")) {
-      throw new Error("Se ha excedido la cuota de la API de Gemini. Intente más tarde.");
-    }
-    throw new Error(`Error de la API de Gemini durante el análisis de límites transaccionales: ${error.message || "Error desconocido"}`);
-  }
+export const analyzeDocumentIntegrity = async (documentText: string): Promise<IntegrityAnalysisResult> => {
+  return executeWithRetry(async (ai) => {
+    const response = await ai.models.generateContent({ model: primaryAnalysisModel, contents: GEMINI_INTEGRITY_ANALYSIS_PROMPT_TEMPLATE(documentText), config: jsonConfig });
+    if (!response.text) throw new Error("Respuesta vacía de la IA.");
+    return JSON.parse(extractJsonFromResponse(response.text)) as IntegrityAnalysisResult;
+  });
 };
 
-export const analyzeCryptoRisk = async (
-  walletAddress: string,
-  blockchain: string,
-  transactionData: string
-): Promise<CryptoAnalysisResult> => {
-  if (!API_KEY || API_KEY === API_KEY_PLACEHOLDER) {
-    throw new Error("La API Key de Gemini no está configurada. No se puede analizar el riesgo cripto.");
-  }
-  const prompt = GEMINI_CRYPTO_PROMPT(walletAddress, blockchain, transactionData);
-
-  try {
-    const response: GenerateContentResponse = await ai.models.generateContent({
-      model: primaryAnalysisModel,
-      contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-        thinkingConfig: { thinkingBudget: 0 },
-      },
-    });
-
-    const text = response.text;
-    if (!text || text.trim() === '') {
-      throw new Error("Respuesta vacía de la IA para el análisis de criptoactivos.");
-    }
-
-    const jsonStr = extractJsonFromResponse(text);
-
-    try {
-      const parsedData = JSON.parse(jsonStr) as CryptoAnalysisResult;
-      if (!parsedData.nivelRiesgo || !parsedData.resumenRiesgo) {
-        throw new Error("El JSON de la IA para el análisis de criptoactivos tiene un formato inesperado.");
-      }
-      return parsedData;
-    } catch (e) {
-      console.error("Failed to parse JSON response from Gemini for crypto analysis. Raw text:", text, "Error:", e);
-      throw new Error(`La respuesta de la IA para el análisis cripto no es un JSON válido: ${(e as Error).message}`);
-    }
-  } catch (error: any) {
-    console.error("Error calling Gemini API for crypto analysis:", error);
-    if (error.message && error.message.toLowerCase().includes("api key not valid")) {
-      throw new Error("La API Key de Gemini no es válida. Por favor, verifique su configuración.");
-    }
-    if (error.message && error.message.toLowerCase().includes("quota")) {
-      throw new Error("Se ha excedido la cuota de la API de Gemini. Intente más tarde.");
-    }
-    throw new Error(`Error de la API de Gemini durante el análisis de criptoactivos: ${error.message || "Error desconocido"}`);
-  }
+export const analyzeFinancialDocumentWithGemini = async (documentText: string): Promise<FinancialAnalysisResult> => {
+  return executeWithRetry(async (ai) => {
+    const response = await ai.models.generateContent({ model: primaryAnalysisModel, contents: GEMINI_FINANCIAL_PROMPT_TEMPLATE(documentText), config: jsonConfig });
+    if (!response.text) throw new Error("Respuesta vacía de la IA.");
+    return JSON.parse(extractJsonFromResponse(response.text)) as FinancialAnalysisResult;
+  });
 };
 
-export const analyzeAML = async (
-  documentText: string,
-  entityType: string,
-  country: string
-): Promise<AMLResult> => {
-  if (!API_KEY || API_KEY === API_KEY_PLACEHOLDER) {
-    throw new Error("La API Key de Gemini no está configurada. No se puede realizar la evaluación AML.");
-  }
-  const prompt = GEMINI_AML_PROMPT(documentText, entityType, country);
+export const analyzeBankStatementWithGemini = async (documentText: string): Promise<BankStatementAnalysisResult> => {
+  return executeWithRetry(async (ai) => {
+    const response = await ai.models.generateContent({ model: primaryAnalysisModel, contents: GEMINI_BANK_STATEMENT_PROMPT_TEMPLATE(documentText), config: jsonConfig });
+    if (!response.text) throw new Error("Respuesta vacía de la IA.");
+    return JSON.parse(extractJsonFromResponse(response.text)) as BankStatementAnalysisResult;
+  });
+};
 
-  try {
-    const response: GenerateContentResponse = await ai.models.generateContent({
-      model: primaryAnalysisModel,
-      contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-        thinkingConfig: { thinkingBudget: 0 },
-      },
-    });
+export const analyzeTaxFolderWithGemini = async (documentText: string): Promise<TaxFolderAnalysisResult> => {
+  return executeWithRetry(async (ai) => {
+    const response = await ai.models.generateContent({ model: primaryAnalysisModel, contents: GEMINI_TAX_FOLDER_PROMPT_TEMPLATE(documentText), config: jsonConfig });
+    if (!response.text) throw new Error("Respuesta vacía de la IA.");
+    return JSON.parse(extractJsonFromResponse(response.text)) as TaxFolderAnalysisResult;
+  });
+};
 
-    const text = response.text;
-    if (!text || text.trim() === '') {
-      throw new Error("Respuesta vacía de la IA para la evaluación AML.");
-    }
+export const analyzeCrossCheckWithGemini = async (documentText: string): Promise<CombinedAnalysisResult> => {
+  return executeWithRetry(async (ai) => {
+    const response = await ai.models.generateContent({ model: primaryAnalysisModel, contents: GEMINI_CROSS_ANALYSIS_PROMPT_TEMPLATE(documentText), config: jsonConfig });
+    if (!response.text) throw new Error("Respuesta vacía de la IA.");
+    return JSON.parse(extractJsonFromResponse(response.text)) as CombinedAnalysisResult;
+  });
+};
 
-    const jsonStr = extractJsonFromResponse(text);
+export const analyzeCryptoWalletWithGemini = async (walletProfile: CryptoWalletProfile): Promise<CryptoRiskAssessment> => {
+  return executeWithRetry(async (ai) => {
+    const response = await ai.models.generateContent({ model: primaryAnalysisModel, contents: GEMINI_CRYPTO_FORENSIC_PROMPT(JSON.stringify(walletProfile, null, 2)), config: jsonConfig });
+    if (!response.text) throw new Error("Respuesta vacía de la IA.");
+    return JSON.parse(extractJsonFromResponse(response.text)) as CryptoRiskAssessment;
+  });
+};
 
-    try {
-      const parsedData = JSON.parse(jsonStr) as AMLResult;
-      if (!parsedData.nivelRiesgo || typeof parsedData.puntuacion !== 'number') {
-        throw new Error("El JSON de la IA para la evaluación AML tiene un formato inesperado.");
-      }
-      return parsedData;
-    } catch (e) {
-      console.error("Failed to parse JSON response from Gemini for AML analysis. Raw text:", text, "Error:", e);
-      throw new Error(`La respuesta de la IA para la evaluación AML no es un JSON válido: ${(e as Error).message}`);
-    }
-  } catch (error: any) {
-    console.error("Error calling Gemini API for AML analysis:", error);
-    if (error.message && error.message.toLowerCase().includes("api key not valid")) {
-      throw new Error("La API Key de Gemini no es válida. Por favor, verifique su configuración.");
-    }
-    if (error.message && error.message.toLowerCase().includes("quota")) {
-      throw new Error("Se ha excedido la cuota de la API de Gemini. Intente más tarde.");
-    }
-    throw new Error(`Error de la API de Gemini durante la evaluación AML: ${error.message || "Error desconocido"}`);
-  }
+export const analyzeComplianceDocumentWithGemini = async (documentText: string): Promise<ComplianceAnalysisResult> => {
+  return executeWithRetry(async (ai) => {
+    const response = await ai.models.generateContent({ model: primaryAnalysisModel, contents: GEMINI_COMPLIANCE_AUDIT_PROMPT(documentText), config: jsonConfig });
+    if (!response.text) throw new Error("Respuesta vacía de la IA.");
+    return JSON.parse(extractJsonFromResponse(response.text)) as ComplianceAnalysisResult;
+  });
 };

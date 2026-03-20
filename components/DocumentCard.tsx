@@ -1,19 +1,20 @@
 
 
 import React, { useState, useRef } from 'react';
-import { ProcessedDocument, FileProcessingStatus, SupplementaryDocumentAnalysis, SupplementaryAnalysisStatus, RiskAnalysisStatus } from '../types';
+import { ProcessedDocument, FileProcessingStatus, SupplementaryDocumentAnalysis, SupplementaryAnalysisStatus, RiskAnalysisStatus, IntegrityAnalysisStatus, FidedignidadLevel } from '../types';
 import { LoadingSpinner } from './LoadingSpinner';
-import { IconPdf, IconCheckCircle, IconXCircle, IconAlertTriangle, IconTrash, IconUpload, IconChevronDown, IconChevronUp, IconChatBubbleLeftRight, IconFiles } from './IconComponents';
+import { IconPdf, IconCheckCircle, IconXCircle, IconAlertTriangle, IconTrash, IconUpload, IconChevronDown, IconChevronUp, IconChatBubbleLeftRight, IconFiles, IconShieldCheck } from './IconComponents';
 
 interface DocumentCardProps {
   document: ProcessedDocument;
-  onDownloadPdf: () => void;
   onRemove: () => void;
   onAddSupplementaryFile: (primaryDocId: string, file: File) => void;
-  isApiKeyOk: boolean;
-  isChatActive: boolean;
-  onToggleChat: () => void;
+  onDownloadPdf: () => void;
   onRequestRiskAnalysis: () => void;
+  onRequestIntegrityAnalysis: () => void;
+  onToggleChat: () => void;
+  isChatActive: boolean;
+  isApiKeyOk: boolean;
 }
 
 const StatusIndicator: React.FC<{ status: FileProcessingStatus | SupplementaryAnalysisStatus, isSupplementary?: boolean }> = ({ status, isSupplementary }) => {
@@ -98,16 +99,29 @@ const SupplementaryAnalysisItem: React.FC<{ analysis: SupplementaryDocumentAnaly
     );
 };
 
+const FidedignidadLevelIndicator: React.FC<{ level: FidedignidadLevel }> = ({ level }) => {
+    switch (level) {
+        case 'Alta Fidedignidad':
+            return <div className="inline-flex items-center space-x-2 font-bold text-green-700 bg-green-100 px-3 py-1 rounded-full"><IconCheckCircle className="w-5 h-5" /><span>{level}</span></div>;
+        case 'Fidedignidad Media':
+            return <div className="inline-flex items-center space-x-2 font-bold text-amber-700 bg-amber-100 px-3 py-1 rounded-full"><IconAlertTriangle className="w-5 h-5" /><span>{level}</span></div>;
+        case 'Baja Fidedignidad':
+            return <div className="inline-flex items-center space-x-2 font-bold text-red-700 bg-red-100 px-3 py-1 rounded-full"><IconXCircle className="w-5 h-5" /><span>{level}</span></div>;
+        default:
+            return <span>{level}</span>;
+    }
+};
 
 export const DocumentCard: React.FC<DocumentCardProps> = ({ 
     document, 
-    onDownloadPdf, 
     onRemove, 
-    onAddSupplementaryFile, 
-    isApiKeyOk,
-    isChatActive,
-    onToggleChat,
+    onAddSupplementaryFile,
+    onDownloadPdf,
     onRequestRiskAnalysis,
+    onRequestIntegrityAnalysis,
+    onToggleChat,
+    isChatActive,
+    isApiKeyOk
 }) => {
   const [isExpanded, setIsExpanded] = useState(true);
   const supplementaryFileInputRef = useRef<HTMLInputElement>(null);
@@ -120,14 +134,18 @@ export const DocumentCard: React.FC<DocumentCardProps> = ({
   };
   
   const isProcessingSupplementary = document.supplementaryAnalyses?.some(sa => sa.status === SupplementaryAnalysisStatus.ANALYZING) ?? false;
+  const isIntegrityAnalysisRunning = document.integrityAnalysisStatus === IntegrityAnalysisStatus.ANALYZING;
   const isRemovalDisabled = document.status === FileProcessingStatus.ANALYZING ||
                             document.status === FileProcessingStatus.READING ||
                             document.status === FileProcessingStatus.DETECTING_COUNTRY ||
                             isProcessingSupplementary ||
                             document.riskAnalysisStatus === RiskAnalysisStatus.ANALYZING ||
+                            isIntegrityAnalysisRunning ||
                             document.isChatLoading;
   const isConsolidated = !!document.sourceFileNames && document.sourceFileNames.length > 0;
   const isChatOnlyMode = document.purpose === 'chat_only';
+
+  const canPerformActions = document.status === FileProcessingStatus.COMPLETED && isApiKeyOk && !document.isChatLoading && !isProcessingSupplementary && document.riskAnalysisStatus !== RiskAnalysisStatus.ANALYZING && !isIntegrityAnalysisRunning;
 
   return (
     <div className="bg-white rounded-lg shadow-xl border border-slate-200 overflow-hidden transition-all duration-300 hover:shadow-2xl flex flex-col h-full">
@@ -208,12 +226,54 @@ export const DocumentCard: React.FC<DocumentCardProps> = ({
                             </tr>
                         </thead>
                         <tbody>
-                            {document.extractedData.map((item, index) => (
-                            <tr key={index} className={`${index % 2 === 0 ? 'bg-white' : 'bg-slate-50'} border-b border-slate-200 last:border-b-0`}>
-                                <td className="py-2 px-3 font-medium text-slate-800 whitespace-nowrap">{item.field}</td>
-                                <td className="py-2 px-3 text-slate-600 break-words">{item.value}</td>
-                            </tr>
-                            ))}
+                            {document.extractedData.map((item, index) => {
+                                if (item.field === "Análisis de Facultades Específicas") {
+                                    let facultades;
+                                    try {
+                                        facultades = JSON.parse(item.value);
+                                    } catch (e) {
+                                        facultades = null;
+                                    }
+
+                                    if (facultades && typeof facultades === 'object' && 'compraVentaBienes' in facultades) {
+                                        return (
+                                            <tr key={index} className={`${index % 2 === 0 ? 'bg-white' : 'bg-slate-50'} border-b border-slate-200 last:border-b-0`}>
+                                                <td className="py-2 px-3 font-medium text-slate-800 whitespace-nowrap align-top">{item.field}</td>
+                                                <td className="py-2 px-3 text-slate-600">
+                                                    <ul className="space-y-1">
+                                                        <li className="flex items-center">
+                                                            {facultades.compraVentaBienes 
+                                                                ? <IconCheckCircle className="w-5 h-5 mr-2 text-green-500 flex-shrink-0" /> 
+                                                                : <IconXCircle className="w-5 h-5 mr-2 text-red-500 flex-shrink-0" />}
+                                                            <span className="text-sm">Compraventa valores mobiliarios/bienes incorporales</span>
+                                                        </li>
+                                                        <li className="flex items-center">
+                                                            {facultades.operacionesBancarias 
+                                                                ? <IconCheckCircle className="w-5 h-5 mr-2 text-green-500 flex-shrink-0" /> 
+                                                                : <IconXCircle className="w-5 h-5 mr-2 text-red-500 flex-shrink-0" />}
+                                                            <span className="text-sm">Operaciones Bancarias</span>
+                                                        </li>
+                                                        <li className="flex items-center">
+                                                            {facultades.mandatos 
+                                                                ? <IconCheckCircle className="w-5 h-5 mr-2 text-green-500 flex-shrink-0" /> 
+                                                                : <IconXCircle className="w-5 h-5 mr-2 text-red-500 flex-shrink-0" />}
+                                                            <span className="text-sm">Mandatos</span>
+                                                        </li>
+                                                    </ul>
+                                                </td>
+                                            </tr>
+                                        );
+                                    }
+                                }
+                                
+                                // Default rendering for all other fields or if parsing fails
+                                return (
+                                    <tr key={index} className={`${index % 2 === 0 ? 'bg-white' : 'bg-slate-50'} border-b border-slate-200 last:border-b-0`}>
+                                        <td className="py-2 px-3 font-medium text-slate-800 whitespace-nowrap">{item.field}</td>
+                                        <td className="py-2 px-3 text-slate-600 break-words">{item.value}</td>
+                                    </tr>
+                                );
+                            })}
                         </tbody>
                         </table>
                     </div>
@@ -232,7 +292,7 @@ export const DocumentCard: React.FC<DocumentCardProps> = ({
                             onClick={() => supplementaryFileInputRef.current?.click()}
                             className="w-full bg-sky-500 hover:bg-sky-600 text-white font-semibold py-2 px-3 rounded-lg shadow-md transition duration-150 ease-in-out flex items-center justify-center space-x-2 text-sm mb-3 disabled:opacity-60 disabled:cursor-not-allowed"
                             aria-label="Agregar documento complementario para comparar"
-                            disabled={isProcessingSupplementary || document.isChatLoading || !isApiKeyOk}
+                            disabled={isProcessingSupplementary || document.isChatLoading || !isApiKeyOk || isIntegrityAnalysisRunning}
                             title={!isApiKeyOk ? "La comparación requiere una API Key válida" : (isProcessingSupplementary ? "Procesando otro doc. complementario" : (document.isChatLoading ? "Chat ocupado": "Añadir doc. complementario (PDF/PNG/TXT)"))}
                         >
                             <IconUpload className="w-4 h-4" />
@@ -294,6 +354,49 @@ export const DocumentCard: React.FC<DocumentCardProps> = ({
                             )}
                         </div>
                     )}
+                    {/* Integrity Analysis Section */}
+                    {document.integrityAnalysisStatus !== IntegrityAnalysisStatus.PENDING && (
+                        <div className="mt-4 pt-4 border-t border-slate-200">
+                            <h4 className="text-md font-semibold text-slate-800 mb-2">Análisis de Veracidad</h4>
+                            {document.integrityAnalysisStatus === IntegrityAnalysisStatus.ANALYZING && (
+                                <div className="flex items-center space-x-2 text-sm text-slate-500">
+                                    <LoadingSpinner mini={true} />
+                                    <span>Analizando Veracidad del documento...</span>
+                                </div>
+                            )}
+                            {document.integrityAnalysisStatus === IntegrityAnalysisStatus.COMPLETED && document.integrityAnalysisResult && (
+                                <div className="space-y-4">
+                                    <div className="text-center">
+                                        <FidedignidadLevelIndicator level={document.integrityAnalysisResult.fidedignidadLevel} />
+                                    </div>
+                                    <div>
+                                        <table className="w-full text-xs text-left text-slate-700">
+                                            <tbody>
+                                                {document.integrityAnalysisResult.criteria.map((item, index) => (
+                                                <tr key={index} className="border-b border-slate-200 last:border-b-0">
+                                                    <td className="py-1.5 px-2 font-medium text-slate-800">{item.criterion}</td>
+                                                    <td className="py-1.5 px-2 text-slate-600 font-semibold">{item.result}</td>
+                                                </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                    <div>
+                                        <strong className="text-sm text-slate-700">Recomendación del Analista:</strong>
+                                        <blockquote className="mt-1 text-sm text-slate-600 italic bg-slate-100 p-2 rounded border-l-4 border-primary-500">
+                                            {document.integrityAnalysisResult.recommendation}
+                                        </blockquote>
+                                    </div>
+                                </div>
+                            )}
+                            {document.integrityAnalysisStatus === IntegrityAnalysisStatus.ERROR && document.integrityAnalysisError && (
+                                <div className="mt-2 text-xs text-red-700 bg-red-100 p-2 rounded">
+                                    <p className="font-medium">Error en Análisis de Veracidad:</p>
+                                    <p>{document.integrityAnalysisError}</p>
+                                </div>
+                            )}
+                        </div>
+                    )}
                 </>
             ) : (
                 <div className="h-full flex flex-col items-center justify-center text-slate-400 py-8">
@@ -317,50 +420,47 @@ export const DocumentCard: React.FC<DocumentCardProps> = ({
 
       </div>
 
-      {document.status === FileProcessingStatus.COMPLETED && (
-          <div className="p-5 border-t border-slate-200 mt-auto bg-slate-50/50">
-            <div className="space-y-3">
-              <button
+       {document.status === FileProcessingStatus.COMPLETED && (
+        <div className="p-3 bg-slate-50 border-t border-slate-200 grid grid-cols-2 sm:grid-cols-4 gap-2 text-center">
+            <button
                 onClick={onToggleChat}
-                className="w-full bg-primary-500 hover:bg-primary-600 text-white font-semibold py-2 px-3 rounded-lg shadow-md transition duration-150 ease-in-out flex items-center justify-center space-x-2 text-sm disabled:opacity-60 disabled:cursor-not-allowed"
-                aria-expanded={isChatActive}
-                disabled={!isApiKeyOk || !document.rawTextContent || document.riskAnalysisStatus === RiskAnalysisStatus.ANALYZING}
-                title={!isApiKeyOk ? "El chat requiere una API Key válida" : (!document.rawTextContent ? "El documento principal no tiene contenido para chatear" : (isChatActive ? "Ocultar Chat" : "Chatear con Documentos"))}
-              >
-                <IconChatBubbleLeftRight className="w-4 h-4" />
-                <span>{isChatActive ? "Ocultar Chat" : "Chat con Documentos"}</span>
-                {isChatActive ? <IconChevronUp className="w-4 h-4 ml-1" /> : <IconChevronDown className="w-4 h-4 ml-1" />}
-              </button>
-
-              {!isChatOnlyMode && document.riskAnalysisStatus === RiskAnalysisStatus.PENDING && (
-                <button
-                    onClick={onRequestRiskAnalysis}
-                    className="w-full bg-amber-500 hover:bg-amber-600 text-white font-semibold py-2 px-3 rounded-lg shadow-md transition duration-150 ease-in-out flex items-center justify-center space-x-2 text-sm disabled:opacity-60 disabled:cursor-not-allowed"
-                    disabled={!isApiKeyOk || isProcessingSupplementary || document.isChatLoading}
-                    title={!isApiKeyOk ? "El análisis de riesgos requiere una API Key válida" : "Solicitar Análisis de Riesgos Potenciales"}
-                >
-                    <IconAlertTriangle className="w-4 h-4" />
-                    <span>Análisis de Riesgos</span>
-                </button>
-              )}
-
-              {!isChatOnlyMode && document.extractedData.length > 0 && (
-                 <button
-                    onClick={onDownloadPdf}
-                    className="w-full bg-rose-500 hover:bg-rose-600 text-white font-semibold py-2 px-4 rounded-lg shadow-md transition duration-150 ease-in-out flex items-center justify-center space-x-2"
-                    aria-label={`Descargar PDF de ${document.fileName}`}
-                  >
-                    <IconPdf className="w-5 h-5" />
-                    <span>Descargar Ficha PDF</span>
-                  </button>
-              )}
-            </div>
-             {isChatActive && (!isApiKeyOk || !document.rawTextContent) && ( 
-                <p className="text-xs text-amber-700 text-center p-2 mt-2 bg-amber-100 rounded">
-                    {!isApiKeyOk ? "El chat está deshabilitado: API Key no configurada." : "Chat no disponible: contenido del documento principal ausente."}
-                </p>
-             )}
-          </div>
+                className={`flex flex-col items-center justify-center p-2 rounded-lg transition-colors text-sm font-medium space-y-1
+                    ${isChatActive ? 'bg-primary-500 text-white' : 'bg-slate-200 hover:bg-primary-100 text-slate-700'}
+                    disabled:opacity-50 disabled:cursor-not-allowed`}
+                disabled={!isApiKeyOk}
+                title={isApiKeyOk ? (isChatActive ? "Cerrar chat" : "Chatear con documentos") : "El chat requiere una API Key"}
+            >
+                <IconChatBubbleLeftRight className="w-5 h-5" />
+                <span>Chat con Documentos</span>
+            </button>
+            <button
+                onClick={onRequestRiskAnalysis}
+                className="flex flex-col items-center justify-center p-2 rounded-lg transition-colors text-sm font-medium space-y-1 bg-amber-100 hover:bg-amber-200 text-amber-800 disabled:opacity-50 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-500"
+                disabled={!canPerformActions || document.riskAnalysisStatus !== RiskAnalysisStatus.PENDING}
+                title={document.riskAnalysisStatus !== RiskAnalysisStatus.PENDING ? "Análisis de riesgos ya realizado" : "Analizar riesgos potenciales"}
+            >
+                <IconAlertTriangle className="w-5 h-5" />
+                <span>Análisis de Riesgos</span>
+            </button>
+            <button
+                onClick={onRequestIntegrityAnalysis}
+                className="flex flex-col items-center justify-center p-2 rounded-lg transition-colors text-sm font-medium space-y-1 bg-teal-100 hover:bg-teal-200 text-teal-800 disabled:opacity-50 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-500"
+                disabled={!canPerformActions || document.integrityAnalysisStatus !== IntegrityAnalysisStatus.PENDING}
+                title={document.integrityAnalysisStatus !== IntegrityAnalysisStatus.PENDING ? "Análisis de veracidad ya realizado" : "Analizar veracidad del documento"}
+            >
+                <IconShieldCheck className="w-5 h-5" />
+                <span>Análisis de Veracidad</span>
+            </button>
+            <button
+                onClick={onDownloadPdf}
+                className="flex flex-col items-center justify-center p-2 rounded-lg transition-colors text-sm font-medium space-y-1 bg-red-100 hover:bg-red-200 text-red-800 disabled:opacity-50 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-500"
+                disabled={isChatOnlyMode || document.extractedData.length === 0}
+                title={isChatOnlyMode ? "No disponible en modo solo chat" : "Descargar ficha como PDF"}
+            >
+                <IconPdf className="w-5 h-5" />
+                <span>Descargar Ficha PDF</span>
+            </button>
+        </div>
       )}
     </div>
   );

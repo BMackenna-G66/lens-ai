@@ -1,27 +1,25 @@
 
-
 export const API_KEY_PLACEHOLDER = "MISSING_API_KEY_CONFIG_VALUE";
 
 export const PREDEFINED_FIELDS: string[] = [
-  "ID de la Sociendad",
+  "RUT de la sociedad",
   "Razón Social",
-  "Fecha de Constitución en formato fecha",
-  "Fecha de expedición",
-  "Forma de administración",
+  "Fecha de Constitución",
   "Objeto Social",
-  "Capital Social (suscrito y pagado)",
-  "Número y tipo de acciones",
+  "Capital Social",
+  "Acciones",
   "Accionistas y aportes",
-  "Representante Legal o Administrador",
-  "Duración de la sociedad",
+  "Representante Legal",
+  "Duración",
   "Domicilio Legal",
-  "Facultades del Administrador",
-  "Información sobre Juntas de Accionistas",
-  "Mecanismo de Resolución de Conflictos",
-  "Método de Distribución de Utilidades",
-  "Medio de Comunicación Oficial entre Socios y Sociedad",
+  "Facultades",
+  "Juntas de Accionistas",
+  "Resolución de Conflictos",
+  "Distribución de Utilidades",
+  "Medio de Comunicación",
   "¿Empresa con fines de lucro?",
-  "Documento contiene modificaciones?"
+  "Documento contains modificaciones?",
+  "Análisis de Facultades Específicas"
 ];
 
 export const GEMINI_COUNTRY_DETECTION_PROMPT_TEMPLATE = (documentText: string, countryList: string[]): string => `
@@ -39,53 +37,43 @@ ${documentText}
 
 
 export const GEMINI_PROMPT_TEMPLATE = (documentText: string, countryContext?: string): string => `
-Eres un asistente legal especializado en el análisis de escrituras públicas de sociedades. Tu objetivo es extraer información clave de manera precisa.
+Eres un asistente legal experto en análisis y traducción de documentos corporativos (escrituras, actas, estatutos). Tu tarea es extraer información específica y presentarla COMPLETAMENTE EN ESPAÑOL.
 
 ${countryContext || 'Estás analizando un documento de origen no especificado.'}
 
-Tu objetivo es leer el documento legal, incluso si tiene lenguaje técnico o jurídico complejo, y extraer los siguientes campos en el orden exacto, 
-asegurando que el resultado siempre esté en formato tabla Markdown con dos columnas: "Campo" y "Valor extraído".
+**REGLAS DE ORO:**
+1. **IDIOMA DE SALIDA:** Todo el contenido extraído DEBE estar en español. Si el documento original está en inglés, portugués, chino u otro idioma, traduce los términos técnicos y el contenido al español de forma profesional.
+2. **PRECISIÓN:** Extrae los datos basándote estrictamente en el texto. No inventes información.
+3. **VALORES AUSENTES:** Si un campo no existe en el documento, responde exactamente: "No especificado".
+4. **CONCISIÓN:** Para "Objeto Social" y "Facultades del Administrador", resume los puntos principales en español.
+5. **MODIFICACIONES:** Para "${PREDEFINED_FIELDS[16]}", indica si el documento es una modificación de uno anterior. Responde "Sí contiene" (y resume) o "No contiene".
 
-Extrae los siguientes 19 datos clave usando los nombres de campo EXACTOS proporcionados:
-1. ${PREDEFINED_FIELDS[0]}
-2. ${PREDEFINED_FIELDS[1]}
-3. ${PREDEFINED_FIELDS[2]}
-4. ${PREDEFINED_FIELDS[3]}
-5. ${PREDEFINED_FIELDS[4]}
-6. ${PREDEFINED_FIELDS[5]}
-7. ${PREDEFINED_FIELDS[6]}
-8. ${PREDEFINED_FIELDS[7]}
-9. ${PREDEFINED_FIELDS[8]}
-10. ${PREDEFINED_FIELDS[9]}
-11. ${PREDEFINED_FIELDS[10]}
-12. ${PREDEFINED_FIELDS[11]}
-13. ${PREDEFINED_FIELDS[12]}
-14. ${PREDEFINED_FIELDS[13]}
-15. ${PREDEFINED_FIELDS[14]}
-16. ${PREDEFINED_FIELDS[15]}
-17. ${PREDEFINED_FIELDS[16]}
-18. ${PREDEFINED_FIELDS[17]}
-19. ${PREDEFINED_FIELDS[18]}
+**GUÍA PARA DOCUMENTOS EN CHINO / MANDARÍN:**
+Si el documento es de China, utiliza esta guía de mapeo para identificar los campos:
+- RUT de la sociedad: Tax ID / Unified Social Credit Code / 统一社会信用代码
+- Razón Social: Name / Company Name / 名称
+- Fecha de Constitución: Date of Incorporation / Establishment Date / 成立日期
+- Objeto Social: Business Scope / 经营范围
+- Capital Social: Registered Capital / 注册资本
+- Acciones: Shares / Equity interest
+- Accionistas y aportes: Shareholders / 股东
+- Representante Legal: Legal Representative / 法定代表人
+- Duración: Operating Period / Term / 营业期限
+- Domicilio Legal: Registered Address / 住所
+- Facultades: Governance / Executive Director
+- Juntas de Accionistas: Shareholders' Meetings
+- Resolución de Conflictos: Dispute Resolution / Arbitration
+- Distribución de Utilidades: Profit Distribution
+- Medio de Comunicación: Official Communication / Notices
 
+**INSTRUCCIONES PARA "Análisis de Facultades Específicas":**
+Busca estas facultades y devuelve un JSON stringified con estas claves exactas:
+- "compraVentaBienes": true/false (comprar, vender, enajenar bienes).
+- "operacionesBancarias": true/false (abrir cuentas, girar cheques, representar ante bancos).
+- "mandatos": true/false (otorgar poderes, delegar facultades).
+Ejemplo: "{\\"compraVentaBienes\\": true, \\"operacionesBancarias\\": false, \\"mandatos\\": true}"
 
-Debes ser conciso en la informacion entregada y se debe priorizar la extraccion de datos
-Recuerda que luego de generada la ficha se te entregara información para validar contra los puntos anteriores, las respuestas deben ser cortas y concisas.
-
-Si un campo no está presente en el texto, completa su valor como “No especificado”.
-Ten especial cuidado con el campo 'Objeto Social' y 'Facultades del Administrador', estos deben ser resumidos y concisos.
-
-Para el campo "${PREDEFINED_FIELDS[18]}", analiza si el documento menciona explícitamente modificaciones, saneamientos o rectificaciones a una escritura anterior. Si es así, responde "Sí contiene" y resume brevemente la modificación. Si no se mencionan, responde "No contiene".
-
-El resultado siempre debe estar en formato tabla. No incluyas explicaciones, observaciones ni conclusiones. No busques información fuera del documento entregado.
-
-EJEMPLO DE TABLA ESPERADA (No es parte del documento, solo un ejemplo de formato):
-| Campo                          | Valor extraído                |
-|--------------------------------|-------------------------------|
-| ${PREDEFINED_FIELDS[0]}        | XX.XXX.XXX-X                  |
-| ${PREDEFINED_FIELDS[1]}        | Sociedad Ejemplo SpA          |
-| ... (otros campos) ...         | ... (valores correspondientes) ... |
-
-DOCUMENTO A ANALIZAR:
+DOCUMENTO:
 ---
 ${documentText}
 ---
@@ -103,14 +91,14 @@ ${primaryDocumentExtractedDataJSON}
 ${supplementaryDocumentText}
 ---
 
-Tu tarea es analizar el documento complementario en el contexto del documento principal y responder exclusivamente a las siguientes dos preguntas.
+Tu tarea es analizar el documento complementario en el contexto del documento principal y responder exclusivamente a las siguientes dos preguntas. Si alguno de los documentos está en un idioma distinto al español, traduce la información necesaria para que tu respuesta esté completamente en español.
 Formatea tu respuesta OBLIGATORIAMENTE como un objeto JSON con las claves "validezDocumentoSecundario" y "diferenciasEncontradas".
 
 1.  **validezDocumentoSecundario**: ¿Los datos clave (como nombres, RUTs, fechas importantes, objeto social si aplica) presentes en el documento complementario parecen ser válidos y consistentes cuando se comparan con el resumen del documento principal? 
 Proporciona una justificación breve y directa. Por ejemplo: "Sí, los datos como la Razón Social 'Empresa Ejemplo SpA' y el RUT 'XX.XXX.XXX-X' coinciden con el documento principal, 
 lo que sugiere validez." o "No, existen discrepancias en el nombre del Representante Legal, lo que podría indicar invalidez o un cambio posterior." o "El documento complementario no contiene suficientes datos comparables para determinar su validez respecto al principal."
 
-2.  **diferenciasEncontradas**: ¿Hay alguna diferencia relevante, adición o contradicción notable en la información presentada en el documento complementario en comparación con el resumen del documento principal? Menciona las diferencias específicas o confirma si no hay diferencias significativas. Por ejemplo: "El documento complementario detalla las facultades del apoderado que no estaban explícitas en el resumen principal." o "No se observan diferencias relevantes; el documento complementario parece ser un poder que es coherente." o "El documento complementario introduce una nueva dirección que no estaba en el domicilio legal del principal."
+2.  **diferenciasEncontradas**: ¿Hay alguna diferencia relevante, adición o contradicción notable in la información presentada en el documento complementario en comparación con el resumen del documento principal? Menciona las diferencias específicas o confirma si no hay diferencias significativas. Por ejemplo: "El documento complementario detalla las facultades del apoderado que no estaba explícitamente en el resumen principal." o "No se observan diferencias relevantes; el documento complementario parece ser un poder que es coherente." o "El documento complementario introduce una nueva dirección que no estaba en el domicilio legal del principal."
 
 **IMPORTANTE: Tu respuesta DEBE ser únicamente un objeto JSON válido con las dos claves mencionadas. No incluyas texto explicativo antes o después del objeto JSON.**
 Ejemplo de respuesta JSON esperada:
@@ -120,79 +108,24 @@ Ejemplo de respuesta JSON esperada:
 }
 `;
 
-export const GEMINI_CHAT_SYSTEM_INSTRUCTION = `Eres un asistente de IA especializado en responder preguntas basadas *únicamente* en un CONTEXTO DOCUMENTAL que se te ha proporcionado. Tu tarea es analizar este contexto y responder preguntas. NO DEBES usar conocimiento externo ni información no presente en dicho contexto. Si la respuesta a una pregunta no se encuentra explícitamente en el CONTEXTO DOCUMENTAL, debes indicar: 'La información solicitada no se encuentra en los documentos proporcionados.' Responde de forma concisa y directa. No añadas saludos ni preámbulos innecesarios.`;
+export const GEMINI_CHAT_SYSTEM_INSTRUCTION = `Eres un asistente legal de IA experto. Tu función es responder preguntas basándote ÚNICAMENTE en el CONTEXTO DOCUMENTAL proporcionado.
 
+REGLAS CRÍTICAS:
+1. IDIOMA: Responde SIEMPRE en español, sin importar el idioma del documento original.
+2. FIDELIDAD: Si la información no está en el documento, di: 'La información solicitada no se encuentra en los documentos proporcionados.'
+3. TRADUCCIÓN: Si el documento está en otro idioma (ej. inglés), traduce los términos al español al responder para que el usuario entienda perfectamente.
+4. ESTILO: Sé directo, profesional y conciso. No uses preámbulos.`;
 
-export const GEMINI_LIMITES_PROMPT = (country: string, transactionType: string, amount: string, currency: string, description: string): string => `
-Eres un experto en regulación financiera latinoamericana especializado en ${country}.
-Analiza si la siguiente transacción cumple con los límites regulatorios vigentes en ${country} según la UAF (Chile), UIAF (Colombia) o UIF (Perú).
+export const FINANCIAL_CHAT_SYSTEM_INSTRUCTION = `Eres un Analista Financiero Senior.
+Tu objetivo es ayudar al usuario a interpretar los estados financieros proporcionados.
+A diferencia de un asistente básico, TIENES PERMISO para:
+1. Dar opiniones profesionales sobre la salud financiera de la empresa basadas en los datos.
+2. Interpretar los ratios financieros (ej: explicar si la liquidez es buena o peligrosa).
+3. Sacar conclusiones y detectar riesgos (ej: "La empresa depende mucho de inventarios").
+4. Usar tu conocimiento general de finanzas para explicar conceptos.
 
-Transacción a evaluar:
-- País: ${country}
-- Tipo: ${transactionType}
-- Monto: ${amount} ${currency}
-- Descripción: ${description || 'No especificada'}
+Sin embargo, para los DATOS ESPECÍFICOS (montos, nombres), usa estrictamente lo que hay en el documento. No inventes cifras.`;
 
-Responde ÚNICAMENTE con un objeto JSON válido con este formato exacto:
-{
-  "cumple": boolean,
-  "nivelRiesgo": "Bajo" | "Medio" | "Alto" | "Crítico",
-  "limiteAplicable": "descripción del límite regulatorio aplicable con montos específicos",
-  "observaciones": "análisis detallado del caso",
-  "regulacionReferencia": "nombre de la regulación o ley aplicable",
-  "recomendaciones": ["recomendación 1", "recomendación 2"]
-}
-`;
-
-export const GEMINI_CRYPTO_PROMPT = (walletAddress: string, blockchain: string, transactionData: string): string => `
-Eres un experto en análisis de riesgos de criptoactivos y cumplimiento VASP (Virtual Asset Service Provider) para Latinoamérica.
-Analiza el siguiente caso de criptomonedas y evalúa su nivel de riesgo regulatorio.
-
-Datos a analizar:
-- Blockchain: ${blockchain}
-- Dirección de wallet: ${walletAddress || 'No proporcionada'}
-- Información de transacciones: ${transactionData || 'No proporcionada'}
-
-Responde ÚNICAMENTE con un objeto JSON válido:
-{
-  "nivelRiesgo": "Bajo" | "Medio" | "Alto" | "Crítico",
-  "resumenRiesgo": "resumen ejecutivo del análisis",
-  "patronesSospechosos": [
-    { "detectado": boolean, "descripcion": "descripción del patrón" }
-  ],
-  "cumplimientoVASP": "evaluación del cumplimiento con regulaciones VASP/FATF Travel Rule",
-  "jurisdiccion": "análisis de jurisdicción y riesgos regulatorios",
-  "recomendaciones": ["recomendación 1", "recomendación 2"]
-}
-`;
-
-export const GEMINI_AML_PROMPT = (documentText: string, entityType: string, country: string): string => `
-Eres un experto en prevención de lavado de activos (AML/CFT) especializado en regulación latinoamericana.
-Realiza una evaluación AML completa basada en el siguiente perfil de entidad.
-
-Tipo de entidad: ${entityType}
-País: ${country}
-Información del documento:
----
-${documentText}
----
-
-Responde ÚNICAMENTE con un objeto JSON válido:
-{
-  "nivelRiesgo": "Bajo" | "Medio" | "Alto" | "Crítico",
-  "puntuacion": number entre 0 y 100,
-  "indicadoresRiesgo": [
-    { "tipo": "PEP", "detectado": boolean, "descripcion": "descripción" },
-    { "tipo": "Sanciones", "detectado": boolean, "descripcion": "descripción" },
-    { "tipo": "Jurisdicción de Riesgo", "detectado": boolean, "descripcion": "descripción" },
-    { "tipo": "Estructura Societaria Compleja", "detectado": boolean, "descripcion": "descripción" },
-    { "tipo": "Actividad Económica Inusual", "detectado": boolean, "descripcion": "descripción" }
-  ],
-  "senalesAlerta": ["señal 1", "señal 2"],
-  "perfilRiesgo": "descripción completa del perfil de riesgo",
-  "recomendaciones": ["recomendación 1", "recomendación 2"]
-}
-`;
 
 export const GEMINI_RISK_ANALYSIS_PROMPT_TEMPLATE = (documentText: string): string => `
 Eres un analista de cumplimiento y riesgos legales. Tu tarea es analizar el texto de un documento legal y detectar dos tipos específicos de riesgos. Tu respuesta DEBE ser un objeto JSON válido y nada más.
@@ -218,9 +151,9 @@ Analiza el texto y responde en el siguiente formato JSON:
 Instrucciones para completar el JSON:
 
 1.  **suspiciousActivity**:
-    *   Busca en la sección "Objeto Social" o similar si el texto contiene alguna de las siguientes palabras clave (o sus variantes): "criptomonedas", "armas", "casinos", "offshore".
-    *   Si encuentras alguna, establece "detected" en \`true\` y en "reason" especifica qué palabras encontraste. Ejemplo: "Se detectó la palabra clave 'criptomonedas' en el objeto social.".
-    *   Si no encuentras ninguna, establece "detected" en \`false\` y en "reason" escribe "No se detectaron palabras clave de actividad económica sospechosa en el objeto social.".
+    *   Busca en la sección "Objeto Social" o similar si el texto contiene alguna de las siguientes palabras clave (o sus variantes): "criptomonedas", "armas", "remesedoras", "activo digital", "casinos", "offshore".
+    *   Si encuentras alguna, establece "detected" en \`true\`, de lo contrario \`false\`.
+    *   Si no encuentras ninguna, establece "detected" en \`false\` y en "reason" escribe "No se detectaron palabras clave de actividad económica sospeosa en el objeto social.".
 
 2.  **suspiciousLanguage**:
     *   Busca en todo el documento cláusulas que sean excesivamente vagas o abiertas, como por ejemplo: "...y cualquier otra actividad lícita", "...cualquier otro negocio de lícito comercio", "...y en general, celebrar toda clase de actos y contratos que la ley permita".
@@ -228,4 +161,293 @@ Instrucciones para completar el JSON:
     *   Si el lenguaje es específico y no contiene estas cláusulas genéricas, establece "detected" en \`false\` y en "reason" escribe "El lenguaje del documento parece ser específico y no contiene cláusulas vagas o no estándar.".
 
 IMPORTANTE: Responde únicamente con el objeto JSON. No añadas texto, explicaciones ni markdown.
+`;
+
+export const GEMINI_INTEGRITY_ANALYSIS_PROMPT_TEMPLATE = (documentText: string): string => `
+Actúa como un experto en análisis forense de documentos digitales. Has recibido el contenido de texto extraído de un documento. Tu tarea es evaluar su nivel de integridad basándote ÚNICAMENTE en este texto. Como no tienes acceso al archivo original, debes inferir las respuestas a partir de la calidad y estructura del texto.
+
+Analiza el siguiente texto y responde OBLIGATORIAMENTE con un objeto JSON válido con las claves "criteria", "fidedignidadLevel" y "recommendation". No incluyas explicaciones fuera del JSON.
+
+TEXTO DEL DOCUMENTO A ANALIZAR:
+---
+${documentText}
+---
+
+CRITERIOS A EVALUAR Y PREGUNTAS A RESPONDER EN EL JSON:
+1.  **¿El documento es completamente digital (no escaneado)?**: Infiere la respuesta. Si el texto es limpio, coherente y sin errores extraños, responde "Probablemente digital". Si contiene errores de reconocimiento de caracteres (OCR) como letras confundidas (ej. 'l' por '1', 'O' por '0') o palabras mal formadas, responde "Probablemente escaneado". Si no hay suficiente evidencia, responde "Indeterminado".
+2.  **¿Los metadatos indican un origen confiable (como Word, Acrobat)?**: Responde siempre "Indeterminado (sin acceso a metadatos)", ya que solo analizas el texto.
+3.  **¿Existe coherencia en la fuente, tamaño y estilo del texto?**: Busca en el texto indicios de inconsistencia, como cambios abruptos en espaciado, alineación o estructura de frases que sugieran que partes del texto fueron pegadas desde diferentes fuentes. Responde "Sí" si parece coherente, "No" si detectas inconsistencias claras.
+4.  **¿Existen capas ocultas, texto superpuesto o elementos insertados?**: Busca fragmentos de texto que parezcan lógicamente fuera de lugar, interrumpan el flujo de una oración o no tengan relación con el contexto circundante. Responde "Sí" si encuentras anomalías, si no, responde "No".
+5.  **¿Se detectan errores de OCR (caracteres mal reconocidos)?**: Busca y cuenta errores obvios de OCR. Responde "Sí" si encuentras uno o más errores claros. Si el texto es perfectamente legible, responde "No".
+6.  **¿Se observan frases o patrones típicos generados por IA?**: Evalúa si el lenguaje es excesivamente genérico, demasiado formal (robótico) o si utiliza estructuras de frases repetitivas comunes en modelos de lenguaje. Responde "Sí" si detectas patrones sospechosos. Si el lenguaje parece natural y humano, responde "No".
+7.  **¿Hay campos rellenados posteriormente o signos de edición?**: Busca inconsistencias en el estilo de redacción o formato entre diferentes cláusulas o secciones que puedan sugerir que fueron escritas en momentos diferentes o por personas diferentes. Responde "Sí" si hay indicios claros de edición, si no, responde "No".
+
+FORMATO DE RESPUESTA JSON ESTRICTO:
+{
+  "criteria": [
+    { "criterion": "¿El documento es completamente digital (no escaneado)?", "result": "..." },
+    { "criterion": "¿Los metadatos indican un origen confiable (como Word, Acrobat)?", "result": "Indeterminado (sin acceso a metadatos)" },
+    { "criterion": "¿Existe coherencia en la fuente, tamaño y estilo del texto?", "result": "..." },
+    { "criterion": "¿Existen capas ocultas, texto superpuesto o elementos insertados?", "result": "..." },
+    { "criterion": "¿Se detectan errores de OCR (caracteres mal reconocidos)?", "result": "..." },
+    { "criterion": "¿Se observan frases o patrones típicos generados por IA?", "result": "..." },
+    { "criterion": "¿Hay campos rellenados posteriormente o signos de edición?", "result": "..." }
+  ],
+  "fidedignidadLevel": "Alta Fidedignidad" | "Fidedignidad Media" | "Baja Fidedignidad",
+  "recommendation": "Una recomendación breve y concisa para el analista basada en los hallazgos. Indica si el documento parece confiable para propósitos legales o de onboarding."
+}
+`;
+
+export const GEMINI_FINANCIAL_PROMPT_TEMPLATE = (documentText: string): string => `
+Eres un experto en auditoría financiera internacional. Tu tarea es extraer datos de estados financieros y presentarlos COMPLETAMENTE EN ESPAÑOL.
+
+**REGLAS DE ORO:**
+1. **IDIOMA:** Todo el contenido extraído DEBE estar en español. Traduce términos contables (ej: "Revenue" -> "Ingresos", "Current Assets" -> "Activo Corriente").
+2. **EXTRACCIÓN:** Extrae el nombre de la empresa y la moneda (ISO 4217).
+3. **DATOS NUMÉRICOS:** Extrae los valores para cada año reportado en su moneda original. Usa números enteros.
+4. **CÁLCULOS:** Calcula el Capital de Trabajo Neto (Activo Corriente - Pasivo Corriente).
+
+TEXTO:
+---
+${documentText}
+---
+
+Responde en formato JSON:
+{
+  "companyName": "Nombre",
+  "currencyCode": "ISO",
+  "years": [
+    {
+      "year": "202X",
+      "data": {
+        "efectivoEnCaja": 0,
+        "efectivoEnBancos": 0,
+        "totalEfectivoEquivalentes": 0,
+        "ingresosOperativos": 0,
+        "inventarios": 0,
+        "activoCorriente": 0,
+        "pasivoCorriente": 0,
+        "capitalTrabajoNeto": 0
+      }
+    }
+  ]
+}
+`;
+
+export const GEMINI_BANK_STATEMENT_PROMPT_TEMPLATE = (documentText: string): string => `
+Eres un analista bancario experto. Tu tarea es resumir extractos bancarios y presentar la información COMPLETAMENTE EN ESPAÑOL.
+
+**REGLAS DE ORO:**
+1. **IDIOMA:** Todo el contenido extraído DEBE estar en español.
+2. **EXTRACCIÓN:** Identifica el Banco, Mes/Año y Moneda.
+3. **TOTALES:** Extrae Total Ingresos, Total Egresos y Saldo al Cierre.
+4. **ADB:** Extrae o estima el Saldo Promedio Diario.
+
+TEXTO:
+---
+${documentText}
+---
+
+Responde en formato JSON:
+{
+  "currencyCode": "ISO",
+  "summaries": [
+    {
+      "banco": "Nombre",
+      "mesAnio": "Mes Año",
+      "totalIngresos": 0,
+      "totalEgresos": 0,
+      "saldoCierre": 0,
+      "promedioDiario": 0
+    }
+  ]
+}
+`;
+
+export const GEMINI_CROSS_ANALYSIS_PROMPT_TEMPLATE = (documentText: string): string => `
+Eres un Auditor Financiero Senior experto. Tu tarea es realizar un análisis cruzado entre Estados Financieros y Cartolas Bancarias, presentando TODO EL ANÁLISIS EN ESPAÑOL.
+
+**REGLAS DE ORO:**
+1. **IDIOMA:** Todo el contenido (análisis, conclusiones, alertas) DEBE estar en español. Si los documentos están en otro idioma, traduce los términos técnicos.
+2. **EXTRACCIÓN:** Extrae datos contables y bancarios con precisión.
+3. **CRUCE:** Compara ingresos declarados vs depósitos bancarios reales.
+4. **ANÁLISIS:** Proporciona una conclusión analítica profunda sobre la coherencia de los flujos.
+
+TEXTO:
+---
+${documentText}
+---
+
+Responde en formato JSON:
+{
+  "financial": { ... },
+  "bank": { ... },
+  "crossCheck": {
+      "totalDeclaredIncome": 0,
+      "totalBankDeposits": 0,
+      "difference": 0,
+      "matchPercentage": 0,
+      "conclusion": "Análisis detallado en español...",
+      "riskAlerts": ["Alerta 1 en español", "Alerta 2 en español"]
+  }
+}
+`;
+
+export const GEMINI_TAX_FOLDER_PROMPT_TEMPLATE = (documentText: string): string => `
+Eres un Auditor Tributario Experto del SII (Chile) especializado en análisis de riesgo y capacidad económica. Tu objetivo es realizar una extracción forense, precisa y estructurada de la Carpeta Tributaria Electrónica.
+
+**REGLAS CRÍTICAS DE EXTRACCIÓN:**
+
+1.  **MONEDA Y FORMATO**: Todos los montos deben ser Pesos Chilenos (CLP). Si el OCR pegó el código al monto (ej. 53815000000), los primeros 3 dígitos (538) son el código y el resto es el monto.
+2.  **IDENTIFICACIÓN DE CASILLAS F29**:
+    *   [538]: Total Débitos / Ventas Netas (Crucial).
+    *   [563]: Base Imponible de Ventas.
+    *   [585]: Exportaciones.
+    *   [048]: Retención Impuesto Único (Segunda Categoría).
+    *   [062]: PPM Neto Determinado.
+    *   [089]: IVA Determinado del Periodo.
+3.  **INTEGRIDAD**: Si un periodo (YYYYMM) aparece en el documento, DEBES extraerlo. No alucines periodos inexistentes. Si un valor no se encuentra, usa null o "0".
+4.  **PRECISIÓN FORENSE**: No asumas ceros por flojera. Si ves tablas con montos grandes asociados a ventas o impuestos, asócialos a sus códigos correspondientes.
+
+**RESPUESTA JSON OBLIGATORIA (JERARQUÍA EXACTA):**
+
+{
+  "extraction": {
+    "datos_contribuyente": {
+      "nombre": "string",
+      "rut": "string",
+      "inicio_actividades": "string (DD-MM-YYYY)",
+      "actividades": ["string"],
+      "categoria_tributaria": "string",
+      "domicilio": "string",
+      "sucursales": "string",
+      "doc_timbrados": [{"fecha": "string", "desc": "string"}],
+      "observaciones_tributarias": "string"
+    },
+    "info_tributaria": {
+      "Representantes(s) Legales(s)": [{"Nombre o Razón Social": "string", "RUT": "string", "Fecha de Incorporación": "string"}],
+      "Conformacion de la sociedad": [{"Nombre o Razón Social": "string", "RUT": "string", "Fecha de Incorporación": "string"}],
+      "Participación en sociedades vigentes": [{"Nombre o Razón Social": "string", "RUT": "string", "Fecha de Incorporación": "string"}]
+    },
+    "bienes_raices": [],
+    "boletas_honorarios": [{"periodo": "string", "honorario_bruto": "string", "retencion_de_terceros": "string"}],
+    "F29": {
+      "YYYYMM": {
+        "048": {"name": "RETENCIONES", "value": "string (solo numero)"},
+        "062": {"name": "PPM NETO DET.", "value": "string (solo numero)"},
+        "089": {"name": "IVA DETERM.", "value": "string (solo numero)"},
+        "538": {"name": "VENTAS NETAS", "value": "string (solo numero)"},
+        "563": {"name": "BASE IMPONIBLE", "value": "string (solo numero)"},
+        "585": {"name": "EXPORTACIONES", "value": "string (solo numero)"},
+        "tipo_declaracion": "string",
+        "banco": "string",
+        "fecha_presentacion": "string"
+      }
+    },
+    "F22": {
+      "YYYY": {
+        "305": {"name": "RESULTADO LIQUIDACIÓN", "value": "string"},
+        "315": {"name": "Fecha Presentación", "value": "string"}
+      }
+    }
+  },
+  "checklist": {
+    "kyb_checklist_carpeta_tributaria": [
+      { "item": "Identidad y RUT coinciden", "estado": "PASS|FAIL|REVIEW", "hallazgo": "string", "riesgo_si_falla": "string" }
+    ]
+  },
+  "funds_origin": {
+    "capacidad_economica_tributaria_proxy": {
+      "moneda": "CLP",
+      "exportaciones_total": number,
+      "exportaciones_promedio_mensual": number,
+      "comentarios_limitaciones": ["string"]
+    },
+    "red_flags_carpeta_tributaria": [
+       { "red_flag": "string", "severidad": "string" }
+    ]
+  }
+}
+
+TEXTO DEL DOCUMENTO:
+---
+${documentText}
+---
+`;
+
+export const GEMINI_CRYPTO_FORENSIC_PROMPT = (walletDataJson: string): string => `
+Actúas como un Investigador Forense de Blockchain Senior (similar a Chainalysis o TRM Labs).
+Tu objetivo es perfilar una billetera de criptomonedas basándote en sus transacciones recientes y saldos.
+
+A continuación se presentan los datos crudos extraídos de la blockchain para la billetera en formato JSON:
+${walletDataJson}
+
+TU TAREA:
+1. **IDIOMA:** Todo el análisis y el resumen ejecutivo DEBEN estar en español.
+2. Analiza los patrones de transacciones (entradas/salidas, frecuencia, montos redondos, interacción con contratos) y genera un perfil de riesgo.
+
+1. **Risk Score (0-100)**: Calcula un puntaje de riesgo.
+   - < 30: Bajo (Uso normal/retail).
+   - 30-70: Medio (Uso intensivo, patrones mixtos).
+   - 70-90: Alto (Patrones sospechosos, structuring, mezcla excesiva).
+   - > 90: Crítico (Patrones claros de lavado, scams, hacks).
+
+2. **Perfil de Actor**: Determina qué tipo de entidad parece ser:
+   - "Retail User", "Whale/Institucional", "Bot/High Frequency", "Exchange Hot Wallet", "Mule Account", "Gambling User", etc.
+
+3. **Patrones Sospechosos**: Detecta si existen comportamientos como:
+   - **Structuring/Smurfing**: Múltiples txs pequeñas por debajo de umbrales.
+   - **Layering**: Movimiento rápido de fondos (entra y sale casi inmediatamente).
+   - **Wash Trading**: Movimientos circulares.
+   - **Interaction with High Risk**: Interacción con contratos desconocidos o mixers (si se puede inferir).
+
+4. **Interacción con CEX**: Basado en las direcciones "To" o "From", ¿puedes identificar si interactúa con grandes exchanges (Binance, OKX, etc)? (Infiere si ves muchas txs a direcciones variadas o contratos masivos, o simplemente indica "No identificado" si no hay etiquetas).
+
+FORMATO JSON ESPERADO:
+{
+  "riskScore": 0,
+  "riskLevel": "BAJO" | "MEDIO" | "ALTO" | "CRÍTICO",
+  "riskFactors": ["Factor 1", "Factor 2"],
+  "profileType": "Retail User", 
+  "patternsDetected": [
+    { "name": "Structuring", "description": "Explicación breve...", "detected": boolean },
+    { "name": "Layering", "description": "Explicación breve...", "detected": boolean }
+  ],
+  "cexInteractions": ["Binance", "Unknown"],
+  "summaryAnalysis": "Resumen ejecutivo del perfil de la billetera..."
+}
+`;
+
+export const GEMINI_COMPLIANCE_AUDIT_PROMPT = (documentText: string): string => `
+Eres un experto en Compliance y AML (Prevención de Lavado de Activos). Tu tarea es auditar documentos contra el Estándar de Global66 y presentar el informe COMPLETAMENTE EN ESPAÑOL.
+
+**REGLAS DE ORO:**
+1. **IDIOMA:** Todo el informe (resumen, evidencias, riesgos, recomendaciones) DEBE estar en español.
+2. **TRADUCCIÓN:** Si el documento original está en otro idioma, traduce las cláusulas y hallazgos al español de forma precisa.
+3. **AUDITORÍA:** Evalúa los pilares A a I del estándar.
+4. **DICTAMEN:** Emite un juicio claro sobre la aptitud de onboarding.
+
+TEXTO:
+---
+${documentText}
+---
+
+Responde en formato JSON:
+{
+  "summary": "Resumen ejecutivo en español...",
+  "commonPoints": ["Punto 1", "Punto 2"],
+  "comparisonTable": [
+    {
+      "pillar": "Nombre del Pilar",
+      "status": "Cumple" | "Parcial" | "No cumple",
+      "evidence": "Evidencia traducida al español...",
+      "risk": "Riesgo en español...",
+      "recommendation": "Mejora en español..."
+    }
+  ],
+  "gaps": ["Brecha 1", "Brecha 2"],
+  "specificRecommendations": ["Rec 1", "Rec 2"],
+  "onboardingDictum": "Apto" | "Apto con condiciones" | "No apto",
+  "dictumJustification": "Justificación en español."
+}
 `;
