@@ -5,7 +5,7 @@ import { FileUpload } from './components/FileUpload';
 import { DocumentCard } from './components/DocumentCard';
 import { LoadingSpinner } from './components/LoadingSpinner';
 import { Alert } from './components/Alert';
-import { PREDEFINED_FIELDS, GEMINI_PROMPT_TEMPLATE, API_KEY_PLACEHOLDER, GEMINI_CHAT_SYSTEM_INSTRUCTION } from './constants'; 
+import { PREDEFINED_FIELDS, GEMINI_PROMPT_TEMPLATE, API_KEY_PLACEHOLDER, GEMINI_CHAT_SYSTEM_INSTRUCTION } from './constants';
 import { ProcessedDocument, FileProcessingStatus, ExtractedField, SupplementaryDocumentAnalysis, SupplementaryAnalysisStatus, ComparisonResult, ChatMessage, QueueItem, AnalysisPurpose, RiskAnalysisStatus } from './types';
 import { getTextFromFile } from './services/fileProcessorService';
 import { analyzeDocumentWithGemini, analyzeDocumentComparisonWithGemini, getChatResponse, detectCountryWithGemini, analyzeDocumentForRisks } from './services/geminiService';
@@ -14,6 +14,9 @@ import { generateCsv } from './services/csvGenerator';
 import { IconJson, IconCsv, IconAlertTriangleSolid, IconFileText, IconFiles } from './components/IconComponents'; // Added IconFileText, IconFiles
 import { DocumentChat } from './components/DocumentChat';
 import { KEYWORDS_BY_COUNTRY } from './services/countryKeywords';
+import { LimitesTransaccionales } from './components/LimitesTransaccionales';
+import { LensCrypto } from './components/LensCrypto';
+import { EvaluadorAML } from './components/EvaluadorAML';
 
 const parseGeminiTableResponse = (markdownTable: string): ExtractedField[] => {
   console.log("Raw Gemini Markdown Table Received:\n---\n" + markdownTable + "\n---");
@@ -67,6 +70,7 @@ const keywordFieldMap: { [key: string]: string | undefined } = {
 
 
 const App: React.FC = () => {
+  const [activeTab, setActiveTab] = useState<'analyzer' | 'limites' | 'crypto' | 'aml'>('analyzer');
   const [processedDocuments, setProcessedDocuments] = useState<ProcessedDocument[]>([]);
   const [processingQueue, setProcessingQueue] = useState<QueueItem[]>([]);
   const [currentProcessingJobInfo, setCurrentProcessingJobInfo] = useState<{ id: string, displayName: string, isConsolidated: boolean } | null>(null);
@@ -597,10 +601,43 @@ const App: React.FC = () => {
         {apiKeyStatus === 'missing' && (
            <Alert type="warning" message={`ADVERTENCIA: La API Key de Gemini no parece estar configurada o es inválida (placeholder: ${API_KEY_PLACEHOLDER}). El análisis de documentos y el chat no funcionarán hasta que se configure correctamente.`} />
         )}
-         {apiKeyStatus === 'checking' && ( 
+         {apiKeyStatus === 'checking' && (
            <Alert type="info" message="Verificando configuración de API Key..." />
         )}
-        
+
+        <div className="flex border-b border-slate-200 mb-6 overflow-x-auto">
+          <button
+            onClick={() => setActiveTab('analyzer')}
+            className={`flex items-center gap-2 px-4 py-3 text-sm whitespace-nowrap transition-colors ${activeTab === 'analyzer' ? 'border-b-2 border-primary-600 text-primary-600 font-semibold' : 'text-slate-500 hover:text-slate-700'}`}
+          >
+            <span>📋</span>
+            <span>Analizador de Documentos</span>
+          </button>
+          <button
+            onClick={() => setActiveTab('limites')}
+            className={`flex items-center gap-2 px-4 py-3 text-sm whitespace-nowrap transition-colors ${activeTab === 'limites' ? 'border-b-2 border-primary-600 text-primary-600 font-semibold' : 'text-slate-500 hover:text-slate-700'}`}
+          >
+            <span>⚠️</span>
+            <span>Límites Transaccionales</span>
+          </button>
+          <button
+            onClick={() => setActiveTab('crypto')}
+            className={`flex items-center gap-2 px-4 py-3 text-sm whitespace-nowrap transition-colors ${activeTab === 'crypto' ? 'border-b-2 border-primary-600 text-primary-600 font-semibold' : 'text-slate-500 hover:text-slate-700'}`}
+          >
+            <span>💎</span>
+            <span>Lens - Crypto</span>
+          </button>
+          <button
+            onClick={() => setActiveTab('aml')}
+            className={`flex items-center gap-2 px-4 py-3 text-sm whitespace-nowrap transition-colors ${activeTab === 'aml' ? 'border-b-2 border-primary-600 text-primary-600 font-semibold' : 'text-slate-500 hover:text-slate-700'}`}
+          >
+            <span>⚖️</span>
+            <span>Evaluador AML</span>
+          </button>
+        </div>
+
+        {activeTab === 'analyzer' && (
+        <div>
         <div className="mb-6 p-4 bg-white rounded-lg shadow-lg border border-slate-200">
           <h2 className="text-xl font-semibold text-slate-800 mb-4 text-center">
             <span className="text-primary-600">Paso 1:</span> Configura tu Análisis
@@ -795,6 +832,12 @@ const App: React.FC = () => {
                  <p className="mt-1 text-sm text-slate-500">Por favor, asegúrese de que la API Key esté disponible para habilitar el análisis de documentos y el chat.</p>
             </div>
          )}
+        </div>
+        )}
+
+        {activeTab === 'limites' && <LimitesTransaccionales isApiKeyOk={apiKeyStatus === 'ok'} />}
+        {activeTab === 'crypto' && <LensCrypto isApiKeyOk={apiKeyStatus === 'ok'} />}
+        {activeTab === 'aml' && <EvaluadorAML isApiKeyOk={apiKeyStatus === 'ok'} />}
       </main>
        <footer className="text-center mt-12 py-6 text-sm text-slate-500 border-t border-slate-200">
         Potenciado por Google Gemini API <br />by: Team compliance Global66.

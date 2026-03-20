@@ -1,8 +1,8 @@
 
 
 import { GoogleGenAI, GenerateContentResponse } from "@google/genai";
-import { API_KEY_PLACEHOLDER, GEMINI_COMPARISON_PROMPT_TEMPLATE, GEMINI_CHAT_SYSTEM_INSTRUCTION, GEMINI_COUNTRY_DETECTION_PROMPT_TEMPLATE, GEMINI_RISK_ANALYSIS_PROMPT_TEMPLATE } from "../constants";
-import { ExtractedField, ComparisonResult, RiskAnalysisResult } from "../types";
+import { API_KEY_PLACEHOLDER, GEMINI_COMPARISON_PROMPT_TEMPLATE, GEMINI_CHAT_SYSTEM_INSTRUCTION, GEMINI_COUNTRY_DETECTION_PROMPT_TEMPLATE, GEMINI_RISK_ANALYSIS_PROMPT_TEMPLATE, GEMINI_LIMITES_PROMPT, GEMINI_CRYPTO_PROMPT, GEMINI_AML_PROMPT } from "../constants";
+import { ExtractedField, ComparisonResult, RiskAnalysisResult, LimitesResult, CryptoAnalysisResult, AMLResult } from "../types";
 import { KEYWORDS_BY_COUNTRY } from "./countryKeywords";
 
 const API_KEY = process.env.API_KEY;
@@ -242,5 +242,166 @@ export const analyzeDocumentForRisks = async (documentText: string): Promise<Ris
   } catch (error: any) {
     console.error("Error calling Gemini API for risk analysis:", error);
     throw new Error(`Error de la API de Gemini durante el análisis de riesgos: ${error.message || "Error desconocido"}`);
+  }
+};
+
+export const analyzeLimitesTransaccionales = async (
+  country: string,
+  transactionType: string,
+  amount: string,
+  currency: string,
+  description: string
+): Promise<LimitesResult> => {
+  if (!API_KEY || API_KEY === API_KEY_PLACEHOLDER) {
+    throw new Error("La API Key de Gemini no está configurada. No se puede evaluar los límites transaccionales.");
+  }
+  const prompt = GEMINI_LIMITES_PROMPT(country, transactionType, amount, currency, description);
+
+  try {
+    const response: GenerateContentResponse = await ai.models.generateContent({
+      model: primaryAnalysisModel,
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+      },
+    });
+
+    const text = response.text;
+    if (!text || text.trim() === '') {
+      throw new Error("Respuesta vacía de la IA para el análisis de límites transaccionales.");
+    }
+
+    let jsonStr = text.trim();
+    const fenceRegex = /^```(\w*)?\s*\n?(.*?)\n?\s*```$/s;
+    const match = jsonStr.match(fenceRegex);
+    if (match && match[2]) {
+      jsonStr = match[2].trim();
+    }
+
+    try {
+      const parsedData = JSON.parse(jsonStr) as LimitesResult;
+      if (typeof parsedData.cumple !== 'boolean' || !parsedData.nivelRiesgo) {
+        throw new Error("El JSON de la IA para límites transaccionales tiene un formato inesperado.");
+      }
+      return parsedData;
+    } catch (e) {
+      console.error("Failed to parse JSON response from Gemini for límites transaccionales. Raw text:", text, "Error:", e);
+      throw new Error(`La respuesta de la IA para límites transaccionales no es un JSON válido: ${(e as Error).message}`);
+    }
+  } catch (error: any) {
+    console.error("Error calling Gemini API for límites transaccionales:", error);
+    if (error.message && error.message.toLowerCase().includes("api key not valid")) {
+      throw new Error("La API Key de Gemini no es válida. Por favor, verifique su configuración.");
+    }
+    if (error.message && error.message.toLowerCase().includes("quota")) {
+      throw new Error("Se ha excedido la cuota de la API de Gemini. Intente más tarde.");
+    }
+    throw new Error(`Error de la API de Gemini durante el análisis de límites transaccionales: ${error.message || "Error desconocido"}`);
+  }
+};
+
+export const analyzeCryptoRisk = async (
+  walletAddress: string,
+  blockchain: string,
+  transactionData: string
+): Promise<CryptoAnalysisResult> => {
+  if (!API_KEY || API_KEY === API_KEY_PLACEHOLDER) {
+    throw new Error("La API Key de Gemini no está configurada. No se puede analizar el riesgo cripto.");
+  }
+  const prompt = GEMINI_CRYPTO_PROMPT(walletAddress, blockchain, transactionData);
+
+  try {
+    const response: GenerateContentResponse = await ai.models.generateContent({
+      model: primaryAnalysisModel,
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+      },
+    });
+
+    const text = response.text;
+    if (!text || text.trim() === '') {
+      throw new Error("Respuesta vacía de la IA para el análisis de criptoactivos.");
+    }
+
+    let jsonStr = text.trim();
+    const fenceRegex = /^```(\w*)?\s*\n?(.*?)\n?\s*```$/s;
+    const match = jsonStr.match(fenceRegex);
+    if (match && match[2]) {
+      jsonStr = match[2].trim();
+    }
+
+    try {
+      const parsedData = JSON.parse(jsonStr) as CryptoAnalysisResult;
+      if (!parsedData.nivelRiesgo || !parsedData.resumenRiesgo) {
+        throw new Error("El JSON de la IA para el análisis de criptoactivos tiene un formato inesperado.");
+      }
+      return parsedData;
+    } catch (e) {
+      console.error("Failed to parse JSON response from Gemini for crypto analysis. Raw text:", text, "Error:", e);
+      throw new Error(`La respuesta de la IA para el análisis cripto no es un JSON válido: ${(e as Error).message}`);
+    }
+  } catch (error: any) {
+    console.error("Error calling Gemini API for crypto analysis:", error);
+    if (error.message && error.message.toLowerCase().includes("api key not valid")) {
+      throw new Error("La API Key de Gemini no es válida. Por favor, verifique su configuración.");
+    }
+    if (error.message && error.message.toLowerCase().includes("quota")) {
+      throw new Error("Se ha excedido la cuota de la API de Gemini. Intente más tarde.");
+    }
+    throw new Error(`Error de la API de Gemini durante el análisis de criptoactivos: ${error.message || "Error desconocido"}`);
+  }
+};
+
+export const analyzeAML = async (
+  documentText: string,
+  entityType: string,
+  country: string
+): Promise<AMLResult> => {
+  if (!API_KEY || API_KEY === API_KEY_PLACEHOLDER) {
+    throw new Error("La API Key de Gemini no está configurada. No se puede realizar la evaluación AML.");
+  }
+  const prompt = GEMINI_AML_PROMPT(documentText, entityType, country);
+
+  try {
+    const response: GenerateContentResponse = await ai.models.generateContent({
+      model: primaryAnalysisModel,
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+      },
+    });
+
+    const text = response.text;
+    if (!text || text.trim() === '') {
+      throw new Error("Respuesta vacía de la IA para la evaluación AML.");
+    }
+
+    let jsonStr = text.trim();
+    const fenceRegex = /^```(\w*)?\s*\n?(.*?)\n?\s*```$/s;
+    const match = jsonStr.match(fenceRegex);
+    if (match && match[2]) {
+      jsonStr = match[2].trim();
+    }
+
+    try {
+      const parsedData = JSON.parse(jsonStr) as AMLResult;
+      if (!parsedData.nivelRiesgo || typeof parsedData.puntuacion !== 'number') {
+        throw new Error("El JSON de la IA para la evaluación AML tiene un formato inesperado.");
+      }
+      return parsedData;
+    } catch (e) {
+      console.error("Failed to parse JSON response from Gemini for AML analysis. Raw text:", text, "Error:", e);
+      throw new Error(`La respuesta de la IA para la evaluación AML no es un JSON válido: ${(e as Error).message}`);
+    }
+  } catch (error: any) {
+    console.error("Error calling Gemini API for AML analysis:", error);
+    if (error.message && error.message.toLowerCase().includes("api key not valid")) {
+      throw new Error("La API Key de Gemini no es válida. Por favor, verifique su configuración.");
+    }
+    if (error.message && error.message.toLowerCase().includes("quota")) {
+      throw new Error("Se ha excedido la cuota de la API de Gemini. Intente más tarde.");
+    }
+    throw new Error(`Error de la API de Gemini durante la evaluación AML: ${error.message || "Error desconocido"}`);
   }
 };

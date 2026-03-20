@@ -88,3 +88,30 @@ export interface ProcessedDocument {
 
 // Type for items in the processing queue, can be a single File or a consolidated job
 export type QueueItem = File | { consolidatedId: string; files: File[]; analysisMode: 'consolidated' };
+
+export interface LimitesResult {
+  cumple: boolean;
+  nivelRiesgo: 'Bajo' | 'Medio' | 'Alto' | 'Crítico';
+  limiteAplicable: string;
+  observaciones: string;
+  regulacionReferencia: string;
+  recomendaciones: string[];
+}
+
+export interface CryptoAnalysisResult {
+  nivelRiesgo: 'Bajo' | 'Medio' | 'Alto' | 'Crítico';
+  resumenRiesgo: string;
+  patronesSospechosos: { detectado: boolean; descripcion: string }[];
+  cumplimientoVASP: string;
+  jurisdiccion: string;
+  recomendaciones: string[];
+}
+
+export interface AMLResult {
+  nivelRiesgo: 'Bajo' | 'Medio' | 'Alto' | 'Crítico';
+  puntuacion: number;
+  indicadoresRiesgo: { tipo: string; detectado: boolean; descripcion: string }[];
+  senalesAlerta: string[];
+  perfilRiesgo: string;
+  recomendaciones: string[];
+}

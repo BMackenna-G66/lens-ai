@@ -123,6 +123,77 @@ Ejemplo de respuesta JSON esperada:
 export const GEMINI_CHAT_SYSTEM_INSTRUCTION = `Eres un asistente de IA especializado en responder preguntas basadas *únicamente* en un CONTEXTO DOCUMENTAL que se te ha proporcionado. Tu tarea es analizar este contexto y responder preguntas. NO DEBES usar conocimiento externo ni información no presente en dicho contexto. Si la respuesta a una pregunta no se encuentra explícitamente en el CONTEXTO DOCUMENTAL, debes indicar: 'La información solicitada no se encuentra en los documentos proporcionados.' Responde de forma concisa y directa. No añadas saludos ni preámbulos innecesarios.`;
 
 
+export const GEMINI_LIMITES_PROMPT = (country: string, transactionType: string, amount: string, currency: string, description: string): string => `
+Eres un experto en regulación financiera latinoamericana especializado en ${country}.
+Analiza si la siguiente transacción cumple con los límites regulatorios vigentes en ${country} según la UAF (Chile), UIAF (Colombia) o UIF (Perú).
+
+Transacción a evaluar:
+- País: ${country}
+- Tipo: ${transactionType}
+- Monto: ${amount} ${currency}
+- Descripción: ${description || 'No especificada'}
+
+Responde ÚNICAMENTE con un objeto JSON válido con este formato exacto:
+{
+  "cumple": boolean,
+  "nivelRiesgo": "Bajo" | "Medio" | "Alto" | "Crítico",
+  "limiteAplicable": "descripción del límite regulatorio aplicable con montos específicos",
+  "observaciones": "análisis detallado del caso",
+  "regulacionReferencia": "nombre de la regulación o ley aplicable",
+  "recomendaciones": ["recomendación 1", "recomendación 2"]
+}
+`;
+
+export const GEMINI_CRYPTO_PROMPT = (walletAddress: string, blockchain: string, transactionData: string): string => `
+Eres un experto en análisis de riesgos de criptoactivos y cumplimiento VASP (Virtual Asset Service Provider) para Latinoamérica.
+Analiza el siguiente caso de criptomonedas y evalúa su nivel de riesgo regulatorio.
+
+Datos a analizar:
+- Blockchain: ${blockchain}
+- Dirección de wallet: ${walletAddress || 'No proporcionada'}
+- Información de transacciones: ${transactionData || 'No proporcionada'}
+
+Responde ÚNICAMENTE con un objeto JSON válido:
+{
+  "nivelRiesgo": "Bajo" | "Medio" | "Alto" | "Crítico",
+  "resumenRiesgo": "resumen ejecutivo del análisis",
+  "patronesSospechosos": [
+    { "detectado": boolean, "descripcion": "descripción del patrón" }
+  ],
+  "cumplimientoVASP": "evaluación del cumplimiento con regulaciones VASP/FATF Travel Rule",
+  "jurisdiccion": "análisis de jurisdicción y riesgos regulatorios",
+  "recomendaciones": ["recomendación 1", "recomendación 2"]
+}
+`;
+
+export const GEMINI_AML_PROMPT = (documentText: string, entityType: string, country: string): string => `
+Eres un experto en prevención de lavado de activos (AML/CFT) especializado en regulación latinoamericana.
+Realiza una evaluación AML completa basada en el siguiente perfil de entidad.
+
+Tipo de entidad: ${entityType}
+País: ${country}
+Información del documento:
+---
+${documentText}
+---
+
+Responde ÚNICAMENTE con un objeto JSON válido:
+{
+  "nivelRiesgo": "Bajo" | "Medio" | "Alto" | "Crítico",
+  "puntuacion": number entre 0 y 100,
+  "indicadoresRiesgo": [
+    { "tipo": "PEP", "detectado": boolean, "descripcion": "descripción" },
+    { "tipo": "Sanciones", "detectado": boolean, "descripcion": "descripción" },
+    { "tipo": "Jurisdicción de Riesgo", "detectado": boolean, "descripcion": "descripción" },
+    { "tipo": "Estructura Societaria Compleja", "detectado": boolean, "descripcion": "descripción" },
+    { "tipo": "Actividad Económica Inusual", "detectado": boolean, "descripcion": "descripción" }
+  ],
+  "senalesAlerta": ["señal 1", "señal 2"],
+  "perfilRiesgo": "descripción completa del perfil de riesgo",
+  "recomendaciones": ["recomendación 1", "recomendación 2"]
+}
+`;
+
 export const GEMINI_RISK_ANALYSIS_PROMPT_TEMPLATE = (documentText: string): string => `
 Eres un analista de cumplimiento y riesgos legales. Tu tarea es analizar el texto de un documento legal y detectar dos tipos específicos de riesgos. Tu respuesta DEBE ser un objeto JSON válido y nada más.
 
