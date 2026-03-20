@@ -25,8 +25,9 @@ export const PREDEFINED_FIELDS: string[] = [
 export const GEMINI_COUNTRY_DETECTION_PROMPT_TEMPLATE = (documentText: string, countryList: string[]): string => `
 Eres un experto en identificación de países a partir de documentos legales. Basado en la terminología, nombres y frases legales en el texto del documento proporcionado, determina su país de origen de la siguiente lista: ${countryList.join(', ')}.
 
-Tu respuesta DEBE ser una única clave en minúsculas de la lista proporcionada (p. ej., 'chile', 'colombia', 'peru').
+Tu respuesta DEBE ser una única clave en minúsculas de la lista proporcionada (p. ej., 'chile', 'colombia', 'peru', 'china', 'brasil', 'usa', 'francia', 'dinamarca', 'internacional').
 Si estás muy seguro, devuelve la clave del país. Si no puedes determinar el país con alta confianza, devuelve la cadena 'unknown'.
+Para documentos en chino o mandarín, devuelve 'china'. Para documentos en portugués de Brasil, devuelve 'brasil'. Para documentos en inglés de EE.UU., devuelve 'usa'. Para documentos en francés, devuelve 'francia'. Para documentos en danés, devuelve 'dinamarca'. Para documentos internacionales sin país claro, devuelve 'internacional'.
 No proporciones ninguna explicación o texto adicional.
 
 TEXTO DEL DOCUMENTO:
@@ -418,6 +419,38 @@ FORMATO JSON ESPERADO:
 }
 `;
 
+export const GEMINI_CRYPTO_PATTERN_ALERT_PROMPT = (transactionsJson: string, walletAddress: string, network: string): string => `
+Eres un experto en análisis forense de blockchain y detección de patrones de lavado de activos.
+Analiza las siguientes transacciones de la wallet ${walletAddress} en la red ${network} y detecta patrones sospechosos.
+
+Transacciones:
+${transactionsJson}
+
+Detecta específicamente estos patrones:
+1. **Structuring (Pitufeo)**: Múltiples transacciones justo por debajo de umbrales regulatorios (ej: muchas txs de $9,500 cuando el umbral es $10,000)
+2. **Layering (Estratificación)**: Fondos que se mueven rápidamente entre múltiples wallets para ocultar origen
+3. **Smurfing**: Múltiples pequeñas transacciones que en conjunto suman montos significativos
+4. **Round-trip transactions**: Fondos que salen y regresan a la misma wallet
+5. **Velocity anomalies**: Frecuencia inusualmente alta de transacciones en períodos cortos
+6. **Mixer/Tumbler usage**: Interacciones con servicios de mezcla conocidos
+
+Responde ÚNICAMENTE con JSON válido:
+{
+  "alertas": [
+    {
+      "tipo": "Structuring" | "Layering" | "Smurfing" | "Round-trip" | "Velocity" | "Mixer",
+      "severidad": "Alta" | "Media" | "Baja",
+      "detectado": boolean,
+      "descripcion": "descripción específica con evidencia de las transacciones",
+      "transaccionesRelacionadas": ["txHash1", "txHash2"]
+    }
+  ],
+  "nivelRiesgoGeneral": "Bajo" | "Medio" | "Alto" | "Crítico",
+  "resumenPatrones": "resumen ejecutivo del análisis de patrones",
+  "recomendacionesUAF": ["recomendación 1 para reportar a la UAF/UIAF"]
+}
+`;
+
 export const GEMINI_COMPLIANCE_AUDIT_PROMPT = (documentText: string): string => `
 Eres un experto en Compliance y AML (Prevención de Lavado de Activos). Tu tarea es auditar documentos contra el Estándar de Global66 y presentar el informe COMPLETAMENTE EN ESPAÑOL.
 
@@ -450,4 +483,22 @@ Responde en formato JSON:
   "onboardingDictum": "Apto" | "Apto con condiciones" | "No apto",
   "dictumJustification": "Justificación en español."
 }
+`;
+
+export const GEMINI_EXECUTIVE_SUMMARY_PROMPT = (extractedFields: string, fileName: string): string => `
+Eres un analista legal senior especializado en escrituras públicas latinoamericanas.
+Basándote en los siguientes campos extraídos del documento "${fileName}", genera un resumen ejecutivo profesional y conciso.
+
+Campos extraídos:
+${extractedFields}
+
+Genera un resumen ejecutivo en español de máximo 250 palabras que incluya:
+1. Una descripción del tipo y propósito del documento
+2. Los datos más relevantes de la sociedad (nombre, RUT, constitución)
+3. Aspectos clave de la administración y capital
+4. Observaciones importantes o alertas (modificaciones, cláusulas especiales)
+5. Una conclusión breve sobre el estado del documento
+
+El tono debe ser formal y profesional. No uses listas con viñetas, escribe en párrafos fluidos.
+Responde SOLO con el texto del resumen, sin títulos ni formato adicional.
 `;

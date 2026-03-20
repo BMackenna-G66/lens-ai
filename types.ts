@@ -364,3 +364,18 @@ export interface ComplianceDocumentProcess {
     error?: string;
     rawText?: string;
 }
+
+export interface PatternAlert {
+  tipo: 'Structuring' | 'Layering' | 'Smurfing' | 'Round-trip' | 'Velocity' | 'Mixer';
+  severidad: 'Alta' | 'Media' | 'Baja';
+  detectado: boolean;
+  descripcion: string;
+  transaccionesRelacionadas: string[];
+}
+
+export interface PatternAnalysisResult {
+  alertas: PatternAlert[];
+  nivelRiesgoGeneral: 'Bajo' | 'Medio' | 'Alto' | 'Crítico';
+  resumenPatrones: string;
+  recomendacionesUAF: string[];
+}

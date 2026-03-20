@@ -656,44 +656,267 @@ export const KEYWORDS_BY_COUNTRY: CountryKeywords = {
     },
     "brasil": {
         "id_tributaria": [
-            "ID Tributaria",
-            "Número de Identificación"
+            "CNPJ",
+            "CPF",
+            "Cadastro Nacional da Pessoa Jurídica",
+            "Cadastro Nacional"
         ],
         "razon_social": [
-            "Razón Social",
-            "Nombre Legal"
+            "Razão Social",
+            "Nome Empresarial",
+            "Denominação Social"
         ],
         "fecha_constitucion": [
-            "Fecha de Constitución",
-            "Fecha de Registro"
+            "Data de Constituição",
+            "Data de Abertura",
+            "Data de Registro"
         ],
         "direccion": [
-            "Dirección Legal",
-            "Domicilio Legal"
+            "Endereço",
+            "Sede Social",
+            "Domicílio"
         ],
         "representante_legal": [
             "Representante Legal",
-            "Administrador"
+            "Sócio Administrador",
+            "Diretor"
         ],
         "objeto_social": [
             "Objeto Social",
-            "Actividad Económica"
+            "Atividade Econômica",
+            "Ramo de Atividade"
         ],
         "capital_social": [
             "Capital Social",
-            "Capital Pagado"
+            "Capital Integralizado"
         ],
         "numero_registro": [
             "Número de Registro",
-            "Registro Mercantil"
+            "Junta Comercial",
+            "NIRE"
         ],
         "tipo_sociedad": [
-            "Tipo de Sociedad",
-            "Clase Jurídica"
+            "Tipo Societário",
+            "Natureza Jurídica",
+            "Ltda",
+            "SA"
         ],
         "duracion": [
-            "Duración",
-            "Vigencia"
+            "Prazo de Duração",
+            "Vigência"
+        ]
+    },
+    "usa": {
+        "id_tributaria": [
+            "EIN",
+            "Tax ID",
+            "Federal Tax ID",
+            "Employer Identification Number",
+            "Federal ID"
+        ],
+        "razon_social": [
+            "Company Name",
+            "Legal Name",
+            "Corporation Name",
+            "Entity Name"
+        ],
+        "fecha_constitucion": [
+            "Date of Incorporation",
+            "Formation Date",
+            "Date of Organization"
+        ],
+        "direccion": [
+            "Registered Address",
+            "Principal Office",
+            "Business Address"
+        ],
+        "representante_legal": [
+            "Registered Agent",
+            "President",
+            "CEO",
+            "Managing Member"
+        ],
+        "objeto_social": [
+            "Purpose",
+            "Business Purpose",
+            "Nature of Business"
+        ],
+        "capital_social": [
+            "Authorized Capital",
+            "Capital Stock",
+            "Authorized Shares"
+        ],
+        "numero_registro": [
+            "Entity Number",
+            "File Number",
+            "Registration Number"
+        ],
+        "tipo_sociedad": [
+            "LLC",
+            "Corporation",
+            "Inc",
+            "Corp",
+            "Entity Type"
+        ],
+        "duracion": [
+            "Duration",
+            "Term",
+            "Perpetual"
+        ]
+    },
+    "francia": {
+        "id_tributaria": [
+            "SIRET",
+            "SIREN",
+            "numéro TVA",
+            "numéro de TVA intracommunautaire",
+            "numéro SIREN"
+        ],
+        "razon_social": [
+            "Raison sociale",
+            "Dénomination",
+            "Dénomination sociale"
+        ],
+        "fecha_constitucion": [
+            "Date de constitution",
+            "Date d'immatriculation",
+            "Date de création"
+        ],
+        "direccion": [
+            "Siège social",
+            "Adresse",
+            "Domicile"
+        ],
+        "representante_legal": [
+            "Représentant légal",
+            "Gérant",
+            "Président",
+            "Directeur Général"
+        ],
+        "objeto_social": [
+            "Objet social",
+            "Activité principale",
+            "Activité"
+        ],
+        "capital_social": [
+            "Capital social",
+            "Capital"
+        ],
+        "numero_registro": [
+            "RCS",
+            "Registre du Commerce",
+            "Numéro d'immatriculation"
+        ],
+        "tipo_sociedad": [
+            "SARL",
+            "SA",
+            "SAS",
+            "Forme juridique"
+        ],
+        "duracion": [
+            "Durée",
+            "Durée de la société"
+        ]
+    },
+    "dinamarca": {
+        "id_tributaria": [
+            "CVR-nummer",
+            "CVR",
+            "SE-nummer"
+        ],
+        "razon_social": [
+            "Selskabsnavn",
+            "Firmanavn",
+            "Navn"
+        ],
+        "fecha_constitucion": [
+            "Stiftelsesdato",
+            "Registreringsdato"
+        ],
+        "direccion": [
+            "Hjemsted",
+            "Adresse",
+            "Registreret adresse"
+        ],
+        "representante_legal": [
+            "Direktion",
+            "Direktør",
+            "Bestyrelsesformand"
+        ],
+        "objeto_social": [
+            "Formål",
+            "Vedtægtsmæssigt formål"
+        ],
+        "capital_social": [
+            "Selskabskapital",
+            "Aktiekapital",
+            "Anpartskapital"
+        ],
+        "numero_registro": [
+            "CVR-nummer",
+            "Erhvervsstyrelsen"
+        ],
+        "tipo_sociedad": [
+            "ApS",
+            "A/S",
+            "Selskabsform"
+        ],
+        "duracion": [
+            "Varighed",
+            "Vedtægter"
+        ]
+    },
+    "internacional": {
+        "id_tributaria": [
+            "Tax ID",
+            "Tax Number",
+            "Registration Number",
+            "ID Tributaria"
+        ],
+        "razon_social": [
+            "Company Name",
+            "Legal Name",
+            "Razón Social",
+            "Entity Name"
+        ],
+        "fecha_constitucion": [
+            "Date of Incorporation",
+            "Formation Date",
+            "Fecha de Constitución"
+        ],
+        "direccion": [
+            "Registered Address",
+            "Principal Office",
+            "Domicilio Legal"
+        ],
+        "representante_legal": [
+            "Legal Representative",
+            "Director",
+            "Representative"
+        ],
+        "objeto_social": [
+            "Business Purpose",
+            "Object",
+            "Objeto Social"
+        ],
+        "capital_social": [
+            "Capital",
+            "Share Capital",
+            "Capital Social"
+        ],
+        "numero_registro": [
+            "Registration Number",
+            "Registry Number"
+        ],
+        "tipo_sociedad": [
+            "Entity Type",
+            "Legal Form",
+            "Tipo de Sociedad"
+        ],
+        "duracion": [
+            "Duration",
+            "Term",
+            "Duración"
         ]
     },
     "china": {

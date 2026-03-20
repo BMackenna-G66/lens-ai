@@ -1,6 +1,6 @@
 import { GoogleGenAI, GenerateContentResponse, Type } from "@google/genai";
-import { API_KEY_PLACEHOLDER, PREDEFINED_FIELDS, GEMINI_COMPARISON_PROMPT_TEMPLATE, GEMINI_CHAT_SYSTEM_INSTRUCTION, GEMINI_COUNTRY_DETECTION_PROMPT_TEMPLATE, GEMINI_RISK_ANALYSIS_PROMPT_TEMPLATE, GEMINI_INTEGRITY_ANALYSIS_PROMPT_TEMPLATE, GEMINI_FINANCIAL_PROMPT_TEMPLATE, GEMINI_BANK_STATEMENT_PROMPT_TEMPLATE, GEMINI_CROSS_ANALYSIS_PROMPT_TEMPLATE, GEMINI_CRYPTO_FORENSIC_PROMPT, GEMINI_COMPLIANCE_AUDIT_PROMPT, GEMINI_TAX_FOLDER_PROMPT_TEMPLATE } from "../constants";
-import { ExtractedField, ComparisonResult, RiskAnalysisResult, IntegrityAnalysisResult, FinancialAnalysisResult, BankStatementAnalysisResult, CombinedAnalysisResult, CryptoWalletProfile, CryptoRiskAssessment, ComplianceAnalysisResult, TaxFolderAnalysisResult } from "../types";
+import { API_KEY_PLACEHOLDER, PREDEFINED_FIELDS, GEMINI_COMPARISON_PROMPT_TEMPLATE, GEMINI_CHAT_SYSTEM_INSTRUCTION, GEMINI_COUNTRY_DETECTION_PROMPT_TEMPLATE, GEMINI_RISK_ANALYSIS_PROMPT_TEMPLATE, GEMINI_INTEGRITY_ANALYSIS_PROMPT_TEMPLATE, GEMINI_FINANCIAL_PROMPT_TEMPLATE, GEMINI_BANK_STATEMENT_PROMPT_TEMPLATE, GEMINI_CROSS_ANALYSIS_PROMPT_TEMPLATE, GEMINI_CRYPTO_FORENSIC_PROMPT, GEMINI_COMPLIANCE_AUDIT_PROMPT, GEMINI_TAX_FOLDER_PROMPT_TEMPLATE, GEMINI_CRYPTO_PATTERN_ALERT_PROMPT, GEMINI_EXECUTIVE_SUMMARY_PROMPT } from "../constants";
+import { ExtractedField, ComparisonResult, RiskAnalysisResult, IntegrityAnalysisResult, FinancialAnalysisResult, BankStatementAnalysisResult, CombinedAnalysisResult, CryptoWalletProfile, CryptoRiskAssessment, ComplianceAnalysisResult, TaxFolderAnalysisResult, PatternAnalysisResult } from "../types";
 import { KEYWORDS_BY_COUNTRY } from "./countryKeywords";
 
 const getApiKey = (): string | undefined => process.env.API_KEY;
@@ -160,5 +160,28 @@ export const analyzeComplianceDocumentWithGemini = async (documentText: string):
     const response = await ai.models.generateContent({ model: primaryAnalysisModel, contents: GEMINI_COMPLIANCE_AUDIT_PROMPT(documentText), config: jsonConfig });
     if (!response.text) throw new Error("Respuesta vacía de la IA.");
     return JSON.parse(extractJsonFromResponse(response.text)) as ComplianceAnalysisResult;
+  });
+};
+
+export const analyzeCryptoPatterns = async (transactions: any[], walletAddress: string, network: string): Promise<PatternAnalysisResult> => {
+  const transactionsJson = JSON.stringify(transactions.slice(0, 50), null, 2); // limit to 50 txs
+  const prompt = GEMINI_CRYPTO_PATTERN_ALERT_PROMPT(transactionsJson, walletAddress, network);
+  return executeWithRetry(async (ai) => {
+    const response = await ai.models.generateContent({ model: primaryAnalysisModel, contents: prompt, config: jsonConfig });
+    if (!response.text) throw new Error("Respuesta vacía de la IA.");
+    return JSON.parse(extractJsonFromResponse(response.text)) as PatternAnalysisResult;
+  });
+};
+
+export const generateExecutiveSummary = async (extractedData: ExtractedField[], fileName: string): Promise<string> => {
+  const fieldsText = extractedData.map(f => `${f.field}: ${f.value}`).join('\n');
+  const prompt = GEMINI_EXECUTIVE_SUMMARY_PROMPT(fieldsText, fileName);
+  return executeWithRetry(async (ai) => {
+    const response = await ai.models.generateContent({
+      model: primaryAnalysisModel,
+      contents: prompt,
+      config: { thinkingConfig: { thinkingBudget: 0 } },
+    });
+    return response.text || 'No se pudo generar el resumen ejecutivo.';
   });
 };

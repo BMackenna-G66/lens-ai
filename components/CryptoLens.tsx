@@ -1,10 +1,11 @@
 
 import React, { useState, useRef, useMemo } from 'react';
-import { CryptoNetwork, CryptoWalletProfile, CryptoTransaction, CryptoTokenBalance } from '../types';
+import { CryptoNetwork, CryptoWalletProfile, CryptoTransaction, CryptoTokenBalance, PatternAnalysisResult } from '../types';
 import { detectNetwork, fetchWalletData } from '../services/cryptoService';
-import { analyzeCryptoWalletWithGemini, hasValidApiKeys } from '../services/geminiService';
+import { analyzeCryptoWalletWithGemini, analyzeCryptoPatterns, hasValidApiKeys } from '../services/geminiService';
 import { getTextFromFile } from '../services/fileProcessorService';
 import { generateCryptoPdf } from '../services/pdfGenerator';
+import { TransactionNetworkGraph } from './TransactionNetworkGraph';
 import { 
     IconSearch, IconShieldCheck, IconAlertTriangleSolid, IconWallet, 
     IconCheckCircle, IconCamera, IconChevronLeft, IconChevronRight,
@@ -139,7 +140,15 @@ const TransactionsTable: React.FC<{ transactions: CryptoTransaction[] }> = ({ tr
     </div>
 );
 
-const AnalysisDashboard: React.FC<{ data: CryptoWalletProfile, onPrint: () => void }> = ({ data, onPrint }) => (
+interface AnalysisDashboardProps {
+    data: CryptoWalletProfile;
+    onPrint: () => void;
+    patternResult: PatternAnalysisResult | null;
+    isAnalyzingPatterns: boolean;
+    onAnalyzePatterns: () => void;
+}
+
+const AnalysisDashboard: React.FC<AnalysisDashboardProps> = ({ data, onPrint, patternResult, isAnalyzingPatterns, onAnalyzePatterns }) => (
     <div className="space-y-8 animate-fade-in">
         <div className="flex justify-between items-start">
             <div>
@@ -161,15 +170,92 @@ const AnalysisDashboard: React.FC<{ data: CryptoWalletProfile, onPrint: () => vo
 
         {/* AI Analysis Section */}
         {data.riskAssessment && (
-            <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
-                 <h3 className="text-lg font-bold text-slate-800 mb-3 flex items-center"><IconShieldCheck className="w-5 h-5 mr-2 text-primary-500"/>Análisis de Riesgo IA (Gemini)</h3>
-                 <div className="prose prose-sm max-w-none text-slate-600">
+            <div className="bg-white dark:bg-slate-800 p-6 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-700">
+                 <h3 className="text-lg font-bold text-slate-800 dark:text-slate-100 mb-3 flex items-center"><IconShieldCheck className="w-5 h-5 mr-2 text-primary-500"/>Análisis de Riesgo IA (Gemini)</h3>
+                 <div className="prose prose-sm max-w-none text-slate-600 dark:text-slate-300">
                     <p>{data.riskAssessment.summary}</p>
                     <ul className="list-disc pl-5 mt-2 space-y-1">
                         {data.riskAssessment.riskFactors.map((factor, i) => <li key={i}>{factor}</li>)}
                     </ul>
                  </div>
+                 <div className="mt-4">
+                    <button
+                        onClick={onAnalyzePatterns}
+                        disabled={isAnalyzingPatterns}
+                        className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold px-4 py-2 rounded-lg text-sm transition-colors"
+                    >
+                        {isAnalyzingPatterns ? (
+                            <>
+                                <svg className="animate-spin w-4 h-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                                </svg>
+                                Detectando patrones...
+                            </>
+                        ) : '🔍 Detectar Patrones AML'}
+                    </button>
+                 </div>
             </div>
+        )}
+
+        {/* Pattern Analysis Results */}
+        {patternResult && (
+            <div className="mt-6 p-5 bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm">
+                <h3 className="text-lg font-bold text-slate-800 dark:text-slate-100 mb-4 flex items-center gap-2">
+                    🔍 Análisis de Patrones AML
+                    <span className={`text-xs px-2 py-1 rounded-full font-semibold ${
+                        patternResult.nivelRiesgoGeneral === 'Crítico' ? 'bg-red-100 text-red-800' :
+                        patternResult.nivelRiesgoGeneral === 'Alto' ? 'bg-orange-100 text-orange-800' :
+                        patternResult.nivelRiesgoGeneral === 'Medio' ? 'bg-yellow-100 text-yellow-800' :
+                        'bg-green-100 text-green-800'
+                    }`}>{patternResult.nivelRiesgoGeneral}</span>
+                </h3>
+
+                <p className="text-sm text-slate-600 dark:text-slate-400 mb-4">{patternResult.resumenPatrones}</p>
+
+                <div className="space-y-3 mb-4">
+                    {patternResult.alertas.filter(a => a.detectado).map((alerta, idx) => (
+                        <div key={idx} className={`p-3 rounded-lg border-l-4 ${
+                            alerta.severidad === 'Alta' ? 'bg-red-50 border-red-500 dark:bg-red-900/20' :
+                            alerta.severidad === 'Media' ? 'bg-orange-50 border-orange-500 dark:bg-orange-900/20' :
+                            'bg-yellow-50 border-yellow-500 dark:bg-yellow-900/20'
+                        }`}>
+                            <div className="flex items-center justify-between mb-1">
+                                <span className="font-semibold text-sm text-slate-800 dark:text-slate-100">⚠️ {alerta.tipo}</span>
+                                <span className={`text-xs px-2 py-0.5 rounded-full ${
+                                    alerta.severidad === 'Alta' ? 'bg-red-200 text-red-800' :
+                                    alerta.severidad === 'Media' ? 'bg-orange-200 text-orange-800' : 'bg-yellow-200 text-yellow-800'
+                                }`}>{alerta.severidad}</span>
+                            </div>
+                            <p className="text-xs text-slate-600 dark:text-slate-400">{alerta.descripcion}</p>
+                        </div>
+                    ))}
+                    {patternResult.alertas.every(a => !a.detectado) && (
+                        <div className="p-3 bg-green-50 dark:bg-green-900/20 rounded-lg border-l-4 border-green-500">
+                            <p className="text-sm text-green-800 dark:text-green-300">✅ No se detectaron patrones sospechosos en las transacciones analizadas.</p>
+                        </div>
+                    )}
+                </div>
+
+                {patternResult.recomendacionesUAF.length > 0 && (
+                    <div className="p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
+                        <p className="text-xs font-semibold text-blue-700 dark:text-blue-300 uppercase mb-2">Recomendaciones UAF/UIAF</p>
+                        <ul className="space-y-1">
+                            {patternResult.recomendacionesUAF.map((rec, i) => (
+                                <li key={i} className="text-xs text-slate-700 dark:text-slate-300 flex gap-2"><span>•</span>{rec}</li>
+                            ))}
+                        </ul>
+                    </div>
+                )}
+            </div>
+        )}
+
+        {/* Transaction Network Graph */}
+        {data.transactions && data.transactions.length > 0 && (
+            <TransactionNetworkGraph
+                walletAddress={data.address}
+                transactions={data.transactions}
+            />
         )}
 
         {/* Charts Grid */}
@@ -197,7 +283,23 @@ export const CryptoLens: React.FC = () => {
     const [error, setError] = useState<string | null>(null);
     const [walletData, setWalletData] = useState<CryptoWalletProfile | null>(null);
     const [hasSearched, setHasSearched] = useState(false);
+    const [patternResult, setPatternResult] = useState<PatternAnalysisResult | null>(null);
+    const [isAnalyzingPatterns, setIsAnalyzingPatterns] = useState(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
+
+    const handleAnalyzePatterns = async () => {
+        if (!walletData || !walletData.transactions.length) return;
+        setIsAnalyzingPatterns(true);
+        setError(null);
+        try {
+            const result = await analyzeCryptoPatterns(walletData.transactions, walletData.address, walletData.network);
+            setPatternResult(result);
+        } catch (e: any) {
+            setError(e.message || 'Error al analizar patrones AML.');
+        } finally {
+            setIsAnalyzingPatterns(false);
+        }
+    };
 
     const handleSearch = async () => {
         if (!hasValidApiKeys()) {
@@ -205,10 +307,11 @@ export const CryptoLens: React.FC = () => {
             return;
         }
         if (!address.trim()) { setError("Por favor ingresa una dirección de billetera."); return; }
-        
+
         setLoading(true);
         setError(null);
         setWalletData(null);
+        setPatternResult(null);
         setHasSearched(true);
 
         try {
@@ -327,7 +430,15 @@ export const CryptoLens: React.FC = () => {
                 </div>
             )}
             {error && <Alert type="error" message={error} onClose={() => setError(null)} />}
-            {walletData && !loading && <AnalysisDashboard data={walletData} onPdf={() => generateCryptoPdf(walletData)} />}
+            {walletData && !loading && (
+                <AnalysisDashboard
+                    data={walletData}
+                    onPrint={() => generateCryptoPdf(walletData)}
+                    patternResult={patternResult}
+                    isAnalyzingPatterns={isAnalyzingPatterns}
+                    onAnalyzePatterns={handleAnalyzePatterns}
+                />
+            )}
         </div>
     );
 };

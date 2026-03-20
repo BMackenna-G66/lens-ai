@@ -12,6 +12,17 @@ interface DocumentChatProps {
   onSendMessage: (messageText: string) => void;
 }
 
+const suggestedQuestions = [
+  "¿Cuál es el objeto social de la empresa?",
+  "¿Quién es el representante legal?",
+  "¿Cuál es el capital social?",
+  "¿Hay modificaciones en este documento?",
+  "¿Cuáles son las facultades del administrador?",
+  "Resume los puntos más importantes",
+  "¿Hay cláusulas sospechosas?",
+  "¿Cuál es la fecha de constitución?",
+];
+
 export const DocumentChat: React.FC<DocumentChatProps> = ({
   chatMessages,
   isChatLoading,
@@ -27,10 +38,17 @@ export const DocumentChat: React.FC<DocumentChatProps> = ({
 
   useEffect(scrollToBottom, [chatMessages]);
 
-  const handleSend = () => {
-    if (inputText.trim() && !isChatLoading) {
-      onSendMessage(inputText.trim());
+  const handleSend = (textOverride?: string) => {
+    const text = textOverride !== undefined ? textOverride : inputText.trim();
+    if (text && !isChatLoading) {
+      onSendMessage(text);
       setInputText('');
+    }
+  };
+
+  const handleChipClick = (question: string) => {
+    if (!isChatLoading) {
+      handleSend(question);
     }
   };
 
@@ -88,6 +106,18 @@ export const DocumentChat: React.FC<DocumentChatProps> = ({
           <span>Error en el chat: {chatError}</span>
         </div>
       )}
+      <div className="flex flex-wrap gap-2 mb-3">
+        {suggestedQuestions.map((question, index) => (
+          <button
+            key={index}
+            onClick={() => handleChipClick(question)}
+            disabled={isChatLoading}
+            className="text-xs bg-primary-50 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 border border-primary-200 dark:border-primary-700 rounded-full px-3 py-1 cursor-pointer hover:bg-primary-100 dark:hover:bg-primary-800/40 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {question}
+          </button>
+        ))}
+      </div>
       <div className="flex items-center border-t border-slate-300 pt-3">
         <input
           type="text"
@@ -100,7 +130,7 @@ export const DocumentChat: React.FC<DocumentChatProps> = ({
           aria-label="Escribe tu pregunta para el chat"
         />
         <button
-          onClick={handleSend}
+          onClick={() => handleSend()}
           disabled={isChatLoading || !inputText.trim()}
           className="bg-primary-500 hover:bg-primary-600 text-white font-semibold p-2.5 rounded-r-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-sm"
           aria-label="Enviar mensaje al chat"

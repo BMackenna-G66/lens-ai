@@ -7,14 +7,15 @@ import { Alert } from './Alert';
 import { PREDEFINED_FIELDS, GEMINI_PROMPT_TEMPLATE, GEMINI_CHAT_SYSTEM_INSTRUCTION } from '../constants'; 
 import { ProcessedDocument, FileProcessingStatus, SupplementaryDocumentAnalysis, SupplementaryAnalysisStatus, ComparisonResult, ChatMessage, QueueItem, AnalysisPurpose, RiskAnalysisStatus, IntegrityAnalysisStatus } from '../types';
 import { getTextFromFile } from '../services/fileProcessorService';
-import { 
-    analyzeDocumentWithGemini, 
-    analyzeDocumentComparisonWithGemini, 
-    getChatResponse, 
-    detectCountryWithGemini, 
-    analyzeDocumentForRisks, 
+import {
+    analyzeDocumentWithGemini,
+    analyzeDocumentComparisonWithGemini,
+    getChatResponse,
+    detectCountryWithGemini,
+    analyzeDocumentForRisks,
     analyzeDocumentIntegrity,
-    hasValidApiKeys
+    hasValidApiKeys,
+    generateExecutiveSummary
 } from '../services/geminiService';
 import { generatePdf } from '../services/pdfGenerator';
 import { generateCsv } from '../services/csvGenerator';
@@ -180,7 +181,30 @@ export const DocumentAnalyzer: React.FC = () => {
       if (docToProcess.purpose === 'extract') {
         updateDoc(FileProcessingStatus.DETECTING_COUNTRY, { statusMessage: "Detectando país..." });
         const country = await detectCountryWithGemini(combinedText);
-        const countryContext = KEYWORDS_BY_COUNTRY[country] ? `Contexto para ${country}: ...` : '';
+        const countryContextMap: { [key: string]: string } = {
+          'chile': 'Estás analizando una escritura pública o documento legal chileno. Usa terminología legal chilena (RUT, SpA, SA, Ltda, Notaría, Conservador de Bienes Raíces).',
+          'colombia': 'Estás analizando un documento legal colombiano. Usa terminología legal colombiana (NIT, SAS, SA, Ltda, Cámara de Comercio, matrícula mercantil).',
+          'peru': 'Estás analizando un documento legal peruano. Usa terminología legal peruana (RUC, SAC, SA, EIRL, Registros Públicos, SUNARP).',
+          'ecuador': 'Estás analizando un documento legal ecuatoriano. Usa terminología legal ecuatoriana (RUC, Superintendencia de Compañías).',
+          'argentina': 'Estás analizando un documento legal argentino. Usa terminología legal argentina (CUIT, SA, SRL, IGJ, AFIP).',
+          'mexico': 'Estás analizando un documento legal mexicano. Usa terminología legal mexicana (RFC, SA de CV, SAPI, Registro Público de Comercio).',
+          'uruguay': 'Estás analizando un documento legal uruguayo. Usa terminología legal uruguaya (RUT, SA, SRL, DGI, Registro de Comercio).',
+          'panama': 'Estás analizando un documento legal panameño. Usa terminología legal panameña (RUC, SA, Registro Público de Panamá).',
+          'islas_caiman': 'Estás analizando un documento legal de Islas Caimán. Usa terminología de derecho corporativo de Caimán (exempted company, Cayman Islands Registry).',
+          'eeuu': 'Estás analizando un documento legal estadounidense. Usa terminología legal de EE.UU. (EIN, LLC, Corp, Inc, Secretary of State, Articles of Incorporation).',
+          'usa': 'Estás analizando un documento legal estadounidense en inglés. Traduce todo el contenido al español. Usa terminología legal de EE.UU. (EIN, Tax ID, LLC, Corp, Inc, Articles of Incorporation).',
+          'espana': 'Estás analizando un documento legal español. Usa terminología legal española (NIF, CIF, SA, SL, Registro Mercantil, escritura pública).',
+          'reino_unido': 'Estás analizando un documento legal del Reino Unido. Traduce el contenido al español. Usa terminología legal del Reino Unido (Companies House, Ltd, PLC, UTR).',
+          'paraguay': 'Estás analizando un documento legal paraguayo. Usa terminología legal paraguaya (RUC, SA, SRL, Registro Público de Comercio).',
+          'costa_rica': 'Estás analizando un documento legal costarricense. Usa terminología legal costarricense (cédula jurídica, SA, SRL, Registro Nacional).',
+          'hong_kong': 'Estás analizando un documento legal de Hong Kong. Traduce el contenido al español. Usa terminología de derecho corporativo de Hong Kong (Companies Registry, Ltd, BRN).',
+          'brasil': 'Estás analizando un documento legal brasileño en portugués. Traduce todo el contenido al español. Usa terminología legal brasileña (CNPJ, CPF, Razão Social, Junta Comercial, Ltda, SA).',
+          'china': 'Estás analizando un documento legal chino (mandarín). Traduce todo el contenido al español. Usa la guía de mapeo para documentos chinos incluida a continuación.',
+          'francia': 'Estás analizando un documento legal francés. Traduce todo el contenido al español. Usa terminología legal francesa (SIRET, SIREN, SARL, SA, Raison sociale, Registre du Commerce).',
+          'dinamarca': 'Estás analizando un documento legal danés. Traduce todo el contenido al español. Usa terminología legal danesa (CVR-nummer, ApS, A/S, Selskabsnavn, Erhvervsstyrelsen).',
+          'internacional': 'Estás analizando un documento legal de origen internacional. Traduce todo el contenido al español e identifica la jurisdicción si es posible.',
+        };
+        const countryContext = countryContextMap[country] || (KEYWORDS_BY_COUNTRY[country] ? `Estás analizando un documento legal de origen: ${country}. Traduce el contenido al español si es necesario.` : 'Estás analizando un documento de origen no especificado.');
         updateDoc(FileProcessingStatus.ANALYZING, { statusMessage: "Analizando con IA...", detectedCountry: country });
         
         const prompt = GEMINI_PROMPT_TEMPLATE(combinedText, countryContext);
@@ -318,12 +342,20 @@ export const DocumentAnalyzer: React.FC = () => {
     setActiveChatDocumentId(prevId => (prevId === documentId ? null : documentId));
   };
   
-  const handleDownloadPdf = (doc: ProcessedDocument) => {
-     if (doc.status !== FileProcessingStatus.COMPLETED || !doc.extractedData || doc.extractedData.length === 0) {
-      setGlobalError(`El documento ${doc.fileName} no tiene datos extraídos para generar PDF.`);
-      return;
+  const handleDownloadPdf = async (doc: ProcessedDocument) => {
+    if (!doc.extractedData || doc.extractedData.length === 0) return;
+    try {
+      // Generate executive summary via AI
+      let summary: string | undefined;
+      try {
+        summary = await generateExecutiveSummary(doc.extractedData, doc.fileName);
+      } catch (e) {
+        console.warn('Could not generate executive summary, proceeding without it');
+      }
+      await generatePdf(doc.fileName, doc.extractedData, summary);
+    } catch (error: any) {
+      console.error('Error generating PDF:', error);
     }
-    generatePdf(doc.fileName, doc.extractedData);
   };
   
   const handleDownloadAllCsv = () => {

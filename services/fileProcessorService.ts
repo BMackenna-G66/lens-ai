@@ -4,14 +4,23 @@ import Tesseract from 'tesseract.js';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = `https://esm.sh/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.js`;
 
+// Tesseract.js uses Web Workers internally — one worker is created and reused
+// across all OCR calls to avoid the overhead of spawning a new worker per page.
 let tesseractWorker: Tesseract.Worker | null = null;
 let isTesseractInitialized = false;
 
+// Per-call progress callback — updated before each recognize() call so the
+// Tesseract logger can forward progress to whichever caller is active.
+let activeProgressCallback: ((progress: number, status: string) => void) | null = null;
+
 const initializeTesseract = async (): Promise<Tesseract.Worker> => {
     console.log('[Tesseract] Initializing Tesseract worker...');
-    const worker = await Tesseract.createWorker('spa', undefined, { 
+    const worker = await Tesseract.createWorker('spa', undefined, {
         logger: m => {
             console.log(`[Tesseract] ${m.status}${m.progress ? ` (${(m.progress * 100).toFixed(2)}%)` : ''}`);
+            if (m.progress !== undefined && activeProgressCallback) {
+                activeProgressCallback(Math.round(m.progress * 100), m.status || 'Procesando...');
+            }
         },
     });
     isTesseractInitialized = true;
@@ -27,21 +36,39 @@ const getTesseractWorker = async (): Promise<Tesseract.Worker> => {
     return tesseractWorker;
 };
 
+/**
+ * Terminates the shared Tesseract worker and resets state.
+ * Call this when the application is shutting down or when you want to free
+ * the worker thread resources explicitly.
+ */
+export const terminateTesseractWorker = async (): Promise<void> => {
+    if (tesseractWorker) {
+        await tesseractWorker.terminate();
+        tesseractWorker = null;
+        isTesseractInitialized = false;
+        activeProgressCallback = null;
+        console.log('[Tesseract] Worker terminated.');
+    }
+};
 
-export const getTextFromFile = async (file: File): Promise<string> => {
+
+export const getTextFromFile = async (
+  file: File,
+  onProgress?: (progress: number, status: string) => void
+): Promise<string> => {
   return new Promise((resolve, reject) => {
     console.log(`Processing file type: ${file.type}`);
-    
+
     if (file.type === 'application/pdf') {
-      extractTextFromPdfWithOcr(file).then(resolve).catch(reject);
+      extractTextFromPdfWithOcr(file, onProgress).then(resolve).catch(reject);
     } else if (file.type === 'text/plain') {
       extractTextFromTxt(file).then(resolve).catch(reject);
     } else if (
-        file.type === 'image/png' || 
-        file.type === 'image/jpeg' || 
+        file.type === 'image/png' ||
+        file.type === 'image/jpeg' ||
         file.type === 'image/jpg'
     ) {
-      extractTextFromImageWithOcr(file).then(resolve).catch(reject);
+      extractTextFromImageWithOcr(file, onProgress).then(resolve).catch(reject);
     } else {
       reject(new Error(`Tipo de archivo no soportado (${file.type}). Solo se permiten PDF, PNG, JPG y TXT.`));
     }
@@ -65,13 +92,19 @@ const extractTextFromTxt = (file: File): Promise<string> => {
   });
 };
 
-const extractTextFromImageWithOcr = async (file: File): Promise<string> => {
+const extractTextFromImageWithOcr = async (
+  file: File,
+  onProgress?: (progress: number, status: string) => void
+): Promise<string> => {
   console.log(`[extractTextFromImageWithOcr] Starting OCR text extraction for ${file.name}`);
   try {
+    // Set the active progress callback so the shared Tesseract logger can forward it
+    activeProgressCallback = onProgress ?? null;
     const worker = await getTesseractWorker();
-    
+
     console.log(`[extractTextFromImageWithOcr] Performing OCR on image ${file.name}`);
     const { data: { text: ocrText } } = await worker.recognize(file); // Tesseract can take a File object
+    activeProgressCallback = null;
     
     const trimmedOcrText = ocrText.trim();
     if (!trimmedOcrText) {
@@ -83,6 +116,7 @@ const extractTextFromImageWithOcr = async (file: File): Promise<string> => {
     return trimmedOcrText;
 
   } catch (error: any) {
+    activeProgressCallback = null;
     console.error(`[extractTextFromImageWithOcr] Error during Image OCR for ${file.name}:`, error);
     const originalErrorMessage = error instanceof Error ? error.message : String(error);
     if (error instanceof Error && error.stack) {
@@ -104,27 +138,49 @@ const extractTextFromImageWithOcr = async (file: File): Promise<string> => {
 };
 
 
-const extractTextFromPdfWithOcr = async (file: File): Promise<string> => {
+const extractTextFromPdfWithOcr = async (
+  file: File,
+  onProgress?: (progress: number, status: string) => void
+): Promise<string> => {
   console.log(`[extractTextFromPdfWithOcr] Starting OCR text extraction for ${file.name}`);
-  let pdfDocProxy: PDFDocumentProxy | null = null; 
+  let pdfDocProxy: PDFDocumentProxy | null = null;
 
   try {
     const arrayBuffer = await file.arrayBuffer();
     pdfDocProxy = await pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) }).promise;
     console.log(`[extractTextFromPdfWithOcr] PDF loaded. Number of pages: ${pdfDocProxy.numPages}`);
-    
+
     if (pdfDocProxy.numPages === 0) {
         console.warn(`[extractTextFromPdfWithOcr] PDF ${file.name} has 0 pages.`);
-        throw new Error("PDF_ZERO_PAGES"); 
+        throw new Error("PDF_ZERO_PAGES");
     }
 
-    const worker = await getTesseractWorker(); 
-    
+    // Reuse the single shared Tesseract worker across all pages — avoids
+    // the overhead of spinning up a new worker thread per page.
+    const worker = await getTesseractWorker();
+
     let fullText = '';
-    for (let i = 1; i <= pdfDocProxy.numPages; i++) {
-      console.log(`[extractTextFromPdfWithOcr] Rendering page ${i} of ${pdfDocProxy.numPages} for OCR`);
+    const totalPages = pdfDocProxy.numPages;
+    for (let i = 1; i <= totalPages; i++) {
+      console.log(`[extractTextFromPdfWithOcr] Rendering page ${i} of ${totalPages} for OCR`);
+
+      // Emit coarse page-level progress to the caller before OCR starts on
+      // each page, then let the Tesseract logger emit fine-grained progress.
+      if (onProgress) {
+        const pageStartPct = Math.round(((i - 1) / totalPages) * 100);
+        onProgress(pageStartPct, `Página ${i} de ${totalPages}: preparando...`);
+        // Wire the shared callback so Tesseract's internal logger forwards
+        // per-recognition progress for this page.
+        activeProgressCallback = (pct: number, status: string) => {
+          const pagePct = Math.round(((i - 1) / totalPages) * 100 + (pct / totalPages));
+          onProgress(pagePct, `Página ${i} de ${totalPages}: ${status}`);
+        };
+      } else {
+        activeProgressCallback = null;
+      }
+
       const page = await pdfDocProxy.getPage(i);
-      const viewport = page.getViewport({ scale: 2.0 }); 
+      const viewport = page.getViewport({ scale: 2.0 });
 
       const canvas = document.createElement('canvas');
       const context = canvas.getContext('2d');
@@ -136,18 +192,21 @@ const extractTextFromPdfWithOcr = async (file: File): Promise<string> => {
       canvas.width = viewport.width;
 
       await page.render({ canvasContext: context, viewport: viewport }).promise;
-      
+
       console.log(`[extractTextFromPdfWithOcr] Performing OCR on page ${i}`);
       const { data: { text: ocrText } } = await worker.recognize(canvas);
-      
+
       if (ocrText && ocrText.trim() !== "") {
-        fullText += ocrText.trim() + '\n\n'; 
+        fullText += ocrText.trim() + '\n\n';
         console.log(`[extractTextFromPdfWithOcr] Page ${i} OCR Result (first 100 chars): ${ocrText.substring(0,100).replace(/\n/g, ' ')}`);
       } else {
         console.log(`[extractTextFromPdfWithOcr] Page ${i}: No text detected by OCR or text was empty.`);
       }
-      page.cleanup(); 
+      page.cleanup();
     }
+
+    // Clear the progress callback once all pages are done
+    activeProgressCallback = null;
 
     const trimmedFullText = fullText.trim();
     if (!trimmedFullText) {
@@ -159,6 +218,7 @@ const extractTextFromPdfWithOcr = async (file: File): Promise<string> => {
     return trimmedFullText;
 
   } catch (error: any) {
+    activeProgressCallback = null;
     console.error(`[extractTextFromPdfWithOcr] Error during PDF OCR for ${file.name}:`, error);
     const originalErrorMessage = error instanceof Error ? error.message : String(error);
      if (error instanceof Error && error.stack) {

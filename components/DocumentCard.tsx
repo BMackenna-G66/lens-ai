@@ -156,7 +156,32 @@ export const DocumentCard: React.FC<DocumentCardProps> = ({
             <h3 className="text-lg font-semibold text-primary-600 break-all">{document.fileName}</h3>
             {document.detectedCountry && document.detectedCountry !== 'unknown' && (
               <span className="ml-2 mt-0.5 self-center whitespace-nowrap text-xs font-semibold bg-blue-600 text-blue-100 px-2 py-1 rounded-full capitalize">
-                {document.detectedCountry.replace(/_/g, ' ')}
+                {(() => {
+                  const countryFlagMap: { [key: string]: string } = {
+                    'chile': '🇨🇱 Chile',
+                    'colombia': '🇨🇴 Colombia',
+                    'peru': '🇵🇪 Perú',
+                    'ecuador': '🇪🇨 Ecuador',
+                    'argentina': '🇦🇷 Argentina',
+                    'mexico': '🇲🇽 México',
+                    'uruguay': '🇺🇾 Uruguay',
+                    'panama': '🇵🇦 Panamá',
+                    'islas_caiman': '🇰🇾 Islas Caimán',
+                    'eeuu': '🇺🇸 EE.UU.',
+                    'usa': '🇺🇸 EE.UU.',
+                    'espana': '🇪🇸 España',
+                    'reino_unido': '🇬🇧 Reino Unido',
+                    'paraguay': '🇵🇾 Paraguay',
+                    'costa_rica': '🇨🇷 Costa Rica',
+                    'hong_kong': '🇭🇰 Hong Kong',
+                    'brasil': '🇧🇷 Brasil',
+                    'china': '🇨🇳 China',
+                    'francia': '🇫🇷 Francia',
+                    'dinamarca': '🇩🇰 Dinamarca',
+                    'internacional': '🌐 Internacional',
+                  };
+                  return countryFlagMap[document.detectedCountry] || document.detectedCountry.replace(/_/g, ' ');
+                })()}
               </span>
             )}
           </div>
