@@ -17,8 +17,8 @@ if (API_KEY && API_KEY !== API_KEY_PLACEHOLDER) {
   ai = new GoogleGenAI({ apiKey: API_KEY_PLACEHOLDER });
 }
 
-const primaryAnalysisModel = 'gemini-2.5-flash-preview-04-17';
-const chatModel = 'gemini-2.5-flash-preview-04-17'; // Specify model for chat
+const primaryAnalysisModel = 'gemini-2.0-flash';
+const chatModel = 'gemini-2.0-flash';
 
 export const detectCountryWithGemini = async (documentText: string): Promise<string> => {
     if (!API_KEY || API_KEY === API_KEY_PLACEHOLDER) {
