@@ -20,6 +20,38 @@ if (API_KEY && API_KEY !== API_KEY_PLACEHOLDER) {
 const primaryAnalysisModel = 'gemini-2.5-flash';
 const chatModel = 'gemini-2.5-flash';
 
+const extractJsonFromResponse = (text: string): string => {
+  // Strip markdown fences first
+  const fenceRegex = /^```(?:json)?\s*\n?([\s\S]*?)\n?\s*```$/s;
+  const fenceMatch = text.trim().match(fenceRegex);
+  if (fenceMatch && fenceMatch[1]) return fenceMatch[1].trim();
+
+  // Find the first { or [ and the last matching } or ]
+  const firstBrace = text.indexOf('{');
+  const firstBracket = text.indexOf('[');
+
+  if (firstBrace === -1 && firstBracket === -1) return text.trim();
+
+  let startChar: string;
+  let endChar: string;
+  let startIdx: number;
+
+  if (firstBrace === -1) {
+    startChar = '['; endChar = ']'; startIdx = firstBracket;
+  } else if (firstBracket === -1) {
+    startChar = '{'; endChar = '}'; startIdx = firstBrace;
+  } else {
+    startIdx = Math.min(firstBrace, firstBracket);
+    startChar = text[startIdx] === '{' ? '{' : '[';
+    endChar = startChar === '{' ? '}' : ']';
+  }
+
+  const endIdx = text.lastIndexOf(endChar);
+  if (endIdx > startIdx) return text.slice(startIdx, endIdx + 1);
+
+  return text.trim();
+};
+
 export const detectCountryWithGemini = async (documentText: string): Promise<string> => {
     if (!API_KEY || API_KEY === API_KEY_PLACEHOLDER) {
         throw new Error("La API Key de Gemini no está configurada. No se puede detectar el país.");
@@ -100,6 +132,7 @@ export const analyzeDocumentComparisonWithGemini = async (primaryDocumentExtract
       contents: prompt,
       config: {
         responseMimeType: "application/json",
+        thinkingConfig: { thinkingBudget: 0 },
       }
     });
 
@@ -108,13 +141,8 @@ export const analyzeDocumentComparisonWithGemini = async (primaryDocumentExtract
         console.warn("Gemini API returned undefined, null, or empty text response for comparison analysis.");
         throw new Error("Respuesta vacía o inválida de la API de Gemini para la comparación.");
     }
-    
-    let jsonStr = text.trim();
-    const fenceRegex = /^```(\w*)?\s*\n?(.*?)\n?\s*```$/s;
-    const match = jsonStr.match(fenceRegex);
-    if (match && match[2]) {
-      jsonStr = match[2].trim();
-    }
+
+    const jsonStr = extractJsonFromResponse(text);
 
     try {
       const parsedData = JSON.parse(jsonStr) as ComparisonResult;
@@ -212,6 +240,7 @@ export const analyzeDocumentForRisks = async (documentText: string): Promise<Ris
       contents: prompt,
       config: {
         responseMimeType: "application/json",
+        thinkingConfig: { thinkingBudget: 0 },
       }
     });
 
@@ -219,13 +248,8 @@ export const analyzeDocumentForRisks = async (documentText: string): Promise<Ris
     if (!text || text.trim() === '') {
       throw new Error("Respuesta vacía de la IA para el análisis de riesgos.");
     }
-    
-    let jsonStr = text.trim();
-    const fenceRegex = /^```(\w*)?\s*\n?(.*?)\n?\s*```$/s;
-    const match = jsonStr.match(fenceRegex);
-    if (match && match[2]) {
-      jsonStr = match[2].trim();
-    }
+
+    const jsonStr = extractJsonFromResponse(text);
 
     try {
       const parsedData = JSON.parse(jsonStr) as RiskAnalysisResult;
@@ -263,6 +287,7 @@ export const analyzeLimitesTransaccionales = async (
       contents: prompt,
       config: {
         responseMimeType: "application/json",
+        thinkingConfig: { thinkingBudget: 0 },
       },
     });
 
@@ -271,12 +296,7 @@ export const analyzeLimitesTransaccionales = async (
       throw new Error("Respuesta vacía de la IA para el análisis de límites transaccionales.");
     }
 
-    let jsonStr = text.trim();
-    const fenceRegex = /^```(\w*)?\s*\n?(.*?)\n?\s*```$/s;
-    const match = jsonStr.match(fenceRegex);
-    if (match && match[2]) {
-      jsonStr = match[2].trim();
-    }
+    const jsonStr = extractJsonFromResponse(text);
 
     try {
       const parsedData = JSON.parse(jsonStr) as LimitesResult;
@@ -316,6 +336,7 @@ export const analyzeCryptoRisk = async (
       contents: prompt,
       config: {
         responseMimeType: "application/json",
+        thinkingConfig: { thinkingBudget: 0 },
       },
     });
 
@@ -324,12 +345,7 @@ export const analyzeCryptoRisk = async (
       throw new Error("Respuesta vacía de la IA para el análisis de criptoactivos.");
     }
 
-    let jsonStr = text.trim();
-    const fenceRegex = /^```(\w*)?\s*\n?(.*?)\n?\s*```$/s;
-    const match = jsonStr.match(fenceRegex);
-    if (match && match[2]) {
-      jsonStr = match[2].trim();
-    }
+    const jsonStr = extractJsonFromResponse(text);
 
     try {
       const parsedData = JSON.parse(jsonStr) as CryptoAnalysisResult;
@@ -369,6 +385,7 @@ export const analyzeAML = async (
       contents: prompt,
       config: {
         responseMimeType: "application/json",
+        thinkingConfig: { thinkingBudget: 0 },
       },
     });
 
@@ -377,12 +394,7 @@ export const analyzeAML = async (
       throw new Error("Respuesta vacía de la IA para la evaluación AML.");
     }
 
-    let jsonStr = text.trim();
-    const fenceRegex = /^```(\w*)?\s*\n?(.*?)\n?\s*```$/s;
-    const match = jsonStr.match(fenceRegex);
-    if (match && match[2]) {
-      jsonStr = match[2].trim();
-    }
+    const jsonStr = extractJsonFromResponse(text);
 
     try {
       const parsedData = JSON.parse(jsonStr) as AMLResult;
