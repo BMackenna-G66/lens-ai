@@ -14,11 +14,13 @@
     "firebase": "^12.11.0",
     "jspdf": "^3.0.1",
     "jspdf-autotable": "^5.0.2",
+    "lucide-react": "^0.577.0",
     "pdfjs-dist": "^4.0.379",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "recharts": "^3.7.0",
-    "tesseract.js": "^5.1.0"
+    "tesseract.js": "^5.1.0",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
