@@ -1342,3 +1342,231 @@ export const generateComplianceVsManualPdf = async (
   const timestamp = new Date().toISOString().slice(0, 10);
   doc.save(`Compliance_vs_Manual_${timestamp}.pdf`);
 };
+
+// ─── Criminal Profile PDF ────────────────────────────────────────────────────
+import { PersonProfile } from '../types/criminalTypes';
+
+export const generateCriminalProfilePdf = async (profile: PersonProfile): Promise<void> => {
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const margin = 14;
+  const generationDate = new Date().toLocaleString('es-CL');
+
+  // ── Header ────────────────────────────────────────────────────────────────
+  doc.setFillColor(...NAVY);
+  doc.rect(0, 0, pageWidth, 38, 'F');
+  doc.setFillColor(...INDIGO);
+  doc.rect(0, 38, pageWidth, 2, 'F');
+
+  const logoData = await loadLogoBase64();
+  if (logoData) {
+    try { doc.addImage(logoData, 'JPEG', pageWidth - 58, 8, 44, 13); } catch { /* no logo */ }
+  }
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(16);
+  doc.setTextColor(...WHITE);
+  doc.text('INFORME DE PERFIL CRIMINAL', margin, 16);
+  doc.setFontSize(9);
+  doc.setFont('helvetica', 'normal');
+  doc.setTextColor(196, 210, 230);
+  doc.text('CriminalProfile AI · Compliance Team Global66', margin, 24);
+  doc.text(generationDate, pageWidth - margin, 24, { align: 'right' });
+
+  let y = 48;
+
+  // ── Profile info box ──────────────────────────────────────────────────────
+  doc.setFillColor(...LIGHT_GRAY);
+  doc.setDrawColor(220, 228, 240);
+  doc.roundedRect(margin, y, pageWidth - margin * 2, 30, 2, 2, 'FD');
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(12);
+  doc.setTextColor(...DARK_TEXT);
+  doc.text(`${profile.nombre} ${profile.apellido}`.toUpperCase(), margin + 4, y + 8);
+
+  if (profile.isPep) {
+    doc.setFontSize(7);
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(180, 120, 0);
+    doc.text('★ ES PEP', margin + 4, y + 15);
+  }
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8);
+  doc.setTextColor(...MID_GRAY);
+  doc.text(`RUT: ${profile.rut}`, margin + 4, y + (profile.isPep ? 22 : 15));
+  doc.text(`ID Cliente: ${profile.customerId}`, margin + 4 + 55, y + (profile.isPep ? 22 : 15));
+  doc.text(`Nombre Cuenta: ${profile.nombreCuenta}`, margin + 4 + 110, y + (profile.isPep ? 22 : 15));
+
+  y += 38;
+
+  // ── System Recommendation ─────────────────────────────────────────────────
+  if (profile.preEvaluation) {
+    const isLiberar = profile.preEvaluation.decision.toLowerCase().includes('liber');
+    const isBlocked = profile.preEvaluation.decision.toLowerCase().includes('block');
+    const fillColor: [number,number,number] = isLiberar ? [240,253,244] : isBlocked ? [254,242,242] : [255,251,235];
+    const borderColor: [number,number,number] = isLiberar ? [134,239,172] : isBlocked ? [252,165,165] : [252,211,77];
+    const textColor: [number,number,number] = isLiberar ? [21,128,61] : isBlocked ? [185,28,28] : [146,64,14];
+
+    doc.setFillColor(...fillColor);
+    doc.setDrawColor(...borderColor);
+    doc.roundedRect(margin, y, pageWidth - margin * 2, 22, 2, 2, 'FD');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8);
+    doc.setTextColor(...MID_GRAY);
+    doc.text('RECOMENDACIÓN DEL SISTEMA', margin + 4, y + 6);
+    doc.setFontSize(11);
+    doc.setTextColor(...textColor);
+    doc.text(profile.preEvaluation.decision.toUpperCase(), margin + 4, y + 14);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7.5);
+    doc.setTextColor(...DARK_TEXT);
+    const razonLines = doc.splitTextToSize(profile.preEvaluation.razon, pageWidth - margin * 2 - 80);
+    doc.text(razonLines, margin + 60, y + 10);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    doc.setTextColor(...INDIGO);
+    doc.text(`Valor Total: ${profile.preEvaluation.scoreTotal}`, pageWidth - margin - 4, y + 14, { align: 'right' });
+    y += 30;
+  }
+
+  // ── Score breakdown ───────────────────────────────────────────────────────
+  const precedentes = profile.crimes.filter(c => (c.catalogType || '').toUpperCase().includes('PRECEDENTE'));
+  const noPrecedentes = profile.crimes.filter(c => !(c.catalogType || '').toUpperCase().includes('PRECEDENTE'));
+  const preScore = precedentes.reduce((s, c) => s + (c.catalogValue || 0), 0);
+  const noPreScore = noPrecedentes.reduce((s, c) => s + (c.catalogValue || 0), 0);
+  const totalScore = preScore + noPreScore;
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(9);
+  doc.setTextColor(...NAVY);
+  doc.text('DESGLOSE DE PUNTAJE', margin, y + 5);
+  doc.setDrawColor(...INDIGO);
+  doc.setLineWidth(0.4);
+  doc.line(margin, y + 6.5, margin + 52, y + 6.5);
+  y += 10;
+
+  const drawScoreRow = (label: string, count: number, score: number, maxScore: number) => {
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8);
+    doc.setTextColor(...DARK_TEXT);
+    doc.text(`${label}: ${count} causa(s) → ${score} pts`, margin + 4, y);
+    // bar bg
+    doc.setFillColor(220, 228, 240);
+    doc.roundedRect(margin + 4, y + 2, pageWidth - margin * 2 - 8, 4, 1, 1, 'F');
+    // bar fill
+    const barWidth = maxScore > 0 ? Math.min(1, score / maxScore) * (pageWidth - margin * 2 - 8) : 0;
+    if (barWidth > 0) {
+      doc.setFillColor(...INDIGO);
+      doc.roundedRect(margin + 4, y + 2, barWidth, 4, 1, 1, 'F');
+    }
+    y += 10;
+  };
+
+  drawScoreRow('Precedentes', precedentes.length, preScore, Math.max(totalScore, 1));
+  drawScoreRow('No Precedentes', noPrecedentes.length, noPreScore, Math.max(totalScore, 1));
+
+  // total bar
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(8);
+  doc.setTextColor(...NAVY);
+  doc.text(`Total: ${totalScore} pts`, margin + 4, y);
+  y += 10;
+
+  // ── Crimes table ──────────────────────────────────────────────────────────
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(9);
+  doc.setTextColor(...NAVY);
+  doc.text('HISTORIAL JUDICIAL DETALLADO', margin, y + 5);
+  doc.setDrawColor(...INDIGO);
+  doc.setLineWidth(0.4);
+  doc.line(margin, y + 6.5, margin + 70, y + 6.5);
+  y += 10;
+
+  const crimeRows = profile.crimes.map(c => [
+    c.tipo || 'N/A',
+    c.fecha && c.fecha !== '0' ? c.fecha : 'Sin fecha',
+    c.estado || 'N/A',
+    `${c.ruc || 'N/A'} / ${c.rit || 'N/A'}`,
+    c.riesgo || 'N/A',
+    c.catalogValue !== undefined ? String(c.catalogValue) : 'N/A',
+  ]);
+
+  autoTable(doc, {
+    startY: y,
+    head: [['Tipo', 'Fecha', 'Estado', 'RUC/RIT', 'Riesgo', 'Val. Cat.']],
+    body: crimeRows,
+    theme: 'grid',
+    headStyles: { fillColor: NAVY, textColor: WHITE, fontSize: 7.5, fontStyle: 'bold', cellPadding: 2.5 },
+    bodyStyles: { fontSize: 7, cellPadding: { top: 2, right: 3, bottom: 2, left: 3 }, textColor: DARK_TEXT, lineColor: [220, 228, 240] },
+    alternateRowStyles: { fillColor: [245, 247, 252] },
+    columnStyles: {
+      0: { cellWidth: 50 },
+      1: { cellWidth: 22 },
+      2: { cellWidth: 25 },
+      3: { cellWidth: 35 },
+      4: { cellWidth: 20 },
+      5: { cellWidth: 16 },
+    },
+    margin: { left: margin, right: margin },
+    didDrawPage: (data) => {
+      addPageFooter(doc, data.pageNumber, 0, generationDate);
+    },
+  });
+
+  y = (doc as any).lastAutoTable.finalY + 10;
+
+  // ── Action & Notes ────────────────────────────────────────────────────────
+  if (profile.selectedAction || profile.notes) {
+    if (y > pageHeight - 50) { doc.addPage(); y = 20; }
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    doc.setTextColor(...NAVY);
+    doc.text('DECISIÓN DEL ANALISTA', margin, y);
+    doc.setDrawColor(...INDIGO);
+    doc.line(margin, y + 1.5, margin + 58, y + 1.5);
+    y += 8;
+
+    if (profile.selectedAction) {
+      const isLiberar = profile.selectedAction === 'Liberar';
+      const isBlocked = profile.selectedAction === 'Fully Blocked';
+      const actionFill: [number,number,number] = isLiberar ? [240,253,244] : isBlocked ? [254,242,242] : profile.selectedAction === 'Liberar + UCR' ? [238,242,255] : [255,251,235];
+      const actionText: [number,number,number] = isLiberar ? [21,128,61] : isBlocked ? [185,28,28] : profile.selectedAction === 'Liberar + UCR' ? [67,56,202] : [146,64,14];
+      doc.setFillColor(...actionFill);
+      doc.setDrawColor(220, 228, 240);
+      doc.roundedRect(margin, y, 60, 10, 2, 2, 'FD');
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8);
+      doc.setTextColor(...actionText);
+      doc.text(`Acción: ${profile.selectedAction}`, margin + 4, y + 7);
+      y += 14;
+    }
+
+    if (profile.notes) {
+      const notesLines = doc.splitTextToSize(profile.notes, pageWidth - margin * 2 - 8);
+      doc.setFillColor(240, 244, 255);
+      doc.setDrawColor(...INDIGO);
+      doc.roundedRect(margin, y, pageWidth - margin * 2, notesLines.length * 4.5 + 12, 2, 2, 'FD');
+      doc.setFillColor(...INDIGO);
+      doc.rect(margin, y, 3, notesLines.length * 4.5 + 12, 'F');
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8);
+      doc.setTextColor(...DARK_TEXT);
+      doc.text('Notas del Analista:', margin + 7, y + 6);
+      doc.text(notesLines, margin + 7, y + 11);
+      y += notesLines.length * 4.5 + 16;
+    }
+  }
+
+  // ── Footers ───────────────────────────────────────────────────────────────
+  const totalPages2 = (doc as any).internal.pages.length - 1;
+  for (let i = 1; i <= totalPages2; i++) {
+    doc.setPage(i);
+    addPageFooter(doc, i, totalPages2, generationDate);
+  }
+
+  const safeName = `${profile.nombre}_${profile.apellido}`.replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_-]/g, '');
+  doc.save(`Perfil_${safeName}_${new Date().toISOString().slice(0,10)}.pdf`);
+};

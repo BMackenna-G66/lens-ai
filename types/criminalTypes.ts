@@ -11,6 +11,7 @@ export interface PersonProfile {
   totalCrimes: number; totalHighRiskCrimes: number; highestRisk: string;
   status: 'Pendiente' | 'Revisado'; selectedAction: AnalysisAction;
   preEvaluation?: PreEvaluation; isPep?: boolean;
+  notes?: string;
 }
 export interface CatalogItem { nombre: string; riesgoG66: string; valor: number; tipo: string; }
 export interface DecisionRule {
@@ -24,6 +25,6 @@ export interface CatalogData {
 export interface CriminalAppState {
   profiles: PersonProfile[]; catalog: CatalogData | null;
   loading: boolean; error: string | null; selectedRut: string | null;
-  view: 'dashboard' | 'catalog';
+  view: 'dashboard' | 'catalog' | 'comparison' | 'triage';
 }
 export enum RiskLevel { LOW = 'low', MEDIUM = 'medium', HIGH = 'high', CRITICAL = 'critical' }

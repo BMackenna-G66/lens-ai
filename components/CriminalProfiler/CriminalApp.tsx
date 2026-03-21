@@ -5,11 +5,13 @@ import { DEFAULT_CATALOG } from '../../services/defaultCatalogData';
 import { CriminalDashboard } from './CriminalDashboard';
 import { ProfileDetails } from './ProfileDetails';
 import { CatalogManager } from './CatalogManager';
+import { ComparisonView } from './ComparisonView';
+import { TriageView } from './TriageView';
 import {
   FileSpreadsheet, Search, Filter, ChevronRight, ShieldAlert, AlertCircle,
   Download, CheckCircle, ChevronUp, ChevronDown, ArrowUpDown, CheckSquare,
   Square, BookOpen, Database, RotateCcw, LayoutDashboard, Share2, FolderInput,
-  Layers, Upload, Settings, ArrowLeft, Sun, Moon
+  Layers, Upload, Settings, ArrowLeft, Sun, Moon, Zap, GitCompare
 } from 'lucide-react';
 
 type SortKey = 'rut' | 'nombre' | 'totalCrimes' | 'totalHighRiskCrimes' | 'highestRisk' | 'status';
@@ -189,6 +191,20 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
               <button onClick={() => sessionFileInputRef.current?.click()} title="Importar Sesión" className="p-2.5 text-slate-500 dark:text-indigo-300 hover:text-slate-800 dark:hover:text-white hover:bg-slate-200 dark:hover:bg-indigo-800 rounded-lg transition-all"><FolderInput size={18} /></button>
             </div>
             <button
+              onClick={() => setState(s => ({ ...s, view: 'triage' }))}
+              className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest border transition-all bg-slate-100 dark:bg-indigo-800 text-slate-700 dark:text-indigo-100 border-slate-200 dark:border-indigo-700 hover:bg-amber-100 dark:hover:bg-amber-900 hover:text-amber-700 dark:hover:text-amber-300 hover:border-amber-300"
+              title="Modo Triage"
+            >
+              <Zap size={16} /> Triage
+            </button>
+            <button
+              onClick={() => setState(s => ({ ...s, view: 'comparison' }))}
+              className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest border transition-all bg-slate-100 dark:bg-indigo-800 text-slate-700 dark:text-indigo-100 border-slate-200 dark:border-indigo-700 hover:bg-indigo-100 dark:hover:bg-indigo-700 hover:border-indigo-400"
+              title="Comparar Períodos"
+            >
+              <GitCompare size={16} /> Comparar
+            </button>
+            <button
               onClick={() => setState(s => ({ ...s, view: s.view === 'catalog' ? 'dashboard' : 'catalog' }))}
               className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest border transition-all ${state.view === 'catalog' ? 'bg-indigo-600 text-white border-indigo-600 shadow-xl' : 'bg-slate-100 dark:bg-indigo-800 text-slate-700 dark:text-indigo-100 border-slate-200 dark:border-indigo-700 hover:bg-slate-200 dark:hover:bg-indigo-700'}`}
             >
@@ -203,7 +219,17 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
       </header>
 
       {/* Main */}
-      <main className="flex-1 max-w-7xl mx-auto w-full p-4 md:p-8 space-y-8">
+      {state.view === 'comparison' && (
+        <ComparisonView onBack={() => setState(s => ({ ...s, view: 'dashboard' }))} />
+      )}
+      {state.view === 'triage' && (
+        <TriageView
+          profiles={state.profiles}
+          onUpdateProfile={handleUpdateProfile}
+          onBack={() => setState(s => ({ ...s, view: 'dashboard' }))}
+        />
+      )}
+      <main className={`flex-1 max-w-7xl mx-auto w-full p-4 md:p-8 space-y-8 ${state.view === 'comparison' || state.view === 'triage' ? 'hidden' : ''}`}>
         {state.view === 'catalog' ? (
           state.catalog ? (
             <CatalogManager catalog={state.catalog} onUpdate={handleUpdateCatalog} onReset={handleResetCatalog} />
@@ -292,6 +318,7 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
                               <div className="flex items-center">{label}<SortIcon column={key} /></div>
                             </th>
                           ))}
+                          <th className="px-6 py-4 text-[9px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-[0.2em]">Acción Final</th>
                           <th className="px-6 py-4 text-[9px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-[0.2em] text-right">Ficha</th>
                         </tr>
                       </thead>
@@ -304,6 +331,18 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
                             <td className="px-6 py-4 text-center"><span className={`inline-flex items-center justify-center min-w-[2.5rem] px-2 py-1 rounded-lg text-[10px] font-black ${p.totalHighRiskCrimes > 0 ? 'bg-red-100 dark:bg-red-950 text-red-600 dark:text-red-400 border border-red-200 dark:border-red-800 animate-pulse' : 'bg-slate-100 dark:bg-slate-800 text-slate-400 dark:text-slate-500'}`}>{p.totalHighRiskCrimes}</span></td>
                             <td className="px-6 py-4"><span className={`text-[9px] px-2 py-0.5 rounded-md font-black uppercase border ${p.preEvaluation?.decision.toLowerCase().includes('liber') ? 'bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-400 border-emerald-200 dark:border-emerald-800' : p.preEvaluation?.decision.toLowerCase().includes('block') ? 'bg-red-50 dark:bg-red-950 text-red-600 dark:text-red-400 border-red-200 dark:border-red-800' : 'bg-amber-50 dark:bg-amber-950 text-amber-600 dark:text-amber-400 border-amber-200 dark:border-amber-800'}`}>{p.preEvaluation?.decision || 'Sin Evaluación'}</span></td>
                             <td className="px-6 py-4"><span className={`text-[9px] font-black uppercase px-2 py-1 rounded-md border ${p.highestRisk.toLowerCase().includes('critical')||p.highestRisk.toLowerCase().includes('crítico') ? 'bg-red-600 text-white border-red-700' : p.highestRisk.toLowerCase().includes('high')||p.highestRisk.toLowerCase().includes('alto') ? 'bg-red-100 dark:bg-red-950 text-red-600 dark:text-red-400 border-red-200 dark:border-red-800' : 'bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-500 border-slate-200 dark:border-slate-700'}`}>{p.highestRisk}</span></td>
+                            <td className="px-6 py-4">
+                              {p.selectedAction ? (
+                                <span className={`text-[9px] px-2 py-0.5 rounded-md font-black uppercase border ${
+                                  p.selectedAction === 'Liberar' ? 'bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-400 border-emerald-200 dark:border-emerald-800' :
+                                  p.selectedAction === 'Fully Blocked' ? 'bg-red-50 dark:bg-red-950 text-red-600 dark:text-red-400 border-red-200 dark:border-red-800' :
+                                  p.selectedAction === 'Liberar + UCR' ? 'bg-indigo-50 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 border-indigo-200 dark:border-indigo-800' :
+                                  'bg-amber-50 dark:bg-amber-950 text-amber-600 dark:text-amber-400 border-amber-200 dark:border-amber-800'
+                                }`}>{p.selectedAction}</span>
+                              ) : (
+                                <span className="text-slate-300 dark:text-slate-600 text-sm font-black">—</span>
+                              )}
+                            </td>
                             <td className="px-6 py-4 text-right"><button onClick={() => setState(s => ({ ...s, selectedRut: p.rut }))} className="bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 font-black text-[9px] px-4 py-2 rounded-xl hover:bg-indigo-600 hover:text-white transition-all uppercase tracking-widest border border-slate-200 dark:border-slate-700 active:scale-95">Analizar <ChevronRight size={12} className="inline ml-1" /></button></td>
                           </tr>
                         ))}
