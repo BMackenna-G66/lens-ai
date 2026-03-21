@@ -502,3 +502,66 @@ Genera un resumen ejecutivo en español de máximo 250 palabras que incluya:
 El tono debe ser formal y profesional. No uses listas con viñetas, escribe en párrafos fluidos.
 Responde SOLO con el texto del resumen, sin títulos ni formato adicional.
 `;
+
+// ─── COMPLIANCE vs MANUAL COMPARISON PROMPT ──────────────────────────────────
+export const GEMINI_COMPLIANCE_VS_MANUAL_PROMPT = (manualText: string, documentText: string): string => `
+Eres un experto auditor de cumplimiento AML/LAFT especializado en estándares GAFI/GAFILAT.
+
+Se te proporciona:
+1. MANUAL DE REFERENCIA: El Manual de Prevención LAFT v9.0 de Global66 (G81-MAN-003), que es el estándar de comparación.
+2. DOCUMENTO A EVALUAR: Un documento de política o manual de cumplimiento de otra organización que debe ser evaluado.
+
+Tu tarea es hacer una comparación exhaustiva entre ambos documentos, identificando semejanzas, diferencias y brechas en 13 pilares clave.
+
+MANUAL DE REFERENCIA (Global66 G81-MAN-003 v9.0):
+---
+${manualText.slice(0, 15000)}
+---
+
+DOCUMENTO A EVALUAR:
+---
+${documentText.slice(0, 12000)}
+---
+
+Devuelve SOLO un JSON válido con esta estructura exacta:
+{
+  "resumenGeneral": "Resumen ejecutivo de 3-4 oraciones sobre el nivel general de alineación",
+  "tablaPilares": [
+    {
+      "seccion": "Nombre del pilar (ej: Política de Aceptación de Clientes)",
+      "referenciaManual": "Qué exige el manual Global66 en este pilar (1-2 oraciones)",
+      "estadoDocumento": "Cumple" | "Cumple Parcialmente" | "No Cumple" | "No Aplica",
+      "semejanzas": "Qué coincide entre los documentos en este pilar",
+      "diferencias": "Qué difiere o se trata de manera distinta",
+      "brechas": "Qué le falta al documento evaluado para alinearse al manual",
+      "nivelRiesgo": "Alto" | "Medio" | "Bajo" | "Sin Riesgo"
+    }
+  ],
+  "semejanzasGlobales": ["lista de puntos de coincidencia entre ambos documentos"],
+  "diferenciasGlobales": ["lista de diferencias importantes identificadas"],
+  "brechasCriticas": ["lista de brechas críticas que deben resolverse con urgencia"],
+  "recomendacionesPriorizadas": ["lista de recomendaciones ordenadas de mayor a menor urgencia"],
+  "nivelCumplimientoGlobal": 75,
+  "dictamen": "Alineado" | "Parcialmente Alineado" | "No Alineado",
+  "dictamenJustificacion": "Justificación del dictamen en 2-3 oraciones"
+}
+
+Los 13 pilares a evaluar obligatoriamente son:
+1. Política de Aceptación de Clientes
+2. Política de Gestión de Riesgo AML/CFT
+3. Política KYC (Conozca a su Cliente)
+4. Política de Monitoreo y Reportes
+5. Reportes a la UAF (ROS/ROE)
+6. Política KYE (Conozca a su Empleado)
+7. Política de Formación del Personal
+8. Política de Transferencias
+9. Política de Regalos y Conflictos de Interés
+10. Roles y Responsabilidades (Oficial de Cumplimiento)
+11. Cumplimiento y Sanciones
+12. Revisión Independiente
+13. Gestión de PEPs y Listas Negras
+
+Para cada pilar, basa la evaluación en el contenido real de ambos documentos. Si el documento a evaluar no menciona el pilar, marca "No Cumple" con brecha crítica.
+
+El nivelCumplimientoGlobal debe calcularse como el porcentaje de pilares que "Cumple" o "Cumple Parcialmente" sobre el total.
+`;

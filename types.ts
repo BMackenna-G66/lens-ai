@@ -379,3 +379,27 @@ export interface PatternAnalysisResult {
   resumenPatrones: string;
   recomendacionesUAF: string[];
 }
+
+// --- COMPLIANCE vs MANUAL COMPARISON TYPES ---
+
+export interface ManualComparisonPillar {
+  seccion: string;           // e.g. "Política de Aceptación de Clientes"
+  referenciaManual: string;  // Key requirement from Global66 manual
+  estadoDocumento: 'Cumple' | 'Cumple Parcialmente' | 'No Cumple' | 'No Aplica';
+  semejanzas: string;        // What matches the manual
+  diferencias: string;       // What differs from the manual
+  brechas: string;           // Specific gaps
+  nivelRiesgo: 'Alto' | 'Medio' | 'Bajo' | 'Sin Riesgo';
+}
+
+export interface ComplianceVsManualResult {
+  resumenGeneral: string;
+  tablaPilares: ManualComparisonPillar[];
+  semejanzasGlobales: string[];
+  diferenciasGlobales: string[];
+  brechasCriticas: string[];
+  recomendacionesPriorizadas: string[];
+  nivelCumplimientoGlobal: number;   // 0-100 score
+  dictamen: 'Alineado' | 'Parcialmente Alineado' | 'No Alineado';
+  dictamenJustificacion: string;
+}

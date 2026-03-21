@@ -1,7 +1,7 @@
 
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import { ExtractedField, CryptoWalletProfile, ComplianceAnalysisResult, FinancialDocumentProcess } from '../types';
+import { ExtractedField, CryptoWalletProfile, ComplianceAnalysisResult, FinancialDocumentProcess, FinancialDocumentType } from '../types';
 
 // Colors
 const NAVY = [30, 58, 95] as [number, number, number];       // #1e3a5f
@@ -637,11 +637,10 @@ export const generateFinancialPdf = async (doc_in: FinancialDocumentProcess): Pr
   const margin = 14;
   const generationDate = new Date().toLocaleString('es-CL');
 
-  const subtitleMap: Record<string, string> = {
+  const subtitleMap: Record<FinancialDocumentType, string> = {
     financial_statement: 'Estado Financiero',
     bank_statement: 'Cartola Bancaria',
     tax_folder: 'Carpeta Tributaria SII',
-    combined: 'Análisis Combinado',
     mixed: 'Análisis Combinado',
   };
   const subtitle = subtitleMap[doc_in.docType] ?? doc_in.docType;
@@ -949,8 +948,8 @@ export const generateFinancialPdf = async (doc_in: FinancialDocumentProcess): Pr
     }
   }
 
-  // ---- combined ----
-  if ((doc_in.docType === 'combined' || doc_in.docType === 'mixed') && doc_in.combinedResult) {
+  // ---- combined (mixed) ----
+  if (doc_in.docType === 'mixed' && doc_in.combinedResult) {
     const cr = doc_in.combinedResult;
 
     // Financial summary sub-table
@@ -1095,4 +1094,251 @@ export const generateFinancialPdf = async (doc_in: FinancialDocumentProcess): Pr
   }
 
   doc.save(`Financiero_${doc_in.fileName.replace(/[^a-z0-9]/gi, '_')}_${Date.now()}.pdf`);
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// generateComplianceVsManualPdf
+// Branded PDF comparing an uploaded AML policy against the Global66 LAFT manual
+// ─────────────────────────────────────────────────────────────────────────────
+import { ComplianceVsManualResult } from '../types';
+
+export const generateComplianceVsManualPdf = async (
+  result: ComplianceVsManualResult,
+  fileNames: string[]
+): Promise<void> => {
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const margin = 14;
+  const generationDate = new Date().toLocaleString('es-CL');
+  const logoBase64 = await loadLogoBase64();
+
+  // ── Header ──────────────────────────────────────────────────────────────────
+  doc.setFillColor(...NAVY);
+  doc.rect(0, 0, pageWidth, 38, 'F');
+
+  if (logoBase64) {
+    try { doc.addImage(logoBase64, 'JPEG', margin, 6, 38, 11); } catch { /* ok */ }
+  }
+
+  doc.setFontSize(14);
+  doc.setFont('helvetica', 'bold');
+  doc.setTextColor(...WHITE);
+  doc.text('INFORME DE CUMPLIMIENTO AML', pageWidth / 2, 16, { align: 'center' });
+  doc.setFontSize(9);
+  doc.setFont('helvetica', 'normal');
+  doc.text('Comparación contra Manual G81-MAN-003 v9.0 · Global66', pageWidth / 2, 23, { align: 'center' });
+  doc.setFontSize(7.5);
+  doc.text(`Generado el ${generationDate}`, pageWidth / 2, 29, { align: 'center' });
+
+  let y = 46;
+
+  // ── Info box ─────────────────────────────────────────────────────────────────
+  doc.setFillColor(...LIGHT_GRAY);
+  doc.roundedRect(margin, y, pageWidth - margin * 2, 20, 3, 3, 'F');
+  doc.setFontSize(8);
+  doc.setFont('helvetica', 'bold');
+  doc.setTextColor(...DARK_TEXT);
+  doc.text('Documentos evaluados:', margin + 4, y + 7);
+  doc.setFont('helvetica', 'normal');
+  doc.setTextColor(...MID_GRAY);
+  const filesText = fileNames.join(' · ') || 'Sin nombre';
+  doc.text(doc.splitTextToSize(filesText, pageWidth - margin * 2 - 8), margin + 4, y + 13);
+  y += 26;
+
+  // ── Dictamen box ─────────────────────────────────────────────────────────────
+  const dictumColor: [number, number, number] =
+    result.dictamen === 'Alineado' ? [34, 197, 94] :
+    result.dictamen === 'Parcialmente Alineado' ? [234, 179, 8] :
+    [239, 68, 68];
+
+  doc.setFillColor(...dictumColor);
+  doc.roundedRect(margin, y, pageWidth - margin * 2, 22, 3, 3, 'F');
+  doc.setFontSize(10);
+  doc.setFont('helvetica', 'bold');
+  doc.setTextColor(...WHITE);
+  doc.text(`DICTAMEN: ${result.dictamen.toUpperCase()}  ·  ${result.nivelCumplimientoGlobal}% de alineación`, pageWidth / 2, y + 9, { align: 'center' });
+  doc.setFontSize(8);
+  doc.setFont('helvetica', 'normal');
+  const justLines = doc.splitTextToSize(result.dictamenJustificacion, pageWidth - margin * 2 - 8);
+  doc.text(justLines.slice(0, 1), pageWidth / 2, y + 16, { align: 'center' });
+  y += 28;
+
+  // ── Score bar ────────────────────────────────────────────────────────────────
+  doc.setFontSize(8);
+  doc.setFont('helvetica', 'bold');
+  doc.setTextColor(...DARK_TEXT);
+  doc.text('Nivel de Cumplimiento Global', margin, y + 4);
+  doc.setFillColor(226, 232, 240);
+  doc.roundedRect(margin, y + 7, pageWidth - margin * 2, 5, 2, 2, 'F');
+  doc.setFillColor(...dictumColor);
+  const barW = ((pageWidth - margin * 2) * result.nivelCumplimientoGlobal) / 100;
+  doc.roundedRect(margin, y + 7, barW, 5, 2, 2, 'F');
+  y += 18;
+
+  // ── Resumen general ──────────────────────────────────────────────────────────
+  doc.setFontSize(9);
+  doc.setFont('helvetica', 'bold');
+  doc.setTextColor(...INDIGO);
+  doc.text('Resumen General', margin, y);
+  y += 5;
+  doc.setFont('helvetica', 'normal');
+  doc.setTextColor(...DARK_TEXT);
+  const summaryLines = doc.splitTextToSize(result.resumenGeneral, pageWidth - margin * 2);
+  doc.text(summaryLines, margin, y);
+  y += summaryLines.length * 4.5 + 6;
+
+  // ── Pillar table ─────────────────────────────────────────────────────────────
+  doc.setFontSize(9);
+  doc.setFont('helvetica', 'bold');
+  doc.setTextColor(...INDIGO);
+  doc.text('Comparación por Pilar — Manual G81-MAN-003 vs Documento Evaluado', margin, y);
+  y += 5;
+
+  const statusColorMap: Record<string, [number, number, number]> = {
+    'Cumple': [34, 197, 94],
+    'Cumple Parcialmente': [234, 179, 8],
+    'No Cumple': [239, 68, 68],
+    'No Aplica': [148, 163, 184],
+  };
+  const riskColorMap: Record<string, [number, number, number]> = {
+    'Alto': [239, 68, 68],
+    'Medio': [234, 179, 8],
+    'Bajo': [59, 130, 246],
+    'Sin Riesgo': [34, 197, 94],
+  };
+
+  autoTable(doc, {
+    startY: y,
+    head: [['Sección', 'Estado', 'Riesgo', 'Semejanzas', 'Diferencias / Brechas']],
+    body: result.tablaPilares.map(p => [
+      `${p.seccion}\n${p.referenciaManual}`,
+      p.estadoDocumento,
+      p.nivelRiesgo,
+      p.semejanzas || '—',
+      [p.diferencias, p.brechas ? `⚠ ${p.brechas}` : ''].filter(Boolean).join('\n') || '—',
+    ]),
+    styles: { fontSize: 7, cellPadding: 3, overflow: 'linebreak', valign: 'top' },
+    headStyles: { fillColor: NAVY, textColor: WHITE, fontStyle: 'bold', fontSize: 7.5 },
+    columnStyles: {
+      0: { cellWidth: 40 },
+      1: { cellWidth: 28, halign: 'center' },
+      2: { cellWidth: 20, halign: 'center' },
+      3: { cellWidth: 45 },
+      4: { cellWidth: 45 },
+    },
+    didParseCell: (data) => {
+      if (data.section === 'body') {
+        if (data.column.index === 1) {
+          const color = statusColorMap[data.cell.raw as string] || [148, 163, 184];
+          data.cell.styles.textColor = color;
+          data.cell.styles.fontStyle = 'bold';
+        }
+        if (data.column.index === 2) {
+          const color = riskColorMap[data.cell.raw as string] || [148, 163, 184];
+          data.cell.styles.textColor = color;
+          data.cell.styles.fontStyle = 'bold';
+        }
+      }
+    },
+    alternateRowStyles: { fillColor: [248, 249, 250] },
+    margin: { left: margin, right: margin },
+    didDrawPage: (data) => {
+      const currentPage = data.pageNumber;
+      addPageFooter(doc, currentPage, (doc as any).internal.pages.length - 1, generationDate);
+    },
+  });
+
+  y = (doc as any).lastAutoTable.finalY + 10;
+
+  // Add new page if needed
+  const ensureSpace = (needed: number) => {
+    if (y + needed > pageHeight - 20) {
+      doc.addPage();
+      y = 20;
+    }
+  };
+
+  // ── Semejanzas y Diferencias ─────────────────────────────────────────────────
+  ensureSpace(30);
+  doc.setFontSize(9);
+  doc.setFont('helvetica', 'bold');
+  doc.setTextColor(...INDIGO);
+  doc.text('Semejanzas Globales', margin, y);
+  y += 5;
+  for (const s of result.semejanzasGlobales) {
+    ensureSpace(8);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(...DARK_TEXT);
+    const lines = doc.splitTextToSize(`• ${s}`, pageWidth - margin * 2 - 4);
+    doc.text(lines, margin + 3, y);
+    y += lines.length * 4 + 1;
+  }
+  y += 6;
+
+  ensureSpace(30);
+  doc.setFont('helvetica', 'bold');
+  doc.setTextColor(...INDIGO);
+  doc.text('Diferencias Identificadas', margin, y);
+  y += 5;
+  for (const d of result.diferenciasGlobales) {
+    ensureSpace(8);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(...DARK_TEXT);
+    const lines = doc.splitTextToSize(`• ${d}`, pageWidth - margin * 2 - 4);
+    doc.text(lines, margin + 3, y);
+    y += lines.length * 4 + 1;
+  }
+  y += 6;
+
+  // ── Brechas críticas ─────────────────────────────────────────────────────────
+  if (result.brechasCriticas.length > 0) {
+    ensureSpace(30);
+    doc.setFillColor(255, 240, 240);
+    doc.setDrawColor(239, 68, 68);
+    doc.roundedRect(margin, y, pageWidth - margin * 2, 8 + result.brechasCriticas.length * 7, 3, 3, 'FD');
+    doc.setFontSize(9);
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(185, 28, 28);
+    doc.text('🚨 Brechas Críticas', margin + 4, y + 6);
+    y += 10;
+    for (const b of result.brechasCriticas) {
+      const lines = doc.splitTextToSize(`• ${b}`, pageWidth - margin * 2 - 8);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8);
+      doc.setTextColor(185, 28, 28);
+      doc.text(lines, margin + 6, y);
+      y += lines.length * 4 + 1;
+    }
+    y += 8;
+  }
+
+  // ── Recomendaciones ──────────────────────────────────────────────────────────
+  ensureSpace(30);
+  doc.setFillColor(238, 242, 255);
+  doc.setDrawColor(...INDIGO);
+  doc.roundedRect(margin, y, pageWidth - margin * 2, 8 + result.recomendacionesPriorizadas.length * 7, 3, 3, 'FD');
+  doc.setFontSize(9);
+  doc.setFont('helvetica', 'bold');
+  doc.setTextColor(...INDIGO);
+  doc.text('Recomendaciones Priorizadas', margin + 4, y + 6);
+  y += 10;
+  result.recomendacionesPriorizadas.forEach((r, i) => {
+    const lines = doc.splitTextToSize(`${i + 1}. ${r}`, pageWidth - margin * 2 - 8);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8);
+    doc.setTextColor(55, 48, 163);
+    doc.text(lines, margin + 6, y);
+    y += lines.length * 4 + 1;
+  });
+
+  // ── Footers for all pages ────────────────────────────────────────────────────
+  const totalPages = (doc as any).internal.pages.length - 1;
+  for (let i = 1; i <= totalPages; i++) {
+    doc.setPage(i);
+    addPageFooter(doc, i, totalPages, generationDate);
+  }
+
+  const timestamp = new Date().toISOString().slice(0, 10);
+  doc.save(`Compliance_vs_Manual_${timestamp}.pdf`);
 };
