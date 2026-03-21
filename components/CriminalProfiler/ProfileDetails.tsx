@@ -109,26 +109,26 @@ export const ProfileDetails: React.FC<ProfileDetailsProps> = ({ profile, onClose
 
   const getRiskBadgeColor = (risk: string) => {
     const r = String(risk || '').toLowerCase();
-    if (r === 'crítico' || r === 'critical') return 'bg-red-100 text-red-700 border-red-200';
-    if (r === 'alto' || r === 'high') return 'bg-orange-100 text-orange-700 border-orange-200';
-    if (r === 'medio' || r === 'medium') return 'bg-yellow-100 text-yellow-700 border-yellow-200';
-    if (r === 'bajo' || r === 'low') return 'bg-green-100 text-green-700 border-green-200';
-    return 'bg-slate-100 text-slate-700 border-slate-200';
+    if (r === 'crítico' || r === 'critical') return 'bg-red-100 dark:bg-red-950 text-red-700 dark:text-red-400 border-red-200 dark:border-red-800';
+    if (r === 'alto' || r === 'high') return 'bg-orange-100 dark:bg-orange-950 text-orange-700 dark:text-orange-400 border-orange-200 dark:border-orange-800';
+    if (r === 'medio' || r === 'medium') return 'bg-yellow-100 dark:bg-yellow-950 text-yellow-700 dark:text-yellow-400 border-yellow-200 dark:border-yellow-800';
+    if (r === 'bajo' || r === 'low') return 'bg-green-100 dark:bg-green-950 text-green-700 dark:text-green-400 border-green-200 dark:border-green-800';
+    return 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-600';
   };
 
   return (
     <div className="fixed inset-0 bg-slate-900/70 backdrop-blur-md z-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-[2rem] shadow-2xl w-full max-w-7xl h-[94vh] overflow-hidden flex flex-col border border-white/20">
-        
+      <div className="bg-white dark:bg-slate-900 rounded-[2rem] shadow-2xl w-full max-w-7xl h-[94vh] overflow-hidden flex flex-col border border-slate-100 dark:border-slate-800">
+
         {/* 1. Header Fijo */}
-        <div className="p-4 px-8 border-b border-slate-100 flex justify-between items-center bg-white shrink-0">
+        <div className="p-4 px-8 border-b border-slate-100 dark:border-slate-800 flex justify-between items-center bg-white dark:bg-slate-900 shrink-0">
           <div className="flex items-center gap-5">
-            <div className="p-3 bg-indigo-50 rounded-2xl text-indigo-600">
+            <div className="p-3 bg-indigo-50 dark:bg-indigo-950 rounded-2xl text-indigo-600 dark:text-indigo-400">
               <User size={28} />
             </div>
             <div>
               <div className="flex items-center gap-3">
-                <h2 className="text-xl font-black text-slate-900 tracking-tight">
+                <h2 className="text-xl font-black text-slate-900 dark:text-white tracking-tight">
                   {profile.nombre} {profile.apellido}
                 </h2>
                 {profile.isPep && (
@@ -142,36 +142,36 @@ export const ProfileDetails: React.FC<ProfileDetailsProps> = ({ profile, onClose
                   </span>
                 )}
               </div>
-              <p className="text-slate-400 text-[10px] font-bold uppercase tracking-[0.2em] flex items-center gap-3">
+              <p className="text-slate-400 dark:text-slate-500 text-[10px] font-bold uppercase tracking-[0.2em] flex items-center gap-3">
                 <span>RUT: {profile.rut}</span>
                 <span className="w-1 h-1 rounded-full bg-slate-300"></span>
                 <span>ID: {profile.customerId}</span>
-                <span className="w-1 h-1 rounded-full bg-slate-300"></span>
-                <span className="text-indigo-500 font-black">{profile.nombreCuenta}</span>
+                <span className="w-1 h-1 rounded-full bg-slate-300 dark:bg-slate-600"></span>
+                <span className="text-indigo-500 dark:text-indigo-400 font-black">{profile.nombreCuenta}</span>
               </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-2 bg-slate-50 p-1.5 rounded-2xl border border-slate-100">
+          <div className="flex items-center gap-2 bg-slate-50 dark:bg-slate-800 p-1.5 rounded-2xl border border-slate-100 dark:border-slate-700">
             <button 
               onClick={onPrev}
               disabled={!onPrev}
-              className={`p-2 rounded-xl transition-all ${onPrev ? 'hover:bg-white hover:shadow-sm text-indigo-600' : 'text-slate-300 opacity-30 cursor-not-allowed'}`}
+              className={`p-2 rounded-xl transition-all ${onPrev ? 'hover:bg-white dark:hover:bg-slate-700 hover:shadow-sm text-indigo-600 dark:text-indigo-400' : 'text-slate-300 dark:text-slate-600 opacity-30 cursor-not-allowed'}`}
             >
               <ChevronLeft size={20} />
             </button>
-            <div className="h-4 w-[1px] bg-slate-200 mx-1"></div>
-            <button 
+            <div className="h-4 w-[1px] bg-slate-200 dark:bg-slate-700 mx-1"></div>
+            <button
               onClick={onNext}
               disabled={!onNext}
-              className={`p-2 rounded-xl transition-all ${onNext ? 'hover:bg-white hover:shadow-sm text-indigo-600' : 'text-slate-300 opacity-30 cursor-not-allowed'}`}
+              className={`p-2 rounded-xl transition-all ${onNext ? 'hover:bg-white dark:hover:bg-slate-700 hover:shadow-sm text-indigo-600 dark:text-indigo-400' : 'text-slate-300 dark:text-slate-600 opacity-30 cursor-not-allowed'}`}
             >
               <ChevronRight size={20} />
             </button>
-            <div className="h-4 w-[1px] bg-slate-200 mx-1"></div>
-            <button 
-              onClick={onClose} 
-              className="p-2 hover:bg-red-50 hover:text-red-600 rounded-xl transition-all text-slate-400"
+            <div className="h-4 w-[1px] bg-slate-200 dark:bg-slate-700 mx-1"></div>
+            <button
+              onClick={onClose}
+              className="p-2 hover:bg-red-50 dark:hover:bg-red-950 hover:text-red-600 dark:hover:text-red-400 rounded-xl transition-all text-slate-400 dark:text-slate-500"
             >
               <X size={20} />
             </button>
@@ -179,12 +179,12 @@ export const ProfileDetails: React.FC<ProfileDetailsProps> = ({ profile, onClose
         </div>
 
         {/* 2. Recomendación Sistema y Acción */}
-        <div className="bg-slate-50 border-b border-slate-200 p-6 flex flex-col md:flex-row gap-6 items-stretch shrink-0">
-          
-          <div className="flex-1 bg-white p-4 rounded-2xl shadow-sm border border-slate-200 flex flex-col justify-center">
+        <div className="bg-slate-50 dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-800 p-6 flex flex-col md:flex-row gap-6 items-stretch shrink-0">
+
+          <div className="flex-1 bg-white dark:bg-slate-800 p-4 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-700 flex flex-col justify-center">
             <div className="flex items-center gap-2 mb-2">
               <Sparkles size={14} className="text-indigo-600" />
-              <span className="text-[9px] text-slate-400 font-black uppercase tracking-widest">Recomendación Sistema (Catálogo)</span>
+              <span className="text-[9px] text-slate-400 dark:text-slate-500 font-black uppercase tracking-widest">Recomendación Sistema (Catálogo)</span>
             </div>
             {profile.preEvaluation ? (
               <div className="flex flex-col gap-1">
@@ -195,11 +195,11 @@ export const ProfileDetails: React.FC<ProfileDetailsProps> = ({ profile, onClose
                   }`}>
                     {profile.preEvaluation.decision}
                   </p>
-                  <span className="text-[10px] font-black bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded-lg">
+                  <span className="text-[10px] font-black bg-indigo-50 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 px-2 py-0.5 rounded-lg">
                     VALOR TOTAL: {profile.preEvaluation.scoreTotal}
                   </span>
                 </div>
-                <p className="text-[10px] text-slate-500 font-bold leading-tight">{profile.preEvaluation.razon}</p>
+                <p className="text-[10px] text-slate-500 dark:text-slate-400 font-bold leading-tight">{profile.preEvaluation.razon}</p>
               </div>
             ) : (
               <div className="flex items-center gap-2 text-slate-400">
@@ -209,13 +209,13 @@ export const ProfileDetails: React.FC<ProfileDetailsProps> = ({ profile, onClose
             )}
           </div>
 
-          <div className="w-full md:w-2/5 bg-white p-4 rounded-2xl border border-indigo-100 shadow-lg shadow-indigo-100/20 flex flex-col md:flex-row items-center gap-4">
+          <div className="w-full md:w-2/5 bg-white dark:bg-slate-800 p-4 rounded-2xl border border-indigo-100 dark:border-indigo-900 shadow-lg shadow-indigo-100/20 flex flex-col md:flex-row items-center gap-4">
             <div className="flex-1 w-full">
-              <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest ml-1 mb-1 block">Acción Final Evaluada</label>
-              <select 
+              <label className="text-[9px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest ml-1 mb-1 block">Acción Final Evaluada</label>
+              <select
                 value={localAction}
                 onChange={(e) => setLocalAction(e.target.value as AnalysisAction)}
-                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2 text-sm font-black text-slate-800 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 focus:outline-none transition-all cursor-pointer"
+                className="w-full bg-slate-50 dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-xl px-4 py-2 text-sm font-black text-slate-800 dark:text-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 focus:outline-none transition-all cursor-pointer"
               >
                 <option value="">Seleccionar Acción...</option>
                 <option value="Liberar">Liberar</option>
@@ -237,18 +237,18 @@ export const ProfileDetails: React.FC<ProfileDetailsProps> = ({ profile, onClose
         </div>
 
         {/* 3. Área Principal */}
-        <div className="flex-1 overflow-hidden flex flex-col md:flex-row bg-slate-100/30">
-          
-          <div className="flex-1 overflow-y-auto p-8 border-r border-slate-200">
+        <div className="flex-1 overflow-hidden flex flex-col md:flex-row bg-slate-50 dark:bg-slate-900/50">
+
+          <div className="flex-1 overflow-y-auto p-8 border-r border-slate-200 dark:border-slate-800">
             <div className="flex items-center justify-between mb-6">
-              <h3 className="font-black text-slate-800 flex items-center gap-2 text-sm uppercase tracking-tight">
-                <FileSearch size={18} className="text-indigo-600" /> Historial Judicial Detallado
+              <h3 className="font-black text-slate-800 dark:text-white flex items-center gap-2 text-sm uppercase tracking-tight">
+                <FileSearch size={18} className="text-indigo-600 dark:text-indigo-400" /> Historial Judicial Detallado
               </h3>
               <div className="flex items-center gap-3">
-                <span className="text-[10px] font-black bg-white border border-slate-200 px-3 py-1 rounded-lg text-slate-500">
+                <span className="text-[10px] font-black bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 px-3 py-1 rounded-lg text-slate-500 dark:text-slate-400">
                   TOTAL: {sortedCrimes.length} CAUSAS
                 </span>
-                <span className="text-[10px] font-black bg-red-50 border border-red-100 px-3 py-1 rounded-lg text-red-600">
+                <span className="text-[10px] font-black bg-red-50 dark:bg-red-950 border border-red-100 dark:border-red-800 px-3 py-1 rounded-lg text-red-600 dark:text-red-400">
                   ALTO RIESGO: {profile.totalHighRiskCrimes}
                 </span>
               </div>
@@ -256,28 +256,28 @@ export const ProfileDetails: React.FC<ProfileDetailsProps> = ({ profile, onClose
 
             <div className="space-y-4">
               {sortedCrimes.map((crime) => (
-                <div key={crime.id} className="bg-white border border-slate-100 p-6 rounded-2xl shadow-sm hover:shadow-md transition-all group">
+                <div key={crime.id} className="bg-white dark:bg-slate-800 border border-slate-100 dark:border-slate-700 p-6 rounded-2xl shadow-sm hover:shadow-md transition-all group">
                   <div className="flex justify-between items-start mb-4">
                     <div className="flex flex-col">
                       <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-black text-slate-800 text-sm uppercase leading-tight tracking-tight">{crime.tipo}</span>
+                        <span className="font-black text-slate-800 dark:text-white text-sm uppercase leading-tight tracking-tight">{crime.tipo}</span>
                         {crime.catalogType && (
-                          <span className="text-[8px] font-black bg-slate-100 text-slate-500 px-2 py-0.5 rounded-md border border-slate-200 uppercase tracking-widest">
+                          <span className="text-[8px] font-black bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400 px-2 py-0.5 rounded-md border border-slate-200 dark:border-slate-600 uppercase tracking-widest">
                             CAT: {crime.catalogType}
                           </span>
                         )}
                         {crime.catalogValue !== undefined && (
-                          <span className="text-[9px] font-black bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded-lg border border-indigo-100">
+                          <span className="text-[9px] font-black bg-indigo-50 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 px-2 py-0.5 rounded-lg border border-indigo-100 dark:border-indigo-800">
                             VALOR: {crime.catalogValue}
                           </span>
                         )}
                       </div>
                       <div className="flex items-center gap-4 mt-2">
-                        <div className="flex items-center gap-1 text-slate-400 text-[10px] font-bold">
+                        <div className="flex items-center gap-1 text-slate-400 dark:text-slate-500 text-[10px] font-bold">
                           <Calendar size={12} /> {crime.fecha !== '0' && crime.fecha !== 'undefined' ? crime.fecha : '(Sin fecha)'}
                         </div>
                         {getYearsAgo(crime.fecha, crime.rit) && (
-                          <div className="text-indigo-500 text-[10px] font-black uppercase tracking-widest bg-indigo-50 px-2 py-0.5 rounded-md flex items-center gap-1">
+                          <div className="text-indigo-600 dark:text-indigo-400 text-[10px] font-black uppercase tracking-widest bg-indigo-50 dark:bg-indigo-950 px-2 py-0.5 rounded-md flex items-center gap-1">
                             <Clock size={10} /> {getYearsAgo(crime.fecha, crime.rit)}
                           </div>
                         )}
@@ -287,19 +287,19 @@ export const ProfileDetails: React.FC<ProfileDetailsProps> = ({ profile, onClose
                       {crime.riesgo}
                     </span>
                   </div>
-                  
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-[10px] text-slate-500 border-t border-slate-50 pt-4">
-                    <div className="bg-slate-50/50 p-2 rounded-xl">
-                      <span className="text-slate-300 uppercase text-[8px] font-black block mb-1">Causa ID (RUC/RIT)</span>
-                      <p className="font-mono text-slate-700">{crime.ruc || 'N/A'} / {crime.rit || 'N/A'}</p>
+
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-[10px] border-t border-slate-100 dark:border-slate-700 pt-4">
+                    <div className="bg-slate-50 dark:bg-slate-700/50 p-2 rounded-xl">
+                      <span className="text-slate-400 dark:text-slate-500 uppercase text-[8px] font-black block mb-1">Causa ID (RUC/RIT)</span>
+                      <p className="font-mono text-slate-700 dark:text-slate-300">{crime.ruc || 'N/A'} / {crime.rit || 'N/A'}</p>
                     </div>
-                    <div className="bg-slate-50/50 p-2 rounded-xl">
-                      <span className="text-slate-300 uppercase text-[8px] font-black block mb-1">Situación Procesal</span>
-                      <p className="font-black text-indigo-600 uppercase">{crime.estado || 'No especificado'}</p>
+                    <div className="bg-slate-50 dark:bg-slate-700/50 p-2 rounded-xl">
+                      <span className="text-slate-400 dark:text-slate-500 uppercase text-[8px] font-black block mb-1">Situación Procesal</span>
+                      <p className="font-black text-indigo-600 dark:text-indigo-400 uppercase">{crime.estado || 'No especificado'}</p>
                     </div>
-                    <div className="bg-slate-50/50 p-2 rounded-xl">
-                      <span className="text-slate-300 uppercase text-[8px] font-black block mb-1">Tribunal Competente</span>
-                      <p className="font-bold text-slate-700 leading-tight">{crime.tribunal || 'Desconocido'}</p>
+                    <div className="bg-slate-50 dark:bg-slate-700/50 p-2 rounded-xl">
+                      <span className="text-slate-400 dark:text-slate-500 uppercase text-[8px] font-black block mb-1">Tribunal Competente</span>
+                      <p className="font-bold text-slate-700 dark:text-slate-300 leading-tight">{crime.tribunal || 'Desconocido'}</p>
                     </div>
                   </div>
                 </div>
@@ -308,7 +308,7 @@ export const ProfileDetails: React.FC<ProfileDetailsProps> = ({ profile, onClose
           </div>
 
           {/* Sidebar de IA (Opcional para dudas rápidas) */}
-          <div className="w-full md:w-[450px] p-6 flex flex-col bg-white">
+          <div className="w-full md:w-[450px] p-6 flex flex-col bg-white dark:bg-slate-900">
             <div className="bg-slate-900 rounded-[2rem] shadow-2xl flex flex-col h-full border border-slate-800 overflow-hidden relative">
               <div className="p-4 bg-slate-800 flex justify-between items-center border-b border-slate-700">
                 <div className="flex items-center gap-2">

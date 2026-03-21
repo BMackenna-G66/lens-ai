@@ -55,7 +55,7 @@ const AppContent: React.FC = () => {
 
   // 4. Criminal Profiler suite
   if (activeSuite === 'criminal') {
-    return <CriminalApp onBack={() => setActiveSuite(null)} />;
+    return <CriminalApp onBack={() => setActiveSuite(null)} darkMode={darkMode} onToggleDarkMode={() => setDarkMode(d => !d)} />;
   }
 
   // 5. Compliance suite (default)
