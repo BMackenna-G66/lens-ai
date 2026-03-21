@@ -7,6 +7,8 @@ import { ComplianceAnalysisResult } from '../types';
 import { getTextFromFile } from '../services/fileProcessorService';
 import { analyzeComplianceDocumentWithGemini, hasValidApiKeys } from '../services/geminiService';
 import { IconScale, IconClipboardCheck, IconCheckCircle, IconXCircle, IconAlertTriangle } from './IconComponents';
+import { trackEvent } from '../services/analyticsService';
+import { generateCompliancePdf } from '../services/pdfGenerator';
 
 const isKeyValid = hasValidApiKeys;
 
@@ -37,6 +39,7 @@ export const ComplianceLens: React.FC = () => {
 
             const analysis = await analyzeComplianceDocumentWithGemini(combinedText);
             setResult(analysis);
+            trackEvent({ type: 'compliance_analyzed', module: 'compliance' });
 
         } catch (err: any) {
             setError(err.message);
@@ -108,8 +111,15 @@ export const ComplianceLens: React.FC = () => {
 
                     {/* Full result rendering logic here... */}
                     
-                    <div className="text-center pt-8">
-                        <button 
+                    <div className="flex flex-col sm:flex-row items-center justify-center gap-4 pt-8">
+                        <button
+                            onClick={() => generateCompliancePdf(result, fileNames)}
+                            className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-3 rounded-xl font-bold transition-colors"
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+                            Descargar PDF
+                        </button>
+                        <button
                             onClick={() => { setResult(null); setFileNames([]); }}
                             className="bg-slate-800 hover:bg-slate-900 text-white px-6 py-3 rounded-xl font-bold"
                         >

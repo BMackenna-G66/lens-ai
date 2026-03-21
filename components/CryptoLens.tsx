@@ -5,6 +5,7 @@ import { detectNetwork, fetchWalletData } from '../services/cryptoService';
 import { analyzeCryptoWalletWithGemini, analyzeCryptoPatterns, hasValidApiKeys } from '../services/geminiService';
 import { getTextFromFile } from '../services/fileProcessorService';
 import { generateCryptoPdf } from '../services/pdfGenerator';
+import { trackEvent } from '../services/analyticsService';
 import { TransactionNetworkGraph } from './TransactionNetworkGraph';
 import { 
     IconSearch, IconShieldCheck, IconAlertTriangleSolid, IconWallet, 
@@ -326,6 +327,7 @@ export const CryptoLens: React.FC = () => {
             const riskAssessment = await analyzeCryptoWalletWithGemini(rawProfile);
             
             setWalletData({ ...rawProfile, riskAssessment });
+            trackEvent({ type: 'crypto_analyzed', module: 'crypto' });
         } catch (e: any) {
             setError(e.message || 'Ocurrió un error inesperado.');
         } finally {

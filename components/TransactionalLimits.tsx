@@ -25,6 +25,8 @@ import {
 import { IconCheckCircle, IconFileText, IconChatBubbleLeftRight, IconFiles, IconAlertTriangle, IconBuildingLibrary, IconCheckCircle as IconSuccess, IconXCircle, IconInfoCircle } from './IconComponents';
 import { DocumentChat } from './DocumentChat';
 import { FINANCIAL_CHAT_SYSTEM_INSTRUCTION } from '../constants';
+import { trackDocumentProcessed } from '../services/analyticsService';
+import { generateFinancialPdf } from '../services/pdfGenerator';
 
 const isKeyValid = hasValidApiKeys;
 
@@ -137,6 +139,7 @@ export const TransactionalLimits: React.FC = () => {
 
                     if (mode === 'chat_only') {
                         updateStatus(FileProcessingStatus.COMPLETED);
+                        trackDocumentProcessed('tools');
                     } else {
                         setLoadingStep('Realizando Análisis Cruzado con IA...');
                         const combinedResult = await analyzeCrossCheckWithGemini(allText);
@@ -151,12 +154,13 @@ export const TransactionalLimits: React.FC = () => {
                             exchangeRate = 1;
                         }
 
-                        updateStatus(FileProcessingStatus.COMPLETED, { 
+                        updateStatus(FileProcessingStatus.COMPLETED, {
                             combinedResult: combinedResult,
                             financialResult: combinedResult.financial,
                             bankResult: combinedResult.bank,
-                            exchangeRate 
+                            exchangeRate
                         });
+                        trackDocumentProcessed('tools');
                     }
 
                 } catch (err: any) {
@@ -193,6 +197,7 @@ export const TransactionalLimits: React.FC = () => {
 
                 if (mode === 'chat_only') {
                      updateStatus(FileProcessingStatus.COMPLETED);
+                     trackDocumentProcessed('tools');
                 } else {
                     setLoadingStep('Analizando información con IA...');
                     
@@ -204,7 +209,8 @@ export const TransactionalLimits: React.FC = () => {
                             exchangeRate = (await fetchExchangeRate(result.currencyCode.toUpperCase())) || 1.0;
                         }
                         updateStatus(FileProcessingStatus.COMPLETED, { financialResult: result, exchangeRate });
-                    } 
+                        trackDocumentProcessed('tools');
+                    }
                     else if (docType === 'bank_statement') {
                         const bankResult = await analyzeBankStatementWithGemini(text);
                         let exchangeRate = 1.0;
@@ -213,6 +219,7 @@ export const TransactionalLimits: React.FC = () => {
                              exchangeRate = (await fetchExchangeRate(bankResult.currencyCode.toUpperCase())) || 1.0;
                         }
                         updateStatus(FileProcessingStatus.COMPLETED, { bankResult, exchangeRate });
+                        trackDocumentProcessed('tools');
                     }
                     else if (docType === 'tax_folder') {
                         setLoadingStep('Analizando Carpeta Tributaria SII...');
@@ -220,6 +227,7 @@ export const TransactionalLimits: React.FC = () => {
                         setLoadingStep(`Consultando tasa de cambio CLP...`);
                         const exchangeRate = (await fetchExchangeRate('CLP')) || 1.0;
                         updateStatus(FileProcessingStatus.COMPLETED, { taxFolderResult: taxResult, exchangeRate });
+                        trackDocumentProcessed('tools');
                     }
                 }
             } catch (err: any) {
@@ -520,10 +528,19 @@ export const TransactionalLimits: React.FC = () => {
                                     {doc.status === FileProcessingStatus.ERROR && doc.error && <Alert type="error" message={`Error en ${doc.fileName}: ${doc.error}`} />}
                                 </div>
 
-                                <div className="p-3 bg-slate-100 border-t border-slate-200">
+                                <div className="p-3 bg-slate-100 border-t border-slate-200 flex flex-col sm:flex-row gap-2">
+                                    {doc.status === FileProcessingStatus.COMPLETED && (doc.financialResult || doc.bankResult || doc.taxFolderResult || doc.combinedResult) && (
+                                        <button
+                                            onClick={() => generateFinancialPdf(doc)}
+                                            className="flex-1 flex items-center justify-center gap-2 p-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium transition-colors"
+                                        >
+                                            <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+                                            Descargar PDF
+                                        </button>
+                                    )}
                                     <button
                                         onClick={() => handleToggleChat(doc.id)}
-                                        className={`w-full flex items-center justify-center p-2 rounded-lg transition-colors text-sm font-medium space-x-2 ${isChatActive ? 'bg-primary-600 text-white' : 'bg-slate-200 hover:bg-primary-100 text-slate-700'} disabled:opacity-50`}
+                                        className={`flex-1 flex items-center justify-center p-2 rounded-lg transition-colors text-sm font-medium space-x-2 ${isChatActive ? 'bg-primary-600 text-white' : 'bg-slate-200 hover:bg-primary-100 text-slate-700'} disabled:opacity-50`}
                                         disabled={!isKeyValid}
                                     >
                                         <IconChatBubbleLeftRight className="w-5 h-5" />

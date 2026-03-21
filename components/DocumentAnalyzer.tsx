@@ -23,6 +23,7 @@ import { IconJson, IconCsv, IconAlertTriangle, IconAlertTriangleSolid, IconFileT
 import { DocumentChat } from './DocumentChat';
 import { KEYWORDS_BY_COUNTRY } from '../services/countryKeywords';
 import { db } from '../services/dbService';
+import { trackDocumentProcessed } from '../services/analyticsService';
 
 
 
@@ -210,8 +211,10 @@ export const DocumentAnalyzer: React.FC = () => {
         const prompt = GEMINI_PROMPT_TEMPLATE(combinedText, countryContext);
         const { extractedData, rawResponse } = await analyzeDocumentWithGemini(prompt);
         updateDoc(FileProcessingStatus.COMPLETED, { extractedData, rawGeminiResponse: rawResponse, statusMessage: "Completado." });
+        trackDocumentProcessed('analyzer', country, false);
       } else {
         updateDoc(FileProcessingStatus.COMPLETED, { statusMessage: "Listo para chatear." });
+        trackDocumentProcessed('analyzer');
       }
     } catch (error: any) {
       updateDoc(FileProcessingStatus.ERROR, { errorMessage: error.message, statusMessage: "Error." });
@@ -277,6 +280,7 @@ export const DocumentAnalyzer: React.FC = () => {
     try {
         const result = await analyzeDocumentForRisks(doc.rawTextContent);
         setProcessedDocuments(prev => prev.map(d => d.id === documentId ? { ...d, riskAnalysisStatus: RiskAnalysisStatus.COMPLETED, riskAnalysisResult: result } : d));
+        if (result.suspiciousActivity?.detected) trackDocumentProcessed('analyzer', doc.detectedCountry, true);
     } catch(error: any) {
         setProcessedDocuments(prev => prev.map(d => d.id === documentId ? { ...d, riskAnalysisStatus: RiskAnalysisStatus.ERROR, riskAnalysisError: error.message } : d));
     }
