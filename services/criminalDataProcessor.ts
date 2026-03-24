@@ -249,9 +249,8 @@ export const processRegcheqFile = async (file: File, catalog?: CatalogData | nul
           return;
         }
 
-        // Build PEP & name maps from "Coincidencias"
+        // Build PEP map from "Coincidencias" (column "Coincidencia_PEP Chile")
         const pepMap = new Map<string, boolean>();
-        const nameMap = new Map<string, { nombre: string; apellido: string }>();
 
         if (coincidenciasSheet) {
           (XLSX.utils.sheet_to_json(coincidenciasSheet, { defval: '' }) as any[]).forEach(row => {
@@ -260,10 +259,6 @@ export const processRegcheqFile = async (file: File, catalog?: CatalogData | nul
             const dni = raw.replace(/\./g, '').replace(/-/g, '').toUpperCase();
             const pepVal = row['Coincidencia_PEP Chile'];
             pepMap.set(dni, pepVal === true || String(pepVal).toLowerCase() === 'true' || pepVal === 1);
-            nameMap.set(dni, {
-              nombre: String(row['Nombre'] || '').trim(),
-              apellido: String(row['Apellido paterno'] || '').trim(),
-            });
           });
         }
 
@@ -276,13 +271,17 @@ export const processRegcheqFile = async (file: File, catalog?: CatalogData | nul
           const dni = raw.replace(/\./g, '').replace(/-/g, '').toUpperCase();
 
           if (!profilesMap.has(dni)) {
-            const nameInfo = nameMap.get(dni);
-            const nombreFicha = String(row['Nombre Ficha'] || '').trim();
+            // Full name comes from "Imputado (API)" — split last word as apellido
+            const fullName = String(row['Imputado (API)'] || row['Imputado'] || '').trim();
+            const words = fullName.split(/\s+/);
+            const apellido = words.length > 1 ? words.slice(-1).join(' ') : '';
+            const nombre = words.length > 1 ? words.slice(0, -1).join(' ') : fullName;
+
             profilesMap.set(dni, {
               rut: dni,
-              nombre: nameInfo?.nombre || nombreFicha,
-              apellido: nameInfo?.apellido || '',
-              nombreCuenta: nombreFicha || `${nameInfo?.nombre || ''} ${nameInfo?.apellido || ''}`.trim(),
+              nombre,
+              apellido,
+              nombreCuenta: fullName,
               customerId: raw,
               conInfo: true,
               isPep: pepMap.get(dni) || false,
