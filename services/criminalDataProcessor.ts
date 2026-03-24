@@ -224,6 +224,119 @@ export const applyEvaluationToProfile = (profile: PersonProfile, catalog: Catalo
   }
 };
 
+// ─── Flujo Masivo: Regcheq format ────────────────────────────────────────────
+// Expects Excel with sheets "Causas Penales Chile" and "Coincidencias"
+export const processRegcheqFile = async (file: File, catalog?: CatalogData | null): Promise<PersonProfile[]> => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const data = new Uint8Array(e.target?.result as ArrayBuffer);
+        const workbook = XLSX.read(data, { type: 'array' });
+
+        const findSheet = (keywords: string[]) => {
+          const found = workbook.SheetNames.find(s =>
+            keywords.some(k => s.toLowerCase().includes(k.toLowerCase()))
+          );
+          return found ? workbook.Sheets[found] : null;
+        };
+
+        const causasSheet = findSheet(['Causas Penales Chile', 'Causas Penales', 'Causas']);
+        const coincidenciasSheet = findSheet(['Coincidencias']);
+
+        if (!causasSheet) {
+          reject('No se encontró la hoja "Causas Penales Chile" en el archivo Regcheq.');
+          return;
+        }
+
+        // Build PEP & name maps from "Coincidencias"
+        const pepMap = new Map<string, boolean>();
+        const nameMap = new Map<string, { nombre: string; apellido: string }>();
+
+        if (coincidenciasSheet) {
+          (XLSX.utils.sheet_to_json(coincidenciasSheet, { defval: '' }) as any[]).forEach(row => {
+            const raw = String(row['DNI'] || '').trim();
+            if (!raw) return;
+            const dni = raw.replace(/\./g, '').replace(/-/g, '').toUpperCase();
+            const pepVal = row['Coincidencia_PEP Chile'];
+            pepMap.set(dni, pepVal === true || String(pepVal).toLowerCase() === 'true' || pepVal === 1);
+            nameMap.set(dni, {
+              nombre: String(row['Nombre'] || '').trim(),
+              apellido: String(row['Apellido paterno'] || '').trim(),
+            });
+          });
+        }
+
+        // Build profiles from "Causas Penales Chile"
+        const profilesMap = new Map<string, PersonProfile>();
+
+        (XLSX.utils.sheet_to_json(causasSheet, { defval: '' }) as any[]).forEach(row => {
+          const raw = String(row['DNI'] || '').trim();
+          if (!raw) return;
+          const dni = raw.replace(/\./g, '').replace(/-/g, '').toUpperCase();
+
+          if (!profilesMap.has(dni)) {
+            const nameInfo = nameMap.get(dni);
+            const nombreFicha = String(row['Nombre Ficha'] || '').trim();
+            profilesMap.set(dni, {
+              rut: dni,
+              nombre: nameInfo?.nombre || nombreFicha,
+              apellido: nameInfo?.apellido || '',
+              nombreCuenta: nombreFicha || `${nameInfo?.nombre || ''} ${nameInfo?.apellido || ''}`.trim(),
+              customerId: raw,
+              conInfo: true,
+              isPep: pepMap.get(dni) || false,
+              crimes: [],
+              totalCrimes: 0,
+              totalHighRiskCrimes: 0,
+              highestRisk: 'n/a',
+              status: 'Pendiente',
+              selectedAction: '',
+            });
+          }
+
+          const profile = profilesMap.get(dni)!;
+          const crimeType = String(row['Delito'] || '').trim();
+          if (crimeType && crimeType !== '0') {
+            const ruc = String(row['RUC'] || '').trim();
+            const rit = String(row['RIT'] || '').trim();
+            const uniqueId = ruc || rit || `${dni}_${crimeType}_${profile.crimes.length}`;
+            if (!profile.crimes.some(c => c.id === uniqueId)) {
+              profile.crimes.push({
+                id: uniqueId,
+                tipo: crimeType,
+                estado: String(row['Estado'] || 'S/E').trim(),
+                fecha: String(row['Fecha'] || '').trim(),
+                riesgo: String(row['Riesgo Delito'] || 'N/A').trim(),
+                rit,
+                ruc,
+                tribunal: String(row['Tribunal'] || '').trim(),
+              });
+            }
+          }
+
+          profile.totalCrimes = profile.crimes.length;
+          profile.totalHighRiskCrimes = profile.crimes.filter(c => isHighRisk(c.riesgo)).length;
+          profile.highestRisk = calculateHighestRisk(profile.crimes);
+          if (catalog) applyEvaluationToProfile(profile, catalog);
+        });
+
+        const result = Array.from(profilesMap.values());
+        if (result.length === 0) {
+          reject('No se encontraron registros válidos en "Causas Penales Chile".');
+        } else {
+          resolve(result);
+        }
+      } catch (err) {
+        console.error('Error al procesar archivo Regcheq:', err);
+        reject('Error de formato en el archivo Regcheq. Verifique que tenga las hojas esperadas.');
+      }
+    };
+    reader.onerror = () => reject('Error al leer el archivo.');
+    reader.readAsArrayBuffer(file);
+  });
+};
+
 export const exportToExcel = (profiles: PersonProfile[]) => {
   const exportData = profiles.map(p => ({
     'IDENTIDAD (DNI/RUT)': p.rut, 

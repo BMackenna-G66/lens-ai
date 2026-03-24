@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { processExcelFile, exportToExcel, processCatalogFile, applyEvaluationToProfile } from '../../services/criminalDataProcessor';
+import { processExcelFile, processRegcheqFile, exportToExcel, processCatalogFile, applyEvaluationToProfile } from '../../services/criminalDataProcessor';
 import { PersonProfile, CriminalAppState, AnalysisAction, CatalogData } from '../../types/criminalTypes';
 import { DEFAULT_CATALOG } from '../../services/defaultCatalogData';
 import { CriminalDashboard } from './CriminalDashboard';
@@ -35,7 +35,10 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
   const [filterRisk, setFilterRisk] = useState<string>('All');
   const [selectedRuts, setSelectedRuts] = useState<Set<string>>(new Set());
   const [sortConfig, setSortConfig] = useState<{ key: SortKey; order: SortOrder }>({ key: 'rut', order: null });
+  const [flowType, setFlowType] = useState<'emergency' | 'masivo'>('emergency');
   const sessionFileInputRef = useRef<HTMLInputElement>(null);
+  const emergencyFileRef = useRef<HTMLInputElement>(null);
+  const masivoFileRef = useRef<HTMLInputElement>(null);
 
   // Load catalog: localStorage override > default built-in catalog
   useEffect(() => {
@@ -65,11 +68,31 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
     }
   };
 
-  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0]; if (!file) return;
+  const handleProfileLoad = async (file: File, flow: 'emergency' | 'masivo') => {
     setState(prev => ({ ...prev, loading: true, error: null }));
-    try { const data = await processExcelFile(file, state.catalog); setState(prev => ({ ...prev, profiles: data, loading: false })); setSelectedRuts(new Set()); }
-    catch (err: any) { setState(prev => ({ ...prev, loading: false, error: err.toString() })); }
+    try {
+      const data = flow === 'masivo'
+        ? await processRegcheqFile(file, state.catalog)
+        : await processExcelFile(file, state.catalog);
+      setState(prev => ({ ...prev, profiles: data, loading: false }));
+      setSelectedRuts(new Set());
+    } catch (err: any) {
+      setState(prev => ({ ...prev, loading: false, error: String(err) }));
+    }
+  };
+
+  const handleEmergencyUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]; if (!file) return;
+    setFlowType('emergency');
+    handleProfileLoad(file, 'emergency');
+    e.target.value = '';
+  };
+
+  const handleMasivoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]; if (!file) return;
+    setFlowType('masivo');
+    handleProfileLoad(file, 'masivo');
+    e.target.value = '';
   };
 
   const handleCatalogUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -210,10 +233,28 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
             >
               {state.view === 'catalog' ? <><LayoutDashboard size={16} /> Dashboard</> : <><BookOpen size={16} /> Catálogo</>}
             </button>
-            <label className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 px-5 py-2.5 rounded-xl cursor-pointer transition-all shadow-lg text-xs font-black uppercase tracking-widest border border-indigo-500 active:scale-95 text-white">
+            {/* Hidden file inputs */}
+            <input type="file" accept=".xlsx,.xls,.csv" ref={emergencyFileRef} onChange={handleEmergencyUpload} className="hidden" />
+            <input type="file" accept=".xlsx,.xls,.csv" ref={masivoFileRef} onChange={handleMasivoUpload} className="hidden" />
+            {/* Flow selector */}
+            <div className="flex items-center gap-1 bg-slate-100 dark:bg-indigo-900/50 p-1 rounded-xl border border-slate-200 dark:border-indigo-800">
+              <button
+                onClick={() => setFlowType('emergency')}
+                title="Flujo de Emergencia — planilla interna"
+                className={`px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest transition-all ${flowType === 'emergency' ? 'bg-amber-500 text-white shadow' : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-white'}`}
+              >⚡ Emergencia</button>
+              <button
+                onClick={() => setFlowType('masivo')}
+                title="Flujo Masivo — planilla Regcheq"
+                className={`px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest transition-all ${flowType === 'masivo' ? 'bg-indigo-600 text-white shadow' : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-white'}`}
+              >📊 Masivo</button>
+            </div>
+            <button
+              onClick={() => flowType === 'masivo' ? masivoFileRef.current?.click() : emergencyFileRef.current?.click()}
+              className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 px-5 py-2.5 rounded-xl transition-all shadow-lg text-xs font-black uppercase tracking-widest border border-indigo-500 active:scale-95 text-white"
+            >
               <Database size={16} /> Cargar Clientes
-              <input type="file" accept=".xlsx,.xls,.csv" onChange={handleFileUpload} className="hidden" />
-            </label>
+            </button>
           </div>
         </div>
       </header>
@@ -352,18 +393,45 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
                 </div>
               </>
             ) : (
-              <div className="flex flex-col items-center justify-center py-20 px-4 text-center bg-white dark:bg-slate-900 rounded-[3rem] border border-slate-200 dark:border-slate-800 border-dashed">
-                <div className="w-24 h-24 bg-indigo-50 dark:bg-indigo-950 rounded-full flex items-center justify-center mb-8 animate-pulse"><Database className="text-indigo-500 dark:text-indigo-400" size={40} /></div>
-                <h2 className="text-2xl font-black text-slate-900 dark:text-white mb-2 uppercase tracking-tight">Comienza cargando tu base de datos</h2>
-                <p className="text-slate-500 dark:text-slate-400 max-w-lg mb-10 leading-relaxed font-medium">El catálogo de decisiones ya está cargado. Solo necesitas subir tu archivo de clientes para comenzar.</p>
-                <div className="w-full max-w-md">
-                  <div className="bg-slate-50 dark:bg-slate-800 p-8 rounded-[2rem] border border-slate-200 dark:border-slate-700 flex flex-col items-center gap-4 hover:shadow-lg transition-all">
-                    <div className="p-4 bg-white dark:bg-slate-900 rounded-2xl text-indigo-500 border border-indigo-100 dark:border-indigo-900"><Database size={32} /></div>
-                    <div><h4 className="font-black text-slate-900 dark:text-white uppercase text-xs mb-1">Base de Clientes</h4><p className="text-[10px] text-slate-400 font-bold uppercase tracking-tight">DNI + Columnas dinámicas (0-48)</p></div>
-                    <label className="bg-indigo-600 text-white px-6 py-3 rounded-xl font-black uppercase text-[10px] tracking-widest hover:bg-indigo-500 transition-all cursor-pointer w-full text-center">
-                      Cargar Clientes<input type="file" accept=".xlsx,.xls,.csv" onChange={handleFileUpload} className="hidden" />
-                    </label>
-                  </div>
+              <div className="flex flex-col items-center py-16 px-4">
+                <h2 className="text-2xl font-black text-slate-900 dark:text-white mb-2 uppercase tracking-tight">Selecciona el Flujo de Carga</h2>
+                <p className="text-slate-500 dark:text-slate-400 max-w-lg mb-10 text-center leading-relaxed font-medium">
+                  El catálogo de decisiones ya está activo. Elige cómo quieres cargar los registros a analizar.
+                </p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 w-full max-w-2xl">
+                  {/* Flujo de Emergencia */}
+                  <label className="bg-white dark:bg-slate-900 rounded-[2rem] border-2 border-slate-200 dark:border-slate-700 hover:border-amber-400 dark:hover:border-amber-500 hover:shadow-xl cursor-pointer transition-all group p-8 flex flex-col items-center gap-4">
+                    <div className="p-4 bg-amber-50 dark:bg-amber-950 rounded-2xl border border-amber-200 dark:border-amber-800">
+                      <Zap size={32} className="text-amber-500" />
+                    </div>
+                    <div className="text-center">
+                      <h4 className="font-black text-slate-900 dark:text-white uppercase text-sm mb-2">⚡ Flujo de Emergencia</h4>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 font-medium leading-relaxed">
+                        Planilla interna con formato propio: columna DNI + columnas dinámicas de delitos (crimen_N, estado_N, riesgo_N…).
+                      </p>
+                    </div>
+                    <span className="bg-amber-500 group-hover:bg-amber-400 text-white px-6 py-2.5 rounded-xl font-black uppercase text-[10px] tracking-widest transition-all w-full text-center">
+                      Seleccionar Archivo
+                    </span>
+                    <input type="file" accept=".xlsx,.xls,.csv" onChange={handleEmergencyUpload} className="hidden" />
+                  </label>
+
+                  {/* Flujo Masivo */}
+                  <label className="bg-white dark:bg-slate-900 rounded-[2rem] border-2 border-slate-200 dark:border-slate-700 hover:border-indigo-400 dark:hover:border-indigo-500 hover:shadow-xl cursor-pointer transition-all group p-8 flex flex-col items-center gap-4">
+                    <div className="p-4 bg-indigo-50 dark:bg-indigo-950 rounded-2xl border border-indigo-200 dark:border-indigo-800">
+                      <FileSpreadsheet size={32} className="text-indigo-500" />
+                    </div>
+                    <div className="text-center">
+                      <h4 className="font-black text-slate-900 dark:text-white uppercase text-sm mb-2">📊 Flujo Masivo</h4>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 font-medium leading-relaxed">
+                        Planilla Regcheq con hojas "Causas Penales Chile" y "Coincidencias". Detecta PEP automáticamente desde la columna H.
+                      </p>
+                    </div>
+                    <span className="bg-indigo-600 group-hover:bg-indigo-500 text-white px-6 py-2.5 rounded-xl font-black uppercase text-[10px] tracking-widest transition-all w-full text-center">
+                      Seleccionar Archivo
+                    </span>
+                    <input type="file" accept=".xlsx,.xls,.csv" onChange={handleMasivoUpload} className="hidden" />
+                  </label>
                 </div>
               </div>
             )}
