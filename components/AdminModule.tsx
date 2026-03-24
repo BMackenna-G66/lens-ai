@@ -191,6 +191,8 @@ const InvitationsTab: React.FC<{ currentUid: string; currentEmail: string }> = (
   const [role, setRole] = useState<UserRole>('Analista');
   const [creating, setCreating] = useState(false);
   const [successMsg, setSuccessMsg] = useState('');
+  const [lastInvitedEmail, setLastInvitedEmail] = useState('');
+  const appUrl = 'https://bmackenna-g66.github.io/lens-ai/';
 
   const loadInvitations = useCallback(() => {
     setLoading(true);
@@ -207,9 +209,9 @@ const InvitationsTab: React.FC<{ currentUid: string; currentEmail: string }> = (
     if (!email.trim()) return;
     setCreating(true);
     await createInvitation(email.trim(), role, currentUid, currentEmail);
+    setLastInvitedEmail(email.trim());
     setEmail('');
-    setSuccessMsg('Invitación creada correctamente.');
-    setTimeout(() => setSuccessMsg(''), 3000);
+    setSuccessMsg('ok');
     await loadInvitations();
     setCreating(false);
   };
@@ -252,7 +254,22 @@ const InvitationsTab: React.FC<{ currentUid: string; currentEmail: string }> = (
             {creating ? 'Creando…' : 'Crear Invitación'}
           </button>
         </form>
-        {successMsg && <p className="text-xs text-emerald-400 mt-2">{successMsg}</p>}
+        {successMsg === 'ok' && (
+          <div className="mt-3 p-3 bg-emerald-950/40 border border-emerald-700/40 rounded-lg">
+            <p className="text-xs text-emerald-400 font-semibold mb-1">✅ Invitación registrada para <span className="text-white">{lastInvitedEmail}</span></p>
+            <p className="text-xs text-slate-400 mb-2">Comparte este enlace con el usuario. Al ingresar con su cuenta Google recibirá el rol asignado automáticamente:</p>
+            <div className="flex items-center gap-2">
+              <code className="flex-1 text-xs bg-slate-800 text-indigo-300 px-2 py-1.5 rounded border border-slate-600 truncate">{appUrl}</code>
+              <button
+                type="button"
+                onClick={() => { navigator.clipboard.writeText(appUrl); }}
+                className="text-xs bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-1.5 rounded border border-slate-600 transition-colors whitespace-nowrap"
+              >
+                Copiar link
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* List */}

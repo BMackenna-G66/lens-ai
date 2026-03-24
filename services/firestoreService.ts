@@ -151,7 +151,27 @@ export async function bootstrapUser(firebaseUser: {
     }
 
     const count = await getUserCount();
-    const role: UserRole = count === 0 ? 'Lider' : 'Analista';
+    let role: UserRole = count === 0 ? 'Lider' : 'Analista';
+
+    // Check for a pending invitation matching this email
+    let invitationId: string | null = null;
+    if (firebaseUser.email && count > 0) {
+      try {
+        const invQ = query(
+          collection(db, 'invitations'),
+          orderBy('createdAt', 'desc'),
+        );
+        const invSnap = await getDocs(invQ);
+        const match = invSnap.docs.find(d => {
+          const data = d.data();
+          return data.email?.toLowerCase() === firebaseUser.email!.toLowerCase() && !data.used;
+        });
+        if (match) {
+          role = match.data().role as UserRole;
+          invitationId = match.id;
+        }
+      } catch { /* silent — invitation lookup is best-effort */ }
+    }
 
     const newProfile: UserProfile = {
       uid: firebaseUser.uid,
@@ -165,6 +185,18 @@ export async function bootstrapUser(firebaseUser: {
     };
 
     await createUserProfile(newProfile);
+
+    // Mark invitation as used
+    if (invitationId) {
+      try {
+        await updateDoc(doc(db, 'invitations', invitationId), {
+          used: true,
+          usedBy: firebaseUser.uid,
+          usedAt: Date.now(),
+        });
+      } catch { /* silent */ }
+    }
+
     return newProfile;
   } catch {
     return fallbackProfile;
