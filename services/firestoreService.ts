@@ -25,6 +25,7 @@ export type UserRole = 'Lider' | 'Analista';
 export interface ModulePermissions {
   compliance: boolean;
   criminal: boolean;
+  generalDashboard: boolean;
 }
 
 export interface UserProfile {
@@ -135,7 +136,7 @@ export async function bootstrapUser(firebaseUser: {
     displayName: firebaseUser.displayName ?? '',
     photoURL: firebaseUser.photoURL ?? '',
     role: 'Analista',
-    modules: { compliance: true, criminal: true },
+    modules: { compliance: true, criminal: true, generalDashboard: true },
     createdAt: Date.now(),
     lastLogin: Date.now(),
   };
@@ -158,7 +159,7 @@ export async function bootstrapUser(firebaseUser: {
       displayName: firebaseUser.displayName ?? '',
       photoURL: firebaseUser.photoURL ?? '',
       role,
-      modules: { compliance: true, criminal: true },
+      modules: { compliance: true, criminal: true, generalDashboard: true },
       createdAt: Date.now(),
       lastLogin: Date.now(),
     };

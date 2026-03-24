@@ -8,7 +8,7 @@ interface AppLauncherProps {
 }
 
 export const AppLauncher: React.FC<AppLauncherProps> = ({ onSelect }) => {
-  const { user, logout, firebaseReady, role } = useAuth();
+  const { user, logout, firebaseReady, role, userProfile } = useAuth();
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 flex flex-col items-center justify-center p-6">
@@ -111,7 +111,7 @@ export const AppLauncher: React.FC<AppLauncherProps> = ({ onSelect }) => {
         {role === 'Lider' && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
             {/* Dashboard General card */}
-            <button
+            {userProfile?.modules?.generalDashboard !== false && <button
               onClick={() => onSelect('general-dashboard')}
               className="group bg-emerald-950/40 hover:bg-emerald-900/40 border border-emerald-800/40 hover:border-emerald-600/50 rounded-2xl p-6 text-left transition-all"
             >
@@ -121,11 +121,10 @@ export const AppLauncher: React.FC<AppLauncherProps> = ({ onSelect }) => {
                 </div>
                 <div>
                   <h3 className="text-white font-bold text-sm">Dashboard General</h3>
-                  <p className="text-emerald-400 text-xs">Solo Líderes</p>
                 </div>
               </div>
               <p className="text-slate-400 text-xs">Actividad acumulada de todos los analistas, métricas globales y por usuario.</p>
-            </button>
+            </button>}
 
             {/* Administración card */}
             <button
@@ -138,7 +137,6 @@ export const AppLauncher: React.FC<AppLauncherProps> = ({ onSelect }) => {
                 </div>
                 <div>
                   <h3 className="text-white font-bold text-sm">Administración</h3>
-                  <p className="text-amber-400 text-xs">Solo Líderes</p>
                 </div>
               </div>
               <p className="text-slate-400 text-xs">Gestión de usuarios, roles, invitaciones y permisos de módulos.</p>

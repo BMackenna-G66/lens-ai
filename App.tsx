@@ -71,14 +71,14 @@ const AppContent: React.FC = () => {
     return <AdminModule onBack={() => setActiveSuite(null)} />;
   }
 
-  // 5. General Dashboard — Líderes only
+  // 5. General Dashboard — Líderes only + module permission
   if (activeSuite === 'general-dashboard') {
-    if (role !== 'Lider') {
+    if (role !== 'Lider' || userProfile?.modules?.generalDashboard === false) {
       return (
         <div className="min-h-screen bg-slate-900 flex items-center justify-center">
           <div className="text-center text-slate-400">
             <p className="text-xl mb-4">🔒</p>
-            <p className="font-semibold">Acceso restringido a Líderes</p>
+            <p className="font-semibold">Acceso restringido</p>
             <button onClick={() => setActiveSuite(null)} className="mt-4 text-xs text-indigo-400 underline">Volver al inicio</button>
           </div>
         </div>
