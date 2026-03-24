@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { processExcelFile, processRegcheqFile, exportToExcel, processCatalogFile, applyEvaluationToProfile } from '../../services/criminalDataProcessor';
+import { processExcelFile, processRegcheqFile, detectCriminalFileFormat, exportToExcel, processCatalogFile, applyEvaluationToProfile } from '../../services/criminalDataProcessor';
 import { PersonProfile, CriminalAppState, AnalysisAction, CatalogData } from '../../types/criminalTypes';
 import { DEFAULT_CATALOG } from '../../services/defaultCatalogData';
 import { CriminalDashboard } from './CriminalDashboard';
@@ -68,10 +68,14 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
     }
   };
 
-  const handleProfileLoad = async (file: File, flow: 'emergency' | 'masivo') => {
+  const handleProfileLoad = async (file: File, hintFlow: 'emergency' | 'masivo') => {
     setState(prev => ({ ...prev, loading: true, error: null }));
     try {
-      const data = flow === 'masivo'
+      // Auto-detect format: if file has "Causas Penales Chile" sheet → Regcheq
+      const detected = await detectCriminalFileFormat(file);
+      const resolvedFlow = detected === 'regcheq' ? 'masivo' : hintFlow;
+      if (resolvedFlow !== hintFlow) setFlowType(resolvedFlow);
+      const data = resolvedFlow === 'masivo'
         ? await processRegcheqFile(file, state.catalog)
         : await processExcelFile(file, state.catalog);
       setState(prev => ({ ...prev, profiles: data, loading: false }));

@@ -224,6 +224,27 @@ export const applyEvaluationToProfile = (profile: PersonProfile, catalog: Catalo
   }
 };
 
+// ─── Format auto-detection ───────────────────────────────────────────────────
+export const detectCriminalFileFormat = async (file: File): Promise<'regcheq' | 'emergency'> => {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const data = new Uint8Array(e.target?.result as ArrayBuffer);
+        const workbook = XLSX.read(data, { type: 'array', sheetRows: 1 }); // only read headers
+        const isRegcheq = workbook.SheetNames.some(s =>
+          s.toLowerCase().includes('causas penales')
+        );
+        resolve(isRegcheq ? 'regcheq' : 'emergency');
+      } catch {
+        resolve('emergency');
+      }
+    };
+    reader.onerror = () => resolve('emergency');
+    reader.readAsArrayBuffer(file);
+  });
+};
+
 // ─── Flujo Masivo: Regcheq format ────────────────────────────────────────────
 // Expects Excel with sheets "Causas Penales Chile" and "Coincidencias"
 export const processRegcheqFile = async (file: File, catalog?: CatalogData | null): Promise<PersonProfile[]> => {
