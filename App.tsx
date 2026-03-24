@@ -7,15 +7,17 @@ import { Dashboard } from './components/Dashboard';
 import { LoginPage } from './components/LoginPage';
 import { AppLauncher } from './components/AppLauncher';
 import { CriminalApp } from './components/CriminalProfiler/CriminalApp';
+import { GeneralDashboard } from './components/GeneralDashboard';
+import { AdminModule } from './components/AdminModule';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { IconFiles, IconAlertTriangle, IconWallet, IconScale } from './components/IconComponents';
 import { trackModuleVisit, ModuleKey } from './services/analyticsService';
 
 type TabKey = 'dashboard' | 'analyzer' | 'tools' | 'crypto' | 'compliance';
-type Suite = 'compliance' | 'criminal' | null;
+type Suite = 'compliance' | 'criminal' | 'admin' | 'general-dashboard' | null;
 
 const AppContent: React.FC = () => {
-  const { user, isLoading: authLoading, firebaseReady } = useAuth();
+  const { user, isLoading: authLoading, firebaseReady, profileLoading, role, userProfile } = useAuth();
   const [activeSuite, setActiveSuite] = useState<Suite>(null);
   const [activeTab, setActiveTab] = useState<TabKey>('dashboard');
   const [darkMode, setDarkMode] = useState<boolean>(() => localStorage.getItem('darkMode') === 'true');
@@ -32,7 +34,7 @@ const AppContent: React.FC = () => {
   };
 
   // 1. Loading state
-  if (authLoading) {
+  if (authLoading || profileLoading) {
     return (
       <div className="min-h-screen bg-slate-900 flex items-center justify-center">
         <div className="text-center">
@@ -53,12 +55,71 @@ const AppContent: React.FC = () => {
     return <AppLauncher onSelect={setActiveSuite} />;
   }
 
-  // 4. Criminal Profiler suite
+  // 4. Admin — Líderes only
+  if (activeSuite === 'admin') {
+    if (role !== 'Lider') {
+      return (
+        <div className="min-h-screen bg-slate-900 flex items-center justify-center">
+          <div className="text-center text-slate-400">
+            <p className="text-xl mb-4">🔒</p>
+            <p className="font-semibold">Acceso restringido a Líderes</p>
+            <button onClick={() => setActiveSuite(null)} className="mt-4 text-xs text-indigo-400 underline">Volver al inicio</button>
+          </div>
+        </div>
+      );
+    }
+    return <AdminModule onBack={() => setActiveSuite(null)} />;
+  }
+
+  // 5. General Dashboard — Líderes only
+  if (activeSuite === 'general-dashboard') {
+    if (role !== 'Lider') {
+      return (
+        <div className="min-h-screen bg-slate-900 flex items-center justify-center">
+          <div className="text-center text-slate-400">
+            <p className="text-xl mb-4">🔒</p>
+            <p className="font-semibold">Acceso restringido a Líderes</p>
+            <button onClick={() => setActiveSuite(null)} className="mt-4 text-xs text-indigo-400 underline">Volver al inicio</button>
+          </div>
+        </div>
+      );
+    }
+    return <GeneralDashboard onBack={() => setActiveSuite(null)} />;
+  }
+
+  // 6. Criminal Profiler suite
   if (activeSuite === 'criminal') {
+    const criminalEnabled = userProfile?.modules?.criminal ?? true;
+    if (!criminalEnabled) {
+      return (
+        <div className="min-h-screen bg-slate-900 flex items-center justify-center">
+          <div className="text-center text-slate-400">
+            <p className="text-2xl mb-4">🚫</p>
+            <p className="font-semibold">Módulo desactivado</p>
+            <p className="text-sm mt-1">Tu administrador ha desactivado el módulo de Perfiles Criminales.</p>
+            <button onClick={() => setActiveSuite(null)} className="mt-4 text-xs text-indigo-400 underline">Volver al inicio</button>
+          </div>
+        </div>
+      );
+    }
     return <CriminalApp onBack={() => setActiveSuite(null)} darkMode={darkMode} onToggleDarkMode={() => setDarkMode(d => !d)} />;
   }
 
-  // 5. Compliance suite (default)
+  // 7. Compliance suite (default)
+  const complianceEnabled = userProfile?.modules?.compliance ?? true;
+  if (!complianceEnabled) {
+    return (
+      <div className="min-h-screen bg-slate-900 flex items-center justify-center">
+        <div className="text-center text-slate-400">
+          <p className="text-2xl mb-4">🚫</p>
+          <p className="font-semibold">Módulo desactivado</p>
+          <p className="text-sm mt-1">Tu administrador ha desactivado el módulo de Compliance.</p>
+          <button onClick={() => setActiveSuite(null)} className="mt-4 text-xs text-indigo-400 underline">Volver al inicio</button>
+        </div>
+      </div>
+    );
+  }
+
   const tabs: { key: TabKey; label: string; icon: React.ReactNode }[] = [
     { key: 'dashboard', label: 'Dashboard', icon: <span className="text-base">📊</span> },
     { key: 'analyzer', label: 'Analizador de Documentos', icon: <IconFiles className="w-5 h-5" /> },

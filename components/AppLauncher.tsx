@@ -1,14 +1,14 @@
 import React from 'react';
 import { useAuth } from '../context/AuthContext';
 
-type Suite = 'compliance' | 'criminal';
+type Suite = 'compliance' | 'criminal' | 'admin' | 'general-dashboard';
 
 interface AppLauncherProps {
   onSelect: (suite: Suite) => void;
 }
 
 export const AppLauncher: React.FC<AppLauncherProps> = ({ onSelect }) => {
-  const { user, logout, firebaseReady } = useAuth();
+  const { user, logout, firebaseReady, role } = useAuth();
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 flex flex-col items-center justify-center p-6">
@@ -29,7 +29,18 @@ export const AppLauncher: React.FC<AppLauncherProps> = ({ onSelect }) => {
             <div className="flex items-center gap-3 bg-slate-900/60 border border-slate-700/50 rounded-2xl px-4 py-2">
               {user.photoURL && <img src={user.photoURL} alt="avatar" className="w-8 h-8 rounded-full" />}
               <div className="text-left hidden sm:block">
-                <p className="text-sm font-semibold text-white leading-none">{user.displayName?.split(' ')[0]}</p>
+                <div className="flex items-center gap-2">
+                  <p className="text-sm font-semibold text-white leading-none">{user.displayName?.split(' ')[0]}</p>
+                  {role && (
+                    <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full border ${
+                      role === 'Lider'
+                        ? 'bg-amber-500/20 text-amber-400 border-amber-600/30'
+                        : 'bg-slate-700 text-slate-400 border-slate-600/50'
+                    }`}>
+                      {role}
+                    </span>
+                  )}
+                </div>
                 <p className="text-xs text-slate-400 mt-0.5">{user.email}</p>
               </div>
               {firebaseReady && (
@@ -95,6 +106,45 @@ export const AppLauncher: React.FC<AppLauncherProps> = ({ onSelect }) => {
             </div>
           </button>
         </div>
+
+        {/* Líder-only cards */}
+        {role === 'Lider' && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+            {/* Dashboard General card */}
+            <button
+              onClick={() => onSelect('general-dashboard')}
+              className="group bg-emerald-950/40 hover:bg-emerald-900/40 border border-emerald-800/40 hover:border-emerald-600/50 rounded-2xl p-6 text-left transition-all"
+            >
+              <div className="flex items-center gap-3 mb-3">
+                <div className="w-10 h-10 bg-emerald-700/30 rounded-xl flex items-center justify-center border border-emerald-600/30">
+                  <span className="text-xl">📈</span>
+                </div>
+                <div>
+                  <h3 className="text-white font-bold text-sm">Dashboard General</h3>
+                  <p className="text-emerald-400 text-xs">Solo Líderes</p>
+                </div>
+              </div>
+              <p className="text-slate-400 text-xs">Actividad acumulada de todos los analistas, métricas globales y por usuario.</p>
+            </button>
+
+            {/* Administración card */}
+            <button
+              onClick={() => onSelect('admin')}
+              className="group bg-amber-950/40 hover:bg-amber-900/40 border border-amber-800/40 hover:border-amber-600/50 rounded-2xl p-6 text-left transition-all"
+            >
+              <div className="flex items-center gap-3 mb-3">
+                <div className="w-10 h-10 bg-amber-700/30 rounded-xl flex items-center justify-center border border-amber-600/30">
+                  <span className="text-xl">⚙️</span>
+                </div>
+                <div>
+                  <h3 className="text-white font-bold text-sm">Administración</h3>
+                  <p className="text-amber-400 text-xs">Solo Líderes</p>
+                </div>
+              </div>
+              <p className="text-slate-400 text-xs">Gestión de usuarios, roles, invitaciones y permisos de módulos.</p>
+            </button>
+          </div>
+        )}
 
         <p className="text-center text-xs text-slate-600 mt-8 font-medium">
           Potenciado por Google Gemini · Team Compliance Global66 · {new Date().getFullYear()}

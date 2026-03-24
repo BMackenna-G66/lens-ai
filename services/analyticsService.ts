@@ -17,17 +17,43 @@ export interface AnalyticsEvent {
 const EVENTS_KEY = 'lens_ai_analytics_v1';
 const MAX_EVENTS = 1000;
 
+// ─── Current user (set by AuthContext after login) ────────────────────────────
+
+let _currentUser: { uid: string; email: string; displayName: string } | null = null;
+
+export function setAnalyticsUser(uid: string, email: string, displayName: string): void {
+  _currentUser = { uid, email, displayName };
+}
+
 // ─── Write ────────────────────────────────────────────────────────────────────
 
 export function trackEvent(event: Omit<AnalyticsEvent, 'timestamp'>): void {
+  const timestamp = Date.now();
   try {
     const events = readEvents();
-    events.push({ ...event, timestamp: Date.now() });
+    events.push({ ...event, timestamp });
     // Keep only the most recent MAX_EVENTS entries to bound storage use
     const trimmed = events.length > MAX_EVENTS ? events.slice(events.length - MAX_EVENTS) : events;
     localStorage.setItem(EVENTS_KEY, JSON.stringify(trimmed));
   } catch {
     // Storage quota exceeded or private mode – silently skip
+  }
+
+  // Also write to Firestore asynchronously (fire and forget)
+  if (_currentUser) {
+    const currentUser = _currentUser;
+    import('./firestoreService').then(({ writeAnalyticsEvent }) => {
+      writeAnalyticsEvent({
+        userId: currentUser.uid,
+        userEmail: currentUser.email,
+        userName: currentUser.displayName,
+        module: event.module,
+        eventType: event.type,
+        country: event.country,
+        hasRisk: event.hasRisk,
+        timestamp,
+      }).catch(() => {});
+    });
   }
 }
 

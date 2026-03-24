@@ -6,6 +6,10 @@ import {
   isFirebaseConfigured,
   User,
 } from '../services/firebaseService';
+import { bootstrapUser, UserProfile, UserRole } from '../services/firestoreService';
+import { setAnalyticsUser } from '../services/analyticsService';
+
+export type { UserProfile, UserRole };
 
 interface AuthUser {
   uid: string;
@@ -18,6 +22,9 @@ interface AuthContextType {
   user: AuthUser | null;
   isLoading: boolean;
   firebaseReady: boolean;
+  userProfile: UserProfile | null;
+  role: UserRole | null;
+  profileLoading: boolean;
   login: () => Promise<void>;
   logout: () => Promise<void>;
 }
@@ -26,6 +33,9 @@ const AuthContext = createContext<AuthContextType>({
   user: null,
   isLoading: true,
   firebaseReady: false,
+  userProfile: null,
+  role: null,
+  profileLoading: false,
   login: async () => {},
   logout: async () => {},
 });
@@ -33,21 +43,43 @@ const AuthContext = createContext<AuthContextType>({
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
+  const [profileLoading, setProfileLoading] = useState(false);
   const firebaseReady = isFirebaseConfigured();
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged((firebaseUser: User | null) => {
+    const unsubscribe = onAuthStateChanged(async (firebaseUser: User | null) => {
       if (firebaseUser) {
-        setUser({
+        const authUser: AuthUser = {
           uid: firebaseUser.uid,
           displayName: firebaseUser.displayName,
           email: firebaseUser.email,
           photoURL: firebaseUser.photoURL,
-        });
+        };
+        setUser(authUser);
+        setIsLoading(false);
+
+        // Bootstrap Firestore profile
+        setProfileLoading(true);
+        try {
+          const profile = await bootstrapUser(firebaseUser);
+          setUserProfile(profile);
+          setAnalyticsUser(
+            firebaseUser.uid,
+            firebaseUser.email ?? '',
+            firebaseUser.displayName ?? '',
+          );
+        } catch {
+          setUserProfile(null);
+        } finally {
+          setProfileLoading(false);
+        }
       } else {
         setUser(null);
+        setUserProfile(null);
+        setIsLoading(false);
+        setProfileLoading(false);
       }
-      setIsLoading(false);
     });
     return unsubscribe;
   }, []);
@@ -60,10 +92,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const logout = async () => {
     await signOut();
+    setUserProfile(null);
   };
 
+  const role: UserRole | null = userProfile?.role ?? null;
+
   return (
-    <AuthContext.Provider value={{ user, isLoading, firebaseReady, login, logout }}>
+    <AuthContext.Provider value={{ user, isLoading, firebaseReady, userProfile, role, profileLoading, login, logout }}>
       {children}
     </AuthContext.Provider>
   );

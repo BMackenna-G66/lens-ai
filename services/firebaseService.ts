@@ -14,6 +14,7 @@ import {
   onAuthStateChanged as firebaseOnAuthStateChanged,
   User,
 } from 'firebase/auth';
+import { getFirestore as fsGetFirestore, Firestore } from 'firebase/firestore';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 // These are injected as process.env.* by vite.config.ts at build time.
@@ -37,6 +38,7 @@ export function isFirebaseConfigured(): boolean {
 // ─── Init (lazy singleton) ────────────────────────────────────────────────────
 let app: FirebaseApp | null = null;
 let auth: Auth | null = null;
+let db: Firestore | null = null;
 
 function getFirebase(): { app: FirebaseApp; auth: Auth } | null {
   if (!isFirebaseConfigured()) return null;
@@ -46,6 +48,13 @@ function getFirebase(): { app: FirebaseApp; auth: Auth } | null {
     auth = getAuth(app);
   }
   return { app, auth: auth! };
+}
+
+export function getDb(): Firestore | null {
+  const fb = getFirebase();
+  if (!fb) return null;
+  if (!db) db = fsGetFirestore(fb.app);
+  return db;
 }
 
 // ─── Auth API ─────────────────────────────────────────────────────────────────
