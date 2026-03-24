@@ -174,7 +174,7 @@ export const DocumentAnalyzer: React.FC = () => {
       if (!docToProcess) throw new Error("Documento no encontrado.");
 
       updateDoc(FileProcessingStatus.READING, { statusMessage: "Extrayendo texto..." });
-      const combinedText = (await Promise.all(files.map(getTextFromFile))).join("\n\n");
+      const combinedText = (await Promise.all(files.map(f => getTextFromFile(f)))).join("\n\n");
       if (!combinedText.trim()) throw new Error("El contenido del archivo está vacío.");
 
       updateDoc(FileProcessingStatus.ANALYZING, { rawTextContent: combinedText });
