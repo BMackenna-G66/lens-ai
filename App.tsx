@@ -9,12 +9,13 @@ import { AppLauncher } from './components/AppLauncher';
 import { CriminalApp } from './components/CriminalProfiler/CriminalApp';
 import { GeneralDashboard } from './components/GeneralDashboard';
 import { AdminModule } from './components/AdminModule';
+import { RegcheqTool } from './components/RegcheqTool';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { IconFiles, IconAlertTriangle, IconWallet, IconScale } from './components/IconComponents';
 import { trackModuleVisit, ModuleKey } from './services/analyticsService';
 
 type TabKey = 'dashboard' | 'analyzer' | 'tools' | 'crypto' | 'compliance';
-type Suite = 'compliance' | 'criminal' | 'admin' | 'general-dashboard' | null;
+type Suite = 'compliance' | 'criminal' | 'admin' | 'general-dashboard' | 'regcheq' | null;
 
 const AppContent: React.FC = () => {
   const { user, isLoading: authLoading, firebaseReady, profileLoading, role, userProfile } = useAuth();
@@ -87,7 +88,12 @@ const AppContent: React.FC = () => {
     return <GeneralDashboard onBack={() => setActiveSuite(null)} />;
   }
 
-  // 6. Criminal Profiler suite
+  // 6. Regcheq suite
+  if (activeSuite === 'regcheq') {
+    return <RegcheqTool onBack={() => setActiveSuite(null)} />;
+  }
+
+  // 7. Criminal Profiler suite
   if (activeSuite === 'criminal') {
     const criminalEnabled = userProfile?.modules?.criminal ?? true;
     if (!criminalEnabled) {

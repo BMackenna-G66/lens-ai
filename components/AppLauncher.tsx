@@ -1,7 +1,7 @@
 import React from 'react';
 import { useAuth } from '../context/AuthContext';
 
-type Suite = 'compliance' | 'criminal' | 'admin' | 'general-dashboard';
+type Suite = 'compliance' | 'criminal' | 'admin' | 'general-dashboard' | 'regcheq';
 
 interface AppLauncherProps {
   onSelect: (suite: Suite) => void;
@@ -103,6 +103,38 @@ export const AppLauncher: React.FC<AppLauncherProps> = ({ onSelect }) => {
               {['📂 Carga Excel', '⚖️ Motor Decisión', '🤖 IA por Perfil', '📤 Exportar', '🔍 Catálogo'].map(tag => (
                 <span key={tag} className="text-[10px] font-bold uppercase tracking-widest text-red-400 bg-red-950/40 border border-red-900/50 px-2 py-1 rounded-lg">{tag}</span>
               ))}
+            </div>
+          </button>
+        </div>
+
+        {/* Regcheq card — full width below the 2-col grid */}
+        <div className="mt-6">
+          <button
+            onClick={() => onSelect('regcheq')}
+            className="group relative w-full bg-slate-900/70 hover:bg-teal-950/40 border border-slate-700/50 hover:border-teal-600/50 rounded-3xl p-8 text-left transition-all duration-300 hover:shadow-2xl hover:shadow-teal-950/30 active:scale-[0.98]"
+          >
+            <div className="absolute top-4 right-4 opacity-0 group-hover:opacity-100 transition-opacity">
+              <div className="w-8 h-8 bg-teal-600 rounded-full flex items-center justify-center">
+                <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                </svg>
+              </div>
+            </div>
+            <div className="flex items-start gap-6">
+              <div className="w-16 h-16 bg-teal-600/20 rounded-2xl flex items-center justify-center flex-shrink-0 border border-teal-500/30 group-hover:bg-teal-600/30 transition-colors">
+                <span className="text-3xl">🔎</span>
+              </div>
+              <div className="flex-1">
+                <h2 className="text-xl font-black text-white mb-2">Regcheq — Análisis AML / KYC</h2>
+                <p className="text-slate-400 text-sm font-medium mb-4 leading-relaxed">
+                  Consulta perfiles contra listas PEP Chile, OFAC, ONU, UE, PDI, causas penales, screening global y lista de interés interna vía la API de Regcheq.
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {['🔍 Perfil Individual', '📋 Lista de Interés', '🌐 PEP · OFAC · ONU', '⚖️ Causas Penales', '🛡️ Screening Global'].map(tag => (
+                    <span key={tag} className="text-[10px] font-bold uppercase tracking-widest text-teal-400 bg-teal-950/50 border border-teal-800/50 px-2 py-1 rounded-lg">{tag}</span>
+                  ))}
+                </div>
+              </div>
             </div>
           </button>
         </div>

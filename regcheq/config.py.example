@@ -1,0 +1,2 @@
+API_KEY  = "TU_API_KEY_AQUI"
+BASE_URL = "https://external-api.regcheq.com"

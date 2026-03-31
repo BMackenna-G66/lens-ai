@@ -23,3 +23,6 @@ dist-ssr
 *.sln
 *.sw?
 .claude/
+
+# Regcheq backend — credenciales locales
+regcheq/config.py
