@@ -1,7 +1,7 @@
 import React from 'react';
 import { useAuth } from '../context/AuthContext';
 
-type Suite = 'compliance' | 'criminal' | 'admin' | 'general-dashboard' | 'regcheq' | 'customer-report';
+type Suite = 'compliance' | 'criminal' | 'admin' | 'general-dashboard' | 'regcheq';
 
 interface AppLauncherProps {
   onSelect: (suite: Suite) => void;
@@ -132,38 +132,6 @@ export const AppLauncher: React.FC<AppLauncherProps> = ({ onSelect }) => {
                 <div className="flex flex-wrap gap-2">
                   {['🔍 Perfil Individual', '📋 Lista de Interés', '🌐 PEP · OFAC · ONU', '⚖️ Causas Penales', '🛡️ Screening Global'].map(tag => (
                     <span key={tag} className="text-[10px] font-bold uppercase tracking-widest text-teal-400 bg-teal-950/50 border border-teal-800/50 px-2 py-1 rounded-lg">{tag}</span>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </button>
-        </div>
-
-        {/* Customer Report card */}
-        <div className="mt-6">
-          <button
-            onClick={() => onSelect('customer-report')}
-            className="group relative w-full bg-slate-900/70 hover:bg-blue-950/40 border border-slate-700/50 hover:border-blue-600/50 rounded-3xl p-8 text-left transition-all duration-300 hover:shadow-2xl hover:shadow-blue-950/30 active:scale-[0.98]"
-          >
-            <div className="absolute top-4 right-4 opacity-0 group-hover:opacity-100 transition-opacity">
-              <div className="w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center">
-                <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
-                </svg>
-              </div>
-            </div>
-            <div className="flex items-start gap-6">
-              <div className="w-16 h-16 bg-blue-600/20 rounded-2xl flex items-center justify-center flex-shrink-0 border border-blue-500/30 group-hover:bg-blue-600/30 transition-colors">
-                <span className="text-3xl">📑</span>
-              </div>
-              <div className="flex-1">
-                <h2 className="text-xl font-black text-white mb-2">Reporte de Cliente — PDF</h2>
-                <p className="text-slate-400 text-sm font-medium mb-4 leading-relaxed">
-                  Busca un cliente por ID o email, selecciona las secciones que necesitas (KYC, compliance, transacciones, beneficiarios) y descarga un reporte PDF listo para usar.
-                </p>
-                <div className="flex flex-wrap gap-2">
-                  {['🔍 Buscar por ID/Email', '📋 KYC & Compliance', '💸 Transacciones', '👥 Beneficiarios', '📥 Exportar PDF'].map(tag => (
-                    <span key={tag} className="text-[10px] font-bold uppercase tracking-widest text-blue-400 bg-blue-950/50 border border-blue-800/50 px-2 py-1 rounded-lg">{tag}</span>
                   ))}
                 </div>
               </div>
