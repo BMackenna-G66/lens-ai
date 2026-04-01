@@ -300,15 +300,15 @@ function DetailTable({ data, dark }: { data: unknown; dark: boolean }) {
     return sortDir === 'asc' ? ta.localeCompare(tb) : tb.localeCompare(ta);
   });
 
-  const thBg  = dark ? 'bg-red-950/40 text-red-400/80' : 'bg-red-100 text-red-700';
-  const rowHover = dark ? 'hover:bg-slate-800/40' : 'hover:bg-slate-100';
+  const thBg  = dark ? 'bg-red-950/40 text-red-400/80' : 'bg-violet-100 text-violet-700';
+  const rowHover = dark ? 'hover:bg-slate-800/40' : 'hover:bg-violet-50/60';
   const tdText = dark ? 'text-slate-300' : 'text-slate-700';
-  const borderColor = dark ? 'border-red-900/30' : 'border-red-300/60';
+  const borderColor = dark ? 'border-red-900/30' : 'border-violet-200/60';
 
   return (
     <div className="mt-2 space-y-2">
       {meta && meta.length > 0 && (
-        <div className={`flex flex-wrap gap-4 px-3 py-2 rounded-lg text-xs ${dark ? 'bg-red-950/30 border border-red-900/30 text-slate-300' : 'bg-red-50 border border-red-200 text-slate-600'}`}>
+        <div className={`flex flex-wrap gap-4 px-3 py-2 rounded-lg text-xs ${dark ? 'bg-red-950/30 border border-red-900/30 text-slate-300' : 'bg-violet-50 border border-violet-200 text-slate-700'}`}>
           {meta.map(m => (
             <span key={m.label}><strong className="text-red-400 mr-1">{m.label}:</strong>{m.value}</span>
           ))}
@@ -377,8 +377,8 @@ function DetailTable({ data, dark }: { data: unknown; dark: boolean }) {
 
 function ListaRow({ name, entry, dark }: { name: string; entry: ListaEntry; dark: boolean }) {
   const [open, setOpen] = useState(false);
-  const hitBorder = dark ? 'border-red-800/50 bg-red-950/20' : 'border-red-300 bg-red-50';
-  const cleanBorder = dark ? 'border-slate-700/40 bg-slate-800/30' : 'border-slate-200 bg-slate-50';
+  const hitBorder = dark ? 'border-red-800/50 bg-red-950/20' : 'border-red-300 bg-red-50/70';
+  const cleanBorder = dark ? 'border-slate-700/40 bg-slate-800/30' : 'border-violet-200/60 bg-violet-50/30';
   return (
     <div className={`rounded-xl border transition-colors ${entry.coincidence ? hitBorder : cleanBorder}`}>
       <button
@@ -393,7 +393,7 @@ function ListaRow({ name, entry, dark }: { name: string; entry: ListaEntry; dark
         <span className={`flex-1 text-sm font-medium ${dark ? 'text-slate-200' : 'text-slate-700'}`}>{name}</span>
         {entry.coincidence
           ? <span className={`text-xs font-black uppercase ${entry.risk.toLowerCase()==='medium'?'text-amber-400':'text-red-400'}`}>{entry.risk.toUpperCase()}</span>
-          : <span className={`text-xs ${dark ? 'text-slate-500' : 'text-slate-400'}`}>Sin coincidencia</span>}
+          : <span className={`text-xs ${dark ? 'text-slate-500' : 'text-slate-500'}`}>Sin coincidencia</span>}
         {entry.coincidence && (
           <svg className={`w-3 h-3 text-slate-500 transition-transform ${open ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
@@ -411,13 +411,13 @@ function ListaRow({ name, entry, dark }: { name: string; entry: ListaEntry; dark
 
 function ResultCard({ result, dark }: { result: PerfilResult; dark: boolean }) {
   const hitCount = Object.values(result.listas).filter(e => e.coincidence).length;
-  const bg    = dark ? 'bg-slate-800/50 border-slate-700/50' : 'bg-white border-slate-200';
+  const bg    = dark ? 'bg-slate-800/50 border-slate-700/50' : 'bg-white border-violet-200/70 shadow-sm';
   const text  = dark ? 'text-white' : 'text-slate-900';
-  const muted = dark ? 'text-slate-500' : 'text-slate-400';
-  const fieldBg = dark ? 'bg-slate-900/40 border-slate-700/40' : 'bg-slate-50 border-slate-200';
-  const fieldLabel = dark ? 'text-slate-500' : 'text-slate-400';
-  const fieldVal   = dark ? 'text-slate-200' : 'text-slate-700';
-  const divider = dark ? 'bg-slate-700/50' : 'bg-slate-200';
+  const muted = dark ? 'text-slate-500' : 'text-violet-600';
+  const fieldBg = dark ? 'bg-slate-900/40 border-slate-700/40' : 'bg-violet-50/60 border-violet-200/60';
+  const fieldLabel = dark ? 'text-slate-500' : 'text-violet-500';
+  const fieldVal   = dark ? 'text-slate-200' : 'text-slate-800';
+  const divider = dark ? 'bg-slate-700/50' : 'bg-violet-200/60';
 
   return (
     <div className="space-y-4">
@@ -562,15 +562,15 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack }) => {
   const [addLoading, setAddLoading]   = useState(false);
 
   // ── Theme-based classes ─────────────────────────────────────────────────────
-  const bg        = dark ? 'bg-gradient-to-br from-slate-900 via-slate-900 to-indigo-950' : 'bg-slate-100';
-  const cardBg    = dark ? 'bg-slate-800/50 border-slate-700/50' : 'bg-white border-slate-200';
-  const navBg     = dark ? 'bg-slate-900/90 border-slate-700/50' : 'bg-white border-slate-200';
-  const textMain  = dark ? 'text-slate-100' : 'text-slate-800';
-  const textMuted = dark ? 'text-slate-400' : 'text-slate-500';
+  const bg        = dark ? 'bg-gradient-to-br from-slate-900 via-slate-900 to-indigo-950' : 'bg-gradient-to-br from-white via-violet-50/40 to-white';
+  const cardBg    = dark ? 'bg-slate-800/50 border-slate-700/50' : 'bg-white border-violet-200/70 shadow-sm';
+  const navBg     = dark ? 'bg-slate-900/90 border-slate-700/50' : 'bg-white/95 border-violet-200/70 shadow-sm';
+  const textMain  = dark ? 'text-slate-100' : 'text-slate-900';
+  const textMuted = dark ? 'text-slate-400' : 'text-slate-600';
   const inputCls  = dark
     ? 'bg-slate-900/60 border-slate-600/50 text-white placeholder-slate-600 focus:border-indigo-500'
-    : 'bg-white border-slate-300 text-slate-800 placeholder-slate-400 focus:border-indigo-400';
-  const labelCls  = dark ? 'text-slate-400' : 'text-slate-500';
+    : 'bg-white border-violet-200 text-slate-800 placeholder-slate-400 focus:border-violet-500 focus:ring-1 focus:ring-violet-200';
+  const labelCls  = dark ? 'text-slate-400' : 'text-violet-600';
 
   function inputField(label: string, value: string, onChange: (v:string)=>void, props?: React.InputHTMLAttributes<HTMLInputElement>) {
     return (
@@ -773,18 +773,18 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack }) => {
           </svg>
           Inicio
         </button>
-        <div className={`h-4 w-px ${dark ? 'bg-slate-700' : 'bg-slate-300'}`} />
+        <div className={`h-4 w-px ${dark ? 'bg-slate-700' : 'bg-violet-200'}`} />
         <span className="text-sm font-black">Regcheq</span>
         <span className={`text-xs font-medium ${textMuted}`}>Análisis AML / KYC</span>
 
-        <div className={`flex gap-1 rounded-xl p-1 ml-2 ${dark ? 'bg-slate-800/60' : 'bg-slate-100'}`}>
+        <div className={`flex gap-1 rounded-xl p-1 ml-2 ${dark ? 'bg-slate-800/60' : 'bg-violet-100/70'}`}>
           {(['individual','masivo','lista'] as Tab[]).map(t => {
             const labels: Record<Tab,string> = { individual:'🔍 Individual', masivo:'📊 Masivo', lista:'📋 Lista de Interés' };
             return (
               <button
                 key={t}
                 onClick={() => { setTab(t); if (t === 'lista') cargarLista(); }}
-                className={`text-xs font-bold px-4 py-2 rounded-lg transition-all ${tab === t ? 'bg-indigo-600 text-white' : `${textMuted} hover:text-indigo-400`}`}
+                className={`text-xs font-bold px-4 py-2 rounded-lg transition-all ${tab === t ? 'bg-indigo-600 text-white' : dark ? `${textMuted} hover:text-indigo-400` : 'text-violet-700 hover:text-violet-900'}`}
               >
                 {labels[t]}
               </button>
@@ -795,7 +795,7 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack }) => {
         {/* Dark mode toggle */}
         <button
           onClick={() => setDark(d => !d)}
-          className={`ml-auto flex items-center gap-2 text-xs font-bold px-3 py-2 rounded-xl border transition-all ${dark ? 'bg-slate-800 border-slate-700 text-amber-400' : 'bg-white border-slate-300 text-slate-600'}`}
+          className={`ml-auto flex items-center gap-2 text-xs font-bold px-3 py-2 rounded-xl border transition-all ${dark ? 'bg-slate-800 border-slate-700 text-amber-400' : 'bg-violet-50 border-violet-300 text-violet-700 hover:bg-violet-100'}`}
           title="Cambiar tema"
         >
           {dark ? '☀️ Claro' : '🌙 Oscuro'}
@@ -814,10 +814,10 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack }) => {
 
             <div className={`border rounded-2xl p-6 space-y-5 ${cardBg}`}>
               {/* Type toggle */}
-              <div className={`flex gap-0 rounded-xl overflow-hidden w-fit border ${dark ? 'bg-slate-900/50 border-slate-700/50' : 'bg-slate-100 border-slate-200'}`}>
+              <div className={`flex gap-0 rounded-xl overflow-hidden w-fit border ${dark ? 'bg-slate-900/50 border-slate-700/50' : 'bg-violet-50 border-violet-200'}`}>
                 {(['natural','legal'] as PersonType[]).map(t => (
                   <button key={t} onClick={() => { setTipo(t); setResult(null); setError(''); }}
-                    className={`px-5 py-2.5 text-sm font-bold transition-all ${tipo === t ? 'bg-indigo-600 text-white' : `${textMuted} hover:text-indigo-400`}`}>
+                    className={`px-5 py-2.5 text-sm font-bold transition-all ${tipo === t ? 'bg-indigo-600 text-white' : dark ? `${textMuted} hover:text-indigo-400` : 'text-violet-700 hover:text-violet-900'}`}>
                     {t === 'natural' ? '👤 Persona Natural' : '🏢 Empresa / Jurídica'}
                   </button>
                 ))}
@@ -868,7 +868,7 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack }) => {
                   className={`w-10 h-6 rounded-full border transition-all relative ${crearFicha ? 'bg-indigo-600 border-indigo-500' : dark ? 'bg-slate-700 border-slate-600' : 'bg-slate-200 border-slate-300'}`}>
                   <div className={`absolute top-1 w-4 h-4 rounded-full bg-white transition-transform ${crearFicha ? 'translate-x-5' : 'translate-x-1'}`} />
                 </div>
-                <span className={`text-sm ${dark ? 'text-slate-300' : 'text-slate-600'}`}>Crear / actualizar ficha antes de consultar</span>
+                <span className={`text-sm ${dark ? 'text-slate-300' : 'text-slate-700'}`}>Crear / actualizar ficha antes de consultar</span>
               </label>
 
               <button onClick={analizarPerfil} disabled={loading}
@@ -924,7 +924,7 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack }) => {
                     className={`w-10 h-6 rounded-full border transition-all relative ${crearMasivo ? 'bg-indigo-600 border-indigo-500' : dark ? 'bg-slate-700 border-slate-600' : 'bg-slate-200 border-slate-300'}`}>
                     <div className={`absolute top-1 w-4 h-4 rounded-full bg-white transition-transform ${crearMasivo ? 'translate-x-5' : 'translate-x-1'}`} />
                   </div>
-                  <span className={`text-sm ${dark ? 'text-slate-300' : 'text-slate-600'}`}>Crear fichas antes de consultar</span>
+                  <span className={`text-sm ${dark ? 'text-slate-300' : 'text-slate-700'}`}>Crear fichas antes de consultar</span>
                 </label>
                 <div className="flex items-center gap-2">
                   <label className={`text-xs font-bold uppercase tracking-widest whitespace-nowrap ${labelCls}`}>Delay (seg)</label>
@@ -956,11 +956,11 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack }) => {
                 {masivoResults.length > 0 && !masivoRunning && (
                   <>
                     <button onClick={exportarExcel}
-                      className={`flex items-center gap-2 border font-bold px-5 py-2.5 rounded-xl text-sm transition-all ${dark ? 'border-emerald-600/50 text-emerald-400 hover:bg-emerald-950/40' : 'border-emerald-400 text-emerald-600 hover:bg-emerald-50'}`}>
+                      className={`flex items-center gap-2 border font-bold px-5 py-2.5 rounded-xl text-sm transition-all ${dark ? 'border-emerald-600/50 text-emerald-400 hover:bg-emerald-950/40' : 'border-emerald-500 text-emerald-700 hover:bg-emerald-50'}`}>
                       📥 Exportar Excel
                     </button>
                     <button onClick={exportarPDFAll}
-                      className={`flex items-center gap-2 border font-bold px-5 py-2.5 rounded-xl text-sm transition-all ${dark ? 'border-indigo-600/50 text-indigo-400 hover:bg-indigo-950/40' : 'border-indigo-400 text-indigo-600 hover:bg-indigo-50'}`}>
+                      className={`flex items-center gap-2 border font-bold px-5 py-2.5 rounded-xl text-sm transition-all ${dark ? 'border-indigo-600/50 text-indigo-400 hover:bg-indigo-950/40' : 'border-violet-500 text-violet-700 hover:bg-violet-50'}`}>
                       📋 PDF todas las fichas
                     </button>
                   </>
@@ -995,13 +995,13 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack }) => {
                 {masivoStats.total > 0 && (
                   <div className="grid grid-cols-5 gap-3">
                     {[
-                      { num: masivoStats.total,  lbl: 'Total',       cls: dark ? 'text-slate-200' : 'text-slate-700' },
+                      { num: masivoStats.total,  lbl: 'Total',       cls: dark ? 'text-slate-200' : 'text-violet-800' },
                       { num: masivoStats.high,   lbl: 'Alto riesgo', cls: 'text-red-400' },
                       { num: masivoStats.alerts, lbl: 'Con alertas', cls: 'text-amber-400' },
                       { num: masivoStats.ok,     lbl: 'Sin alertas', cls: 'text-emerald-400' },
                       { num: masivoStats.err,    lbl: 'Errores',     cls: textMuted },
                     ].map(s => (
-                      <div key={s.lbl} className={`border rounded-xl p-3 text-center ${dark ? 'bg-slate-900/40 border-slate-700/40' : 'bg-slate-50 border-slate-200'}`}>
+                      <div key={s.lbl} className={`border rounded-xl p-3 text-center ${dark ? 'bg-slate-900/40 border-slate-700/40' : 'bg-violet-50/60 border-violet-200/60'}`}>
                         <div className={`text-2xl font-black ${s.cls}`}>{s.num}</div>
                         <div className={`text-[10px] font-bold uppercase tracking-widest mt-1 ${textMuted}`}>{s.lbl}</div>
                       </div>
@@ -1016,14 +1016,14 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack }) => {
               <div className={`border rounded-2xl p-6 space-y-4 ${cardBg}`}>
                 <div className="flex flex-wrap items-center gap-3">
                   <button onClick={() => setCarouselIdx(i => Math.max(0, i-1))} disabled={carouselIdx === 0}
-                    className={`text-xs font-bold px-4 py-2 rounded-xl border transition-all disabled:opacity-40 ${dark ? 'border-slate-600 text-slate-300 hover:border-indigo-500' : 'border-slate-300 text-slate-600 hover:border-indigo-400'}`}>
+                    className={`text-xs font-bold px-4 py-2 rounded-xl border transition-all disabled:opacity-40 ${dark ? 'border-slate-600 text-slate-300 hover:border-indigo-500' : 'border-violet-300 text-violet-700 hover:border-violet-500'}`}>
                     ◀ Anterior
                   </button>
                   <span className={`text-sm font-bold ${dark ? 'text-slate-200' : 'text-slate-700'}`}>
                     {carouselIdx + 1} / {filteredResults.length}
                   </span>
                   <button onClick={() => setCarouselIdx(i => Math.min(filteredResults.length-1, i+1))} disabled={carouselIdx >= filteredResults.length-1}
-                    className={`text-xs font-bold px-4 py-2 rounded-xl border transition-all disabled:opacity-40 ${dark ? 'border-slate-600 text-slate-300 hover:border-indigo-500' : 'border-slate-300 text-slate-600 hover:border-indigo-400'}`}>
+                    className={`text-xs font-bold px-4 py-2 rounded-xl border transition-all disabled:opacity-40 ${dark ? 'border-slate-600 text-slate-300 hover:border-indigo-500' : 'border-violet-300 text-violet-700 hover:border-violet-500'}`}>
                     Siguiente ▶
                   </button>
                   <input
@@ -1058,7 +1058,7 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack }) => {
               </div>
               <div className="flex gap-2">
                 <button onClick={cargarLista} disabled={listaLoading}
-                  className={`flex items-center gap-2 border font-bold px-4 py-2 rounded-xl text-sm transition-all ${dark ? 'border-slate-600 text-slate-300 hover:border-indigo-500' : 'border-slate-300 text-slate-600 hover:border-indigo-400'}`}>
+                  className={`flex items-center gap-2 border font-bold px-4 py-2 rounded-xl text-sm transition-all ${dark ? 'border-slate-600 text-slate-300 hover:border-indigo-500' : 'border-violet-300 text-violet-700 hover:border-violet-500 hover:bg-violet-50'}`}>
                   <svg className={`w-4 h-4 ${listaLoading ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
                   Actualizar
                 </button>
@@ -1103,7 +1103,7 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack }) => {
               <div className={`border rounded-2xl overflow-hidden ${cardBg}`}>
                 <table className="w-full text-sm">
                   <thead>
-                    <tr className={`border-b ${dark ? 'border-slate-700/50 bg-slate-900/40' : 'border-slate-200 bg-slate-50'}`}>
+                    <tr className={`border-b ${dark ? 'border-slate-700/50 bg-slate-900/40' : 'border-violet-200/60 bg-violet-50/60'}`}>
                       {['RUT/DNI','Nombre','Tipo','Razón','Estado'].map(h => (
                         <th key={h} className={`px-4 py-3 text-left text-[10px] font-bold uppercase tracking-widest ${textMuted}`}>{h}</th>
                       ))}
@@ -1111,7 +1111,7 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack }) => {
                   </thead>
                   <tbody>
                     {listaItems.map((item, i) => (
-                      <tr key={i} className={`border-t transition-colors ${dark ? 'border-slate-800/60 hover:bg-slate-800/40' : 'border-slate-100 hover:bg-slate-50'}`}>
+                      <tr key={i} className={`border-t transition-colors ${dark ? 'border-slate-800/60 hover:bg-slate-800/40' : 'border-violet-100 hover:bg-violet-50/50'}`}>
                         <td className={`px-4 py-3 font-mono text-xs ${textMuted}`}>{item.dni}</td>
                         <td className={`px-4 py-3 font-medium ${dark ? 'text-slate-200' : 'text-slate-700'}`}>{item.name}</td>
                         <td className={`px-4 py-3 ${textMuted}`}>{item.personType}</td>
