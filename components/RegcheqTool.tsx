@@ -715,59 +715,123 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack }) => {
   function exportarExcel() {
     if (masivoResults.length === 0) return;
 
-    // ── Hoja 1: Resumen de coincidencias ──────────────────────────────────────
-    const resumenRows = masivoResults.map(r => ({
-      'DNI/RUT':  r.dni,
-      'Nombre':   r.nombre,
-      'Riesgo':   r.riesgo_final,
-      'PEP':      r.pep_level || '',
-      'Alertas':  Object.values(r.listas).filter(e => e.coincidence).length,
-      ...Object.fromEntries(Object.entries(r.listas).map(([n,e]) => [n, e.coincidence ? e.risk.toUpperCase() : 'OK'])),
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const ts  = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+    const fileName = `resultado_regcheq_${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.xlsx`;
+
+    // Helper — coincidence bool as "True"/"False"
+    const coinc = (r: PerfilResult, label: string) => r.listas[label]?.coincidence ? 'True' : 'False';
+
+    // Helper — extract crimes array from causas penales lista entry
+    const getCrimes = (r: PerfilResult): Record<string,unknown>[] => {
+      const raw = r.listas['Causas Penales Chile']?.data as Record<string,unknown> | null | undefined;
+      if (!raw) return [];
+      if (Array.isArray(raw)) return raw as Record<string,unknown>[];
+      if (Array.isArray(raw['additionalData'])) return raw['additionalData'] as Record<string,unknown>[];
+      return [];
+    };
+
+    // Helper — imputado name from causas API data
+    const getImputado = (r: PerfilResult): string => {
+      const raw = r.listas['Causas Penales Chile']?.data as Record<string,unknown> | null | undefined;
+      const info = raw?.['info'] as Record<string,unknown> | undefined;
+      return info?.['name'] ? String(info['name']) : '';
+    };
+
+    // ── Hoja 1: Resultados Regcheq ────────────────────────────────────────────
+    const resultadosRows = masivoResults.map(r => ({
+      'DNI':                                      r.dni,
+      'Tipo de persona':                          'natural',
+      'Nombre':                                   r.nombre,
+      'Apellido paterno':                         r.ficha['Apellido paterno'] || '',
+      'Razón Social':                             r.ficha['Razón Social'] || '',
+      'Riesgo calculado listas':                  r.riesgo_final,
+      'Riesgo sobreescrito':                      '',
+      'Riesgo final Ficha':                       r.riesgo_final,
+      'listas_total_coincidencias':               Object.values(r.listas).filter(e => e.coincidence).length,
+      'Coincidencia_PEP Chile':                   coinc(r, 'PEP Chile'),
+      'Coincidencia_Funcionarios Públicos Chile':  'False',
+      'Coincidencia_Causas penales Chile':         coinc(r, 'Causas Penales Chile'),
+      'Coincidencia_PDI':                         coinc(r, 'PDI Chile'),
+      'Coincidencia_Países Sancionados (GAFI)':   coinc(r, 'GAFI'),
+      'Coincidencia_Organismos internacionales':  'False',
+      'Coincidencia_OFAC Domicilio':              coinc(r, 'OFAC'),
+      'Coincidencia_Screening Global':            coinc(r, 'Screening Global'),
+      'Coincidencia_RTP':                         coinc(r, 'RTP / PDI'),
+      'Coincidencia_Palabras Clave':              'False',
+      'Coincidencia_Comentarios de Riesgo':       'False',
+      'Coincidencia_Lista de interés':            coinc(r, 'Lista de Interés'),
+      'Coincidencia_Lista Regcheq':               'False',
+      'Coincidencia_BIC':                         'False',
+      'PEP_nivel':                                r.pep_level || '',
+      'causas_penales_imputado':                  getImputado(r),
+      'regcheq_error':                            '',
     }));
-    const wsResumen = XLSX.utils.json_to_sheet(resumenRows);
 
-    // ── Hoja 2: Causas Penales Chile (delitos en formato crimen_N) ────────────
-    const causasRows: Record<string, string>[] = [];
+    // ── Hoja 2: Coincidencias ─────────────────────────────────────────────────
+    const coincidenciasRows = masivoResults.map(r => ({
+      'DNI':                                      r.dni,
+      'Nombre':                                   r.nombre,
+      'Apellido paterno':                         r.ficha['Apellido paterno'] || '',
+      'Razón Social':                             r.ficha['Razón Social'] || '',
+      'Riesgo final Ficha':                       r.riesgo_final,
+      'Nombre imputado (API)':                    getImputado(r),
+      'Coincidencia_Causas penales Chile':         coinc(r, 'Causas Penales Chile'),
+      'Coincidencia_PEP Chile':                   coinc(r, 'PEP Chile'),
+      'Coincidencia_Funcionarios Públicos Chile':  'False',
+      'Coincidencia_PDI':                         coinc(r, 'PDI Chile'),
+      'Coincidencia_Países Sancionados (GAFI)':   coinc(r, 'GAFI'),
+      'Coincidencia_Organismos internacionales':  'False',
+      'Coincidencia_OFAC Domicilio':              coinc(r, 'OFAC'),
+      'Coincidencia_Screening Global':            coinc(r, 'Screening Global'),
+      'Coincidencia_RTP':                         coinc(r, 'RTP / PDI'),
+      'Coincidencia_BIC':                         'False',
+      'Coincidencia_Palabras Clave':              'False',
+      'Coincidencia_Comentarios de Riesgo':       'False',
+      'Coincidencia_Lista de interés':            coinc(r, 'Lista de Interés'),
+      'Coincidencia_Lista Regcheq':               'False',
+    }));
+
+    // ── Hoja 3: Causas Penales Chile — una fila por delito ────────────────────
+    const causasRows: Record<string,string>[] = [];
     for (const r of masivoResults) {
-      // Include ALL profiles — crimes from data.additionalData regardless of coincidence flag
-      const causasEntry = r.listas['Causas Penales Chile'];
-      const raw = causasEntry?.data as Record<string, unknown> | null | undefined;
-
-      // data can be: { additionalData: [...] } or an array directly
-      let crimes: Record<string, unknown>[] = [];
-      if (Array.isArray(raw)) {
-        crimes = raw as Record<string, unknown>[];
-      } else if (raw && Array.isArray(raw['additionalData'])) {
-        crimes = raw['additionalData'] as Record<string, unknown>[];
+      const crimes = getCrimes(r);
+      const imputado = getImputado(r) || r.nombre;
+      for (const c of crimes) {
+        causasRows.push({
+          'DNI':            r.dni,
+          'Imputado (API)': imputado,
+          'Nombre Ficha':   r.nombre,
+          'Riesgo Ficha':   r.riesgo_final,
+          'Delito':         String(c['crimen']   ?? c['Crimen']   ?? c['delito']   ?? ''),
+          'Estado':         String(c['estado']   ?? c['Estado']   ?? ''),
+          'Fecha':          String(c['fecha']    ?? c['Fecha']    ?? ''),
+          'Riesgo Delito':  String(c['riesgo']   ?? c['Riesgo']   ?? c['risk']    ?? ''),
+          'RIT':            String(c['rit']      ?? c['RIT']      ?? ''),
+          'RUC':            String(c['ruc']      ?? c['RUC']      ?? ''),
+          'Tribunal':       String(c['tribunal'] ?? c['Tribunal'] ?? ''),
+        });
       }
-
-      const baseRow: Record<string, string> = {
-        'rut':             r.dni,
-        'Tipo de persona': 'natural',
-        'Nombre':          r.nombre,
-        'Riesgo Final':    r.riesgo_final,
-        'Es_pep':          r.pep_level ? 'True' : 'False',
-        'Con Info':        'Si',
-        'Total Delitos':   String(crimes.length),
-      };
-
-      crimes.forEach((c, i) => {
-        baseRow[`crimen_${i}`]   = String(c['crimen']   ?? c['Crimen']   ?? '');
-        baseRow[`estado_${i}`]   = String(c['estado']   ?? c['Estado']   ?? '');
-        baseRow[`fecha_${i}`]    = String(c['fecha']    ?? c['Fecha']    ?? '');
-        baseRow[`riesgo_${i}`]   = String(c['riesgo']   ?? c['Riesgo']   ?? '');
-        baseRow[`rit_${i}`]      = String(c['rit']      ?? c['RIT']      ?? '');
-        baseRow[`ruc_${i}`]      = String(c['ruc']      ?? c['RUC']      ?? '');
-        baseRow[`tribunal_${i}`] = String(c['tribunal'] ?? c['Tribunal'] ?? '');
-      });
-      causasRows.push(baseRow);
     }
 
+    // ── Hoja 4: Resumen ───────────────────────────────────────────────────────
+    const highCount = masivoResults.filter(r => (r.riesgo_final || '').toLowerCase().includes('high')).length;
+    const pepCount  = masivoResults.filter(r => r.listas['PEP Chile']?.coincidence).length;
+    const resumenRows = [
+      { 'Generado': 'Total personas', [ts]: masivoResults.length },
+      { 'Generado': 'Errores API',    [ts]: 0 },
+      { 'Generado': 'High Risk',      [ts]: highCount },
+      { 'Generado': 'PEP detectado',  [ts]: pepCount },
+    ];
+
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, wsResumen, 'Coincidencias');
-    const wsCausas = XLSX.utils.json_to_sheet(causasRows);
-    XLSX.utils.book_append_sheet(wb, wsCausas, 'Causas Penales Chile');
-    XLSX.writeFile(wb, `regcheq_masivo_${new Date().toISOString().slice(0,10)}.xlsx`);
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(resultadosRows),    'Resultados Regcheq');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(coincidenciasRows), 'Coincidencias');
+    if (causasRows.length > 0)
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(causasRows), 'Causas Penales Chile');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(resumenRows),       'Resumen');
+    XLSX.writeFile(wb, fileName);
   }
 
   function exportarPDFAll() {
