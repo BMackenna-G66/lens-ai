@@ -729,25 +729,28 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack }) => {
     // ── Hoja 2: Causas Penales Chile (delitos en formato crimen_N) ────────────
     const causasRows: Record<string, string>[] = [];
     for (const r of masivoResults) {
+      // Include ALL profiles — crimes from data.additionalData regardless of coincidence flag
       const causasEntry = r.listas['Causas Penales Chile'];
-      if (!causasEntry?.coincidence) continue;
-      const raw = causasEntry.data as Record<string, unknown> | null;
-      const additional = raw?.additionalData;
-      const crimes: Record<string, unknown>[] = Array.isArray(additional)
-        ? (additional as Record<string, unknown>[])
-        : [];
-      if (crimes.length === 0) continue;
+      const raw = causasEntry?.data as Record<string, unknown> | null | undefined;
+
+      // data can be: { additionalData: [...] } or an array directly
+      let crimes: Record<string, unknown>[] = [];
+      if (Array.isArray(raw)) {
+        crimes = raw as Record<string, unknown>[];
+      } else if (raw && Array.isArray(raw['additionalData'])) {
+        crimes = raw['additionalData'] as Record<string, unknown>[];
+      }
 
       const baseRow: Record<string, string> = {
-        'rut':                r.dni,
-        'Tipo de persona':    'natural',
-        'Nombre':             r.nombre,
-        'Riesgo Final':       r.riesgo_final,
-        'Es_pep':             r.pep_level ? 'True' : 'False',
-        'Con Info':           'Si',
+        'rut':             r.dni,
+        'Tipo de persona': 'natural',
+        'Nombre':          r.nombre,
+        'Riesgo Final':    r.riesgo_final,
+        'Es_pep':          r.pep_level ? 'True' : 'False',
+        'Con Info':        'Si',
+        'Total Delitos':   String(crimes.length),
       };
 
-      // Spread crimes as crimen_0, estado_0, fecha_0, riesgo_0, rit_0, ruc_0, tribunal_0 ...
       crimes.forEach((c, i) => {
         baseRow[`crimen_${i}`]   = String(c['crimen']   ?? c['Crimen']   ?? '');
         baseRow[`estado_${i}`]   = String(c['estado']   ?? c['Estado']   ?? '');
@@ -762,10 +765,8 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack }) => {
 
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, wsResumen, 'Coincidencias');
-    if (causasRows.length > 0) {
-      const wsCausas = XLSX.utils.json_to_sheet(causasRows);
-      XLSX.utils.book_append_sheet(wb, wsCausas, 'Causas Penales Chile');
-    }
+    const wsCausas = XLSX.utils.json_to_sheet(causasRows);
+    XLSX.utils.book_append_sheet(wb, wsCausas, 'Causas Penales Chile');
     XLSX.writeFile(wb, `regcheq_masivo_${new Date().toISOString().slice(0,10)}.xlsx`);
   }
 
