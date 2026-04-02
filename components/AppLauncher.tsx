@@ -108,7 +108,7 @@ export const AppLauncher: React.FC<AppLauncherProps> = ({ onSelect }) => {
         </div>
 
         {/* Regcheq card — full width below the 2-col grid */}
-        <div className="mt-6">
+        {(userProfile?.modules?.regcheq ?? true) && <div className="mt-6">
           <button
             onClick={() => onSelect('regcheq')}
             className="group relative w-full bg-slate-900/70 hover:bg-teal-950/40 border border-slate-700/50 hover:border-teal-600/50 rounded-3xl p-8 text-left transition-all duration-300 hover:shadow-2xl hover:shadow-teal-950/30 active:scale-[0.98]"
@@ -137,7 +137,7 @@ export const AppLauncher: React.FC<AppLauncherProps> = ({ onSelect }) => {
               </div>
             </div>
           </button>
-        </div>
+        </div>}
 
         {/* Líder-only cards */}
         {role === 'Lider' && (
