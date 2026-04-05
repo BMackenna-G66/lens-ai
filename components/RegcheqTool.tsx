@@ -2,6 +2,7 @@ import React, { useState, useRef, useCallback, useEffect } from 'react';
 import * as XLSX from 'xlsx';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import { DEFAULT_CATALOG } from '../services/defaultCatalogData';
 
 // ─── Config ────────────────────────────────────────────────────────────────────
 const API_BASE = 'https://external-api.regcheq.com';
@@ -54,6 +55,13 @@ interface ListaEntry {
   risk: string;
   data: unknown;
 }
+interface DecisionResult {
+  decision: string;
+  razon: string;
+  precedentesCount: number;
+  noPrecedentesCount: number;
+  totalEquivalente: number;
+}
 interface PerfilResult {
   dni: string;
   nombre: string;
@@ -61,6 +69,7 @@ interface PerfilResult {
   pep_level: string;
   listas: Record<string, ListaEntry>;
   ficha: Record<string, string>;
+  decision?: DecisionResult;
 }
 interface ListaInteres {
   dni: string;
@@ -158,6 +167,34 @@ function normalizeData(raw: unknown): { meta: {label:string;value:string}[]|null
   return { meta: null, items: [{ valor: String(raw) }] };
 }
 
+// ─── Decision engine (local catalog) ─────────────────────────────────────────
+function computeDecisionFromCrimes(additionalData: Record<string,unknown>[]): DecisionResult | undefined {
+  if (!additionalData || additionalData.length === 0) return undefined;
+  const catalog = DEFAULT_CATALOG;
+  if (!catalog.items.length || !catalog.decisionTable.length) return undefined;
+
+  const catalogMap = new Map(catalog.items.map(i => [i.nombre.toLowerCase(), i]));
+  let scoreTotal = 0;
+  for (const crime of additionalData) {
+    const nombre = String(crime['crimen'] ?? crime['Crimen'] ?? crime['delito'] ?? '').toLowerCase().trim();
+    if (!nombre) continue;
+    const match = catalogMap.get(nombre);
+    if (match) scoreTotal += match.valor;
+  }
+
+  const sorted = [...catalog.decisionTable].sort((a, b) => b.totalEquivalente - a.totalEquivalente);
+  const rule = sorted.find(r => scoreTotal >= r.totalEquivalente);
+  if (!rule) return undefined;
+
+  return {
+    decision: rule.decision,
+    razon: rule.razon,
+    precedentesCount: rule.precedentesCount,
+    noPrecedentesCount: rule.noPrecedentesCount,
+    totalEquivalente: scoreTotal,
+  };
+}
+
 // ─── API call ─────────────────────────────────────────────────────────────────
 async function fetchPerfil(dniVal: string): Promise<PerfilResult> {
   const resp = await fetch(`${API_BASE}/record/${dniVal}/${API_KEY}`);
@@ -183,6 +220,17 @@ async function fetchPerfil(dniVal: string): Promise<PerfilResult> {
   const ficha: Record<string,string> = {};
   for (const [k, label] of FICHA_MAP) { const v = perfil[k]; if (v) ficha[label] = String(v); }
 
+  // Compute local decision from Causas Penales Chile crimes
+  const causasEntry = listas['Causas Penales Chile'];
+  let decision: DecisionResult | undefined;
+  if (causasEntry?.coincidence && causasEntry.data) {
+    const raw = causasEntry.data as Record<string,unknown>;
+    const additionalData = Array.isArray(raw['additionalData'])
+      ? (raw['additionalData'] as Record<string,unknown>[])
+      : [];
+    decision = computeDecisionFromCrimes(additionalData);
+  }
+
   return {
     dni: dniVal,
     nombre: perfil.name ?? perfil.socialReason ?? '',
@@ -190,6 +238,7 @@ async function fetchPerfil(dniVal: string): Promise<PerfilResult> {
     pep_level: perfil.pepLevel ?? '',
     listas,
     ficha,
+    decision,
   };
 }
 
@@ -409,6 +458,43 @@ function ListaRow({ name, entry, dark }: { name: string; entry: ListaEntry; dark
   );
 }
 
+function DecisionBox({ decision, dark }: { decision: DecisionResult; dark: boolean }) {
+  const d = decision.decision;
+  const isFB  = d === 'FORZAR_BLOQUEO';
+  const isUCR = d === 'UNDER_COMPLIANCE_REVIEW';
+
+  const boxCls = isFB
+    ? 'bg-red-950/40 border-red-700/60'
+    : isUCR
+      ? 'bg-amber-950/40 border-amber-700/60'
+      : 'bg-emerald-950/30 border-emerald-700/50';
+
+  const labelCls = isFB
+    ? 'text-red-400'
+    : isUCR
+      ? 'text-amber-400'
+      : 'text-emerald-400';
+
+  const icon = isFB ? '🚫' : isUCR ? '⚠️' : '✅';
+
+  return (
+    <div className={`rounded-xl border px-5 py-4 space-y-2 ${boxCls}`}>
+      <div className={`text-base font-black flex items-center gap-2 ${labelCls}`}>
+        <span>{icon}</span>
+        <span>{d}</span>
+      </div>
+      {decision.razon && (
+        <div className={`text-sm ${dark ? 'text-slate-400' : 'text-slate-600'}`}>{decision.razon}</div>
+      )}
+      <div className={`flex flex-wrap gap-5 text-xs ${dark ? 'text-slate-500' : 'text-slate-500'}`}>
+        <span>Precedentes: <strong className={dark ? 'text-slate-300' : 'text-slate-700'}>{decision.precedentesCount}</strong></span>
+        <span>No-precedentes: <strong className={dark ? 'text-slate-300' : 'text-slate-700'}>{decision.noPrecedentesCount}</strong></span>
+        <span>Equivalente total: <strong className={dark ? 'text-slate-300' : 'text-slate-700'}>{decision.totalEquivalente}</strong></span>
+      </div>
+    </div>
+  );
+}
+
 function ResultCard({ result, dark }: { result: PerfilResult; dark: boolean }) {
   const hitCount = Object.values(result.listas).filter(e => e.coincidence).length;
   const bg    = dark ? 'bg-slate-800/50 border-slate-700/50' : 'bg-white border-violet-200/70 shadow-sm';
@@ -471,7 +557,9 @@ function ResultCard({ result, dark }: { result: PerfilResult; dark: boolean }) {
 
       <div>
         <div className="flex items-center gap-3 mb-3">
-          <span className={`text-[10px] font-bold uppercase tracking-widest ${muted}`}>Listas consultadas</span>
+          <span className={`text-[10px] font-bold uppercase tracking-widest ${muted}`}>
+            Resultados de listas — {hitCount} alerta{hitCount !== 1 ? 's' : ''} de {Object.keys(result.listas).length} consultadas
+          </span>
           <div className={`flex-1 h-px ${divider}`} />
         </div>
         <div className="space-y-2">
@@ -482,6 +570,16 @@ function ResultCard({ result, dark }: { result: PerfilResult; dark: boolean }) {
             ))}
         </div>
       </div>
+
+      {result.decision && (
+        <div>
+          <div className="flex items-center gap-3 mb-3">
+            <span className={`text-[10px] font-bold uppercase tracking-widest ${muted}`}>Decisión (Motor local)</span>
+            <div className={`flex-1 h-px ${divider}`} />
+          </div>
+          <DecisionBox decision={result.decision} dark={dark} />
+        </div>
+      )}
     </div>
   );
 }
