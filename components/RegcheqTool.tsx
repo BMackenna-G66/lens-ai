@@ -203,12 +203,12 @@ async function fetchPerfil(dniVal: string): Promise<PerfilResult> {
 
   const listasRaw = ((perfil.listas ?? {}) as Record<string, Record<string,unknown>>);
   const listas: Record<string, ListaEntry> = {};
+  // Always include ALL lists, even if the API didn't return them (shows "Sin coincidencia")
   for (const [clave, nombre] of Object.entries(NOMBRE_LISTA)) {
-    const entry = listasRaw[clave];
-    if (!entry) continue;
-    let rawData = entry.data ?? null;
+    const entry = listasRaw[clave] ?? null;
+    let rawData = entry?.data ?? null;
     if (typeof rawData === 'string' && !(rawData as string).trim()) rawData = null;
-    listas[nombre] = { coincidence: Boolean(entry.coincidence), risk: String(entry.risk ?? ''), data: rawData };
+    listas[nombre] = { coincidence: Boolean(entry?.coincidence), risk: String(entry?.risk ?? ''), data: rawData };
   }
 
   const FICHA_MAP: [string, string][] = [
@@ -243,45 +243,205 @@ async function fetchPerfil(dniVal: string): Promise<PerfilResult> {
 }
 
 // ─── PDF generator ────────────────────────────────────────────────────────────
-function generatePDF(result: PerfilResult) {
-  const doc = new jsPDF();
-  doc.setFontSize(16);
-  doc.text('Regcheq — Análisis de Perfil', 14, 18);
-  doc.setFontSize(11);
-  doc.text(`DNI/RUT: ${result.dni}`, 14, 28);
-  doc.text(`Nombre: ${result.nombre || '—'}`, 14, 35);
-  doc.text(`Riesgo: ${result.riesgo_final || '—'}`, 14, 42);
-  if (result.pep_level) doc.text(`PEP Nivel: ${result.pep_level}`, 14, 49);
+const PDF_NAVY   = [30, 58, 95]    as [number, number, number];
+const PDF_INDIGO = [79, 70, 229]   as [number, number, number];
+const PDF_RED    = [185, 28, 28]   as [number, number, number];
+const PDF_GREEN  = [21, 128, 61]   as [number, number, number];
+const PDF_AMBER  = [146, 64, 14]   as [number, number, number];
+const PDF_WHITE  = [255, 255, 255] as [number, number, number];
+const PDF_LGRAY  = [248, 249, 250] as [number, number, number];
+const PDF_MGRAY  = [100, 116, 139] as [number, number, number];
+const PDF_DTEXT  = [30, 41, 59]    as [number, number, number];
 
-  const filaY = result.pep_level ? 56 : 49;
-  if (Object.keys(result.ficha).length > 0) {
-    autoTable(doc, {
-      startY: filaY,
-      head: [['Campo', 'Valor']],
-      body: Object.entries(result.ficha),
-      theme: 'striped',
-      headStyles: { fillColor: [63, 81, 181] },
-    });
+async function loadLogoForPDF(): Promise<string | null> {
+  for (const path of ['/logo_global.jpg', '/lens-ai/logo_global.jpg']) {
+    try {
+      const res = await fetch(path);
+      if (!res.ok) continue;
+      const blob = await res.blob();
+      return await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(reader.result as string);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+    } catch { continue; }
+  }
+  return null;
+}
+
+async function generatePDF(result: PerfilResult) {
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+  const pageW  = doc.internal.pageSize.getWidth();
+  const pageH  = doc.internal.pageSize.getHeight();
+  const margin = 14;
+  const now    = new Date();
+  const dateStr = now.toLocaleString('es-CL');
+  const getLastY = () => (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable?.finalY ?? 80;
+
+  // ── Header ──
+  doc.setFillColor(...PDF_NAVY);
+  doc.rect(0, 0, pageW, 38, 'F');
+  doc.setFillColor(...PDF_INDIGO);
+  doc.rect(0, 38, pageW, 2, 'F');
+
+  const logo = await loadLogoForPDF();
+  if (logo) { try { doc.addImage(logo, 'JPEG', pageW - 58, 8, 44, 13); } catch { /* skip */ } }
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(15);
+  doc.setTextColor(...PDF_WHITE);
+  doc.text('REPORTE DE SCREENING AML/KYC', margin, 16);
+  doc.setFontSize(8);
+  doc.setFont('helvetica', 'normal');
+  doc.setTextColor(196, 210, 230);
+  doc.text('Regcheq · Análisis de Perfil · LENS AI', margin, 24);
+
+  // ── Info box ──
+  const hitCount = Object.values(result.listas).filter(e => e.coincidence).length;
+  const totalLists = Object.keys(result.listas).length;
+  const riskUpper = (result.riesgo_final || '').toUpperCase();
+  const riskColor: [number,number,number] = riskUpper.includes('HIGH') ? PDF_RED : riskUpper.includes('MEDIUM') ? PDF_AMBER : PDF_GREEN;
+
+  doc.setFillColor(...PDF_LGRAY);
+  doc.setDrawColor(220, 228, 240);
+  doc.roundedRect(margin, 46, pageW - margin * 2, 26, 2, 2, 'FD');
+
+  doc.setFontSize(8); doc.setFont('helvetica', 'bold'); doc.setTextColor(...PDF_MGRAY);
+  doc.text('IDENTIFICACIÓN', margin + 4, 53);
+  doc.setFont('helvetica', 'normal'); doc.setTextColor(...PDF_DTEXT); doc.setFontSize(9);
+  doc.text(`${result.nombre || '—'}`, margin + 4, 59);
+  doc.setFontSize(8); doc.setTextColor(...PDF_MGRAY);
+  doc.text(`DNI / RUT: ${result.dni}`, margin + 4, 66);
+
+  doc.setFontSize(8); doc.setFont('helvetica', 'bold'); doc.setTextColor(...PDF_MGRAY);
+  doc.text('RIESGO', pageW / 2, 53);
+  doc.setFontSize(11); doc.setFont('helvetica', 'bold'); doc.setTextColor(...riskColor);
+  doc.text(riskUpper || 'N/D', pageW / 2, 62);
+
+  if (result.pep_level) {
+    doc.setFontSize(8); doc.setFont('helvetica', 'bold'); doc.setTextColor(...PDF_MGRAY);
+    doc.text('PEP', pageW - 50, 53);
+    doc.setFontSize(9); doc.setFont('helvetica', 'normal'); doc.setTextColor(...PDF_DTEXT);
+    doc.text(`Nivel ${result.pep_level}`, pageW - 50, 59);
   }
 
-  const hits = Object.entries(result.listas).filter(([,e]) => e.coincidence);
-  const clean = Object.entries(result.listas).filter(([,e]) => !e.coincidence);
+  doc.setFontSize(7); doc.setFont('helvetica', 'normal'); doc.setTextColor(...PDF_MGRAY);
+  doc.text(`Generado: ${dateStr}`, pageW - margin, 70, { align: 'right' });
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const lastY = () => (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable?.finalY ?? filaY + 10;
+  // ── Alert banner ──
+  let curY = 78;
+  if (hitCount > 0) {
+    doc.setFillColor(254, 226, 226);
+    doc.setDrawColor(...PDF_RED);
+    doc.roundedRect(margin, curY, pageW - margin * 2, 10, 1.5, 1.5, 'FD');
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(8); doc.setTextColor(...PDF_RED);
+    doc.text(`⚠  ${hitCount} alerta${hitCount > 1 ? 's' : ''} detectada${hitCount > 1 ? 's' : ''} de ${totalLists} listas consultadas`, margin + 4, curY + 6.5);
+  } else {
+    doc.setFillColor(220, 252, 231);
+    doc.setDrawColor(...PDF_GREEN);
+    doc.roundedRect(margin, curY, pageW - margin * 2, 10, 1.5, 1.5, 'FD');
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(8); doc.setTextColor(...PDF_GREEN);
+    doc.text(`✓  Sin alertas — perfil limpio en todas las listas consultadas`, margin + 4, curY + 6.5);
+  }
+  curY += 14;
 
+  // ── Datos del perfil ──
+  if (Object.keys(result.ficha).length > 0) {
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(...PDF_NAVY);
+    doc.text('DATOS DEL PERFIL', margin, curY + 4);
+    doc.setFillColor(...PDF_INDIGO);
+    doc.rect(margin, curY + 5.5, pageW - margin * 2, 0.5, 'F');
+    autoTable(doc, {
+      startY: curY + 8,
+      head: [['Campo', 'Valor']],
+      body: Object.entries(result.ficha),
+      theme: 'grid',
+      headStyles: { fillColor: PDF_NAVY, textColor: PDF_WHITE, fontSize: 7, fontStyle: 'bold' },
+      bodyStyles: { fontSize: 8, textColor: PDF_DTEXT },
+      alternateRowStyles: { fillColor: PDF_LGRAY },
+      columnStyles: { 0: { fontStyle: 'bold', cellWidth: 50 } },
+      margin: { left: margin, right: margin },
+    });
+    curY = getLastY() + 6;
+  }
+
+  // ── Resultados de listas ──
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(...PDF_NAVY);
+  doc.text(`RESULTADOS DE LISTAS — ${hitCount} alerta${hitCount !== 1 ? 's' : ''} de ${totalLists} consultadas`, margin, curY + 4);
+  doc.setFillColor(...PDF_INDIGO);
+  doc.rect(margin, curY + 5.5, pageW - margin * 2, 0.5, 'F');
+
+  const sortedListas = Object.entries(result.listas).sort((a, b) => (b[1].coincidence ? 1 : 0) - (a[1].coincidence ? 1 : 0));
   autoTable(doc, {
-    startY: lastY() + 6,
+    startY: curY + 8,
     head: [['Lista', 'Resultado', 'Riesgo']],
-    body: [
-      ...hits.map(([n,e])  => [n, 'ALERTA', e.risk.toUpperCase()]),
-      ...clean.map(([n]) => [n, 'Sin coincidencia', '—']),
-    ],
-    theme: 'striped',
-    headStyles: { fillColor: [198, 40, 40] },
+    body: sortedListas.map(([n, e]) => [
+      n,
+      e.coincidence ? 'ALERTA' : 'Sin coincidencia',
+      e.coincidence ? (e.risk?.toUpperCase() || 'HIGH') : '—',
+    ]),
+    theme: 'grid',
+    headStyles: { fillColor: PDF_NAVY, textColor: PDF_WHITE, fontSize: 7, fontStyle: 'bold' },
+    bodyStyles: { fontSize: 8, textColor: PDF_DTEXT },
+    alternateRowStyles: { fillColor: PDF_LGRAY },
+    columnStyles: { 0: { cellWidth: 80 }, 1: { cellWidth: 45 }, 2: { cellWidth: 35 } },
+    didParseCell: (data) => {
+      if (data.section === 'body' && data.column.index === 1) {
+        const val = String(data.cell.raw ?? '');
+        if (val === 'ALERTA') { data.cell.styles.textColor = PDF_RED; data.cell.styles.fontStyle = 'bold'; }
+        else { data.cell.styles.textColor = PDF_GREEN; }
+      }
+      if (data.section === 'body' && data.column.index === 2) {
+        const val = String(data.cell.raw ?? '');
+        if (val !== '—') { data.cell.styles.textColor = PDF_RED; data.cell.styles.fontStyle = 'bold'; }
+      }
+    },
+    margin: { left: margin, right: margin },
   });
+  curY = getLastY() + 6;
 
-  doc.save(`regcheq_${result.dni}_${new Date().toISOString().slice(0,10)}.pdf`);
+  // ── Decision box ──
+  if (result.decision) {
+    const d = result.decision;
+    const isFB  = d.decision === 'FORZAR_BLOQUEO';
+    const isUCR = d.decision === 'UNDER_COMPLIANCE_REVIEW';
+    const decColor: [number,number,number] = isFB ? PDF_RED : isUCR ? PDF_AMBER : PDF_GREEN;
+    const decFill: [number,number,number]  = isFB ? [254,226,226] : isUCR ? [254,243,199] : [220,252,231];
+
+    // Check if we need a new page
+    if (curY > pageH - 50) { doc.addPage(); curY = 20; }
+
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(...PDF_NAVY);
+    doc.text('DECISIÓN (MOTOR LOCAL)', margin, curY + 4);
+    doc.setFillColor(...PDF_INDIGO);
+    doc.rect(margin, curY + 5.5, pageW - margin * 2, 0.5, 'F');
+    curY += 9;
+
+    doc.setFillColor(...decFill);
+    doc.setDrawColor(...decColor);
+    doc.roundedRect(margin, curY, pageW - margin * 2, 22, 2, 2, 'FD');
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(...decColor);
+    doc.text(d.decision, margin + 4, curY + 7);
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(7.5); doc.setTextColor(...PDF_DTEXT);
+    if (d.razon) doc.text(d.razon, margin + 4, curY + 13);
+    doc.setTextColor(...PDF_MGRAY); doc.setFontSize(7);
+    doc.text(`Precedentes: ${d.precedentesCount}   No-precedentes: ${d.noPrecedentesCount}   Equivalente total: ${d.totalEquivalente}`, margin + 4, curY + 20);
+    curY += 28;
+  }
+
+  // ── Footer on all pages ──
+  const totalPgs = (doc.internal as unknown as { getNumberOfPages: () => number }).getNumberOfPages?.() ?? 1;
+  for (let p = 1; p <= totalPgs; p++) {
+    doc.setPage(p);
+    doc.setFillColor(...PDF_NAVY);
+    doc.rect(0, pageH - 12, pageW, 12, 'F');
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(6.5); doc.setTextColor(...PDF_WHITE);
+    doc.text('LENS AI · Regcheq Screening · Team Compliance Global66', margin, pageH - 4.5);
+    doc.text(`Página ${p} de ${totalPgs} · ${dateStr}`, pageW - margin, pageH - 4.5, { align: 'right' });
+  }
+
+  doc.save(`regcheq_${result.dni}_${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}.pdf`);
 }
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
@@ -464,16 +624,16 @@ function DecisionBox({ decision, dark }: { decision: DecisionResult; dark: boole
   const isUCR = d === 'UNDER_COMPLIANCE_REVIEW';
 
   const boxCls = isFB
-    ? 'bg-red-950/40 border-red-700/60'
+    ? dark ? 'bg-red-950/40 border-red-700/60' : 'bg-red-50 border-red-300'
     : isUCR
-      ? 'bg-amber-950/40 border-amber-700/60'
-      : 'bg-emerald-950/30 border-emerald-700/50';
+      ? dark ? 'bg-amber-950/40 border-amber-700/60' : 'bg-amber-50 border-amber-300'
+      : dark ? 'bg-emerald-950/30 border-emerald-700/50' : 'bg-emerald-50 border-emerald-300';
 
   const labelCls = isFB
-    ? 'text-red-400'
+    ? dark ? 'text-red-400' : 'text-red-700'
     : isUCR
-      ? 'text-amber-400'
-      : 'text-emerald-400';
+      ? dark ? 'text-amber-400' : 'text-amber-700'
+      : dark ? 'text-emerald-400' : 'text-emerald-700';
 
   const icon = isFB ? '🚫' : isUCR ? '⚠️' : '✅';
 
@@ -528,11 +688,11 @@ function ResultCard({ result, dark }: { result: PerfilResult; dark: boolean }) {
         </div>
 
         {hitCount > 0 ? (
-          <div className="bg-red-950/40 border border-red-800/50 rounded-xl px-4 py-3 text-sm text-red-300">
+          <div className={`border rounded-xl px-4 py-3 text-sm font-medium ${dark ? 'bg-red-950/40 border-red-800/50 text-red-300' : 'bg-red-50 border-red-300 text-red-700'}`}>
             ⚠ <strong>{hitCount} alerta{hitCount > 1 ? 's' : ''} detectada{hitCount > 1 ? 's' : ''}</strong> — haz clic en cada lista para ver el detalle
           </div>
         ) : (
-          <div className="bg-emerald-950/30 border border-emerald-800/40 rounded-xl px-4 py-3 text-sm text-emerald-400">
+          <div className={`border rounded-xl px-4 py-3 text-sm font-medium ${dark ? 'bg-emerald-950/30 border-emerald-800/40 text-emerald-400' : 'bg-emerald-50 border-emerald-300 text-emerald-700'}`}>
             ✓ <strong>Sin alertas</strong> — perfil limpio en todas las listas consultadas
           </div>
         )}
