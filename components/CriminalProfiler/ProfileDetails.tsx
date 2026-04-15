@@ -20,15 +20,31 @@ interface ProfileDetailsProps {
 }
 
 type CrimeTab = 'lista' | 'timeline';
+type TimelineDir = 'vertical' | 'horizontal';
+
+// Maps preEvaluation.decision → nearest AnalysisAction
+function mapDecisionToAction(decision?: string): AnalysisAction {
+  if (!decision) return '';
+  const d = decision.toLowerCase();
+  if (d.includes('bloqueo') || d.includes('blocked') || d.includes('block')) return 'Fully Blocked';
+  if (d.includes('liberar') && d.includes('ucr')) return 'Liberar + UCR';
+  if (d.includes('liberar') || d.includes('liber')) return 'Liberar';
+  if (d.includes('ucr') || d.includes('compliance') || d.includes('revisar') || d.includes('review')) return 'Revisar';
+  const valid: AnalysisAction[] = ['Liberar', 'Revisar', 'Liberar + UCR', 'Fully Blocked'];
+  return valid.find(a => a.toLowerCase() === d) || '';
+}
 
 export const ProfileDetails: React.FC<ProfileDetailsProps> = ({ profile, onClose, onUpdate, onNext, onPrev }) => {
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [analyzing, setAnalyzing] = useState(false);
   const [useInternet, setUseInternet] = useState(false);
   const [inputValue, setInputValue] = useState('');
-  const [localAction, setLocalAction] = useState<AnalysisAction>(profile.selectedAction || '');
+  const [localAction, setLocalAction] = useState<AnalysisAction>(
+    profile.selectedAction || mapDecisionToAction(profile.preEvaluation?.decision)
+  );
   const [localNotes, setLocalNotes] = useState<string>(profile.notes || '');
   const [crimeTab, setCrimeTab] = useState<CrimeTab>('lista');
+  const [timelineDir, setTimelineDir] = useState<TimelineDir>('vertical');
   const [downloadingPdf, setDownloadingPdf] = useState(false);
 
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -45,10 +61,10 @@ export const ProfileDetails: React.FC<ProfileDetailsProps> = ({ profile, onClose
   useEffect(() => {
     setChatHistory([]);
     setInputValue('');
-    setLocalAction(profile.selectedAction || '');
+    setLocalAction(profile.selectedAction || mapDecisionToAction(profile.preEvaluation?.decision));
     setLocalNotes(profile.notes || '');
     setAnalyzing(false);
-  }, [profile.rut, profile.selectedAction, profile.notes]);
+  }, [profile.rut, profile.selectedAction, profile.notes, profile.preEvaluation?.decision]);
 
   const scrollToBottom = () => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -330,7 +346,14 @@ export const ProfileDetails: React.FC<ProfileDetailsProps> = ({ profile, onClose
 
           <div className="w-full md:w-2/5 bg-white dark:bg-slate-800 p-4 rounded-2xl border border-indigo-100 dark:border-indigo-900 shadow-lg shadow-indigo-100/20 flex flex-col gap-3">
             <div className="flex-1">
-              <label className="text-[9px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest ml-1 mb-1 block">Acción Final Evaluada</label>
+              <div className="flex items-center justify-between ml-1 mb-1">
+                <label className="text-[9px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest">Acción Final Evaluada</label>
+                {!profile.selectedAction && mapDecisionToAction(profile.preEvaluation?.decision) && (
+                  <span className="text-[8px] font-black text-indigo-500 dark:text-indigo-400 uppercase tracking-widest bg-indigo-50 dark:bg-indigo-950 px-2 py-0.5 rounded-full border border-indigo-200 dark:border-indigo-800">
+                    ✦ Sugerencia motor
+                  </span>
+                )}
+              </div>
               <select
                 value={localAction}
                 onChange={(e) => setLocalAction(e.target.value as AnalysisAction)}
@@ -386,7 +409,7 @@ export const ProfileDetails: React.FC<ProfileDetailsProps> = ({ profile, onClose
             </div>
 
             {/* Tab bar */}
-            <div className="flex gap-2 mb-5">
+            <div className="flex items-center gap-2 mb-5 flex-wrap">
               <button
                 onClick={() => setCrimeTab('lista')}
                 className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest border transition-all ${
@@ -407,6 +430,15 @@ export const ProfileDetails: React.FC<ProfileDetailsProps> = ({ profile, onClose
               >
                 <GitBranch size={12} /> Línea de Tiempo
               </button>
+              {crimeTab === 'timeline' && (
+                <button
+                  onClick={() => setTimelineDir(d => d === 'vertical' ? 'horizontal' : 'vertical')}
+                  title={timelineDir === 'vertical' ? 'Cambiar a horizontal' : 'Cambiar a vertical'}
+                  className="ml-auto flex items-center gap-1.5 px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest border transition-all bg-white dark:bg-slate-800 text-slate-500 dark:text-slate-400 border-slate-200 dark:border-slate-700 hover:border-indigo-400 hover:text-indigo-500"
+                >
+                  {timelineDir === 'vertical' ? '↔ Horizontal' : '↕ Vertical'}
+                </button>
+              )}
             </div>
 
             {crimeTab === 'lista' ? (
@@ -415,11 +447,11 @@ export const ProfileDetails: React.FC<ProfileDetailsProps> = ({ profile, onClose
                   <CrimeCard key={crime.id} crime={crime} getRiskBadgeColor={getRiskBadgeColor} getYearsAgo={getYearsAgo} />
                 ))}
               </div>
-            ) : (
+            ) : timelineDir === 'vertical' ? (
+              /* ── Vertical timeline ── */
               <div className="space-y-0">
                 {crimesByYear.map(([year, crimes], idx) => (
                   <div key={String(year)} className="flex gap-4">
-                    {/* Year node */}
                     <div className="flex flex-col items-center">
                       <div className="w-10 h-10 rounded-full bg-indigo-600 dark:bg-indigo-700 flex items-center justify-center shrink-0 z-10">
                         <span className="text-white font-black text-[9px]">{year}</span>
@@ -428,7 +460,6 @@ export const ProfileDetails: React.FC<ProfileDetailsProps> = ({ profile, onClose
                         <div className="w-0.5 flex-1 bg-indigo-200 dark:bg-indigo-800 mt-1 mb-1 min-h-[20px]" />
                       )}
                     </div>
-                    {/* Crimes for this year */}
                     <div className="flex-1 pb-6 space-y-3 pt-1">
                       {crimes.map(crime => (
                         <CrimeCard key={crime.id} crime={crime} getRiskBadgeColor={getRiskBadgeColor} getYearsAgo={getYearsAgo} />
@@ -438,6 +469,44 @@ export const ProfileDetails: React.FC<ProfileDetailsProps> = ({ profile, onClose
                 ))}
                 {crimesByYear.length === 0 && (
                   <p className="text-slate-400 text-sm font-medium italic text-center py-8">Sin causas registradas.</p>
+                )}
+              </div>
+            ) : (
+              /* ── Horizontal timeline ── */
+              <div className="overflow-x-auto pb-4">
+                {crimesByYear.length === 0 ? (
+                  <p className="text-slate-400 text-sm font-medium italic text-center py-8">Sin causas registradas.</p>
+                ) : (
+                  <div className="min-w-max">
+                    {/* Rail with year nodes */}
+                    <div className="flex items-center mb-4">
+                      {crimesByYear.map(([year, crimes], idx) => (
+                        <div key={String(year)} className="flex items-center">
+                          <div className="flex flex-col items-center gap-1">
+                            <div className="w-12 h-12 rounded-full bg-indigo-600 dark:bg-indigo-700 flex items-center justify-center shadow-lg">
+                              <span className="text-white font-black text-[9px]">{year}</span>
+                            </div>
+                            <span className="text-[8px] font-black text-indigo-500 dark:text-indigo-400 uppercase">
+                              {(crimes as Crime[]).length} causa{(crimes as Crime[]).length !== 1 ? 's' : ''}
+                            </span>
+                          </div>
+                          {idx < crimesByYear.length - 1 && (
+                            <div className="h-0.5 w-12 bg-indigo-200 dark:bg-indigo-800 mx-1" />
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                    {/* Crime cards per year in columns */}
+                    <div className="flex gap-3 items-start">
+                      {crimesByYear.map(([year, crimes]) => (
+                        <div key={String(year)} className="flex flex-col gap-2 w-56 shrink-0">
+                          {(crimes as Crime[]).map(crime => (
+                            <CrimeCard key={crime.id} crime={crime} getRiskBadgeColor={getRiskBadgeColor} getYearsAgo={getYearsAgo} />
+                          ))}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
                 )}
               </div>
             )}

@@ -32,6 +32,8 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
   const [searchTerm, setSearchTerm] = useState('');
   const [filterRutsWithInfo, setFilterRutsWithInfo] = useState(false);
   const [filterAction, setFilterAction] = useState<string>('All');
+  const [filterFinalAction, setFilterFinalAction] = useState<string>('All');
+  const [filterPreSugerencia, setFilterPreSugerencia] = useState<string>('All');
   const [filterRisk, setFilterRisk] = useState<string>('All');
   const [selectedRuts, setSelectedRuts] = useState<Set<string>>(new Set());
   const [sortConfig, setSortConfig] = useState<{ key: SortKey; order: SortOrder }>({ key: 'rut', order: null });
@@ -158,9 +160,11 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
       const matchesInfo = filterRutsWithInfo ? p.totalCrimes > 0 : true;
       const matchesAction = filterAction === 'All' ? true : (filterAction === 'Pendiente' || filterAction === 'Revisado') ? p.status === filterAction : p.selectedAction === filterAction;
       const matchesRisk = filterRisk === 'All' ? true : p.highestRisk.toLowerCase() === filterRisk.toLowerCase();
+      const matchesFinalAction = filterFinalAction === 'All' ? true : p.selectedAction === filterFinalAction;
+      const matchesPreSugerencia = filterPreSugerencia === 'All' ? true : filterPreSugerencia === 'Sin Evaluación' ? !p.preEvaluation?.decision : (p.preEvaluation?.decision || '') === filterPreSugerencia;
       // PEP sub-flow split
       const matchesPepTab = pepTab === 'peps' ? p.isPep === true : !p.isPep;
-      return matchesSearch && matchesInfo && matchesAction && matchesRisk && matchesPepTab;
+      return matchesSearch && matchesInfo && matchesAction && matchesRisk && matchesFinalAction && matchesPreSugerencia && matchesPepTab;
     });
     if (sortConfig.key && sortConfig.order) {
       result.sort((a, b) => {
@@ -175,7 +179,7 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
       });
     }
     return result;
-  }, [state.profiles, searchTerm, filterRutsWithInfo, filterAction, filterRisk, sortConfig, pepTab]);
+  }, [state.profiles, searchTerm, filterRutsWithInfo, filterAction, filterFinalAction, filterPreSugerencia, filterRisk, sortConfig, pepTab]);
 
   const selectedProfile = useMemo(() => state.profiles.find(p => p.rut === state.selectedRut) || null, [state.profiles, state.selectedRut]);
   const currentIndex = useMemo(() => !state.selectedRut ? -1 : filteredAndSortedProfiles.findIndex(p => p.rut === state.selectedRut), [state.selectedRut, filteredAndSortedProfiles]);
@@ -390,6 +394,27 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
                         <Layers size={12} className="text-slate-400" />
                         <select value={filterRisk} onChange={(e) => setFilterRisk(e.target.value)} className="text-[9px] bg-transparent font-black uppercase focus:outline-none text-slate-600 dark:text-slate-300">
                           <option value="All">Riesgo</option><option value="critical">Crítico</option><option value="high">Alto</option><option value="medium">Medio</option><option value="low">Bajo</option>
+                        </select>
+                      </div>
+                      <div className="flex items-center gap-2 bg-slate-50 dark:bg-slate-800 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700">
+                        <ChevronRight size={12} className="text-slate-400" />
+                        <select value={filterPreSugerencia} onChange={(e) => setFilterPreSugerencia(e.target.value)} className="text-[9px] bg-transparent font-black uppercase focus:outline-none text-slate-600 dark:text-slate-300">
+                          <option value="All">Pre-Sugerencia</option>
+                          <option value="Liberar">Liberar</option>
+                          <option value="Revisar">Revisar</option>
+                          <option value="Liberar + UCR">Liberar + UCR</option>
+                          <option value="Fully Blocked">Fully Blocked</option>
+                          <option value="Sin Evaluación">Sin Evaluación</option>
+                        </select>
+                      </div>
+                      <div className="flex items-center gap-2 bg-slate-50 dark:bg-slate-800 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700">
+                        <CheckCircle size={12} className="text-slate-400" />
+                        <select value={filterFinalAction} onChange={(e) => setFilterFinalAction(e.target.value)} className="text-[9px] bg-transparent font-black uppercase focus:outline-none text-slate-600 dark:text-slate-300">
+                          <option value="All">Acción Final</option>
+                          <option value="Liberar">Liberar</option>
+                          <option value="Revisar">Revisar</option>
+                          <option value="Liberar + UCR">Liberar + UCR</option>
+                          <option value="Fully Blocked">Fully Blocked</option>
                         </select>
                       </div>
                       <button onClick={() => setFilterRutsWithInfo(!filterRutsWithInfo)} className={`flex items-center gap-2 px-4 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all border ${filterRutsWithInfo ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-slate-50 dark:bg-slate-800 text-slate-500 dark:text-slate-400 border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-700'}`}>Solo con Antecedentes</button>
