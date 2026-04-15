@@ -11,7 +11,7 @@ import {
   FileSpreadsheet, Search, Filter, ChevronRight, ShieldAlert, AlertCircle,
   Download, CheckCircle, ChevronUp, ChevronDown, ArrowUpDown, CheckSquare,
   Square, BookOpen, Database, RotateCcw, LayoutDashboard, Share2, FolderInput,
-  Layers, Upload, Settings, ArrowLeft, Sun, Moon, Zap, GitCompare
+  Layers, Upload, Settings, ArrowLeft, Sun, Moon, Zap, GitCompare, Shield
 } from 'lucide-react';
 
 type SortKey = 'rut' | 'nombre' | 'totalCrimes' | 'totalHighRiskCrimes' | 'highestRisk' | 'status';
@@ -36,6 +36,7 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
   const [selectedRuts, setSelectedRuts] = useState<Set<string>>(new Set());
   const [sortConfig, setSortConfig] = useState<{ key: SortKey; order: SortOrder }>({ key: 'rut', order: null });
   const [flowType, setFlowType] = useState<'emergency' | 'masivo'>('emergency');
+  const [pepTab, setPepTab] = useState<'sanciones' | 'peps'>('sanciones');
   const sessionFileInputRef = useRef<HTMLInputElement>(null);
   const emergencyFileRef = useRef<HTMLInputElement>(null);
   const masivoFileRef = useRef<HTMLInputElement>(null);
@@ -157,7 +158,9 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
       const matchesInfo = filterRutsWithInfo ? p.totalCrimes > 0 : true;
       const matchesAction = filterAction === 'All' ? true : (filterAction === 'Pendiente' || filterAction === 'Revisado') ? p.status === filterAction : p.selectedAction === filterAction;
       const matchesRisk = filterRisk === 'All' ? true : p.highestRisk.toLowerCase() === filterRisk.toLowerCase();
-      return matchesSearch && matchesInfo && matchesAction && matchesRisk;
+      // PEP sub-flow split
+      const matchesPepTab = pepTab === 'peps' ? p.isPep === true : !p.isPep;
+      return matchesSearch && matchesInfo && matchesAction && matchesRisk && matchesPepTab;
     });
     if (sortConfig.key && sortConfig.order) {
       result.sort((a, b) => {
@@ -172,7 +175,7 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
       });
     }
     return result;
-  }, [state.profiles, searchTerm, filterRutsWithInfo, filterAction, filterRisk, sortConfig]);
+  }, [state.profiles, searchTerm, filterRutsWithInfo, filterAction, filterRisk, sortConfig, pepTab]);
 
   const selectedProfile = useMemo(() => state.profiles.find(p => p.rut === state.selectedRut) || null, [state.profiles, state.selectedRut]);
   const currentIndex = useMemo(() => !state.selectedRut ? -1 : filteredAndSortedProfiles.findIndex(p => p.rut === state.selectedRut), [state.selectedRut, filteredAndSortedProfiles]);
@@ -337,6 +340,45 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
                         <input type="text" placeholder="Buscar por RUT o Nombre..." className="pl-12 pr-4 py-3 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl text-[11px] font-black uppercase focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 w-full text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
                       </div>
                     </div>
+                    {/* ── PEP sub-flow tabs ── */}
+                    {(() => {
+                      const pepCount = state.profiles.filter(p => p.isPep === true).length;
+                      const sancionesCount = state.profiles.filter(p => !p.isPep).length;
+                      return (
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => { setPepTab('sanciones'); setSelectedRuts(new Set()); }}
+                            className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-[9px] font-black uppercase tracking-widest border transition-all ${
+                              pepTab === 'sanciones'
+                                ? 'bg-indigo-600 text-white border-indigo-600 shadow-lg'
+                                : 'bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:border-indigo-400'
+                            }`}
+                          >
+                            <FileSpreadsheet size={13} />
+                            Listas de Sanciones
+                            <span className={`ml-1 px-2 py-0.5 rounded-full text-[9px] font-black ${pepTab === 'sanciones' ? 'bg-white/20 text-white' : 'bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300'}`}>
+                              {sancionesCount}
+                            </span>
+                          </button>
+                          <button
+                            onClick={() => { setPepTab('peps'); setSelectedRuts(new Set()); }}
+                            className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-[9px] font-black uppercase tracking-widest border transition-all ${
+                              pepTab === 'peps'
+                                ? 'bg-purple-600 text-white border-purple-600 shadow-lg'
+                                : 'bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:border-purple-400'
+                            }`}
+                          >
+                            <Shield size={13} />
+                            Coincidencias PEPs
+                            {pepCount > 0 && (
+                              <span className={`ml-1 px-2 py-0.5 rounded-full text-[9px] font-black ${pepTab === 'peps' ? 'bg-white/20 text-white' : 'bg-purple-100 dark:bg-purple-950 text-purple-700 dark:text-purple-300'}`}>
+                                {pepCount}
+                              </span>
+                            )}
+                          </button>
+                        </div>
+                      );
+                    })()}
                     <div className="flex flex-wrap items-center gap-3">
                       <div className="flex items-center gap-2 bg-slate-50 dark:bg-slate-800 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700">
                         <Filter size={12} className="text-slate-400" />
@@ -371,7 +413,7 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
                         {filteredAndSortedProfiles.map((p) => (
                           <tr key={p.rut} className={`hover:bg-indigo-50 dark:hover:bg-indigo-950/40 transition-colors ${selectedRuts.has(p.rut) ? 'bg-indigo-50 dark:bg-indigo-950/60' : ''}`}>
                             <td className="px-6 py-4"><button onClick={() => { const n = new Set(selectedRuts); n.has(p.rut) ? n.delete(p.rut) : n.add(p.rut); setSelectedRuts(n); }}>{selectedRuts.has(p.rut) ? <CheckSquare size={20} className="text-indigo-500" /> : <Square size={20} className="text-slate-300 dark:text-slate-600" />}</button></td>
-                            <td className="px-6 py-4"><div className="flex flex-col"><span className="text-xs font-black text-slate-900 dark:text-white uppercase leading-none mb-1">{p.nombre} {p.apellido}</span><span className="text-[10px] text-slate-400 dark:text-slate-500 font-bold uppercase">ID: {p.rut}</span></div></td>
+                            <td className="px-6 py-4"><div className="flex flex-col gap-1"><div className="flex items-center gap-2"><span className="text-xs font-black text-slate-900 dark:text-white uppercase leading-none">{p.nombre} {p.apellido}</span>{p.isPep && <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[8px] font-black uppercase bg-purple-100 dark:bg-purple-950 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800"><Shield size={8} />PEP</span>}</div><span className="text-[10px] text-slate-400 dark:text-slate-500 font-bold uppercase">ID: {p.rut}</span></div></td>
                             <td className="px-6 py-4 text-center"><span className={`inline-flex items-center justify-center min-w-[2.5rem] px-2 py-1 rounded-lg text-[10px] font-black ${p.totalCrimes > 0 ? 'bg-indigo-100 dark:bg-indigo-900 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-700' : 'bg-slate-100 dark:bg-slate-800 text-slate-400 dark:text-slate-500'}`}>{p.totalCrimes}</span></td>
                             <td className="px-6 py-4 text-center"><span className={`inline-flex items-center justify-center min-w-[2.5rem] px-2 py-1 rounded-lg text-[10px] font-black ${p.totalHighRiskCrimes > 0 ? 'bg-red-100 dark:bg-red-950 text-red-600 dark:text-red-400 border border-red-200 dark:border-red-800 animate-pulse' : 'bg-slate-100 dark:bg-slate-800 text-slate-400 dark:text-slate-500'}`}>{p.totalHighRiskCrimes}</span></td>
                             <td className="px-6 py-4"><span className={`text-[9px] px-2 py-0.5 rounded-md font-black uppercase border ${p.preEvaluation?.decision.toLowerCase().includes('liber') ? 'bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-400 border-emerald-200 dark:border-emerald-800' : p.preEvaluation?.decision.toLowerCase().includes('block') ? 'bg-red-50 dark:bg-red-950 text-red-600 dark:text-red-400 border-red-200 dark:border-red-800' : 'bg-amber-50 dark:bg-amber-950 text-amber-600 dark:text-amber-400 border-amber-200 dark:border-amber-800'}`}>{p.preEvaluation?.decision || 'Sin Evaluación'}</span></td>
