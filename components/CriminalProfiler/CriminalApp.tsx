@@ -38,7 +38,7 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
   const [selectedRuts, setSelectedRuts] = useState<Set<string>>(new Set());
   const [sortConfig, setSortConfig] = useState<{ key: SortKey; order: SortOrder }>({ key: 'rut', order: null });
   const [flowType, setFlowType] = useState<'emergency' | 'masivo'>('emergency');
-  const [pepTab, setPepTab] = useState<'sanciones' | 'peps'>('sanciones');
+  const [pepTab, setPepTab] = useState<'sanciones' | 'peps' | 'sin-antecedentes'>('sanciones');
   const sessionFileInputRef = useRef<HTMLInputElement>(null);
   const emergencyFileRef = useRef<HTMLInputElement>(null);
   const masivoFileRef = useRef<HTMLInputElement>(null);
@@ -162,8 +162,11 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
       const matchesRisk = filterRisk === 'All' ? true : p.highestRisk.toLowerCase() === filterRisk.toLowerCase();
       const matchesFinalAction = filterFinalAction === 'All' ? true : p.selectedAction === filterFinalAction;
       const matchesPreSugerencia = filterPreSugerencia === 'All' ? true : filterPreSugerencia === 'Sin Evaluación' ? !p.preEvaluation?.decision : (p.preEvaluation?.decision || '') === filterPreSugerencia;
-      // PEP sub-flow split
-      const matchesPepTab = pepTab === 'peps' ? p.isPep === true : !p.isPep;
+      // 3-way sub-flow split
+      const matchesPepTab =
+        pepTab === 'peps'               ? p.isPep === true :
+        pepTab === 'sin-antecedentes'   ? (!p.isPep && p.totalCrimes === 0) :
+        /* sanciones */                   (!p.isPep && p.totalCrimes > 0);
       return matchesSearch && matchesInfo && matchesAction && matchesRisk && matchesFinalAction && matchesPreSugerencia && matchesPepTab;
     });
     if (sortConfig.key && sortConfig.order) {
@@ -344,12 +347,14 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
                         <input type="text" placeholder="Buscar por RUT o Nombre..." className="pl-12 pr-4 py-3 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl text-[11px] font-black uppercase focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 w-full text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
                       </div>
                     </div>
-                    {/* ── PEP sub-flow tabs ── */}
+                    {/* ── 3-way sub-flow tabs ── */}
                     {(() => {
-                      const pepCount = state.profiles.filter(p => p.isPep === true).length;
-                      const sancionesCount = state.profiles.filter(p => !p.isPep).length;
+                      const sancionesCount      = state.profiles.filter(p => !p.isPep && p.totalCrimes > 0).length;
+                      const pepCount            = state.profiles.filter(p => p.isPep === true).length;
+                      const sinAntecedentesCount = state.profiles.filter(p => !p.isPep && p.totalCrimes === 0).length;
                       return (
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          {/* Listas de Sanciones */}
                           <button
                             onClick={() => { setPepTab('sanciones'); setSelectedRuts(new Set()); }}
                             className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-[9px] font-black uppercase tracking-widest border transition-all ${
@@ -364,6 +369,7 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
                               {sancionesCount}
                             </span>
                           </button>
+                          {/* Coincidencias PEPs */}
                           <button
                             onClick={() => { setPepTab('peps'); setSelectedRuts(new Set()); }}
                             className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-[9px] font-black uppercase tracking-widest border transition-all ${
@@ -379,6 +385,21 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
                                 {pepCount}
                               </span>
                             )}
+                          </button>
+                          {/* Sin Antecedentes */}
+                          <button
+                            onClick={() => { setPepTab('sin-antecedentes'); setSelectedRuts(new Set()); }}
+                            className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-[9px] font-black uppercase tracking-widest border transition-all ${
+                              pepTab === 'sin-antecedentes'
+                                ? 'bg-emerald-600 text-white border-emerald-600 shadow-lg'
+                                : 'bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:border-emerald-400'
+                            }`}
+                          >
+                            <CheckCircle size={13} />
+                            Sin Antecedentes
+                            <span className={`ml-1 px-2 py-0.5 rounded-full text-[9px] font-black ${pepTab === 'sin-antecedentes' ? 'bg-white/20 text-white' : 'bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300'}`}>
+                              {sinAntecedentesCount}
+                            </span>
                           </button>
                         </div>
                       );

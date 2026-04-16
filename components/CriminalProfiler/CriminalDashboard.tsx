@@ -16,6 +16,7 @@ const COLORS = ['#6366f1', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6'];
 export const CriminalDashboard: React.FC<DashboardProps> = ({ profiles }) => {
   const stats = useMemo(() => {
     const withCrimes = profiles.filter(p => p.totalCrimes > 0).length;
+    const withoutCrimes = profiles.filter(p => p.totalCrimes === 0 && !p.isPep).length;
     const totalCrimes = profiles.reduce((acc, p) => acc + p.totalCrimes, 0);
 
     const crimeTypes: Record<string, number> = {};
@@ -38,6 +39,7 @@ export const CriminalDashboard: React.FC<DashboardProps> = ({ profiles }) => {
 
     return {
       withCrimes,
+      withoutCrimes,
       totalCrimes,
       crimeTypeData,
       riskData
@@ -46,7 +48,7 @@ export const CriminalDashboard: React.FC<DashboardProps> = ({ profiles }) => {
 
   return (
     <div className="space-y-6">
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
         <StatCard
           title="Total RUTs"
           value={profiles.length}
@@ -57,7 +59,14 @@ export const CriminalDashboard: React.FC<DashboardProps> = ({ profiles }) => {
           title="Con Antecedentes"
           value={stats.withCrimes}
           icon={<ShieldAlert className="text-orange-500" />}
-          subtitle={`${((stats.withCrimes/profiles.length)*100).toFixed(1)}% del total`}
+          subtitle={`${profiles.length ? ((stats.withCrimes / profiles.length) * 100).toFixed(1) : 0}% del total`}
+        />
+        <StatCard
+          title="Sin Antecedentes"
+          value={stats.withoutCrimes}
+          icon={<TrendingUp className="text-emerald-500" />}
+          subtitle={`${profiles.length ? ((stats.withoutCrimes / profiles.length) * 100).toFixed(1) : 0}% del total`}
+          highlight="emerald"
         />
         <StatCard
           title="Total Delitos"
@@ -122,12 +131,16 @@ export const CriminalDashboard: React.FC<DashboardProps> = ({ profiles }) => {
   );
 };
 
-const StatCard: React.FC<{ title: string; value: string | number; icon: React.ReactNode; subtitle: string }> = ({ title, value, icon, subtitle }) => (
-  <div className="bg-white dark:bg-slate-900 p-5 rounded-xl shadow-sm border border-slate-200 dark:border-slate-700 flex items-start space-x-4">
-    <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">{icon}</div>
+const StatCard: React.FC<{ title: string; value: string | number; icon: React.ReactNode; subtitle: string; highlight?: 'emerald' }> = ({ title, value, icon, subtitle, highlight }) => (
+  <div className={`bg-white dark:bg-slate-900 p-5 rounded-xl shadow-sm flex items-start space-x-4 ${
+    highlight === 'emerald'
+      ? 'border-2 border-emerald-300 dark:border-emerald-700'
+      : 'border border-slate-200 dark:border-slate-700'
+  }`}>
+    <div className={`p-3 rounded-lg ${highlight === 'emerald' ? 'bg-emerald-50 dark:bg-emerald-950' : 'bg-slate-50 dark:bg-slate-800'}`}>{icon}</div>
     <div>
       <p className="text-sm font-medium text-slate-500 dark:text-slate-400">{title}</p>
-      <h4 className="text-2xl font-bold text-slate-900 dark:text-white">{value}</h4>
+      <h4 className={`text-2xl font-bold ${highlight === 'emerald' ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-900 dark:text-white'}`}>{value}</h4>
       <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">{subtitle}</p>
     </div>
   </div>

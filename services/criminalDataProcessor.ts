@@ -357,21 +357,40 @@ export const processRegcheqFile = async (file: File, catalog?: CatalogData | nul
   });
 };
 
+const profileRow = (p: PersonProfile) => ({
+  'IDENTIDAD (DNI/RUT)': p.rut,
+  'Nombre Completo': `${p.nombre} ${p.apellido}`,
+  'ID Usuario': p.customerId,
+  'Es PEP': p.isPep ? 'VERDADERO' : 'FALSO',
+  'Sugerencia Motor': p.preEvaluation?.decision || 'N/A',
+  'Score Acumulado': p.preEvaluation?.scoreTotal || 0,
+  'Estatus': p.status,
+  'Acción Manual': p.selectedAction || '',
+  'Gravedad Máx': p.highestRisk,
+  'Cant. Delitos': p.totalCrimes,
+});
+
 export const exportToExcel = (profiles: PersonProfile[]) => {
-  const exportData = profiles.map(p => ({
-    'IDENTIDAD (DNI/RUT)': p.rut, 
-    'Nombre Completo': `${p.nombre} ${p.apellido}`,
-    'ID Usuario': p.customerId,
-    'Es PEP': p.isPep ? 'VERDADERO' : 'FALSO',
-    'Sugerencia Motor': p.preEvaluation?.decision || 'N/A', 
-    'Score Acumulado': p.preEvaluation?.scoreTotal || 0,
-    'Estatus': p.status, 
-    'Acción Manual': p.selectedAction || '',
-    'Gravedad Máx': p.highestRisk, 
-    'Cant. Delitos': p.totalCrimes
-  }));
-  const worksheet = XLSX.utils.json_to_sheet(exportData);
   const workbook = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(workbook, worksheet, 'Analítica Judicial');
+
+  // Hoja 1 — Consolidado completo
+  const wsAll = XLSX.utils.json_to_sheet(profiles.map(profileRow));
+  XLSX.utils.book_append_sheet(workbook, wsAll, 'Consolidado');
+
+  // Hoja 2 — Listas de Sanciones (con antecedentes, no PEP)
+  const sanciones = profiles.filter(p => !p.isPep && p.totalCrimes > 0);
+  const wsSanciones = XLSX.utils.json_to_sheet(sanciones.length ? sanciones.map(profileRow) : [{ Nota: 'Sin registros' }]);
+  XLSX.utils.book_append_sheet(workbook, wsSanciones, 'Listas de Sanciones');
+
+  // Hoja 3 — Coincidencias PEP
+  const peps = profiles.filter(p => p.isPep === true);
+  const wsPeps = XLSX.utils.json_to_sheet(peps.length ? peps.map(profileRow) : [{ Nota: 'Sin registros' }]);
+  XLSX.utils.book_append_sheet(workbook, wsPeps, 'Coincidencias PEP');
+
+  // Hoja 4 — Sin Antecedentes (sin delitos, no PEP)
+  const sinAnt = profiles.filter(p => !p.isPep && p.totalCrimes === 0);
+  const wsSinAnt = XLSX.utils.json_to_sheet(sinAnt.length ? sinAnt.map(profileRow) : [{ Nota: 'Sin registros' }]);
+  XLSX.utils.book_append_sheet(workbook, wsSinAnt, 'Sin Antecedentes');
+
   XLSX.writeFile(workbook, `Reporte_Analisis_${new Date().toISOString().split('T')[0]}.xlsx`);
 };
