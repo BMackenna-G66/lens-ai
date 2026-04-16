@@ -748,13 +748,18 @@ function ResultCard({ result, dark }: { result: PerfilResult; dark: boolean }) {
 
 interface RegcheqToolProps {
   onBack: () => void;
+  darkMode?: boolean;
+  onToggleDarkMode?: () => void;
 }
 
-export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack }) => {
-  const [dark, setDark]   = useState<boolean>(() => localStorage.getItem('regcheq-theme') !== 'light');
-  const [tab, setTab]     = useState<Tab>('individual');
+export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) => {
+  // Use global darkMode if provided, otherwise fallback to localStorage
+  const [localDark] = useState<boolean>(() => localStorage.getItem('regcheq-theme') !== 'light');
+  const dark = darkMode !== undefined ? darkMode : localDark;
+  const [tab, setTab] = useState<Tab>('individual');
 
   useEffect(() => {
+    // Keep local preference in sync for standalone use
     localStorage.setItem('regcheq-theme', dark ? 'dark' : 'light');
   }, [dark]);
 
@@ -1156,14 +1161,7 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack }) => {
           })}
         </div>
 
-        {/* Dark mode toggle */}
-        <button
-          onClick={() => setDark(d => !d)}
-          className={`ml-auto flex items-center gap-2 text-xs font-bold px-3 py-2 rounded-xl border transition-all ${dark ? 'bg-slate-800 border-slate-700 text-amber-400' : 'bg-violet-50 border-violet-300 text-violet-700 hover:bg-violet-100'}`}
-          title="Cambiar tema"
-        >
-          {dark ? '☀️ Claro' : '🌙 Oscuro'}
-        </button>
+        <div className="ml-auto" />
       </nav>
 
       <div className="max-w-4xl mx-auto px-6 py-8">
