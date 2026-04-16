@@ -120,6 +120,26 @@ export const GeneralDashboard: React.FC<GeneralDashboardProps> = ({ onBack }) =>
     return new Date(ts).toLocaleDateString('es-CL', { day: '2-digit', month: 'short', year: 'numeric' });
   };
 
+  // Docs per user (bar chart)
+  const docsByUser = userStats
+    .filter(u => u.totalDocs > 0)
+    .sort((a, b) => b.totalDocs - a.totalDocs)
+    .map(u => ({
+      name: u.profile.displayName?.split(' ')[0] || u.profile.email?.split('@')[0] || 'Usuario',
+      docs: u.totalDocs,
+    }));
+
+  // Docs by country (bar chart)
+  const countryCounts: Record<string, number> = {};
+  for (const e of events) {
+    if (e.eventType === 'document_processed' && e.country) {
+      countryCounts[e.country] = (countryCounts[e.country] || 0) + 1;
+    }
+  }
+  const docsByCountry = Object.entries(countryCounts)
+    .sort((a, b) => b[1] - a[1])
+    .map(([country, docs]) => ({ country, docs }));
+
   if (!firebaseReady) {
     return (
       <div className="min-h-screen bg-slate-50 dark:bg-slate-900 p-8">
@@ -268,6 +288,63 @@ export const GeneralDashboard: React.FC<GeneralDashboardProps> = ({ onBack }) =>
                     )}
                   />
                 </PieChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+        </div>
+
+        {/* New charts row: docs per user + docs by country */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* Docs processed per user */}
+          <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-5">
+            <h3 className="text-base font-semibold text-slate-700 dark:text-slate-300 mb-4">
+              👤 Archivos procesados por usuario
+            </h3>
+            {loading ? (
+              <Skeleton className="h-48" />
+            ) : docsByUser.length === 0 ? (
+              <div className="flex flex-col items-center justify-center h-48 text-slate-400 dark:text-slate-500 gap-2">
+                <span className="text-3xl">📭</span>
+                <p className="text-sm">Sin documentos procesados aún</p>
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height={200}>
+                <BarChart data={docsByUser} layout="vertical" margin={{ top: 0, right: 16, left: 8, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" horizontal={false} />
+                  <XAxis type="number" tick={{ fontSize: 11, fill: '#94a3b8' }} allowDecimals={false} />
+                  <YAxis type="category" dataKey="name" width={72} tick={{ fontSize: 11, fill: '#94a3b8' }} />
+                  <Tooltip content={<CustomTooltip />} />
+                  <Bar dataKey="docs" name="Documentos" fill="#6366f1" radius={[0, 4, 4, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+
+          {/* Docs by country */}
+          <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-5">
+            <h3 className="text-base font-semibold text-slate-700 dark:text-slate-300 mb-4">
+              🌎 Archivos revisados por país de escritura
+            </h3>
+            {loading ? (
+              <Skeleton className="h-48" />
+            ) : docsByCountry.length === 0 ? (
+              <div className="flex flex-col items-center justify-center h-48 text-slate-400 dark:text-slate-500 gap-2">
+                <span className="text-3xl">🌎</span>
+                <p className="text-sm">Sin datos de país registrados aún</p>
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height={200}>
+                <BarChart data={docsByCountry} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                  <XAxis dataKey="country" tick={{ fontSize: 11, fill: '#94a3b8' }} />
+                  <YAxis tick={{ fontSize: 11, fill: '#94a3b8' }} allowDecimals={false} />
+                  <Tooltip content={<CustomTooltip />} />
+                  <Bar dataKey="docs" name="Documentos" radius={[4, 4, 0, 0]}>
+                    {docsByCountry.map((entry, index) => (
+                      <Cell key={entry.country} fill={COLORS[index % COLORS.length]} />
+                    ))}
+                  </Bar>
+                </BarChart>
               </ResponsiveContainer>
             )}
           </div>
