@@ -125,7 +125,7 @@ export const GeneralDashboard: React.FC<GeneralDashboardProps> = ({ onBack }) =>
     .filter(u => u.totalDocs > 0)
     .sort((a, b) => b.totalDocs - a.totalDocs)
     .map(u => ({
-      name: u.profile.displayName?.split(' ')[0] || u.profile.email?.split('@')[0] || 'Usuario',
+      name: u.profile.displayName?.split(' ').slice(0, 2).join(' ') || u.profile.email?.split('@')[0] || 'Usuario',
       docs: u.totalDocs,
     }));
 
@@ -312,7 +312,7 @@ export const GeneralDashboard: React.FC<GeneralDashboardProps> = ({ onBack }) =>
                 <BarChart data={docsByUser} layout="vertical" margin={{ top: 0, right: 16, left: 8, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" horizontal={false} />
                   <XAxis type="number" tick={{ fontSize: 11, fill: '#94a3b8' }} allowDecimals={false} />
-                  <YAxis type="category" dataKey="name" width={72} tick={{ fontSize: 11, fill: '#94a3b8' }} />
+                  <YAxis type="category" dataKey="name" width={110} tick={{ fontSize: 11, fill: '#94a3b8' }} />
                   <Tooltip content={<CustomTooltip />} />
                   <Bar dataKey="docs" name="Documentos" fill="#6366f1" radius={[0, 4, 4, 0]} />
                 </BarChart>
