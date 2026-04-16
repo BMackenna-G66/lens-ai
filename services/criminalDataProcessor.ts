@@ -25,6 +25,62 @@ const calculateHighestRisk = (crimes: Crime[]): string => {
   return highest;
 };
 
+// ── Helpers shared by both flows ─────────────────────────────────────────────
+
+/** Normalise any identifier: remove dots/dashes, uppercase */
+const normaliseId = (raw: string) =>
+  raw.replace(/\./g, '').replace(/-/g, '').toUpperCase();
+
+/** Extract PEP flag from a Coincidencias row (handles multiple column-name variants) */
+const extractPepFromRow = (row: any): boolean => {
+  const val =
+    row['Coincidencia_PEP Chile'] ??
+    row['Coincidencia PEP Chile'] ??
+    row['PEP Chile'] ??
+    row['Es PEP'] ??
+    row['es_pep'] ??
+    row['Es_pep'] ??
+    row['PEP'] ??
+    '';
+  return (
+    val === true || val === 1 ||
+    String(val).toLowerCase() === 'true' ||
+    String(val).toLowerCase() === 'si' ||
+    String(val).toLowerCase() === 'sí' ||
+    String(val).toLowerCase() === 'verdadero'
+  );
+};
+
+/** Build a minimal PersonProfile from a Coincidencias row (name may be absent) */
+const profileFromCoincidenciasRow = (
+  row: any, dni: string, rawId: string, isPep: boolean, catalog?: CatalogData | null
+): PersonProfile => {
+  const fullName = String(
+    row['Nombre'] || row['nombre'] || row['Nombre Completo'] || row['NombreCompleto'] ||
+    row['Imputado'] || row['Imputado (API)'] || ''
+  ).trim();
+  const words = fullName.split(/\s+/).filter(Boolean);
+  const profile: PersonProfile = {
+    rut: dni,
+    nombre: words.length > 1 ? words.slice(0, -1).join(' ') : (fullName || `ID: ${rawId}`),
+    apellido: words.length > 1 ? words[words.length - 1] : '',
+    nombreCuenta: fullName || rawId,
+    customerId: rawId,
+    conInfo: false,
+    isPep,
+    crimes: [],
+    totalCrimes: 0,
+    totalHighRiskCrimes: 0,
+    highestRisk: 'n/a',
+    status: 'Pendiente',
+    selectedAction: '',
+  };
+  if (catalog) applyEvaluationToProfile(profile, catalog);
+  return profile;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 export const processExcelFile = async (file: File, catalog?: CatalogData | null): Promise<PersonProfile[]> => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -40,12 +96,13 @@ export const processExcelFile = async (file: File, catalog?: CatalogData | null)
           // Identificación: Prioridad DNI, luego RUT
           let idRaw = String(row['DNI'] || row['dni'] || row['rut'] || row['RUT'] || row['IDENTIDAD'] || '').trim();
           if (!idRaw || idRaw === "0" || idRaw === "") return;
-          
-          const idClean = idRaw.replace(/\./g, '').replace(/-/g, '').toUpperCase();
-          
+
+          const idClean = normaliseId(idRaw);
+
           const conInfoRaw = String(row['Con Info'] || row['con info'] || row['Con info'] || row['INFO'] || '').toLowerCase();
           const conInfo = conInfoRaw === 'si' || conInfoRaw === 'sí' || row['Con Info'] === 1 || row['con info'] === 1;
-          
+
+          // isPep from main sheet (fallback — Coincidencias sheet overrides below)
           const isPepRaw = String(row['Es_pep'] || row['es_pep'] || row['Es Pep'] || row['es pep'] || '').toLowerCase().trim();
           const isPep = isPepRaw === 'verdadero' || isPepRaw === 'true' || isPepRaw === 'si' || isPepRaw === 'sí' || isPepRaw === '1';
 
@@ -68,12 +125,9 @@ export const processExcelFile = async (file: File, catalog?: CatalogData | null)
           }
 
           const profile = profilesMap.get(idClean)!;
-          if (isPep) {
-            profile.isPep = true;
-          }
+          if (isPep) profile.isPep = true;
 
           const keys = Object.keys(row);
-          
           const indices = new Set<number>();
           keys.forEach(key => {
             const match = key.match(/crimen_(\d+)/i);
@@ -85,9 +139,7 @@ export const processExcelFile = async (file: File, catalog?: CatalogData | null)
             if (crimeType && crimeType !== "0" && crimeType !== "undefined" && crimeType !== "") {
               const ruc = String(row[`ruc_${i}`] || row[`RUC_${i}`] || "").trim();
               const rit = String(row[`rit_${i}`] || row[`RIT_${i}`] || "").trim();
-              
               const uniqueCrimeId = ruc || rit || `${idClean}_${crimeType}_${i}`;
-              
               if (!profile.crimes.some(c => c.id === uniqueCrimeId)) {
                 profile.crimes.push({
                   id: uniqueCrimeId,
@@ -95,8 +147,8 @@ export const processExcelFile = async (file: File, catalog?: CatalogData | null)
                   estado: String(row[`estado_${i}`] || row[`Estado_${i}`] || 'S/E').trim(),
                   fecha: String(row[`fecha_${i}`] || row[`Fecha_${i}`] || '').trim(),
                   riesgo: String(row[`riesgo_${i}`] || row[`Riesgo_${i}`] || 'N/A').trim(),
-                  rit: rit,
-                  ruc: ruc,
+                  rit,
+                  ruc,
                   tribunal: String(row[`tribunal_${i}`] || row[`Tribunal_${i}`] || '').trim()
                 });
               }
@@ -106,10 +158,38 @@ export const processExcelFile = async (file: File, catalog?: CatalogData | null)
           profile.totalCrimes = profile.crimes.length;
           profile.totalHighRiskCrimes = profile.crimes.filter(c => isHighRisk(c.riesgo)).length;
           profile.highestRisk = calculateHighestRisk(profile.crimes);
-          
           if (catalog) applyEvaluationToProfile(profile, catalog);
         });
-        
+
+        // ── Read "Coincidencias" sheet (emergency files may include it) ──────
+        // This is the authoritative source for PEP flags and list matches.
+        // It also adds profiles for people who appear there but not in sheet 1.
+        const coincSheetName = workbook.SheetNames.find(s =>
+          s.toLowerCase().includes('coincidencia')
+        );
+        if (coincSheetName) {
+          (XLSX.utils.sheet_to_json(workbook.Sheets[coincSheetName], { defval: '' }) as any[])
+            .forEach(row => {
+              const rawId = String(
+                row['DNI'] || row['RUT'] || row['rut'] || row['dni'] || row['IDENTIDAD'] || ''
+              ).trim();
+              if (!rawId) return;
+              const id = normaliseId(rawId);
+              const isPepFromCoincidencias = extractPepFromRow(row);
+
+              if (profilesMap.has(id)) {
+                // Update existing profile's PEP flag (Coincidencias is authoritative)
+                if (isPepFromCoincidencias) profilesMap.get(id)!.isPep = true;
+              } else {
+                // New person found only in Coincidencias — add them regardless of PEP
+                profilesMap.set(
+                  id,
+                  profileFromCoincidenciasRow(row, id, rawId, isPepFromCoincidencias, catalog)
+                );
+              }
+            });
+        }
+
         const finalProfiles = Array.from(profilesMap.values());
         if (finalProfiles.length === 0) {
           reject("No se encontraron registros válidos. Verifique que la columna 'DNI' o 'RUT' esté presente.");
@@ -246,7 +326,11 @@ export const detectCriminalFileFormat = async (file: File): Promise<'regcheq' | 
 };
 
 // ─── Flujo Masivo: Regcheq format ────────────────────────────────────────────
-// Expects Excel with sheets "Causas Penales Chile" and "Coincidencias"
+// Expects Excel with sheets "Causas Penales Chile" and "Coincidencias".
+// Strategy:
+//   1. Read "Coincidencias" first → create a profile for EVERY person (PEP or not)
+//   2. Read "Causas Penales Chile" → enrich existing profiles with crime data
+// This ensures people who are PEP but have no criminal record are still captured.
 export const processRegcheqFile = async (file: File, catalog?: CatalogData | null): Promise<PersonProfile[]> => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -262,88 +346,111 @@ export const processRegcheqFile = async (file: File, catalog?: CatalogData | nul
           return found ? workbook.Sheets[found] : null;
         };
 
-        const causasSheet = findSheet(['Causas Penales Chile', 'Causas Penales', 'Causas']);
+        const causasSheet    = findSheet(['Causas Penales Chile', 'Causas Penales', 'Causas']);
         const coincidenciasSheet = findSheet(['Coincidencias']);
 
-        if (!causasSheet) {
-          reject('No se encontró la hoja "Causas Penales Chile" en el archivo Regcheq.');
+        if (!causasSheet && !coincidenciasSheet) {
+          reject('No se encontró la hoja "Causas Penales Chile" ni "Coincidencias" en el archivo.');
           return;
         }
 
-        // Build PEP map from "Coincidencias" (column "Coincidencia_PEP Chile")
-        const pepMap = new Map<string, boolean>();
+        const profilesMap = new Map<string, PersonProfile>();
 
+        // ── PASO 1: Construir perfil base para TODOS desde "Coincidencias" ──
+        // Coincidencias is the authoritative list of all evaluated people.
         if (coincidenciasSheet) {
           (XLSX.utils.sheet_to_json(coincidenciasSheet, { defval: '' }) as any[]).forEach(row => {
-            const raw = String(row['DNI'] || '').trim();
-            if (!raw) return;
-            const dni = raw.replace(/\./g, '').replace(/-/g, '').toUpperCase();
-            const pepVal = row['Coincidencia_PEP Chile'];
-            pepMap.set(dni, pepVal === true || String(pepVal).toLowerCase() === 'true' || pepVal === 1);
+            const rawId = String(row['DNI'] || row['RUT'] || row['dni'] || '').trim();
+            if (!rawId) return;
+            const dni = normaliseId(rawId);
+            const isPep = extractPepFromRow(row);
+
+            if (!profilesMap.has(dni)) {
+              profilesMap.set(
+                dni,
+                profileFromCoincidenciasRow(row, dni, rawId, isPep, catalog)
+              );
+            } else {
+              if (isPep) profilesMap.get(dni)!.isPep = true;
+            }
           });
         }
 
-        // Build profiles from "Causas Penales Chile"
-        const profilesMap = new Map<string, PersonProfile>();
+        // ── PASO 2: Enriquecer con delitos desde "Causas Penales Chile" ──────
+        if (causasSheet) {
+          (XLSX.utils.sheet_to_json(causasSheet, { defval: '' }) as any[]).forEach(row => {
+            const rawId = String(row['DNI'] || '').trim();
+            if (!rawId) return;
+            const dni = normaliseId(rawId);
 
-        (XLSX.utils.sheet_to_json(causasSheet, { defval: '' }) as any[]).forEach(row => {
-          const raw = String(row['DNI'] || '').trim();
-          if (!raw) return;
-          const dni = raw.replace(/\./g, '').replace(/-/g, '').toUpperCase();
-
-          if (!profilesMap.has(dni)) {
-            // Full name comes from "Imputado (API)" — split last word as apellido
-            const fullName = String(row['Imputado (API)'] || row['Imputado'] || '').trim();
-            const words = fullName.split(/\s+/);
-            const apellido = words.length > 1 ? words.slice(-1).join(' ') : '';
-            const nombre = words.length > 1 ? words.slice(0, -1).join(' ') : fullName;
-
-            profilesMap.set(dni, {
-              rut: dni,
-              nombre,
-              apellido,
-              nombreCuenta: fullName,
-              customerId: raw,
-              conInfo: true,
-              isPep: pepMap.get(dni) || false,
-              crimes: [],
-              totalCrimes: 0,
-              totalHighRiskCrimes: 0,
-              highestRisk: 'n/a',
-              status: 'Pendiente',
-              selectedAction: '',
-            });
-          }
-
-          const profile = profilesMap.get(dni)!;
-          const crimeType = String(row['Delito'] || '').trim();
-          if (crimeType && crimeType !== '0') {
-            const ruc = String(row['RUC'] || '').trim();
-            const rit = String(row['RIT'] || '').trim();
-            const uniqueId = ruc || rit || `${dni}_${crimeType}_${profile.crimes.length}`;
-            if (!profile.crimes.some(c => c.id === uniqueId)) {
-              profile.crimes.push({
-                id: uniqueId,
-                tipo: crimeType,
-                estado: String(row['Estado'] || 'S/E').trim(),
-                fecha: String(row['Fecha'] || '').trim(),
-                riesgo: String(row['Riesgo Delito'] || 'N/A').trim(),
-                rit,
-                ruc,
-                tribunal: String(row['Tribunal'] || '').trim(),
+            // Create profile if not yet present (file without Coincidencias sheet)
+            if (!profilesMap.has(dni)) {
+              const fullName = String(row['Imputado (API)'] || row['Imputado'] || '').trim();
+              const words = fullName.split(/\s+/).filter(Boolean);
+              profilesMap.set(dni, {
+                rut: dni,
+                nombre: words.length > 1 ? words.slice(0, -1).join(' ') : fullName,
+                apellido: words.length > 1 ? words[words.length - 1] : '',
+                nombreCuenta: fullName,
+                customerId: rawId,
+                conInfo: true,
+                isPep: false,
+                crimes: [],
+                totalCrimes: 0,
+                totalHighRiskCrimes: 0,
+                highestRisk: 'n/a',
+                status: 'Pendiente',
+                selectedAction: '',
               });
+            } else {
+              // Improve name data if Coincidencias didn't have it
+              const profile = profilesMap.get(dni)!;
+              if (profile.nombre.startsWith('ID:') || profile.nombre === 'N/D') {
+                const fullName = String(row['Imputado (API)'] || row['Imputado'] || '').trim();
+                if (fullName) {
+                  const words = fullName.split(/\s+/).filter(Boolean);
+                  profile.nombre   = words.length > 1 ? words.slice(0, -1).join(' ') : fullName;
+                  profile.apellido = words.length > 1 ? words[words.length - 1] : '';
+                  profile.nombreCuenta = fullName;
+                }
+              }
             }
-          }
 
-          profile.totalCrimes = profile.crimes.length;
-          profile.totalHighRiskCrimes = profile.crimes.filter(c => isHighRisk(c.riesgo)).length;
-          profile.highestRisk = calculateHighestRisk(profile.crimes);
-          if (catalog) applyEvaluationToProfile(profile, catalog);
+            const profile = profilesMap.get(dni)!;
+            const crimeType = String(row['Delito'] || '').trim();
+            if (crimeType && crimeType !== '0') {
+              const ruc = String(row['RUC'] || '').trim();
+              const rit = String(row['RIT'] || '').trim();
+              const uniqueId = ruc || rit || `${dni}_${crimeType}_${profile.crimes.length}`;
+              if (!profile.crimes.some(c => c.id === uniqueId)) {
+                profile.crimes.push({
+                  id: uniqueId,
+                  tipo: crimeType,
+                  estado: String(row['Estado'] || 'S/E').trim(),
+                  fecha: String(row['Fecha'] || '').trim(),
+                  riesgo: String(row['Riesgo Delito'] || 'N/A').trim(),
+                  rit,
+                  ruc,
+                  tribunal: String(row['Tribunal'] || '').trim(),
+                });
+              }
+            }
+
+            profile.totalCrimes = profile.crimes.length;
+            profile.totalHighRiskCrimes = profile.crimes.filter(c => isHighRisk(c.riesgo)).length;
+            profile.highestRisk = calculateHighestRisk(profile.crimes);
+            if (catalog) applyEvaluationToProfile(profile, catalog);
+          });
+        }
+
+        // ── PASO 3: Asegurarse de que perfiles sin delitos tienen evaluación ──
+        profilesMap.forEach(profile => {
+          if (!profile.preEvaluation && catalog) applyEvaluationToProfile(profile, catalog);
         });
 
         const result = Array.from(profilesMap.values());
         if (result.length === 0) {
-          reject('No se encontraron registros válidos en "Causas Penales Chile".');
+          reject('No se encontraron registros válidos. Verifique que el archivo tenga las hojas esperadas.');
         } else {
           resolve(result);
         }
