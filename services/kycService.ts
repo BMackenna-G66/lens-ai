@@ -256,25 +256,40 @@ export const fetchRegcheq = async (input: KYCInput): Promise<KYCResult> => {
     ...(input.income   && { income:   input.income }),
   };
 
-  // Create/update record (same pattern as RegcheqTool)
-  await fetch(`${REGCHEQ_BASE}/record/${REGCHEQ_KEY}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-
-  // Fetch record — POST + immediate GET (retry up to 3x with 1.5s gap if needed)
-  let data: Record<string, unknown> | null = null;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    if (attempt > 0) await new Promise(r => setTimeout(r, 1500));
-    const resp = await fetch(`${REGCHEQ_BASE}/record/${encodeURIComponent(dni)}/${REGCHEQ_KEY}`);
-    if (resp.ok) {
+  // Helper: attempt a single GET and return data only when 'listas' key is present
+  const tryGet = async (): Promise<Record<string, unknown> | null> => {
+    try {
+      const resp = await fetch(`${REGCHEQ_BASE}/record/${dni}/${REGCHEQ_KEY}`);
+      if (!resp.ok) return null;
       const json = await resp.json() as Record<string, unknown>;
-      // Accept any 200 response that has listas or effectiveRisk
-      if (json.listas || json.effectiveRisk) { data = json; break; }
+      // 'listas' in json is true even when listas:{} or listas:null — matches what
+      // RegcheqTool's fetchPerfil accepts (uses perfil.listas ?? {})
+      if (json && typeof json === 'object' && 'listas' in json) return json;
+      return null;
+    } catch { return null; }
+  };
+
+  // ── STEP 1: fast path — try GET on existing record (same as RegcheqTool) ──
+  let data = await tryGet();
+
+  // ── STEP 2: no existing record → POST to create, then poll ──
+  if (!data) {
+    await fetch(`${REGCHEQ_BASE}/record/${REGCHEQ_KEY}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    // Regcheq AML check is asynchronous — poll until 'listas' appears (up to ~20s)
+    for (let attempt = 0; attempt < 8 && !data; attempt++) {
+      await new Promise(r => setTimeout(r, 2500));
+      data = await tryGet();
     }
   }
-  if (!data) throw new Error('Regcheq: sin resultados. Verifica el RUT/documento o tu conexión.');
+
+  if (!data) throw new Error(
+    'Regcheq: sin resultados tras esperar. El procesamiento puede tardar, intenta de nuevo en unos segundos.'
+  );
 
   const listasRaw = (data.listas ?? {}) as Record<string, Record<string, unknown>>;
 
