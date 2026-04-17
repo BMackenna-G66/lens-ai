@@ -66,6 +66,12 @@ export interface NosisVariable {
   date?: string;
 }
 
+export interface RegcheqLista {
+  coincidence: boolean;
+  risk: string;
+  data: unknown;
+}
+
 export interface KYCResult {
   providerUsed: ProviderType;
   queryId?: string;
@@ -80,6 +86,10 @@ export interface KYCResult {
   providerStatus: string;
   providerMessage?: string | null;
   rawPayload?: unknown;
+  // Profile ficha fields (all providers)
+  ficha?: Record<string, string>;
+  // Regcheq: all listas (including non-hits, for display)
+  regcheqListas?: Record<string, RegcheqLista>;
   // Inspektor extras
   numConsulta?: number;
   procuradoriaData?: unknown;
@@ -189,6 +199,37 @@ const getInspToken = async (): Promise<string> => {
   return _token;
 };
 
+// ── Regcheq lista key → display name ─────────────────────────────────────────
+const REGCHEQ_LISTA_NAMES: Record<string, string> = {
+  pepChile:                   'PEP Chile',
+  funcPublicChile:            'Funcionario Público Chile',
+  internationalOrganizations: 'OFAC / ONU / UE',
+  pdiResult:                  'PDI / Antecedentes',
+  gafiResult:                 'GAFI',
+  keywordsResult:             'Palabras Clave',
+  regcheqList:                'Lista Interna Regcheq',
+  rtpResult:                  'Riesgo País (RTP)',
+  internList:                 'Lista de Interés',
+  secondCriminalCasesChile:   'Causas Penales Chile',
+  interpol:                   'INTERPOL',
+  screeningGlobal:            'Screening Global',
+};
+
+const REGCHEQ_KEY_TO_LIST_TYPE: Record<string, string> = {
+  pepChile:                   'PEP_LOCAL',
+  funcPublicChile:            'PEP_LOCAL',
+  internationalOrganizations: 'OFAC_SDN',
+  pdiResult:                  'PDI_LOCAL',
+  gafiResult:                 'GAFI',
+  keywordsResult:             'KEYWORDS',
+  regcheqList:                'INTERNAL_LIST',
+  rtpResult:                  'RTP',
+  internList:                 'INTERNAL_LIST',
+  secondCriminalCasesChile:   'PDI_LOCAL',
+  interpol:                   'OFAC_SDN',
+  screeningGlobal:            'OFAC_SDN',
+};
+
 // ── Regcheq ───────────────────────────────────────────────────────────────────
 export const fetchRegcheq = async (input: KYCInput): Promise<KYCResult> => {
   const dni = normaliseDoc(input.documentNumber, input.documentType);
@@ -215,61 +256,80 @@ export const fetchRegcheq = async (input: KYCInput): Promise<KYCResult> => {
     ...(input.income   && { income:   input.income }),
   };
 
+  // Create/update record (same pattern as RegcheqTool)
   await fetch(`${REGCHEQ_BASE}/record/${REGCHEQ_KEY}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
 
-  // Poll for result
+  // Fetch record — POST + immediate GET (retry up to 3x with 1.5s gap if needed)
   let data: Record<string, unknown> | null = null;
-  for (let i = 0; i < 6; i++) {
-    await new Promise(r => setTimeout(r, 700 * (i + 1)));
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) await new Promise(r => setTimeout(r, 1500));
     const resp = await fetch(`${REGCHEQ_BASE}/record/${encodeURIComponent(dni)}/${REGCHEQ_KEY}`);
     if (resp.ok) {
       const json = await resp.json() as Record<string, unknown>;
-      if (json.listas) { data = json; break; }
+      // Accept any 200 response that has listas or effectiveRisk
+      if (json.listas || json.effectiveRisk) { data = json; break; }
     }
   }
-  if (!data) throw new Error('Regcheq: no se recibieron resultados');
+  if (!data) throw new Error('Regcheq: sin resultados. Verifica el RUT/documento o tu conexión.');
 
-  const listas = (data.listas ?? {}) as Record<string, Record<string, unknown>>;
+  const listasRaw = (data.listas ?? {}) as Record<string, Record<string, unknown>>;
+
+  // Build normalised listas map (all keys, including non-hits)
+  const regcheqListas: Record<string, RegcheqLista> = {};
+  for (const [key, nombre] of Object.entries(REGCHEQ_LISTA_NAMES)) {
+    const entry = listasRaw[key] ?? null;
+    let rawData = entry?.data ?? null;
+    if (typeof rawData === 'string' && !(rawData as string).trim()) rawData = null;
+    regcheqListas[nombre] = {
+      coincidence: Boolean(entry?.coincidence),
+      risk: String(entry?.risk ?? ''),
+      data: rawData,
+    };
+  }
+
+  // Hits-only matches array
   const matches: KYCMatch[] = [];
-
-  const addList = (key: string, listType: string) => {
-    const l = listas[key];
-    if (!l?.coincidence) return;
+  for (const [key, nombre] of Object.entries(REGCHEQ_LISTA_NAMES)) {
+    const l = listasRaw[key];
+    if (!l?.coincidence) continue;
+    const listType = REGCHEQ_KEY_TO_LIST_TYPE[key] ?? 'LAFT';
     const items = (l.data as unknown[]) ?? [];
     if (items.length > 0) {
-      items.forEach((d: unknown) => {
-        const dd = d as Record<string, string>;
+      (items as Record<string, string>[]).forEach(d => {
         matches.push({
-          listType, risk: (l.risk as RiskLevel) ?? 'low',
-          source: key,
-          matchedName: dd.name || dd.nombre || '',
-          offense: dd.crime || dd.delito || null,
-          zone: dd.country || dd.zona || null,
-          lastUpdated: dd.updatedAt || null,
+          listType, risk: (l.risk as RiskLevel) ?? 'high',
+          source: nombre,
+          matchedName: d.name || d.nombre || '',
+          offense: d.crime || d.delito || d.crimen || null,
+          zone: d.country || d.zona || null,
+          lastUpdated: d.updatedAt || null,
           raw: d,
         });
       });
     } else {
-      matches.push({ listType, risk: (l.risk as RiskLevel) ?? 'low', source: key, raw: l });
+      matches.push({ listType, risk: (l.risk as RiskLevel) ?? 'high', source: nombre, raw: l });
     }
-  };
+  }
 
-  addList('pepChile',                'PEP_LOCAL');
-  addList('funcPublicChile',         'PEP_LOCAL');
-  addList('internationalOrganizations', 'OFAC_SDN');
-  addList('pdiResult',               'PDI_LOCAL');
-  addList('gafiResult',              'GAFI');
-  addList('keywordsResult',          'KEYWORDS');
-  addList('regcheqList',             'INTERNAL_LIST');
-  addList('rtpResult',               'RTP');
-  addList('internList',              'INTERNAL_LIST');
+  // Ficha fields
+  const FICHA_MAP: [string, string][] = [
+    ['name','Nombre'],['fatherName','Apellido paterno'],['motherName','Apellido materno'],
+    ['nationality','Nacionalidad'],['country','País'],['email','Email'],
+    ['phone','Teléfono'],['position','Cargo'],['employer','Empleador'],
+    ['birthDate','Fecha nacimiento'],
+  ];
+  const ficha: Record<string, string> = {};
+  for (const [k, label] of FICHA_MAP) {
+    const v = (data as Record<string, unknown>)[k];
+    if (v) ficha[label] = String(v);
+  }
 
-  const isPEP = !!(listas.pepChile?.coincidence || listas.funcPublicChile?.coincidence);
-  const risks = Object.values(listas).filter(l => l?.coincidence).map(l => l.risk as string);
+  const isPEP = !!(listasRaw.pepChile?.coincidence || listasRaw.funcPublicChile?.coincidence);
+  const risks = Object.values(listasRaw).filter(l => l?.coincidence).map(l => l.risk as string);
   let effectiveRisk: RiskLevel = 'low';
   if (risks.includes('high')) effectiveRisk = 'high';
   else if (risks.includes('medium')) effectiveRisk = 'medium';
@@ -277,12 +337,14 @@ export const fetchRegcheq = async (input: KYCInput): Promise<KYCResult> => {
   return {
     providerUsed: 'REGCHEQ',
     documentNumber: dni,
-    fullName: name,
+    fullName: (data.name as string) || name,
     country: input.country,
     effectiveRisk: (data.effectiveRisk as RiskLevel) ?? effectiveRisk,
     isPEP,
     pepLevel: (data.pepLevel as string) || null,
     matches,
+    ficha,
+    regcheqListas,
     lastChecked: new Date().toISOString(),
     providerStatus: 'OK',
     rawPayload: data,
@@ -362,6 +424,17 @@ export const fetchInspektor = async (input: KYCInput): Promise<KYCResult> => {
     else effectiveRisk = 'low';
   }
 
+  const fichaInsp: Record<string, string> = {};
+  if (input.firstName)  fichaInsp['Nombre']           = [input.firstName, input.fatherName, input.motherName].filter(Boolean).join(' ').toUpperCase();
+  if (input.documentType) fichaInsp['Tipo documento'] = input.documentType;
+  if (docNum)           fichaInsp['Documento']         = docNum;
+  if (input.birthDate)  fichaInsp['Fecha nacimiento']  = input.birthDate;
+  if (input.gender)     fichaInsp['Género']            = input.gender;
+  if (input.email)      fichaInsp['Email']             = input.email;
+  if (input.phone)      fichaInsp['Teléfono']          = input.phone;
+  if (input.position)   fichaInsp['Cargo']             = input.position;
+  if (input.employer)   fichaInsp['Empleador']         = input.employer;
+
   return {
     providerUsed: 'INSPEKTOR',
     queryId: String(data.numConsulta ?? ''),
@@ -372,6 +445,7 @@ export const fetchInspektor = async (input: KYCInput): Promise<KYCResult> => {
     effectiveRisk,
     isPEP,
     matches,
+    ficha: fichaInsp,
     lastChecked: new Date().toISOString(),
     providerStatus: 'OK',
     procuradoriaData: data.procuraduria,
@@ -421,6 +495,15 @@ export const fetchNosis = async (input: KYCInput): Promise<KYCResult> => {
 
   const resolvedName = nosisVariables.find(v => v.name === 'VI_Identidad_Nombre')?.value || nombre;
 
+  const fichaNosis: Record<string, string> = {};
+  fichaNosis['Nombre'] = resolvedName;
+  fichaNosis['Documento'] = docNum;
+  if (input.documentType) fichaNosis['Tipo documento'] = input.documentType;
+  if (input.birthDate)    fichaNosis['Fecha nacimiento'] = input.birthDate;
+  if (input.gender)       fichaNosis['Género'] = input.gender;
+  if (input.email)        fichaNosis['Email'] = input.email;
+  if (input.phone)        fichaNosis['Teléfono'] = input.phone;
+
   return {
     providerUsed: 'NOSIS',
     queryId: resultado.Transaccion as string,
@@ -430,6 +513,7 @@ export const fetchNosis = async (input: KYCInput): Promise<KYCResult> => {
     effectiveRisk: 'low',
     isPEP: false,
     matches: [],
+    ficha: fichaNosis,
     lastChecked: (resultado.FechaRecepcion as string) || new Date().toISOString(),
     providerStatus: (resultado.Novedad as string) || 'OK',
     nosisVariables,
