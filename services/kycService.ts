@@ -1,5 +1,5 @@
 // ── Credentials ───────────────────────────────────────────────────────────────
-const _env = (import.meta as Record<string, unknown> & { env: Record<string, string> }).env;
+const _env = (import.meta as unknown as { env: Record<string, string> }).env;
 
 const REGCHEQ_KEY  = _env.VITE_REGCHEQ_API_KEY ?? 'F10596C184DB7D99DB90F956';
 const REGCHEQ_BASE = 'https://external-api.regcheq.com';

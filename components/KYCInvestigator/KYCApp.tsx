@@ -63,9 +63,6 @@ async function generateKYCPDF(result: KYCResult) {
   const getLastY = () => (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable?.finalY ?? 80;
 
   const providerCfg = PROVIDER_CONFIG[result.providerUsed];
-  const hitCount = result.matches.length + (result.regcheqListas
-    ? Object.values(result.regcheqListas).filter(l => l.coincidence).length - result.matches.length
-    : 0);
   const totalHits = result.regcheqListas
     ? Object.values(result.regcheqListas).filter(l => l.coincidence).length
     : result.matches.length;
@@ -89,7 +86,6 @@ async function generateKYCPDF(result: KYCResult) {
   doc.text(`${providerCfg.label} · Análisis de Perfil · LENS AI`, margin, 24);
 
   // ── Info box ──
-  const riskUpper = (result.effectiveRisk || '').toUpperCase();
   const rCfg = RISK_CONFIG[result.effectiveRisk];
   const riskColor: [number,number,number] = result.effectiveRisk === 'high' ? PDF_RED : result.effectiveRisk === 'medium' ? PDF_AMBER : PDF_GREEN;
 
@@ -349,7 +345,7 @@ const RegcheqListaRow: React.FC<{ name: string; entry: RegcheqLista; dark: boole
           </svg>
         )}
       </button>
-      {open && entry.coincidence && entry.data && (
+      {open && entry.coincidence && entry.data != null && (
         <div className="px-4 pb-4">
           <pre className={`text-[10px] rounded-xl p-3 overflow-auto max-h-48 whitespace-pre-wrap break-all font-mono ${dark ? 'bg-slate-800/50 text-slate-400' : 'bg-slate-100 text-slate-600'}`}>
             {JSON.stringify(entry.data, null, 2)}
@@ -439,8 +435,6 @@ const NosisTable: React.FC<{ variables: NosisVariable[]; dark: boolean }> = ({ v
 // ── Result card ───────────────────────────────────────────────────────────────
 const ResultCard: React.FC<{ result: KYCResult; dark: boolean }> = ({ result, dark }) => {
   const [showRaw, setShowRaw] = useState(false);
-  const rCfg  = RISK_CONFIG[result.effectiveRisk];
-  const pCfg  = PROVIDER_CONFIG[result.providerUsed];
   const allHits = result.regcheqListas
     ? Object.values(result.regcheqListas).filter(l => l.coincidence).length
     : result.matches.length;
