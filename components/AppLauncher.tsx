@@ -1,7 +1,7 @@
 import React from 'react';
 import { useAuth } from '../context/AuthContext';
 
-type Suite = 'compliance' | 'criminal' | 'admin' | 'general-dashboard' | 'regcheq';
+type Suite = 'compliance' | 'criminal' | 'admin' | 'general-dashboard' | 'regcheq' | 'kyc';
 
 interface AppLauncherProps {
   onSelect: (suite: Suite) => void;
@@ -133,6 +133,40 @@ export const AppLauncher: React.FC<AppLauncherProps> = ({ onSelect }) => {
                   <div className="flex flex-wrap gap-2">
                     {['🔍 Perfil Individual', '📋 Lista de Interés', '🌐 PEP · OFAC · ONU', '⚖️ Causas Penales', '🛡️ Screening Global'].map(tag => (
                       <span key={tag} className="text-[10px] font-bold uppercase tracking-widest text-teal-700 dark:text-teal-400 bg-teal-100 dark:bg-teal-950/50 border border-teal-200 dark:border-teal-800/50 px-2 py-1 rounded-lg">{tag}</span>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </button>
+          </div>
+        )}
+
+        {/* KYC Investigator card — full width */}
+        {(userProfile?.modules?.kyc ?? true) && (
+          <div className="mt-6">
+            <button
+              onClick={() => onSelect('kyc')}
+              className="group relative w-full bg-white/80 dark:bg-slate-900/70 hover:bg-indigo-50 dark:hover:bg-indigo-950/40 border border-slate-200 dark:border-slate-700/50 hover:border-indigo-400 dark:hover:border-indigo-600/50 rounded-3xl p-8 text-left transition-all duration-300 hover:shadow-2xl hover:shadow-indigo-100/50 dark:hover:shadow-indigo-950/30 active:scale-[0.98]"
+            >
+              <div className="absolute top-4 right-4 opacity-0 group-hover:opacity-100 transition-opacity">
+                <div className="w-8 h-8 bg-indigo-700 rounded-full flex items-center justify-center">
+                  <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                  </svg>
+                </div>
+              </div>
+              <div className="flex items-start gap-6">
+                <div className="w-16 h-16 bg-indigo-100 dark:bg-indigo-600/20 rounded-2xl flex items-center justify-center flex-shrink-0 border border-indigo-200 dark:border-indigo-500/30 group-hover:bg-indigo-200 dark:group-hover:bg-indigo-600/30 transition-colors">
+                  <span className="text-3xl">🌐</span>
+                </div>
+                <div className="flex-1">
+                  <h2 className="text-xl font-black text-slate-900 dark:text-white mb-2">KYC Investigador — Multiproveedor</h2>
+                  <p className="text-slate-500 dark:text-slate-400 text-sm font-medium mb-4 leading-relaxed">
+                    Consulta individual contra listas AML/KYC globales. Enruta automáticamente a Regcheq (CL/global), Inspektor (CO) o Nosis (AR) según el país del cliente.
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {['🇨🇱 Regcheq', '🇨🇴 Inspektor', '🇦🇷 Nosis', '🌍 PEP · OFAC · ONU', '⚖️ Rama Judicial', '🔐 Procuraduría'].map(tag => (
+                      <span key={tag} className="text-[10px] font-bold uppercase tracking-widest text-indigo-600 dark:text-indigo-400 bg-indigo-100 dark:bg-indigo-950/50 border border-indigo-200 dark:border-indigo-800/50 px-2 py-1 rounded-lg">{tag}</span>
                     ))}
                   </div>
                 </div>
