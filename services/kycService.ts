@@ -256,39 +256,35 @@ export const fetchRegcheq = async (input: KYCInput): Promise<KYCResult> => {
     ...(input.income   && { income:   input.income }),
   };
 
-  // Helper: attempt a single GET and return data only when 'listas' key is present
-  const tryGet = async (): Promise<Record<string, unknown> | null> => {
+  // Helper: single GET — accepts ANY 200 response (same as RegcheqTool's fetchPerfil)
+  const doGet = async (): Promise<Record<string, unknown> | null> => {
     try {
       const resp = await fetch(`${REGCHEQ_BASE}/record/${dni}/${REGCHEQ_KEY}`);
       if (!resp.ok) return null;
       const json = await resp.json() as Record<string, unknown>;
-      // 'listas' in json is true even when listas:{} or listas:null — matches what
-      // RegcheqTool's fetchPerfil accepts (uses perfil.listas ?? {})
-      if (json && typeof json === 'object' && 'listas' in json) return json;
-      return null;
+      return (json && typeof json === 'object' && !Array.isArray(json)) ? json : null;
     } catch { return null; }
   };
 
-  // ── STEP 1: fast path — try GET on existing record (same as RegcheqTool) ──
-  let data = await tryGet();
+  // ── Exact same pattern as RegcheqTool ──────────────────────────────────────
+  // 1. POST to create / update the record with profile data
+  await fetch(`${REGCHEQ_BASE}/record/${REGCHEQ_KEY}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
 
-  // ── STEP 2: no existing record → POST to create, then poll ──
+  // 2. GET the record — RegcheqTool does this immediately after POST with no delay
+  let data = await doGet();
+
+  // 3. One retry after a short wait, in case the record needed a moment to be indexed
   if (!data) {
-    await fetch(`${REGCHEQ_BASE}/record/${REGCHEQ_KEY}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-
-    // Regcheq AML check is asynchronous — poll until 'listas' appears (up to ~20s)
-    for (let attempt = 0; attempt < 8 && !data; attempt++) {
-      await new Promise(r => setTimeout(r, 2500));
-      data = await tryGet();
-    }
+    await new Promise(r => setTimeout(r, 2000));
+    data = await doGet();
   }
 
   if (!data) throw new Error(
-    'Regcheq: sin resultados tras esperar. El procesamiento puede tardar, intenta de nuevo en unos segundos.'
+    'Regcheq: no se pudo obtener el resultado. Verifica el RUT/documento y que tengas conexión.'
   );
 
   const listasRaw = (data.listas ?? {}) as Record<string, Record<string, unknown>>;
