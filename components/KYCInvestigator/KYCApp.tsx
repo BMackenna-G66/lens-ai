@@ -282,15 +282,6 @@ const emptyForm = (): KYCInput => ({
   motherName: '',
   birthDate: '',
   gender: undefined,
-  nationality: '',
-  email: '',
-  phone: '',
-  region: '',
-  city: '',
-  address: '',
-  position: '',
-  employer: '',
-  income: '',
   tienePrioridad4: false,
   procuraduria: true,
   ramaJudicial: true,
@@ -602,8 +593,12 @@ export const KYCApp: React.FC<KYCAppProps> = ({ onBack, darkMode, onToggleDarkMo
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!form.documentNumber.trim() || !form.firstName.trim() || !form.fatherName.trim()) {
-      setError('Completa los campos obligatorios: documento, primer nombre y apellido paterno.');
+    if (!form.documentNumber.trim()) {
+      setError('Ingresa el número de documento.');
+      return;
+    }
+    if (provider === 'INSPEKTOR' && (!form.firstName?.trim() || !form.fatherName?.trim())) {
+      setError('Para consultas en Colombia (Inspektor) se requiere nombre y apellido paterno.');
       return;
     }
     setLoading(true);
@@ -729,32 +724,17 @@ export const KYCApp: React.FC<KYCAppProps> = ({ onBack, darkMode, onToggleDarkMo
             </div>
           </div>
 
-          {/* Names */}
-          <div className={`border rounded-2xl p-5 ${cardBg}`}>
-            <p className={`text-[10px] font-bold uppercase tracking-widest mb-4 ${muted}`}>Nombres *</p>
-            <div className="space-y-3">
-              {inputField('Primer nombre *', form.firstName, v => set('firstName', v), { placeholder: 'JUAN CARLOS', required: true })}
-              {inputField('Apellido paterno *', form.fatherName, v => set('fatherName', v), { placeholder: 'GONZÁLEZ', required: true })}
-              {inputField('Apellido materno', form.motherName ?? '', v => set('motherName', v), { placeholder: 'PÉREZ' })}
+          {/* Names — required for CO (Inspektor), hidden for other providers */}
+          {provider === 'INSPEKTOR' && (
+            <div className={`border rounded-2xl p-5 ${cardBg}`}>
+              <p className={`text-[10px] font-bold uppercase tracking-widest mb-4 ${muted}`}>Nombres *</p>
+              <div className="space-y-3">
+                {inputField('Primer nombre *', form.firstName ?? '', v => set('firstName', v), { placeholder: 'JUAN CARLOS', required: true })}
+                {inputField('Apellido paterno *', form.fatherName ?? '', v => set('fatherName', v), { placeholder: 'GONZÁLEZ', required: true })}
+                {inputField('Apellido materno', form.motherName ?? '', v => set('motherName', v), { placeholder: 'PÉREZ' })}
+              </div>
             </div>
-          </div>
-
-          {/* Optional fields */}
-          <details className={`border rounded-2xl ${cardBg}`}>
-            <summary className={`px-5 py-4 text-[10px] font-bold uppercase tracking-widest cursor-pointer select-none ${muted}`}>
-              Datos adicionales (opcional)
-            </summary>
-            <div className="px-5 pb-5 grid grid-cols-2 gap-3">
-              <div className="col-span-2">{inputField('Email', form.email ?? '', v => set('email', v), { type: 'email', placeholder: 'cliente@email.com' })}</div>
-              {inputField('Teléfono', form.phone ?? '', v => set('phone', v), { placeholder: '+56 9 1234 5678' })}
-              {inputField('Fecha nacimiento', form.birthDate ?? '', v => set('birthDate', v), { type: 'date' })}
-              {selectField('Género', form.gender ?? '', v => set('gender', v || undefined),
-                [{ value: '', label: '—' },{ value: 'masculino', label: 'Masculino' },{ value: 'femenino', label: 'Femenino' },{ value: 'X', label: 'X / Otro' }]
-              )}
-              {inputField('Cargo', form.position ?? '', v => set('position', v))}
-              <div className="col-span-2">{inputField('Empleador', form.employer ?? '', v => set('employer', v))}</div>
-            </div>
-          </details>
+          )}
 
           {/* Inspektor options */}
           {provider === 'INSPEKTOR' && (

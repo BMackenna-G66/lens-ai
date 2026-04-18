@@ -20,20 +20,12 @@ export interface KYCInput {
   country: string;
   documentType: string;
   documentNumber: string;
-  firstName: string;
-  fatherName: string;
+  // Required for CO (Inspektor); optional for other providers
+  firstName?: string;
+  fatherName?: string;
   motherName?: string;
   birthDate?: string;
   gender?: 'masculino' | 'femenino' | 'X';
-  nationality?: string;
-  email?: string;
-  phone?: string;
-  region?: string;
-  city?: string;
-  address?: string;
-  position?: string;
-  employer?: string;
-  income?: string;
   // CO – Inspektor
   tienePrioridad4?: boolean;
   procuraduria?: boolean;
@@ -131,7 +123,7 @@ const normaliseDoc = (num: string, type: string): string => {
 };
 
 const fullName = (i: KYCInput) =>
-  [i.firstName, i.fatherName, i.motherName].filter(Boolean).join(' ').toUpperCase().trim();
+  [i.firstName ?? '', i.fatherName ?? '', i.motherName ?? ''].filter(Boolean).join(' ').toUpperCase().trim();
 
 const inspDocType = (dt: string): number => {
   const m: Record<string, number> = { CC: 1, NIT: 2, CE: 5, PPT: 10, PEP: 0 };
@@ -233,30 +225,8 @@ const REGCHEQ_KEY_TO_LIST_TYPE: Record<string, string> = {
 // ── Regcheq ───────────────────────────────────────────────────────────────────
 export const fetchRegcheq = async (input: KYCInput): Promise<KYCResult> => {
   const dni = normaliseDoc(input.documentNumber, input.documentType);
-  const name = fullName(input);
 
-  const body: Record<string, unknown> = {
-    dni,
-    personType: 'natural',
-    dniType: input.documentType,
-    name: input.firstName.toUpperCase(),
-    fatherName: input.fatherName.toUpperCase(),
-    ...(input.motherName   && { motherName:  input.motherName.toUpperCase() }),
-    ...(input.email        && { email:        input.email }),
-    ...(input.phone        && { phone:        input.phone }),
-    ...(input.nationality  && { nationality:  input.nationality }),
-    country:  input.country,
-    ...(input.region   && { region:   input.region }),
-    ...(input.city     && { city:     input.city }),
-    ...(input.address  && { address:  input.address }),
-    ...(input.birthDate && { birthDate: input.birthDate }),
-    ...(input.gender   && { gender:   input.gender }),
-    ...(input.position && { position: input.position }),
-    ...(input.employer && { employer: input.employer }),
-    ...(input.income   && { income:   input.income }),
-  };
-
-  // Helper: single GET — accepts ANY 200 response (same as RegcheqTool's fetchPerfil)
+  // Direct GET lookup — no record creation
   const doGet = async (): Promise<Record<string, unknown> | null> => {
     try {
       const resp = await fetch(`${REGCHEQ_BASE}/record/${dni}/${REGCHEQ_KEY}`);
@@ -266,25 +236,16 @@ export const fetchRegcheq = async (input: KYCInput): Promise<KYCResult> => {
     } catch { return null; }
   };
 
-  // ── Exact same pattern as RegcheqTool ──────────────────────────────────────
-  // 1. POST to create / update the record with profile data
-  await fetch(`${REGCHEQ_BASE}/record/${REGCHEQ_KEY}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-
-  // 2. GET the record — RegcheqTool does this immediately after POST with no delay
   let data = await doGet();
 
-  // 3. One retry after a short wait, in case the record needed a moment to be indexed
+  // One retry after a short wait
   if (!data) {
-    await new Promise(r => setTimeout(r, 2000));
+    await new Promise(r => setTimeout(r, 1500));
     data = await doGet();
   }
 
   if (!data) throw new Error(
-    'Regcheq: no se pudo obtener el resultado. Verifica el RUT/documento y que tengas conexión.'
+    'Regcheq: no se encontró información para este documento. Verifica el número ingresado.'
   );
 
   const listasRaw = (data.listas ?? {}) as Record<string, Record<string, unknown>>;
@@ -326,7 +287,7 @@ export const fetchRegcheq = async (input: KYCInput): Promise<KYCResult> => {
     }
   }
 
-  // Ficha fields
+  // Ficha — read whatever Regcheq stored for this document
   const FICHA_MAP: [string, string][] = [
     ['name','Nombre'],['fatherName','Apellido paterno'],['motherName','Apellido materno'],
     ['nationality','Nacionalidad'],['country','País'],['email','Email'],
@@ -348,7 +309,7 @@ export const fetchRegcheq = async (input: KYCInput): Promise<KYCResult> => {
   return {
     providerUsed: 'REGCHEQ',
     documentNumber: dni,
-    fullName: (data.name as string) || name,
+    fullName: (data.name as string) || dni,
     country: input.country,
     effectiveRisk: (data.effectiveRisk as RiskLevel) ?? effectiveRisk,
     isPEP,
@@ -436,15 +397,11 @@ export const fetchInspektor = async (input: KYCInput): Promise<KYCResult> => {
   }
 
   const fichaInsp: Record<string, string> = {};
-  if (input.firstName)  fichaInsp['Nombre']           = [input.firstName, input.fatherName, input.motherName].filter(Boolean).join(' ').toUpperCase();
-  if (input.documentType) fichaInsp['Tipo documento'] = input.documentType;
-  if (docNum)           fichaInsp['Documento']         = docNum;
-  if (input.birthDate)  fichaInsp['Fecha nacimiento']  = input.birthDate;
-  if (input.gender)     fichaInsp['Género']            = input.gender;
-  if (input.email)      fichaInsp['Email']             = input.email;
-  if (input.phone)      fichaInsp['Teléfono']          = input.phone;
-  if (input.position)   fichaInsp['Cargo']             = input.position;
-  if (input.employer)   fichaInsp['Empleador']         = input.employer;
+  if (input.firstName)    fichaInsp['Nombre']           = [input.firstName, input.fatherName, input.motherName].filter(Boolean).join(' ').toUpperCase();
+  if (input.documentType) fichaInsp['Tipo documento']   = input.documentType;
+  if (docNum)             fichaInsp['Documento']         = docNum;
+  if (input.birthDate)    fichaInsp['Fecha nacimiento']  = input.birthDate;
+  if (input.gender)       fichaInsp['Género']            = input.gender;
 
   return {
     providerUsed: 'INSPEKTOR',
@@ -512,8 +469,6 @@ export const fetchNosis = async (input: KYCInput): Promise<KYCResult> => {
   if (input.documentType) fichaNosis['Tipo documento'] = input.documentType;
   if (input.birthDate)    fichaNosis['Fecha nacimiento'] = input.birthDate;
   if (input.gender)       fichaNosis['Género'] = input.gender;
-  if (input.email)        fichaNosis['Email'] = input.email;
-  if (input.phone)        fichaNosis['Teléfono'] = input.phone;
 
   return {
     providerUsed: 'NOSIS',
