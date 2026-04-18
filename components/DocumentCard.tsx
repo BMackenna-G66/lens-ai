@@ -144,6 +144,9 @@ export const DocumentCard: React.FC<DocumentCardProps> = ({
                             document.isChatLoading;
   const isConsolidated = !!document.sourceFileNames && document.sourceFileNames.length > 0;
   const isChatOnlyMode = document.purpose === 'chat_only';
+  const razonSocial = document.extractedData?.find(
+    f => f.field.toLowerCase().includes('razón social') || f.field.toLowerCase().includes('razon social')
+  )?.value?.trim() || null;
 
   const canPerformActions = document.status === FileProcessingStatus.COMPLETED && isApiKeyOk && !document.isChatLoading && !isProcessingSupplementary && document.riskAnalysisStatus !== RiskAnalysisStatus.ANALYZING && !isIntegrityAnalysisRunning;
 
@@ -153,7 +156,16 @@ export const DocumentCard: React.FC<DocumentCardProps> = ({
         <div className="flex-grow min-w-0">
           <div className="flex items-center">
             {isConsolidated && <IconFiles className="w-5 h-5 mr-2 text-primary-500 flex-shrink-0" />}
-            <h3 className="text-lg font-semibold text-primary-600 break-all">{document.fileName}</h3>
+            <div className="min-w-0">
+              <h3 className="text-lg font-bold text-primary-600 break-all leading-tight">
+                {razonSocial ?? document.fileName}
+              </h3>
+              {razonSocial && (
+                <p className="text-xs text-slate-400 mt-0.5 truncate" title={document.fileName}>
+                  {document.fileName}
+                </p>
+              )}
+            </div>
             {document.detectedCountry && document.detectedCountry !== 'unknown' && (
               <span className="ml-2 mt-0.5 self-center whitespace-nowrap text-xs font-semibold bg-blue-600 text-blue-100 px-2 py-1 rounded-full capitalize">
                 {(() => {
