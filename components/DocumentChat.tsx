@@ -1,8 +1,9 @@
 
 import React, { useState, useEffect, useRef } from 'react';
+import html2canvas from 'html2canvas';
 import { ChatMessage } from '../types';
 import { LoadingSpinner } from './LoadingSpinner';
-import { IconAlertTriangle, IconChatBubbleLeftRight } from './IconComponents'; // Added IconChatBubbleLeftRight
+import { IconAlertTriangle, IconChatBubbleLeftRight } from './IconComponents';
 
 interface DocumentChatProps {
   documentId: string;
@@ -30,7 +31,9 @@ export const DocumentChat: React.FC<DocumentChatProps> = ({
   onSendMessage,
 }) => {
   const [inputText, setInputText] = useState('');
+  const [screenshotting, setScreenshotting] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const chatPanelRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -59,8 +62,52 @@ export const DocumentChat: React.FC<DocumentChatProps> = ({
     }
   };
 
+  const handleScreenshot = async () => {
+    if (!chatPanelRef.current) return;
+    setScreenshotting(true);
+    try {
+      const canvas = await html2canvas(chatPanelRef.current, {
+        backgroundColor: '#f1f5f9',
+        scale: 2,
+        useCORS: true,
+        logging: false,
+      });
+      const link = document.createElement('a');
+      link.download = `chat_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.png`;
+      link.href = canvas.toDataURL('image/png');
+      link.click();
+    } catch {
+      // silent — screenshot failed
+    } finally {
+      setScreenshotting(false);
+    }
+  };
+
   return (
-    <div className="mt-2 p-3 bg-slate-100/70 rounded-lg shadow-inner flex flex-col h-[700px] max-h-[82vh]">
+    <div ref={chatPanelRef} className="mt-2 p-3 bg-slate-100/70 rounded-lg shadow-inner flex flex-col h-[750px] max-h-[87vh]">
+      {/* Panel header with screenshot button */}
+      <div className="flex items-center justify-between mb-2 pb-2 border-b border-slate-300/60">
+        <div className="flex items-center gap-1.5 text-slate-500">
+          <IconChatBubbleLeftRight className="w-4 h-4" />
+          <span className="text-xs font-semibold uppercase tracking-wider">Chat con documento</span>
+        </div>
+        <button
+          onClick={handleScreenshot}
+          disabled={screenshotting || chatMessages.length === 0}
+          title="Descargar screenshot del chat"
+          className="flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1.5 rounded-lg bg-white border border-slate-300 text-slate-600 hover:bg-slate-50 hover:border-slate-400 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shadow-sm"
+        >
+          {screenshotting ? (
+            <LoadingSpinner mini={true} />
+          ) : (
+            <svg xmlns="http://www.w3.org/2000/svg" className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+              <path strokeLinecap="round" strokeLinejoin="round" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+          )}
+          Screenshot
+        </button>
+      </div>
       <div className="flex-grow overflow-y-auto mb-3 pr-1 custom-scrollbar space-y-3">
         {chatMessages.length === 0 && !isChatLoading && !chatError && (
           <div className="flex flex-col items-center justify-center h-full text-slate-500 text-sm">
