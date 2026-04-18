@@ -60,7 +60,7 @@ export const DocumentChat: React.FC<DocumentChatProps> = ({
   };
 
   return (
-    <div className="mt-2 p-3 bg-slate-100/70 rounded-lg shadow-inner flex flex-col h-[550px] max-h-[70vh]">
+    <div className="mt-2 p-3 bg-slate-100/70 rounded-lg shadow-inner flex flex-col h-[700px] max-h-[82vh]">
       <div className="flex-grow overflow-y-auto mb-3 pr-1 custom-scrollbar space-y-3">
         {chatMessages.length === 0 && !isChatLoading && !chatError && (
           <div className="flex flex-col items-center justify-center h-full text-slate-500 text-sm">
