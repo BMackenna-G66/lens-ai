@@ -61,7 +61,7 @@ const UsersTab: React.FC<{ currentUid: string }> = ({ currentUid }) => {
     setSaving(s => ({ ...s, [uid]: false }));
   };
 
-  const handleModuleToggle = async (uid: string, key: 'compliance' | 'criminal' | 'generalDashboard' | 'regcheq' | 'kyc', currentModules: UserProfile['modules']) => {
+  const handleModuleToggle = async (uid: string, key: 'compliance' | 'criminal' | 'generalDashboard' | 'regcheq', currentModules: UserProfile['modules']) => {
     const newModules = { ...currentModules, [key]: !currentModules[key] };
     setSaving(s => ({ ...s, [`${uid}-${key}`]: true }));
     await updateUserProfile(uid, { modules: newModules });
@@ -101,7 +101,6 @@ const UsersTab: React.FC<{ currentUid: string }> = ({ currentUid }) => {
               <th className="text-left py-3 px-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Perfiles Crim.</th>
               <th className="text-left py-3 px-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Dashboard Gral.</th>
               <th className="text-left py-3 px-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Regcheq</th>
-              <th className="text-left py-3 px-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">KYC Inv.</th>
               <th className="text-left py-3 px-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Acciones</th>
             </tr>
           </thead>
@@ -145,36 +144,29 @@ const UsersTab: React.FC<{ currentUid: string }> = ({ currentUid }) => {
                 <td className="py-3 px-4">
                   <Toggle
                     checked={user.modules?.compliance ?? true}
-                    onChange={() => handleModuleToggle(user.uid, 'compliance', user.modules ?? { compliance: true, criminal: true, generalDashboard: true, regcheq: true, kyc: true })}
+                    onChange={() => handleModuleToggle(user.uid, 'compliance', user.modules ?? { compliance: true, criminal: true, generalDashboard: true, regcheq: true })}
                     disabled={!!saving[`${user.uid}-compliance`]}
                   />
                 </td>
                 <td className="py-3 px-4">
                   <Toggle
                     checked={user.modules?.criminal ?? true}
-                    onChange={() => handleModuleToggle(user.uid, 'criminal', user.modules ?? { compliance: true, criminal: true, generalDashboard: true, regcheq: true, kyc: true })}
+                    onChange={() => handleModuleToggle(user.uid, 'criminal', user.modules ?? { compliance: true, criminal: true, generalDashboard: true, regcheq: true })}
                     disabled={!!saving[`${user.uid}-criminal`]}
                   />
                 </td>
                 <td className="py-3 px-4">
                   <Toggle
                     checked={user.modules?.generalDashboard ?? true}
-                    onChange={() => handleModuleToggle(user.uid, 'generalDashboard', user.modules ?? { compliance: true, criminal: true, generalDashboard: true, regcheq: true, kyc: true })}
+                    onChange={() => handleModuleToggle(user.uid, 'generalDashboard', user.modules ?? { compliance: true, criminal: true, generalDashboard: true, regcheq: true })}
                     disabled={!!saving[`${user.uid}-generalDashboard`]}
                   />
                 </td>
                 <td className="py-3 px-4">
                   <Toggle
                     checked={user.modules?.regcheq ?? true}
-                    onChange={() => handleModuleToggle(user.uid, 'regcheq', user.modules ?? { compliance: true, criminal: true, generalDashboard: true, regcheq: true, kyc: true })}
+                    onChange={() => handleModuleToggle(user.uid, 'regcheq', user.modules ?? { compliance: true, criminal: true, generalDashboard: true, regcheq: true })}
                     disabled={!!saving[`${user.uid}-regcheq`]}
-                  />
-                </td>
-                <td className="py-3 px-4">
-                  <Toggle
-                    checked={user.modules?.kyc ?? true}
-                    onChange={() => handleModuleToggle(user.uid, 'kyc', user.modules ?? { compliance: true, criminal: true, generalDashboard: true, regcheq: true, kyc: true })}
-                    disabled={!!saving[`${user.uid}-kyc`]}
                   />
                 </td>
                 <td className="py-3 px-4">
