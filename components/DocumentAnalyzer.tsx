@@ -356,7 +356,11 @@ export const DocumentAnalyzer: React.FC = () => {
       } catch (e) {
         console.warn('Could not generate executive summary, proceeding without it');
       }
-      await generatePdf(doc.fileName, doc.extractedData, summary);
+      const razonSocial = doc.extractedData.find(
+        f => f.field.toLowerCase().includes('razón social') || f.field.toLowerCase().includes('razon social')
+      )?.value?.trim();
+      const pdfName = razonSocial ? `${razonSocial} - Analisis Lens AI` : doc.fileName;
+      await generatePdf(pdfName, doc.extractedData, summary);
     } catch (error: any) {
       console.error('Error generating PDF:', error);
     }

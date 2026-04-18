@@ -216,7 +216,7 @@ export const generatePdf = async (
     addPageFooter(doc, i, totalPages, generationDate);
   }
 
-  doc.save(`Analisis_${fileName.replace(/[^a-z0-9]/gi, '_')}.pdf`);
+  doc.save(`${fileName.replace(/[^a-z0-9 _\-]/gi, '_')}.pdf`);
 };
 
 /**
