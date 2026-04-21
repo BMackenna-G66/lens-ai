@@ -5,6 +5,7 @@ import {
 } from 'recharts';
 import { useAuth } from '../context/AuthContext';
 import { computeDashboardStats, DashboardStats } from '../services/analyticsService';
+import { getTokenEvents, FirestoreTokenEvent } from '../services/firestoreService';
 import { db } from '../services/dbService';
 import { ProcessedDocument } from '../types';
 
@@ -64,11 +65,12 @@ const CustomTooltip: React.FC<any> = ({ active, payload, label }) => {
 // ─── Main Dashboard ───────────────────────────────────────────────────────────
 
 export const Dashboard: React.FC = () => {
-  const { user, firebaseReady, login, logout, isLoading: authLoading } = useAuth();
+  const { user, firebaseReady, login, logout, isLoading: authLoading, role } = useAuth();
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [recentDocs, setRecentDocs] = useState<ProcessedDocument[]>([]);
   const [dbTotal, setDbTotal] = useState<number>(0);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [tokenEvents, setTokenEvents] = useState<FirestoreTokenEvent[]>([]);
 
   const refresh = useCallback(() => setRefreshKey(k => k + 1), []);
 
@@ -82,6 +84,48 @@ export const Dashboard: React.FC = () => {
       setRecentDocs(sorted);
     }).catch(() => {});
   }, [refreshKey]);
+
+  // Load token events from Firestore only for Líderes
+  useEffect(() => {
+    if (role !== 'Lider' || !firebaseReady) return;
+    getTokenEvents(1000).then(setTokenEvents).catch(() => {});
+  }, [refreshKey, role, firebaseReady]);
+
+  // ── Token derived stats (Líderes only) ─────────────────────────────────────
+  const fmtT = (n: number) =>
+    n >= 1_000_000 ? `${(n / 1_000_000).toFixed(2)}M`
+    : n >= 1_000   ? `${(n / 1_000).toFixed(1)}K`
+    : String(n);
+
+  const totalTokensAll  = tokenEvents.reduce((s, e) => s + e.totalTokens, 0);
+  const totalPromptAll  = tokenEvents.reduce((s, e) => s + e.promptTokens, 0);
+  const totalRespAll    = tokenEvents.reduce((s, e) => s + e.responseTokens, 0);
+
+  const opMap: Record<string, { calls: number; prompt: number; response: number; total: number }> = {};
+  for (const e of tokenEvents) {
+    if (!opMap[e.operation]) opMap[e.operation] = { calls: 0, prompt: 0, response: 0, total: 0 };
+    opMap[e.operation].calls++;
+    opMap[e.operation].prompt   += e.promptTokens;
+    opMap[e.operation].response += e.responseTokens;
+    opMap[e.operation].total    += e.totalTokens;
+  }
+  const opSummary = Object.entries(opMap).sort((a, b) => b[1].total - a[1].total);
+
+  const nowTs = Date.now();
+  const dailyTokens: { date: string; tokens: number }[] = [];
+  for (let i = 13; i >= 0; i--) {
+    const dayStart = new Date(nowTs - i * 24 * 60 * 60 * 1000);
+    dayStart.setHours(0, 0, 0, 0);
+    const dayEnd = new Date(dayStart);
+    dayEnd.setHours(23, 59, 59, 999);
+    const total = tokenEvents
+      .filter(e => e.timestamp >= dayStart.getTime() && e.timestamp <= dayEnd.getTime())
+      .reduce((s, e) => s + e.totalTokens, 0);
+    dailyTokens.push({ date: dayStart.toLocaleDateString('es-CL', { day: '2-digit', month: 'short' }), tokens: total });
+  }
+
+  const fmtDT = (ts: number) =>
+    new Date(ts).toLocaleString('es-CL', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
 
   const statusBadge = (status: string) => {
     const map: Record<string, string> = {
@@ -215,6 +259,15 @@ export const Dashboard: React.FC = () => {
           subtitle="Módulo Crypto"
         />
       </div>
+
+      {/* ── Token stat cards (Líderes only) ── */}
+      {role === 'Lider' && (
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <StatCard label="Tokens totales consumidos" value={fmtT(totalTokensAll)} icon="🧠" color="border-violet-200 dark:border-violet-800" subtitle="Global · todos los usuarios" />
+          <StatCard label="Tokens de entrada (prompt)" value={fmtT(totalPromptAll)} icon="📥" color="border-sky-200 dark:border-sky-800" subtitle="Contexto enviado a Gemini" />
+          <StatCard label="Tokens de salida (respuesta)" value={fmtT(totalRespAll)} icon="📤" color="border-emerald-200 dark:border-emerald-800" subtitle="Respuestas generadas" />
+        </div>
+      )}
 
       {/* ── Charts row ── */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -384,6 +437,137 @@ export const Dashboard: React.FC = () => {
           )}
         </div>
       </div>
+
+      {/* ── Token usage section (Líderes only) ── */}
+      {role === 'Lider' && (
+        <div className="space-y-4">
+          {/* Section title */}
+          <h3 className="text-base font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-2">
+            🧠 Consumo de Tokens IA
+            <span className="text-[10px] font-normal text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-700 rounded-full px-2 py-0.5">Solo Líderes · Global</span>
+          </h3>
+
+          {/* Token stat cards */}
+          <>
+                {/* Daily tokens chart + per-op table */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  {/* Daily bar chart */}
+                  <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-5">
+                    <h4 className="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-4">
+                      📊 Tokens por día (últimos 14 días)
+                    </h4>
+                    {dailyTokens.every(d => d.tokens === 0) ? (
+                      <div className="flex flex-col items-center justify-center h-48 text-slate-400 dark:text-slate-500 gap-2">
+                        <span className="text-3xl">📭</span>
+                        <p className="text-sm">Sin tokens registrados aún</p>
+                      </div>
+                    ) : (
+                      <ResponsiveContainer width="100%" height={200}>
+                        <BarChart data={dailyTokens} margin={{ top: 0, right: 0, left: -10, bottom: 0 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                          <XAxis dataKey="date" tick={{ fontSize: 11, fill: '#94a3b8' }} />
+                          <YAxis tick={{ fontSize: 11, fill: '#94a3b8' }} tickFormatter={v => fmtT(v as number)} />
+                          <Tooltip
+                            content={({ active, payload, label }: any) =>
+                              active && payload?.length ? (
+                                <div className="bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-2 shadow-lg text-sm">
+                                  <p className="font-medium text-slate-700 dark:text-slate-200">{label}</p>
+                                  <p className="text-violet-500 font-semibold">Tokens: {fmtT(payload[0].value ?? 0)}</p>
+                                </div>
+                              ) : null
+                            }
+                          />
+                          <Bar dataKey="tokens" fill="#8b5cf6" radius={[4, 4, 0, 0]} />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    )}
+                  </div>
+
+                  {/* Per-operation table */}
+                  <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-5">
+                    <h4 className="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-4">
+                      ⚙️ Consumo por operación
+                    </h4>
+                    {opSummary.length === 0 ? (
+                      <div className="flex flex-col items-center justify-center h-48 text-slate-400 dark:text-slate-500 gap-2">
+                        <span className="text-3xl">⚙️</span>
+                        <p className="text-sm">Sin datos de operaciones aún</p>
+                      </div>
+                    ) : (
+                      <div className="overflow-x-auto max-h-[200px] overflow-y-auto">
+                        <table className="w-full text-xs">
+                          <thead className="sticky top-0 bg-white dark:bg-slate-800">
+                            <tr className="border-b border-slate-100 dark:border-slate-700">
+                              <th className="text-left py-2 px-2 font-medium text-slate-500 dark:text-slate-400">Operación</th>
+                              <th className="text-right py-2 px-2 font-medium text-slate-500 dark:text-slate-400">Llamadas</th>
+                              <th className="text-right py-2 px-2 font-medium text-slate-500 dark:text-slate-400">Entrada</th>
+                              <th className="text-right py-2 px-2 font-medium text-slate-500 dark:text-slate-400">Salida</th>
+                              <th className="text-right py-2 px-2 font-medium text-slate-500 dark:text-slate-400">Total</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {opSummary.map(([op, s]) => (
+                              <tr key={op} className="border-b border-slate-50 dark:border-slate-700/50 hover:bg-slate-50 dark:hover:bg-slate-700/30">
+                                <td className="py-1.5 px-2 text-slate-700 dark:text-slate-300 font-medium">{op}</td>
+                                <td className="py-1.5 px-2 text-right text-slate-500 dark:text-slate-400">{s.calls}</td>
+                                <td className="py-1.5 px-2 text-right text-sky-600 dark:text-sky-400">{fmtT(s.prompt)}</td>
+                                <td className="py-1.5 px-2 text-right text-emerald-600 dark:text-emerald-400">{fmtT(s.response)}</td>
+                                <td className="py-1.5 px-2 text-right text-violet-600 dark:text-violet-400 font-semibold">{fmtT(s.total)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Event log */}
+                <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-5">
+                  <h4 className="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-4">
+                    📋 Evolutivo de tokens (últimas 50 operaciones · todos los usuarios)
+                  </h4>
+                  {tokenEvents.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center h-20 text-slate-400 dark:text-slate-500 gap-1">
+                      <p className="text-xs">Sin registros aún — se empezarán a guardar desde ahora.</p>
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="border-b border-slate-100 dark:border-slate-700">
+                            <th className="text-left py-2 px-2 font-medium text-slate-500 dark:text-slate-400">Fecha</th>
+                            <th className="text-left py-2 px-2 font-medium text-slate-500 dark:text-slate-400">Usuario</th>
+                            <th className="text-left py-2 px-2 font-medium text-slate-500 dark:text-slate-400">Operación</th>
+                            <th className="text-right py-2 px-2 font-medium text-slate-500 dark:text-slate-400">Entrada</th>
+                            <th className="text-right py-2 px-2 font-medium text-slate-500 dark:text-slate-400">Salida</th>
+                            <th className="text-right py-2 px-2 font-medium text-slate-500 dark:text-slate-400">Total</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {tokenEvents.slice(0, 50).map((ev, idx) => (
+                            <tr
+                              key={ev.id ?? idx}
+                              className="border-b border-slate-50 dark:border-slate-700/50 hover:bg-slate-50 dark:hover:bg-slate-700/30 transition-colors"
+                            >
+                              <td className="py-1.5 px-2 text-slate-500 dark:text-slate-400 whitespace-nowrap">{fmtDT(ev.timestamp)}</td>
+                              <td className="py-1.5 px-2 text-slate-600 dark:text-slate-300 max-w-[120px] truncate" title={ev.userEmail}>
+                                {ev.userName || ev.userEmail?.split('@')[0] || '—'}
+                              </td>
+                              <td className="py-1.5 px-2 text-slate-700 dark:text-slate-300 font-medium">{ev.operation}</td>
+                              <td className="py-1.5 px-2 text-right text-sky-600 dark:text-sky-400">{fmtT(ev.promptTokens)}</td>
+                              <td className="py-1.5 px-2 text-right text-emerald-600 dark:text-emerald-400">{fmtT(ev.responseTokens)}</td>
+                              <td className="py-1.5 px-2 text-right text-violet-600 dark:text-violet-400 font-bold">{fmtT(ev.totalTokens)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+          </>
+        </div>
+      )}
 
       {/* ── Firebase setup hint ── */}
       {!firebaseReady && (

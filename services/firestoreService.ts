@@ -279,3 +279,42 @@ export async function getAnalyticsEvents(limitCount = 2000): Promise<FirestoreAn
     return [];
   }
 }
+
+// ─── Token Events ─────────────────────────────────────────────────────────────
+
+export interface FirestoreTokenEvent {
+  id?: string;
+  userId: string;
+  userEmail: string;
+  userName: string;
+  operation: string;
+  model: string;
+  promptTokens: number;
+  responseTokens: number;
+  totalTokens: number;
+  timestamp: number;
+}
+
+export async function writeTokenEvent(event: Omit<FirestoreTokenEvent, 'id'>): Promise<void> {
+  const db = getDb();
+  if (!db) return;
+  try {
+    await addDoc(collection(db, 'token_events'), event);
+  } catch { /* fire and forget */ }
+}
+
+export async function getTokenEvents(limitCount = 1000): Promise<FirestoreTokenEvent[]> {
+  const db = getDb();
+  if (!db) return [];
+  try {
+    const q = query(
+      collection(db, 'token_events'),
+      orderBy('timestamp', 'desc'),
+      limit(limitCount),
+    );
+    const snap = await getDocs(q);
+    return snap.docs.map(d => ({ id: d.id, ...d.data() } as FirestoreTokenEvent));
+  } catch {
+    return [];
+  }
+}

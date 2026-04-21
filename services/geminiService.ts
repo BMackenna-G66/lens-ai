@@ -57,11 +57,27 @@ const primaryAnalysisModel = 'gemini-2.5-flash';
 const chatModel = 'gemini-2.5-flash';
 const jsonConfig = { responseMimeType: "application/json", thinkingConfig: { thinkingBudget: 0 } } as const;
 
+// ─── Token tracking (fire-and-forget) ────────────────────────────────────────
+interface UsageMeta { promptTokenCount?: number; candidatesTokenCount?: number; totalTokenCount?: number }
+function fireTokenEvent(operation: string, model: string, usage: UsageMeta | null | undefined): void {
+  if (!usage) return;
+  import('./analyticsService').then(({ trackTokenUsage }) => {
+    trackTokenUsage(
+      operation,
+      model,
+      usage.promptTokenCount    ?? 0,
+      usage.candidatesTokenCount ?? 0,
+      usage.totalTokenCount      ?? 0,
+    );
+  }).catch(() => {});
+}
+
 export const detectCountryWithGemini = async (documentText: string): Promise<string> => {
   const countryList = Object.keys(KEYWORDS_BY_COUNTRY);
   const prompt = GEMINI_COUNTRY_DETECTION_PROMPT_TEMPLATE(documentText, countryList);
   return executeWithRetry(async (ai) => {
     const response = await ai.models.generateContent({ model: chatModel, contents: prompt, config: { thinkingConfig: { thinkingBudget: 0 } } });
+    fireTokenEvent('Detección País', chatModel, response.usageMetadata as UsageMeta);
     const country = response.text?.trim().toLowerCase() || 'unknown';
     return (countryList.includes(country) || country === 'unknown') ? country : 'unknown';
   });
@@ -71,6 +87,7 @@ export const analyzeDocumentWithGemini = async (prompt: string): Promise<{ extra
   const responseSchema = { type: Type.ARRAY, items: { type: Type.OBJECT, properties: { field: { type: Type.STRING, enum: PREDEFINED_FIELDS }, value: { type: Type.STRING } }, required: ['field', 'value'] } };
   return executeWithRetry(async (ai) => {
     const response = await ai.models.generateContent({ model: primaryAnalysisModel, contents: prompt, config: { responseMimeType: "application/json", responseSchema, thinkingConfig: { thinkingBudget: 0 } } });
+    fireTokenEvent('Análisis Documento', primaryAnalysisModel, response.usageMetadata as UsageMeta);
     const text = response.text;
     if (!text?.trim()) throw new Error("Respuesta vacía de la API de Gemini.");
     const parsedData: ExtractedField[] = JSON.parse(extractJsonFromResponse(text));
@@ -84,6 +101,7 @@ export const analyzeDocumentComparisonWithGemini = async (primaryDocumentExtract
   const prompt = GEMINI_COMPARISON_PROMPT_TEMPLATE(primaryDataJson, supplementaryDocumentText);
   return executeWithRetry(async (ai) => {
     const response = await ai.models.generateContent({ model: primaryAnalysisModel, contents: prompt, config: jsonConfig });
+    fireTokenEvent('Comparación Documentos', primaryAnalysisModel, response.usageMetadata as UsageMeta);
     if (!response.text) throw new Error("Respuesta vacía de la API.");
     return JSON.parse(extractJsonFromResponse(response.text)) as ComparisonResult;
   });
@@ -94,7 +112,12 @@ export const getChatResponse = async (systemInstruction: string, fullChatHistory
     const chat = ai.chats.create({ model: chatModel, config: { systemInstruction }, history: fullChatHistoryForGemini });
     const responseStream = await chat.sendMessageStream({ message: newUserQuery });
     let aggregatedResponse = "";
-    for await (const chunk of responseStream) aggregatedResponse += chunk.text;
+    let lastChunk: { usageMetadata?: UsageMeta } | undefined;
+    for await (const chunk of responseStream) {
+      aggregatedResponse += chunk.text;
+      lastChunk = chunk as { usageMetadata?: UsageMeta };
+    }
+    fireTokenEvent('Chat Documento', chatModel, lastChunk?.usageMetadata);
     return aggregatedResponse || "No se recibió una respuesta de la IA.";
   });
 };
@@ -102,6 +125,7 @@ export const getChatResponse = async (systemInstruction: string, fullChatHistory
 export const analyzeDocumentForRisks = async (documentText: string): Promise<RiskAnalysisResult> => {
   return executeWithRetry(async (ai) => {
     const response = await ai.models.generateContent({ model: primaryAnalysisModel, contents: GEMINI_RISK_ANALYSIS_PROMPT_TEMPLATE(documentText), config: jsonConfig });
+    fireTokenEvent('Análisis Riesgo', primaryAnalysisModel, response.usageMetadata as UsageMeta);
     if (!response.text) throw new Error("Respuesta vacía de la IA.");
     return JSON.parse(extractJsonFromResponse(response.text)) as RiskAnalysisResult;
   });
@@ -110,6 +134,7 @@ export const analyzeDocumentForRisks = async (documentText: string): Promise<Ris
 export const analyzeDocumentIntegrity = async (documentText: string): Promise<IntegrityAnalysisResult> => {
   return executeWithRetry(async (ai) => {
     const response = await ai.models.generateContent({ model: primaryAnalysisModel, contents: GEMINI_INTEGRITY_ANALYSIS_PROMPT_TEMPLATE(documentText), config: jsonConfig });
+    fireTokenEvent('Análisis Integridad', primaryAnalysisModel, response.usageMetadata as UsageMeta);
     if (!response.text) throw new Error("Respuesta vacía de la IA.");
     return JSON.parse(extractJsonFromResponse(response.text)) as IntegrityAnalysisResult;
   });
@@ -118,6 +143,7 @@ export const analyzeDocumentIntegrity = async (documentText: string): Promise<In
 export const analyzeFinancialDocumentWithGemini = async (documentText: string): Promise<FinancialAnalysisResult> => {
   return executeWithRetry(async (ai) => {
     const response = await ai.models.generateContent({ model: primaryAnalysisModel, contents: GEMINI_FINANCIAL_PROMPT_TEMPLATE(documentText), config: jsonConfig });
+    fireTokenEvent('Análisis Financiero', primaryAnalysisModel, response.usageMetadata as UsageMeta);
     if (!response.text) throw new Error("Respuesta vacía de la IA.");
     return JSON.parse(extractJsonFromResponse(response.text)) as FinancialAnalysisResult;
   });
@@ -126,6 +152,7 @@ export const analyzeFinancialDocumentWithGemini = async (documentText: string): 
 export const analyzeBankStatementWithGemini = async (documentText: string): Promise<BankStatementAnalysisResult> => {
   return executeWithRetry(async (ai) => {
     const response = await ai.models.generateContent({ model: primaryAnalysisModel, contents: GEMINI_BANK_STATEMENT_PROMPT_TEMPLATE(documentText), config: jsonConfig });
+    fireTokenEvent('Análisis Bancario', primaryAnalysisModel, response.usageMetadata as UsageMeta);
     if (!response.text) throw new Error("Respuesta vacía de la IA.");
     return JSON.parse(extractJsonFromResponse(response.text)) as BankStatementAnalysisResult;
   });
@@ -134,6 +161,7 @@ export const analyzeBankStatementWithGemini = async (documentText: string): Prom
 export const analyzeTaxFolderWithGemini = async (documentText: string): Promise<TaxFolderAnalysisResult> => {
   return executeWithRetry(async (ai) => {
     const response = await ai.models.generateContent({ model: primaryAnalysisModel, contents: GEMINI_TAX_FOLDER_PROMPT_TEMPLATE(documentText), config: jsonConfig });
+    fireTokenEvent('Análisis Tributario', primaryAnalysisModel, response.usageMetadata as UsageMeta);
     if (!response.text) throw new Error("Respuesta vacía de la IA.");
     return JSON.parse(extractJsonFromResponse(response.text)) as TaxFolderAnalysisResult;
   });
@@ -142,6 +170,7 @@ export const analyzeTaxFolderWithGemini = async (documentText: string): Promise<
 export const analyzeCrossCheckWithGemini = async (documentText: string): Promise<CombinedAnalysisResult> => {
   return executeWithRetry(async (ai) => {
     const response = await ai.models.generateContent({ model: primaryAnalysisModel, contents: GEMINI_CROSS_ANALYSIS_PROMPT_TEMPLATE(documentText), config: jsonConfig });
+    fireTokenEvent('Cruce Financiero', primaryAnalysisModel, response.usageMetadata as UsageMeta);
     if (!response.text) throw new Error("Respuesta vacía de la IA.");
     return JSON.parse(extractJsonFromResponse(response.text)) as CombinedAnalysisResult;
   });
@@ -150,6 +179,7 @@ export const analyzeCrossCheckWithGemini = async (documentText: string): Promise
 export const analyzeCryptoWalletWithGemini = async (walletProfile: CryptoWalletProfile): Promise<CryptoRiskAssessment> => {
   return executeWithRetry(async (ai) => {
     const response = await ai.models.generateContent({ model: primaryAnalysisModel, contents: GEMINI_CRYPTO_FORENSIC_PROMPT(JSON.stringify(walletProfile, null, 2)), config: jsonConfig });
+    fireTokenEvent('Análisis Cripto', primaryAnalysisModel, response.usageMetadata as UsageMeta);
     if (!response.text) throw new Error("Respuesta vacía de la IA.");
     return JSON.parse(extractJsonFromResponse(response.text)) as CryptoRiskAssessment;
   });
@@ -158,16 +188,18 @@ export const analyzeCryptoWalletWithGemini = async (walletProfile: CryptoWalletP
 export const analyzeComplianceDocumentWithGemini = async (documentText: string): Promise<ComplianceAnalysisResult> => {
   return executeWithRetry(async (ai) => {
     const response = await ai.models.generateContent({ model: primaryAnalysisModel, contents: GEMINI_COMPLIANCE_AUDIT_PROMPT(documentText), config: jsonConfig });
+    fireTokenEvent('Evaluación AML', primaryAnalysisModel, response.usageMetadata as UsageMeta);
     if (!response.text) throw new Error("Respuesta vacía de la IA.");
     return JSON.parse(extractJsonFromResponse(response.text)) as ComplianceAnalysisResult;
   });
 };
 
 export const analyzeCryptoPatterns = async (transactions: any[], walletAddress: string, network: string): Promise<PatternAnalysisResult> => {
-  const transactionsJson = JSON.stringify(transactions.slice(0, 50), null, 2); // limit to 50 txs
+  const transactionsJson = JSON.stringify(transactions.slice(0, 50), null, 2);
   const prompt = GEMINI_CRYPTO_PATTERN_ALERT_PROMPT(transactionsJson, walletAddress, network);
   return executeWithRetry(async (ai) => {
     const response = await ai.models.generateContent({ model: primaryAnalysisModel, contents: prompt, config: jsonConfig });
+    fireTokenEvent('Patrones Cripto', primaryAnalysisModel, response.usageMetadata as UsageMeta);
     if (!response.text) throw new Error("Respuesta vacía de la IA.");
     return JSON.parse(extractJsonFromResponse(response.text)) as PatternAnalysisResult;
   });
@@ -182,6 +214,7 @@ export const generateExecutiveSummary = async (extractedData: ExtractedField[], 
       contents: prompt,
       config: { thinkingConfig: { thinkingBudget: 0 } },
     });
+    fireTokenEvent('Resumen Ejecutivo', primaryAnalysisModel, response.usageMetadata as UsageMeta);
     return response.text || 'No se pudo generar el resumen ejecutivo.';
   });
 };
@@ -196,6 +229,7 @@ export const analyzeComplianceVsManual = async (
       contents: GEMINI_COMPLIANCE_VS_MANUAL_PROMPT(manualText, documentText),
       config: jsonConfig,
     });
+    fireTokenEvent('Compliance vs Manual', primaryAnalysisModel, response.usageMetadata as UsageMeta);
     return JSON.parse(extractJsonFromResponse(response.text)) as ComplianceVsManualResult;
   });
 };

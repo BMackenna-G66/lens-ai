@@ -65,6 +65,30 @@ export function trackDocumentProcessed(module: ModuleKey, country?: string, hasR
   trackEvent({ type: 'document_processed', module, country, hasRisk, userId });
 }
 
+export function trackTokenUsage(
+  operation: string,
+  model: string,
+  promptTokens: number,
+  responseTokens: number,
+  totalTokens: number,
+): void {
+  if (!_currentUser || totalTokens === 0) return;
+  const currentUser = _currentUser;
+  import('./firestoreService').then(({ writeTokenEvent }) => {
+    writeTokenEvent({
+      userId:        currentUser.uid,
+      userEmail:     currentUser.email,
+      userName:      currentUser.displayName,
+      operation,
+      model,
+      promptTokens,
+      responseTokens,
+      totalTokens,
+      timestamp: Date.now(),
+    }).catch(() => {});
+  });
+}
+
 // ─── Read ─────────────────────────────────────────────────────────────────────
 
 export function readEvents(): AnalyticsEvent[] {

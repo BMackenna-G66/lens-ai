@@ -3,7 +3,7 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, Legend,
 } from 'recharts';
-import { getAnalyticsEvents, getAllUsers, FirestoreAnalyticsEvent, UserProfile } from '../services/firestoreService';
+import { getAnalyticsEvents, getAllUsers, getTokenEvents, FirestoreAnalyticsEvent, FirestoreTokenEvent, UserProfile } from '../services/firestoreService';
 import { isFirebaseConfigured } from '../services/firebaseService';
 
 // ─── Palette ──────────────────────────────────────────────────────────────────
@@ -45,6 +45,7 @@ const Skeleton: React.FC<{ className?: string }> = ({ className = '' }) => (
 export const GeneralDashboard: React.FC<GeneralDashboardProps> = ({ onBack }) => {
   const [events, setEvents] = useState<FirestoreAnalyticsEvent[]>([]);
   const [users, setUsers] = useState<UserProfile[]>([]);
+  const [tokenEvents, setTokenEvents] = useState<FirestoreTokenEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshKey, setRefreshKey] = useState(0);
 
@@ -58,10 +59,11 @@ export const GeneralDashboard: React.FC<GeneralDashboardProps> = ({ onBack }) =>
       return;
     }
     setLoading(true);
-    Promise.all([getAnalyticsEvents(2000), getAllUsers()])
-      .then(([evts, usrs]) => {
+    Promise.all([getAnalyticsEvents(2000), getAllUsers(), getTokenEvents(1000)])
+      .then(([evts, usrs, tkns]) => {
         setEvents(evts);
         setUsers(usrs);
+        setTokenEvents(tkns);
       })
       .catch(() => {})
       .finally(() => setLoading(false));
@@ -119,6 +121,43 @@ export const GeneralDashboard: React.FC<GeneralDashboardProps> = ({ onBack }) =>
     if (!ts) return '—';
     return new Date(ts).toLocaleDateString('es-CL', { day: '2-digit', month: 'short', year: 'numeric' });
   };
+
+  const formatDateTime = (ts: number) =>
+    new Date(ts).toLocaleString('es-CL', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+
+  const fmtTokens = (n: number) =>
+    n >= 1_000_000 ? `${(n / 1_000_000).toFixed(2)}M`
+    : n >= 1_000   ? `${(n / 1_000).toFixed(1)}K`
+    : String(n);
+
+  // ── Token derived stats ──────────────────────────────────────────────────────
+  const totalTokensAll  = tokenEvents.reduce((s, e) => s + e.totalTokens, 0);
+  const totalPromptAll  = tokenEvents.reduce((s, e) => s + e.promptTokens, 0);
+  const totalRespAll    = tokenEvents.reduce((s, e) => s + e.responseTokens, 0);
+
+  // Per-operation summary
+  const opMap: Record<string, { calls: number; prompt: number; response: number; total: number }> = {};
+  for (const e of tokenEvents) {
+    if (!opMap[e.operation]) opMap[e.operation] = { calls: 0, prompt: 0, response: 0, total: 0 };
+    opMap[e.operation].calls++;
+    opMap[e.operation].prompt   += e.promptTokens;
+    opMap[e.operation].response += e.responseTokens;
+    opMap[e.operation].total    += e.totalTokens;
+  }
+  const opSummary = Object.entries(opMap).sort((a, b) => b[1].total - a[1].total);
+
+  // Daily tokens last 14 days
+  const dailyTokens: { date: string; tokens: number }[] = [];
+  for (let i = 13; i >= 0; i--) {
+    const dayStart = new Date(now - i * 24 * 60 * 60 * 1000);
+    dayStart.setHours(0, 0, 0, 0);
+    const dayEnd = new Date(dayStart);
+    dayEnd.setHours(23, 59, 59, 999);
+    const total = tokenEvents
+      .filter(e => e.timestamp >= dayStart.getTime() && e.timestamp <= dayEnd.getTime())
+      .reduce((s, e) => s + e.totalTokens, 0);
+    dailyTokens.push({ date: dayStart.toLocaleDateString('es-CL', { day: '2-digit', month: 'short' }), tokens: total });
+  }
 
   // Docs per user (bar chart)
   const docsByUser = userStats
@@ -348,6 +387,171 @@ export const GeneralDashboard: React.FC<GeneralDashboardProps> = ({ onBack }) =>
               </ResponsiveContainer>
             )}
           </div>
+        </div>
+
+        {/* ── Token Usage Section ─────────────────────────────────────────────────── */}
+        {/* Token stat cards */}
+        <div>
+          <h3 className="text-base font-semibold text-slate-700 dark:text-slate-300 mb-3 flex items-center gap-2">
+            <span>🧠</span> Consumo de Tokens IA
+          </h3>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            {loading ? (
+              Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-20" />)
+            ) : (
+              <>
+                <div className="rounded-xl p-4 flex items-center gap-4 border border-violet-200 dark:border-violet-800 bg-white dark:bg-slate-800">
+                  <span className="text-3xl">🧠</span>
+                  <div>
+                    <p className="text-2xl font-bold text-violet-600 dark:text-violet-400">{fmtTokens(totalTokensAll)}</p>
+                    <p className="text-xs font-medium text-slate-500 dark:text-slate-400">Tokens totales consumidos</p>
+                  </div>
+                </div>
+                <div className="rounded-xl p-4 flex items-center gap-4 border border-sky-200 dark:border-sky-800 bg-white dark:bg-slate-800">
+                  <span className="text-3xl">📥</span>
+                  <div>
+                    <p className="text-2xl font-bold text-sky-600 dark:text-sky-400">{fmtTokens(totalPromptAll)}</p>
+                    <p className="text-xs font-medium text-slate-500 dark:text-slate-400">Tokens de entrada (prompt)</p>
+                  </div>
+                </div>
+                <div className="rounded-xl p-4 flex items-center gap-4 border border-emerald-200 dark:border-emerald-800 bg-white dark:bg-slate-800">
+                  <span className="text-3xl">📤</span>
+                  <div>
+                    <p className="text-2xl font-bold text-emerald-600 dark:text-emerald-400">{fmtTokens(totalRespAll)}</p>
+                    <p className="text-xs font-medium text-slate-500 dark:text-slate-400">Tokens de salida (respuesta)</p>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+
+        {/* Tokens per day chart + per-operation table */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* Daily tokens bar chart */}
+          <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-5">
+            <h3 className="text-base font-semibold text-slate-700 dark:text-slate-300 mb-4">
+              📊 Tokens consumidos por día (últimos 14 días)
+            </h3>
+            {loading ? (
+              <Skeleton className="h-48" />
+            ) : dailyTokens.every(d => d.tokens === 0) ? (
+              <div className="flex flex-col items-center justify-center h-48 text-slate-400 dark:text-slate-500 gap-2">
+                <span className="text-3xl">📭</span>
+                <p className="text-sm">Sin tokens registrados aún</p>
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height={200}>
+                <BarChart data={dailyTokens} margin={{ top: 0, right: 0, left: -10, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                  <XAxis dataKey="date" tick={{ fontSize: 11, fill: '#94a3b8' }} />
+                  <YAxis tick={{ fontSize: 11, fill: '#94a3b8' }} tickFormatter={v => fmtTokens(v as number)} />
+                  <Tooltip
+                    content={({ active, payload, label }) =>
+                      active && payload?.length ? (
+                        <div className="bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-2 shadow-lg text-sm">
+                          <p className="font-medium text-slate-700 dark:text-slate-200">{label}</p>
+                          <p className="text-violet-500 font-semibold">Tokens: {fmtTokens((payload[0].value as number) ?? 0)}</p>
+                        </div>
+                      ) : null
+                    }
+                  />
+                  <Bar dataKey="tokens" name="Tokens" fill="#8b5cf6" radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+
+          {/* Per-operation summary table */}
+          <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-5">
+            <h3 className="text-base font-semibold text-slate-700 dark:text-slate-300 mb-4">
+              ⚙️ Consumo por operación
+            </h3>
+            {loading ? (
+              <div className="space-y-3">
+                {Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-8" />)}
+              </div>
+            ) : opSummary.length === 0 ? (
+              <div className="flex flex-col items-center justify-center h-48 text-slate-400 dark:text-slate-500 gap-2">
+                <span className="text-3xl">⚙️</span>
+                <p className="text-sm">Sin datos de operaciones aún</p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto max-h-[200px] overflow-y-auto">
+                <table className="w-full text-xs">
+                  <thead className="sticky top-0 bg-white dark:bg-slate-800">
+                    <tr className="border-b border-slate-100 dark:border-slate-700">
+                      <th className="text-left py-2 px-2 font-medium text-slate-500 dark:text-slate-400">Operación</th>
+                      <th className="text-right py-2 px-2 font-medium text-slate-500 dark:text-slate-400">Llamadas</th>
+                      <th className="text-right py-2 px-2 font-medium text-slate-500 dark:text-slate-400">Entrada</th>
+                      <th className="text-right py-2 px-2 font-medium text-slate-500 dark:text-slate-400">Salida</th>
+                      <th className="text-right py-2 px-2 font-medium text-slate-500 dark:text-slate-400">Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {opSummary.map(([op, stats]) => (
+                      <tr key={op} className="border-b border-slate-50 dark:border-slate-700/50 hover:bg-slate-50 dark:hover:bg-slate-700/30">
+                        <td className="py-1.5 px-2 text-slate-700 dark:text-slate-300 font-medium">{op}</td>
+                        <td className="py-1.5 px-2 text-right text-slate-500 dark:text-slate-400">{stats.calls}</td>
+                        <td className="py-1.5 px-2 text-right text-sky-600 dark:text-sky-400">{fmtTokens(stats.prompt)}</td>
+                        <td className="py-1.5 px-2 text-right text-emerald-600 dark:text-emerald-400">{fmtTokens(stats.response)}</td>
+                        <td className="py-1.5 px-2 text-right text-violet-600 dark:text-violet-400 font-semibold">{fmtTokens(stats.total)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Token event log */}
+        <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-5">
+          <h3 className="text-base font-semibold text-slate-700 dark:text-slate-300 mb-4">
+            📋 Evolutivo de uso de tokens (últimas 50 operaciones)
+          </h3>
+          {loading ? (
+            <div className="space-y-3">
+              {Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-9" />)}
+            </div>
+          ) : tokenEvents.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-24 text-slate-400 dark:text-slate-500 gap-1">
+              <span className="text-2xl">🧠</span>
+              <p className="text-xs">Sin registros de tokens aún. Se empezarán a registrar desde ahora.</p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-slate-100 dark:border-slate-700">
+                    <th className="text-left py-2 px-2 font-medium text-slate-500 dark:text-slate-400">Fecha</th>
+                    <th className="text-left py-2 px-2 font-medium text-slate-500 dark:text-slate-400">Usuario</th>
+                    <th className="text-left py-2 px-2 font-medium text-slate-500 dark:text-slate-400">Operación</th>
+                    <th className="text-right py-2 px-2 font-medium text-slate-500 dark:text-slate-400">Entrada</th>
+                    <th className="text-right py-2 px-2 font-medium text-slate-500 dark:text-slate-400">Salida</th>
+                    <th className="text-right py-2 px-2 font-medium text-slate-500 dark:text-slate-400">Total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {tokenEvents.slice(0, 50).map((ev, idx) => (
+                    <tr
+                      key={ev.id ?? idx}
+                      className="border-b border-slate-50 dark:border-slate-700/50 hover:bg-slate-50 dark:hover:bg-slate-700/30 transition-colors"
+                    >
+                      <td className="py-1.5 px-2 text-slate-500 dark:text-slate-400 whitespace-nowrap">{formatDateTime(ev.timestamp)}</td>
+                      <td className="py-1.5 px-2 text-slate-600 dark:text-slate-300 max-w-[120px] truncate" title={ev.userEmail}>
+                        {ev.userName || ev.userEmail?.split('@')[0] || '—'}
+                      </td>
+                      <td className="py-1.5 px-2 text-slate-700 dark:text-slate-300 font-medium">{ev.operation}</td>
+                      <td className="py-1.5 px-2 text-right text-sky-600 dark:text-sky-400">{fmtTokens(ev.promptTokens)}</td>
+                      <td className="py-1.5 px-2 text-right text-emerald-600 dark:text-emerald-400">{fmtTokens(ev.responseTokens)}</td>
+                      <td className="py-1.5 px-2 text-right text-violet-600 dark:text-violet-400 font-bold">{fmtTokens(ev.totalTokens)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
 
         {/* User breakdown table */}
