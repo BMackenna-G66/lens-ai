@@ -3,6 +3,9 @@ import * as XLSX from 'xlsx';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { DEFAULT_CATALOG } from '../services/defaultCatalogData';
+import { InspektorColombia } from './InspektorColombia';
+
+type CountryMode = null | 'chile' | 'colombia';
 
 // ─── Config ────────────────────────────────────────────────────────────────────
 const API_BASE = 'https://external-api.regcheq.com';
@@ -756,6 +759,7 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) =>
   // Use global darkMode if provided, otherwise fallback to localStorage
   const [localDark] = useState<boolean>(() => localStorage.getItem('regcheq-theme') !== 'light');
   const dark = darkMode !== undefined ? darkMode : localDark;
+  const [countryMode, setCountryMode] = useState<CountryMode>(null);
   const [tab, setTab] = useState<Tab>('individual');
 
   useEffect(() => {
@@ -1132,19 +1136,92 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) =>
   }
 
   // ── Render ──────────────────────────────────────────────────────────────────
+
+  // ── Colombia mode ──────────────────────────────────────────────────────────
+  if (countryMode === 'colombia') {
+    return <InspektorColombia onBack={() => setCountryMode(null)} dark={dark} />;
+  }
+
+  // ── Country selector landing ────────────────────────────────────────────────
+  if (!countryMode) {
+    return (
+      <div className={`min-h-screen ${bg} ${textMain} transition-colors`}>
+        {/* Nav */}
+        <nav className={`sticky top-0 z-50 backdrop-blur border-b px-6 py-3 flex items-center gap-3 ${
+          dark ? 'bg-slate-900/90 border-slate-700/50' : 'bg-white/95 border-violet-200/70 shadow-sm'
+        }`}>
+          <button onClick={onBack} className={`flex items-center gap-2 text-xs font-semibold transition-colors ${dark ? 'text-slate-400 hover:text-indigo-400' : 'text-slate-600 hover:text-indigo-600'}`}>
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+            </svg>
+            Inicio
+          </button>
+          <div className={`h-4 w-px ${dark ? 'bg-slate-700' : 'bg-violet-200'}`} />
+          <span className="text-sm font-black">Regcheq</span>
+          <span className={`text-xs font-medium ${dark ? 'text-slate-400' : 'text-slate-600'}`}>Análisis AML / KYC</span>
+        </nav>
+
+        {/* Country selector */}
+        <div className="max-w-2xl mx-auto px-6 py-16 text-center">
+          <div className="text-5xl mb-4">🌎</div>
+          <h2 className={`text-2xl font-black mb-2 ${dark ? 'text-white' : 'text-slate-900'}`}>
+            ¿Qué tipo de cliente deseas consultar?
+          </h2>
+          <p className={`text-sm mb-10 ${dark ? 'text-slate-400' : 'text-slate-500'}`}>
+            Selecciona la nacionalidad para acceder a las fuentes correspondientes.
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+            {/* Chile */}
+            <button
+              onClick={() => setCountryMode('chile')}
+              className={`group rounded-3xl p-8 text-left transition-all duration-300 border hover:shadow-2xl active:scale-[0.98] ${
+                dark
+                  ? 'bg-slate-800/60 border-slate-700/50 hover:border-indigo-500/50 hover:bg-indigo-950/40 hover:shadow-indigo-950/50'
+                  : 'bg-white border-violet-200 hover:border-indigo-400 hover:shadow-indigo-100/60'
+              }`}
+            >
+              <div className="text-5xl mb-4">🇨🇱</div>
+              <h3 className={`text-xl font-black mb-2 ${dark ? 'text-white' : 'text-slate-900'}`}>Chilenos</h3>
+              <p className={`text-sm leading-relaxed ${dark ? 'text-slate-400' : 'text-slate-500'}`}>
+                Regcheq — PEP Chile, OFAC, ONU, Unión Europea, PDI, causas penales, screening global y lista de interés interna.
+              </p>
+            </button>
+
+            {/* Colombia */}
+            <button
+              onClick={() => setCountryMode('colombia')}
+              className={`group rounded-3xl p-8 text-left transition-all duration-300 border hover:shadow-2xl active:scale-[0.98] ${
+                dark
+                  ? 'bg-slate-800/60 border-slate-700/50 hover:border-yellow-500/40 hover:bg-yellow-950/20 hover:shadow-yellow-950/30'
+                  : 'bg-white border-violet-200 hover:border-yellow-400 hover:shadow-yellow-100/50'
+              }`}
+            >
+              <div className="text-5xl mb-4">🇨🇴</div>
+              <h3 className={`text-xl font-black mb-2 ${dark ? 'text-white' : 'text-slate-900'}`}>Colombianos</h3>
+              <p className={`text-sm leading-relaxed ${dark ? 'text-slate-400' : 'text-slate-500'}`}>
+                Inspektor · DataLAFT — Listas AML, Procuraduría, Rama Judicial, JEPMS y listas propias.
+              </p>
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Chile mode (existing UI) ────────────────────────────────────────────────
   return (
     <div className={`min-h-screen ${bg} ${textMain} transition-colors`}>
       {/* Nav */}
       <nav className={`sticky top-0 z-50 backdrop-blur border-b px-6 py-3 flex items-center gap-3 flex-wrap ${navBg}`}>
-        <button onClick={onBack} className={`flex items-center gap-2 text-xs font-semibold transition-colors ${textMuted} hover:text-indigo-400`}>
+        <button onClick={() => setCountryMode(null)} className={`flex items-center gap-2 text-xs font-semibold transition-colors ${textMuted} hover:text-indigo-400`}>
           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
           </svg>
-          Inicio
+          Países
         </button>
         <div className={`h-4 w-px ${dark ? 'bg-slate-700' : 'bg-violet-200'}`} />
-        <span className="text-sm font-black">Regcheq</span>
-        <span className={`text-xs font-medium ${textMuted}`}>Análisis AML / KYC</span>
+        <span className="text-sm font-black">🇨🇱 Chilenos</span>
+        <span className={`text-xs font-medium ${textMuted}`}>Regcheq · AML / KYC</span>
 
         <div className={`flex gap-1 rounded-xl p-1 ml-2 ${dark ? 'bg-slate-800/60' : 'bg-violet-100/70'}`}>
           {(['individual','masivo','lista'] as Tab[]).map(t => {
