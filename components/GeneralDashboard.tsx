@@ -3,7 +3,7 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, Legend,
 } from 'recharts';
-import { getAnalyticsEvents, getAllUsers, getTokenEvents, FirestoreAnalyticsEvent, FirestoreTokenEvent, UserProfile } from '../services/firestoreService';
+import { subscribeToAnalyticsEvents, subscribeToTokenEvents, getAllUsers, FirestoreAnalyticsEvent, FirestoreTokenEvent, UserProfile } from '../services/firestoreService';
 import { isFirebaseConfigured } from '../services/firebaseService';
 
 // ─── Palette ──────────────────────────────────────────────────────────────────
@@ -47,27 +47,37 @@ export const GeneralDashboard: React.FC<GeneralDashboardProps> = ({ onBack }) =>
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [tokenEvents, setTokenEvents] = useState<FirestoreTokenEvent[]>([]);
   const [loading, setLoading] = useState(true);
-  const [refreshKey, setRefreshKey] = useState(0);
+  const [usersLoading, setUsersLoading] = useState(true);
+  const [refreshUsersKey, setRefreshUsersKey] = useState(0);
 
   const firebaseReady = isFirebaseConfigured();
 
-  const refresh = useCallback(() => setRefreshKey(k => k + 1), []);
+  const refresh = useCallback(() => setRefreshUsersKey(k => k + 1), []);
 
+  // Real-time listeners for analytics and token events
   useEffect(() => {
     if (!firebaseReady) {
       setLoading(false);
       return;
     }
     setLoading(true);
-    Promise.all([getAnalyticsEvents(2000), getAllUsers(), getTokenEvents(1000)])
-      .then(([evts, usrs, tkns]) => {
-        setEvents(evts);
-        setUsers(usrs);
-        setTokenEvents(tkns);
-      })
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  }, [refreshKey, firebaseReady]);
+    let firstAnalytics = true;
+    const unsubAnalytics = subscribeToAnalyticsEvents(2000, (evts) => {
+      setEvents(evts);
+      if (firstAnalytics) { setLoading(false); firstAnalytics = false; }
+    });
+    const unsubTokens = subscribeToTokenEvents(1000, (tkns) => {
+      setTokenEvents(tkns);
+    });
+    return () => { unsubAnalytics(); unsubTokens(); };
+  }, [firebaseReady]);
+
+  // One-time fetch for users (refreshable via button)
+  useEffect(() => {
+    if (!firebaseReady) { setUsersLoading(false); return; }
+    setUsersLoading(true);
+    getAllUsers().then(usrs => setUsers(usrs)).catch(() => {}).finally(() => setUsersLoading(false));
+  }, [refreshUsersKey, firebaseReady]);
 
   // ── Derived stats ────────────────────────────────────────────────────────────
 
@@ -559,7 +569,7 @@ export const GeneralDashboard: React.FC<GeneralDashboardProps> = ({ onBack }) =>
           <h3 className="text-base font-semibold text-slate-700 dark:text-slate-300 mb-4">
             👤 Actividad por usuario
           </h3>
-          {loading ? (
+          {usersLoading ? (
             <div className="space-y-3">
               {Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-10" />)}
             </div>

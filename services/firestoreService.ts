@@ -15,6 +15,7 @@ import {
   orderBy,
   limit,
   getCountFromServer,
+  onSnapshot,
 } from 'firebase/firestore';
 import { getDb } from './firebaseService';
 
@@ -317,4 +318,38 @@ export async function getTokenEvents(limitCount = 1000): Promise<FirestoreTokenE
   } catch {
     return [];
   }
+}
+
+export function subscribeToAnalyticsEvents(
+  limitCount: number,
+  callback: (events: FirestoreAnalyticsEvent[]) => void,
+): () => void {
+  const db = getDb();
+  if (!db) { callback([]); return () => {}; }
+  const q = query(
+    collection(db, 'analytics'),
+    orderBy('timestamp', 'desc'),
+    limit(limitCount),
+  );
+  return onSnapshot(q,
+    (snap) => callback(snap.docs.map(d => ({ id: d.id, ...d.data() } as FirestoreAnalyticsEvent))),
+    () => callback([]),
+  );
+}
+
+export function subscribeToTokenEvents(
+  limitCount: number,
+  callback: (events: FirestoreTokenEvent[]) => void,
+): () => void {
+  const db = getDb();
+  if (!db) { callback([]); return () => {}; }
+  const q = query(
+    collection(db, 'token_events'),
+    orderBy('timestamp', 'desc'),
+    limit(limitCount),
+  );
+  return onSnapshot(q,
+    (snap) => callback(snap.docs.map(d => ({ id: d.id, ...d.data() } as FirestoreTokenEvent))),
+    () => callback([]),
+  );
 }
