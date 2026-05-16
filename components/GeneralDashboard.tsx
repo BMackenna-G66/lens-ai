@@ -3,7 +3,7 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, Legend,
 } from 'recharts';
-import { subscribeToAnalyticsEvents, subscribeToTokenEvents, getAllUsers, FirestoreAnalyticsEvent, FirestoreTokenEvent, UserProfile } from '../services/firestoreService';
+import { subscribeToAnalyticsEvents, subscribeToTokenEvents, getAnalyticsEvents, getTokenEvents, getAllUsers, FirestoreAnalyticsEvent, FirestoreTokenEvent, UserProfile } from '../services/firestoreService';
 import { isFirebaseConfigured } from '../services/firebaseService';
 
 // ─── Palette ──────────────────────────────────────────────────────────────────
@@ -62,6 +62,7 @@ export const GeneralDashboard: React.FC<GeneralDashboardProps> = ({ onBack }) =>
     }
     setLoading(true);
     let firstAnalytics = true;
+
     const unsubAnalytics = subscribeToAnalyticsEvents(2000, (evts) => {
       setEvents(evts);
       if (firstAnalytics) { setLoading(false); firstAnalytics = false; }
@@ -69,7 +70,15 @@ export const GeneralDashboard: React.FC<GeneralDashboardProps> = ({ onBack }) =>
     const unsubTokens = subscribeToTokenEvents(1000, (tkns) => {
       setTokenEvents(tkns);
     });
-    return () => { unsubAnalytics(); unsubTokens(); };
+
+    // Safety-net poll every 60s: ensures data stays fresh even if onSnapshot
+    // silently stops delivering updates (permissions, network, etc.)
+    const poll = setInterval(() => {
+      getAnalyticsEvents(2000).then(evts => { if (evts.length > 0) setEvents(evts); }).catch(() => {});
+      getTokenEvents(1000).then(tkns => { if (tkns.length > 0) setTokenEvents(tkns); }).catch(() => {});
+    }, 60_000);
+
+    return () => { unsubAnalytics(); unsubTokens(); clearInterval(poll); };
   }, [firebaseReady]);
 
   // One-time fetch for users (refreshable via button)

@@ -260,8 +260,8 @@ export async function writeAnalyticsEvent(event: FirestoreAnalyticsEvent): Promi
   if (!db) return;
   try {
     await addDoc(collection(db, 'analytics'), event);
-  } catch {
-    // fire and forget — don't throw
+  } catch (err) {
+    console.error('[Lens AI] writeAnalyticsEvent failed:', err);
   }
 }
 
@@ -333,7 +333,7 @@ export function subscribeToAnalyticsEvents(
   );
   return onSnapshot(q,
     (snap) => callback(snap.docs.map(d => ({ id: d.id, ...d.data() } as FirestoreAnalyticsEvent))),
-    () => callback([]),
+    (err) => console.error('[Lens AI] Analytics snapshot error:', err),
   );
 }
 
@@ -350,6 +350,6 @@ export function subscribeToTokenEvents(
   );
   return onSnapshot(q,
     (snap) => callback(snap.docs.map(d => ({ id: d.id, ...d.data() } as FirestoreTokenEvent))),
-    () => callback([]),
+    (err) => console.error('[Lens AI] Token snapshot error:', err),
   );
 }

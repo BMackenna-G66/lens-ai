@@ -52,8 +52,10 @@ export function trackEvent(event: Omit<AnalyticsEvent, 'timestamp'>): void {
         country: event.country,
         hasRisk: event.hasRisk,
         timestamp,
-      }).catch(() => {});
+      }).catch(err => console.error('[Lens AI] Analytics Firestore write error:', err));
     });
+  } else {
+    console.warn('[Lens AI] trackEvent: _currentUser is null — Firestore write skipped for event:', event.type);
   }
 }
 
