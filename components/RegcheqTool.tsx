@@ -13,17 +13,29 @@ const API_KEY  = (import.meta as Record<string, unknown> & { env: Record<string,
 
 // ─── Listas map ────────────────────────────────────────────────────────────────
 const NOMBRE_LISTA: Record<string, string> = {
-  pepChile:                 'PEP Chile',
-  interpol:                 'INTERPOL',
-  ofac:                     'OFAC',
-  un:                       'ONU',
-  eu:                       'Unión Europea',
-  rtp:                      'RTP / PDI',
-  secondCriminalCasesChile: 'Causas Penales Chile',
-  pdi:                      'PDI Chile',
-  gafi:                     'GAFI',
-  screeningGlobal:          'Screening Global',
-  interestList:             'Lista de Interés',
+  // ── Chile-specific keys ─────────────────────────────────────────────────────
+  pepChile:                   'PEP Chile',
+  interpol:                   'INTERPOL',
+  ofac:                       'OFAC',
+  un:                         'ONU',
+  eu:                         'Unión Europea',
+  rtp:                        'RTP / PDI',
+  secondCriminalCasesChile:   'Causas Penales Chile',
+  pdi:                        'PDI Chile',
+  gafi:                       'GAFI',
+  screeningGlobal:            'Screening Global',
+  interestList:               'Lista de Interés',
+  // ── International / global keys (also present in Chile responses) ────────────
+  internationalOrganizations: 'Organismos Internacionales',   // ← OFAC/ONU/EU hits global
+  ofacAddressResult:          'OFAC Domicilio',
+  bicResult:                  'BIC',
+  gafiResult:                 'GAFI',                         // alias → smart-merge con 'gafi'
+  rtpResult:                  'RTP / PDI',                    // alias → smart-merge con 'rtp'
+  pdiResult:                  'PDI Chile',                    // alias → smart-merge con 'pdi'
+  keywordsResult:             'Palabras Clave',
+  riskComments:               'Comentarios de Riesgo',
+  internList:                 'Lista Interna',
+  regcheqList:                'Lista Regcheq',
 };
 
 // ─── Keys to skip / highlight ──────────────────────────────────────────────────
@@ -110,11 +122,12 @@ function normalizeData(raw: unknown): { meta: {label:string;value:string}[]|null
   }
   if (typeof raw === 'object') {
     const obj = raw as Record<string, unknown>;
-    // Causas penales
+    // Causas penales / generic additionalData arrays
     const adData = obj.additionalData;
     if (Array.isArray(adData) && adData.length > 0) {
       const first = adData[0] as Record<string,unknown>;
       if ('crimen' in first || 'tribunal' in first || 'ruc' in first) {
+        // ── Causas Penales Chile ──
         const info = (obj.info ?? {}) as Record<string,unknown>;
         const meta: {label:string;value:string}[] = [];
         if (info.name)          meta.push({ label: 'Imputado',     value: String(info.name) });
@@ -122,16 +135,20 @@ function normalizeData(raw: unknown): { meta: {label:string;value:string}[]|null
         if (info.total_matches) meta.push({ label: 'Total causas', value: String(info.total_matches) });
         return { meta: meta.length ? meta : null, items: adData as Record<string,unknown>[] };
       }
-      // Screening global
-      const hits = (adData as Record<string,unknown>[])[0]?.doc !== undefined
-        ? null
-        : ((adData as unknown) as { hits?: unknown[] }).hits;
-      if (!hits) {
-        const hitsArr = (adData as Record<string,unknown>[])[0] as Record<string,unknown>;
-        if (hitsArr) {
-          // try hits pattern directly
-        }
-      }
+      // ── Generic additionalData (internationalOrganizations, OFAC, BIC, etc.) ──
+      // Has fields like: name, program, activity, list, status, score
+      const info = (obj.info ?? {}) as Record<string,unknown>;
+      const meta: {label:string;value:string}[] = [];
+      if (info.name)            meta.push({ label: 'Nombre buscado',     value: String(info.name) });
+      if (info.total_matches !== undefined)
+                                meta.push({ label: 'Total coincidencias', value: String(info.total_matches) });
+      const typesArr = (info as Record<string,unknown>).typesMatches;
+      if (Array.isArray(typesArr) && typesArr.length)
+                                meta.push({ label: 'Listas con alerta',  value: (typesArr as string[]).join(', ') });
+      const formatted = (info as Record<string,unknown>).formattedMatches;
+      if (formatted && !typesArr)
+                                meta.push({ label: 'Listas',             value: String(formatted) });
+      return { meta: meta.length ? meta : null, items: adData as Record<string,unknown>[] };
     }
     // screeningGlobal: additionalData.hits[].doc
     const adObj = adData as Record<string,unknown> | undefined;
@@ -206,12 +223,20 @@ async function fetchPerfil(dniVal: string): Promise<PerfilResult> {
 
   const listasRaw = ((perfil.listas ?? {}) as Record<string, Record<string,unknown>>);
   const listas: Record<string, ListaEntry> = {};
-  // Always include ALL lists, even if the API didn't return them (shows "Sin coincidencia")
+  // Smart-merge: iterate all known keys. When two keys share the same display label
+  // (e.g. 'rtp' and 'rtpResult' → 'RTP / PDI'), keep whichever has coincidence=true.
+  // This way Chile responses use the old keys and global responses use the *Result keys
+  // without one overwriting the other's positive match.
   for (const [clave, nombre] of Object.entries(NOMBRE_LISTA)) {
     const entry = listasRaw[clave] ?? null;
     let rawData = entry?.data ?? null;
     if (typeof rawData === 'string' && !(rawData as string).trim()) rawData = null;
-    listas[nombre] = { coincidence: Boolean(entry?.coincidence), risk: String(entry?.risk ?? ''), data: rawData };
+    const incoming: ListaEntry = { coincidence: Boolean(entry?.coincidence), risk: String(entry?.risk ?? ''), data: rawData };
+    const existing = listas[nombre];
+    // Only overwrite if incoming wins (has coincidence) or slot is empty or existing has no coincidence
+    if (!existing || incoming.coincidence || !existing.coincidence) {
+      listas[nombre] = incoming;
+    }
   }
 
   const FICHA_MAP: [string, string][] = [
@@ -219,6 +244,7 @@ async function fetchPerfil(dniVal: string): Promise<PerfilResult> {
     ['nationality','Nacionalidad'],['country','País'],['email','Email'],
     ['phone','Teléfono'],['position','Cargo'],['employer','Empleador'],
     ['birthDate','Fecha nacimiento'],['socialReason','Razón Social'],['businessType','Tipo empresa'],
+    ['comments','Comentarios'],
   ];
   const ficha: Record<string,string> = {};
   for (const [k, label] of FICHA_MAP) { const v = perfil[k]; if (v) ficha[label] = String(v); }
