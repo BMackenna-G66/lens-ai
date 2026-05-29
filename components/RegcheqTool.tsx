@@ -983,14 +983,53 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) =>
       if (!dniV) { addLog('err', `Fila ${i+1}: sin DNI, omitida`); err++; setMasivoProgress(i+1); continue; }
 
       try {
+        // ── Step 1: create/update record if requested ─────────────────────────
         if (crearMasivo) {
           const body: Record<string,string> = { dni: dniV, personType: 'natural' };
-          if (name)    body.name        = name.toUpperCase();
-          if (apellido) body.fatherName = apellido.toUpperCase();
-          if (pais)    body.nationality = pais;
-          await fetch(`${API_BASE}/record/${API_KEY}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+          if (name)     body.name        = name.toUpperCase();
+          if (apellido) body.fatherName  = apellido.toUpperCase();
+          if (pais)     body.nationality = pais;
+          const postResp = await fetch(`${API_BASE}/record/${API_KEY}`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+          });
+          if (!postResp.ok) {
+            // Log POST failure but still try GET (record may already exist)
+            addLog('info', `  ↳ POST ${postResp.status} para ${dniV} — intentando consulta de todas formas`);
+          } else {
+            // Give the API a moment to index the new record before querying
+            await new Promise(res => setTimeout(res, 800));
+          }
         }
-        const r = await fetchPerfil(dniV);
+
+        // ── Step 2: fetch profile (with one automatic retry on 404) ───────────
+        let r: PerfilResult;
+        try {
+          r = await fetchPerfil(dniV);
+        } catch (firstErr: unknown) {
+          const msg = firstErr instanceof Error ? firstErr.message : String(firstErr);
+          if (msg.includes('404') && !crearMasivo) {
+            // Record doesn't exist yet — auto-create and retry
+            addLog('info', `  ↳ 404 para ${dniV} — creando ficha automáticamente y reintentando...`);
+            const body: Record<string,string> = { dni: dniV, personType: 'natural' };
+            if (name)     body.name        = name.toUpperCase();
+            if (apellido) body.fatherName  = apellido.toUpperCase();
+            if (pais)     body.nationality = pais;
+            const autoPost = await fetch(`${API_BASE}/record/${API_KEY}`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+            });
+            if (!autoPost.ok) throw new Error(`Auto-create falló (${autoPost.status}): verifica el formato del DNI`);
+            await new Promise(res => setTimeout(res, 1000));
+            r = await fetchPerfil(dniV);
+          } else if (msg.includes('404') && crearMasivo) {
+            // POST succeeded but GET still 404 — wait longer and retry once
+            addLog('info', `  ↳ Registro creado pero aún no disponible — reintentando en 2s...`);
+            await new Promise(res => setTimeout(res, 2000));
+            r = await fetchPerfil(dniV);
+          } else {
+            throw firstErr;
+          }
+        }
+
         results.push(r);
         const hitCount = Object.values(r.listas).filter(e => e.coincidence).length;
         const riskLow  = (r.riesgo_final || '').toLowerCase();
