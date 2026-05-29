@@ -5,7 +5,7 @@ import autoTable from 'jspdf-autotable';
 import { DEFAULT_CATALOG } from '../services/defaultCatalogData';
 import { InspektorColombia } from './InspektorColombia';
 
-type CountryMode = null | 'chile' | 'colombia';
+type CountryMode = null | 'chile' | 'colombia' | 'global';
 
 // ─── Config ────────────────────────────────────────────────────────────────────
 const API_BASE = 'https://external-api.regcheq.com';
@@ -925,11 +925,18 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) =>
     }
 
     // Find DNI column
-    const dniCol = ['rut','dni','rut/dni'].find(k => rows[0]?.[k] !== undefined);
+    const dniColCandidates = countryMode === 'global'
+      ? ['dni','id','pasaporte','passport','documento','document']
+      : ['rut','dni','rut/dni'];
+    const dniCol = dniColCandidates.find(k => rows[0]?.[k] !== undefined);
     if (!dniCol) {
-      setMasivoError('El archivo no tiene columna "rut" o "dni". Verifica el formato.');
+      setMasivoError(countryMode === 'global'
+        ? 'El archivo no tiene columna "dni". Verifica el formato.'
+        : 'El archivo no tiene columna "rut" o "dni". Verifica el formato.');
       setMasivoRunning(false); return;
     }
+    // Detect optional nationality column (global mode)
+    const paisCol = ['pais','país','nacionalidad','nationality','country'].find(k => rows[0]?.[k] !== undefined);
 
     const toProcess = limite > 0 ? rows.slice(0, limite) : rows;
     setMasivoTotal(toProcess.length);
@@ -941,16 +948,20 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) =>
     for (let i = 0; i < toProcess.length; i++) {
       if (abortRef.current) { addLog('info', '⛔ Proceso cancelado por el usuario'); break; }
       const row   = toProcess[i];
-      const dniV  = row[dniCol];
-      const name  = row['nombre'] ?? row['name'] ?? row['razón social'] ?? row['razon social'] ?? '';
-      const label = name ? `${dniV} (${name})` : dniV;
+      const dniV    = row[dniCol];
+      const name    = row['nombre'] ?? row['name'] ?? row['razón social'] ?? row['razon social'] ?? '';
+      const apellido = row['apellido'] ?? row['apellido_paterno'] ?? row['apellido paterno'] ?? '';
+      const pais    = paisCol ? (row[paisCol] ?? '') : '';
+      const label   = name ? `${dniV} (${name}${apellido ? ' '+apellido : ''})` : dniV;
 
       if (!dniV) { addLog('err', `Fila ${i+1}: sin DNI, omitida`); err++; setMasivoProgress(i+1); continue; }
 
       try {
         if (crearMasivo) {
           const body: Record<string,string> = { dni: dniV, personType: 'natural' };
-          if (name) body.name = name.toUpperCase();
+          if (name)    body.name        = name.toUpperCase();
+          if (apellido) body.fatherName = apellido.toUpperCase();
+          if (pais)    body.nationality = pais;
           await fetch(`${API_BASE}/record/${API_KEY}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
         }
         const r = await fetchPerfil(dniV);
@@ -1170,7 +1181,7 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) =>
           <p className={`text-sm mb-10 ${dark ? 'text-slate-400' : 'text-slate-500'}`}>
             Selecciona la nacionalidad para acceder a las fuentes correspondientes.
           </p>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
             {/* Chile */}
             <button
               onClick={() => setCountryMode('chile')}
@@ -1202,6 +1213,22 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) =>
                 Inspektor · DataLAFT — Listas AML, Procuraduría, Rama Judicial, JEPMS y listas propias.
               </p>
             </button>
+
+            {/* Global / Internacional */}
+            <button
+              onClick={() => setCountryMode('global')}
+              className={`group rounded-3xl p-8 text-left transition-all duration-300 border hover:shadow-2xl active:scale-[0.98] ${
+                dark
+                  ? 'bg-slate-800/60 border-slate-700/50 hover:border-emerald-500/40 hover:bg-emerald-950/20 hover:shadow-emerald-950/30'
+                  : 'bg-white border-violet-200 hover:border-emerald-400 hover:shadow-emerald-100/50'
+              }`}
+            >
+              <div className="text-5xl mb-4">🌍</div>
+              <h3 className={`text-xl font-black mb-2 ${dark ? 'text-white' : 'text-slate-900'}`}>Internacional</h3>
+              <p className={`text-sm leading-relaxed ${dark ? 'text-slate-400' : 'text-slate-500'}`}>
+                Regcheq — OFAC, ONU, Unión Europea, INTERPOL, GAFI y Screening Global para cualquier nacionalidad.
+              </p>
+            </button>
           </div>
         </div>
       </div>
@@ -1220,11 +1247,13 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) =>
           Países
         </button>
         <div className={`h-4 w-px ${dark ? 'bg-slate-700' : 'bg-violet-200'}`} />
-        <span className="text-sm font-black">🇨🇱 Chilenos</span>
+        <span className="text-sm font-black">
+          {countryMode === 'global' ? '🌍 Internacional' : '🇨🇱 Chilenos'}
+        </span>
         <span className={`text-xs font-medium ${textMuted}`}>Regcheq · AML / KYC</span>
 
         <div className={`flex gap-1 rounded-xl p-1 ml-2 ${dark ? 'bg-slate-800/60' : 'bg-violet-100/70'}`}>
-          {(['individual','masivo','lista'] as Tab[]).map(t => {
+          {(countryMode === 'global' ? (['individual','masivo'] as Tab[]) : (['individual','masivo','lista'] as Tab[])).map(t => {
             const labels: Record<Tab,string> = { individual:'🔍 Individual', masivo:'📊 Masivo', lista:'📋 Lista de Interés' };
             return (
               <button
@@ -1248,7 +1277,11 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) =>
           <div className="space-y-6">
             <div>
               <h2 className={`text-2xl font-black ${dark ? 'text-white' : 'text-slate-800'}`}>Análisis de Perfil</h2>
-              <p className={`text-sm mt-1 ${textMuted}`}>Consulta listas de vigilancia, PEP, OFAC, causas penales y más.</p>
+              <p className={`text-sm mt-1 ${textMuted}`}>
+                {countryMode === 'global'
+                  ? 'Consulta OFAC, ONU, Unión Europea, INTERPOL, GAFI y Screening Global para cualquier nacionalidad.'
+                  : 'Consulta listas de vigilancia, PEP, OFAC, causas penales y más.'}
+              </p>
             </div>
 
             <div className={`border rounded-2xl p-6 space-y-5 ${cardBg}`}>
@@ -1265,20 +1298,46 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) =>
               {/* Natural form */}
               {tipo === 'natural' && (
                 <div className="space-y-4">
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                    {inputField('DNI / RUT *', natDni, setNatDni, { placeholder:'12345678-9', onKeyDown: e => e.key==='Enter' && analizarPerfil() })}
-                    {inputField('Nombre', natNombre, setNatNombre, { placeholder:'PEDRO' })}
-                    {inputField('Apellido paterno', natAp, setNatAp, { placeholder:'PÉREZ' })}
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                    {inputField('Apellido materno', natAp2, setNatAp2, { placeholder:'GÓMEZ' })}
-                    {inputField('Nacionalidad', natNac, setNatNac, { placeholder:'Chile' })}
-                    {inputField('Cargo / Posición', natCargo, setNatCargo, { placeholder:'Gerente' })}
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    {inputField('Email', natEmail, setNatEmail, { type:'email', placeholder:'correo@ejemplo.cl' })}
-                    {inputField('Teléfono', natTel, setNatTel, { placeholder:'+56912345678' })}
-                  </div>
+                  {countryMode === 'global' ? (
+                    <>
+                      {/* Global layout: nationality prominently up front */}
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                        {inputField('DNI / Pasaporte / ID *', natDni, setNatDni, { placeholder:'AB123456', onKeyDown: e => e.key==='Enter' && analizarPerfil() })}
+                        {inputField('Nacionalidad / País ✦', natNac, setNatNac, { placeholder:'Argentina' })}
+                        {inputField('Nombre', natNombre, setNatNombre, { placeholder:'JUAN' })}
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                        {inputField('Apellido paterno', natAp, setNatAp, { placeholder:'PÉREZ' })}
+                        {inputField('Apellido materno', natAp2, setNatAp2, { placeholder:'GÓMEZ' })}
+                        {inputField('Cargo / Posición', natCargo, setNatCargo, { placeholder:'Director' })}
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        {inputField('Email', natEmail, setNatEmail, { type:'email', placeholder:'correo@ejemplo.com' })}
+                        {inputField('Teléfono', natTel, setNatTel, { placeholder:'+54911234567' })}
+                      </div>
+                      <p className={`text-xs ${dark ? 'text-emerald-400/80' : 'text-emerald-700'}`}>
+                        ✦ Incluir <strong>nombre completo</strong> y <strong>nacionalidad</strong> mejora significativamente la cobertura en listas internacionales (OFAC, ONU, Screening Global).
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      {/* Chile layout: original */}
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                        {inputField('DNI / RUT *', natDni, setNatDni, { placeholder:'12345678-9', onKeyDown: e => e.key==='Enter' && analizarPerfil() })}
+                        {inputField('Nombre', natNombre, setNatNombre, { placeholder:'PEDRO' })}
+                        {inputField('Apellido paterno', natAp, setNatAp, { placeholder:'PÉREZ' })}
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                        {inputField('Apellido materno', natAp2, setNatAp2, { placeholder:'GÓMEZ' })}
+                        {inputField('Nacionalidad', natNac, setNatNac, { placeholder:'Chile' })}
+                        {inputField('Cargo / Posición', natCargo, setNatCargo, { placeholder:'Gerente' })}
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        {inputField('Email', natEmail, setNatEmail, { type:'email', placeholder:'correo@ejemplo.cl' })}
+                        {inputField('Teléfono', natTel, setNatTel, { placeholder:'+56912345678' })}
+                      </div>
+                    </>
+                  )}
                 </div>
               )}
 
@@ -1286,7 +1345,7 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) =>
               {tipo === 'legal' && (
                 <div className="space-y-4">
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                    {inputField('RUT Empresa *', legRut, setLegRut, { placeholder:'76543210-K', onKeyDown: e => e.key==='Enter' && analizarPerfil() })}
+                    {inputField(countryMode === 'global' ? 'ID / NIT / Registro *' : 'RUT Empresa *', legRut, setLegRut, { placeholder: countryMode === 'global' ? 'ID-123456' : '76543210-K', onKeyDown: e => e.key==='Enter' && analizarPerfil() })}
                     {inputField('Razón Social', legRazon, setLegRazon, { placeholder:'Empresa SA' })}
                     {inputField('Tipo de empresa', legTipo, setLegTipo, { placeholder:'Sociedad Anónima' })}
                   </div>
@@ -1328,7 +1387,14 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) =>
           <div className="space-y-6">
             <div>
               <h2 className={`text-2xl font-black ${dark ? 'text-white' : 'text-slate-800'}`}>Consulta Masiva</h2>
-              <p className={`text-sm mt-1 ${textMuted}`}>Sube un Excel con columna <code className="font-mono text-indigo-400">rut</code> o <code className="font-mono text-indigo-400">dni</code> para procesar múltiples perfiles.</p>
+              {countryMode === 'global' ? (
+                <p className={`text-sm mt-1 ${textMuted}`}>
+                  Sube un Excel con columna <code className="font-mono text-indigo-400">dni</code> (obligatorio).
+                  Columnas opcionales: <code className="font-mono text-indigo-400">nombre</code>, <code className="font-mono text-indigo-400">apellido</code>, <code className="font-mono text-indigo-400">pais</code> / <code className="font-mono text-indigo-400">nacionalidad</code>.
+                </p>
+              ) : (
+                <p className={`text-sm mt-1 ${textMuted}`}>Sube un Excel con columna <code className="font-mono text-indigo-400">rut</code> o <code className="font-mono text-indigo-400">dni</code> para procesar múltiples perfiles.</p>
+              )}
             </div>
 
             <div className={`border rounded-2xl p-6 space-y-5 ${cardBg}`}>
@@ -1349,8 +1415,10 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) =>
                   {masivoFile ? masivoFile.name : 'Arrastra tu Excel aquí o haz clic para seleccionar'}
                 </p>
                 <p className={`text-xs ${textMuted}`}>
-                  Formato: <code className="font-mono text-indigo-400">.xlsx</code> ·
-                  Columna obligatoria: <code className="font-mono text-indigo-400">rut</code> o <code className="font-mono text-indigo-400">dni</code>
+                  {countryMode === 'global'
+                    ? <>Formato: <code className="font-mono text-indigo-400">.xlsx</code> · Columna obligatoria: <code className="font-mono text-indigo-400">dni</code> · Opcionales: <code className="font-mono text-indigo-400">nombre</code>, <code className="font-mono text-indigo-400">apellido</code>, <code className="font-mono text-indigo-400">pais</code></>
+                    : <>Formato: <code className="font-mono text-indigo-400">.xlsx</code> · Columna obligatoria: <code className="font-mono text-indigo-400">rut</code> o <code className="font-mono text-indigo-400">dni</code></>
+                  }
                 </p>
                 <input id="masivo-file-input" type="file" accept=".xlsx" className="hidden"
                   onChange={e => e.target.files?.[0] && setMasivoFile(e.target.files[0])} />
