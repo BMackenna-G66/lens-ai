@@ -84,6 +84,9 @@ export const detectNetwork = (address: string): CryptoNetwork => {
 
     // TRON: Starts with T, length 34
     if (cleaned.startsWith('T') && cleaned.length === 34) return 'TRON';
+
+    // SOLANA: Base58 string, 32-44 chars, does NOT start with T (Tron) or r (XRP) or 0x (EVM)
+    if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(cleaned) && !cleaned.startsWith('T')) return 'SOL';
     
     // EVM: Starts with 0x, length 42. Could be ETH, BSC, POLYGON, ARB, OP, etc.
     // Defaulting to ETH as the primary detection, user must switch for others.
@@ -94,24 +97,24 @@ export const detectNetwork = (address: string): CryptoNetwork => {
 
 const fetchCryptoPrices = async (): Promise<{ [key: string]: number }> => {
     const prices: { [key: string]: number } = {
-        'ETH': 0, 'TRX': 0, 'BNB': 0, 'MATIC': 0, 
-        'BTC': 0, 'AVAX': 0, 'OP': 0, 'ARB': 0, 'XRP': 0, 'FTM': 0, 'CELO': 0
+        'ETH': 0, 'TRX': 0, 'BNB': 0, 'MATIC': 0,
+        'BTC': 0, 'AVAX': 0, 'OP': 0, 'ARB': 0, 'XRP': 0, 'FTM': 0, 'CELO': 0, 'SOL': 0
     };
-    
+
     try {
         // Try fetching from Binance Public API (usually reliable without auth)
         const symbols = [
-            'ETHUSDT', 'TRXUSDT', 'BNBUSDT', 'MATICUSDT', 
-            'BTCUSDT', 'AVAXUSDT', 'OPUSDT', 'ARBUSDT', 'XRPUSDT', 'FTMUSDT', 'CELOUSDT'
+            'ETHUSDT', 'TRXUSDT', 'BNBUSDT', 'MATICUSDT',
+            'BTCUSDT', 'AVAXUSDT', 'OPUSDT', 'ARBUSDT', 'XRPUSDT', 'FTMUSDT', 'CELOUSDT', 'SOLUSDT'
         ];
-        
+
         for (const symbol of symbols) {
             try {
                 const res = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`);
                 if (res.ok) {
                     const data = await res.json();
                     const price = parseFloat(data.price);
-                    
+
                     if (symbol === 'ETHUSDT') prices['ETH'] = price;
                     if (symbol === 'TRXUSDT') prices['TRX'] = price;
                     if (symbol === 'BNBUSDT') prices['BNB'] = price;
@@ -123,6 +126,7 @@ const fetchCryptoPrices = async (): Promise<{ [key: string]: number }> => {
                     if (symbol === 'XRPUSDT') prices['XRP'] = price;
                     if (symbol === 'FTMUSDT') prices['FTM'] = price;
                     if (symbol === 'CELOUSDT') prices['CELO'] = price;
+                    if (symbol === 'SOLUSDT') prices['SOL'] = price;
                 }
             } catch (e) {
                 console.warn(`Failed to fetch price for ${symbol}`, e);
@@ -608,6 +612,112 @@ const fetchTronData = async (address: string, prices: { [key: string]: number })
     }
 };
 
+// --- SOLANA FETCHER ---
+const fetchSolanaData = async (address: string, prices: { [key: string]: number }): Promise<Partial<CryptoWalletProfile>> => {
+    const RPC = 'https://api.mainnet-beta.solana.com';
+
+    const rpcPost = async (body: object) => {
+        const res = await fetch(RPC, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+        if (!res.ok) throw new Error(`Solana RPC HTTP ${res.status}`);
+        return res.json();
+    };
+
+    try {
+        // 1. Balance (lamports → SOL)
+        const balanceResp = await rpcPost({ jsonrpc: '2.0', id: 1, method: 'getBalance', params: [address] });
+        const nativeBalance = (balanceResp.result?.value || 0) / 1e9;
+
+        // 2. Recent signatures (limit 50)
+        const sigsResp = await rpcPost({
+            jsonrpc: '2.0', id: 1, method: 'getSignaturesForAddress',
+            params: [address, { limit: 50 }]
+        });
+        const signatures: any[] = sigsResp.result || [];
+
+        // Map signatures to CryptoTransaction (simplified — no individual tx value parsing)
+        const transactions: CryptoTransaction[] = signatures.map((sig: any) => ({
+            hash: sig.signature,
+            timeStamp: sig.blockTime ? new Date(sig.blockTime * 1000).toISOString() : new Date().toISOString(),
+            from: address,
+            to: '',
+            value: 0,
+            isError: !!sig.err,
+            tokenSymbol: 'SOL'
+        }));
+
+        // 3. Token accounts (USDT/USDC)
+        const tokenAccountsResp = await rpcPost({
+            jsonrpc: '2.0', id: 1, method: 'getTokenAccountsByOwner',
+            params: [
+                address,
+                { programId: 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA' },
+                { encoding: 'jsonParsed' }
+            ]
+        });
+
+        const tokens: CryptoTokenBalance[] = [
+            { tokenName: 'Solana', tokenSymbol: 'SOL', balance: nativeBalance }
+        ];
+
+        const tokenAccounts: any[] = tokenAccountsResp.result?.value || [];
+        tokenAccounts.forEach((acc: any) => {
+            const info = acc.account?.data?.parsed?.info;
+            if (!info) return;
+            const mint = info.mint as string;
+            const amount = parseFloat(info.tokenAmount?.uiAmountString || '0');
+            if (amount <= 0) return;
+
+            // Identify well-known stablecoins by mint
+            const KNOWN_MINTS: { [key: string]: string } = {
+                'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB': 'USDT',
+                'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v': 'USDC',
+                'So11111111111111111111111111111111111111112': 'SOL',
+            };
+            const symbol = KNOWN_MINTS[mint] || mint.slice(0, 6);
+            tokens.push({
+                tokenName: symbol,
+                tokenSymbol: symbol,
+                balance: amount,
+                contractAddress: mint,
+                usdValue: ['USDT', 'USDC'].includes(symbol) ? amount : undefined
+            });
+        });
+
+        const solPrice = prices['SOL'] || 0;
+        const netWorthUSD = nativeBalance * solPrice +
+            tokens.filter(t => t.tokenSymbol !== 'SOL' && t.usdValue).reduce((s, t) => s + (t.usdValue || 0), 0);
+
+        const activeDays = new Set(transactions.map(t => t.timeStamp.split('T')[0])).size;
+
+        transactions.sort((a, b) => new Date(b.timeStamp).getTime() - new Date(a.timeStamp).getTime());
+
+        return {
+            address,
+            network: 'SOL',
+            nativeBalance,
+            tokens,
+            firstActivity: transactions.length > 0 ? transactions[transactions.length - 1].timeStamp : new Date().toISOString(),
+            lastActivity: transactions.length > 0 ? transactions[0].timeStamp : new Date().toISOString(),
+            totalTxCount: signatures.length,
+            totalReceived: 0,
+            totalSent: 0,
+            totalReceivedUSD: 0,
+            totalSentUSD: 0,
+            netWorthUSD,
+            activeDays,
+            transactions
+        };
+
+    } catch (e: any) {
+        console.error('Solana Fetch Error:', e);
+        throw new Error(`Error conectando a Solana RPC: ${e.message}`);
+    }
+};
+
 export const fetchWalletData = async (address: string, network: CryptoNetwork): Promise<CryptoWalletProfile> => {
     let data: Partial<CryptoWalletProfile>;
     
@@ -620,6 +730,8 @@ export const fetchWalletData = async (address: string, network: CryptoNetwork): 
             data = await fetchBtcData(address, prices);
         } else if (network === 'XRP') {
             data = await fetchXrpData(address, prices);
+        } else if (network === 'SOL') {
+            data = await fetchSolanaData(address, prices);
         } else if (EVM_NETWORKS[network]) {
             // UNIFIED EVM LOGIC FOR ALL OTHER NETWORKS
             const config = EVM_NETWORKS[network];

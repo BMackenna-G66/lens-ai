@@ -279,7 +279,7 @@ export interface FinancialDocumentProcess {
 
 // --- CRYPTO ANALYSIS TYPES ---
 
-export type CryptoNetwork = 'ETH' | 'TRON' | 'BSC' | 'POLYGON' | 'BTC' | 'ARB' | 'OP' | 'AVAX' | 'BASE' | 'XRP' | 'FTM' | 'CELO' | 'UNKNOWN';
+export type CryptoNetwork = 'ETH' | 'TRON' | 'BSC' | 'POLYGON' | 'BTC' | 'ARB' | 'OP' | 'AVAX' | 'BASE' | 'XRP' | 'FTM' | 'CELO' | 'SOL' | 'UNKNOWN';
 
 export interface CryptoTokenBalance {
     tokenName: string;
