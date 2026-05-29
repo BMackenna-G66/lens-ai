@@ -993,8 +993,10 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) =>
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
           });
           if (!postResp.ok) {
-            // Log POST failure but still try GET (record may already exist)
+            // POST failed — record may already exist or API rejected the format.
+            // Always try GET regardless; a 400 often means "already exists".
             addLog('info', `  ↳ POST ${postResp.status} para ${dniV} — intentando consulta de todas formas`);
+            await new Promise(res => setTimeout(res, 300));
           } else {
             // Give the API a moment to index the new record before querying
             await new Promise(res => setTimeout(res, 800));
@@ -1017,8 +1019,12 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) =>
             const autoPost = await fetch(`${API_BASE}/record/${API_KEY}`, {
               method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
             });
-            if (!autoPost.ok) throw new Error(`Auto-create falló (${autoPost.status}): verifica el formato del DNI`);
-            await new Promise(res => setTimeout(res, 1000));
+            // Even if POST returns 4xx (record may already exist or API rejects
+            // certain formats), always try the GET — it may still return data
+            if (!autoPost.ok) {
+              addLog('info', `  ↳ POST ${autoPost.status} para ${dniV} — intentando GET de todas formas`);
+            }
+            await new Promise(res => setTimeout(res, autoPost.ok ? 1000 : 300));
             r = await fetchPerfil(dniV);
           } else if (msg.includes('404') && crearMasivo) {
             // POST succeeded but GET still 404 — wait longer and retry once
