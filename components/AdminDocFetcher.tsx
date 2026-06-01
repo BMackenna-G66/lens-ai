@@ -226,12 +226,10 @@ export const AdminDocFetcher: React.FC<Props> = ({ onBack, darkMode }) => {
         `identification=${encodeURIComponent(val)}`,
         `rut=${encodeURIComponent(val)}`,
       ] : /* id */ [
+        `companyIds=${encodeURIComponent(val)}`,   // ← param real confirmado en Admin G66
         `id=${encodeURIComponent(val)}`,
         `companyId=${encodeURIComponent(val)}`,
         `ids=${encodeURIComponent(val)}`,
-        `identifier=${encodeURIComponent(val)}`,
-        `companyIdentifier=${encodeURIComponent(val)}`,
-        `search=${encodeURIComponent(val)}`,
       ];
 
     try {
@@ -550,7 +548,7 @@ export const AdminDocFetcher: React.FC<Props> = ({ onBack, darkMode }) => {
               onKeyDown={e => e.key === 'Enter' && buscarEmpresa()}
               placeholder={
                 searchType === 'email' ? 'contacto@empresa.com' :
-                searchType === 'id'    ? 'Ej: 4031569 (ID numérico interno)' :
+                searchType === 'id'    ? 'Ej: 4029441  (columna ID del Admin)' :
                 searchType === 'name'  ? 'Comercializadora Nordicos SpA' :
                                          'RUT o número de documento fiscal'
               }
