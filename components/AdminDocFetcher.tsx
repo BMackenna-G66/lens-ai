@@ -12,14 +12,9 @@ import React, { useState, useRef, useCallback } from 'react';
 // ─── API ──────────────────────────────────────────────────────────────────────
 const API_BASE = 'https://api.global66.com';
 
-// Endpoints para intercambiar el refresh token por un access token.
-// Se intentan en orden hasta que uno responda 2xx.
-const REFRESH_ENDPOINTS = [
-  `${API_BASE}/user/v2/token/refresh`,
-  `${API_BASE}/user/token/refresh`,
-  `${API_BASE}/auth/token/refresh`,
-  `${API_BASE}/auth/refresh`,
-];
+// Endpoint para intercambiar el refresh token por un idToken.
+// Usa form-urlencoded (no JSON) y devuelve { idToken: "..." }.
+const REFRESH_ENDPOINT = `${API_BASE}/admin/refresh-token`;
 
 // ─── Document slot labels ─────────────────────────────────────────────────────
 const SLOT_LABELS: Record<string, string> = {
@@ -144,50 +139,41 @@ export const AdminDocFetcher: React.FC<Props> = ({ onBack, darkMode }) => {
     sessionStorage.setItem('g66-access-token', val);
   }
 
-  // ── Exchange refresh token for access token ─────────────────────────────────
+  // ── Exchange refresh token for idToken ─────────────────────────────────────
+  // Mirrors Python: POST /admin/refresh-token (form-urlencoded) → { idToken }
+  // Authorization header uses the idToken directly — no "Bearer " prefix.
   async function obtenerToken(): Promise<string> {
     if (!refreshToken.trim()) throw new Error('Ingresa tu Refresh Token para continuar.');
     setTokenRefreshing(true); setTokenError('');
-
-    let lastError = '';
-    for (const url of REFRESH_ENDPOINTS) {
-      try {
-        const resp = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ refreshToken: refreshToken.trim() }),
-        });
-        if (!resp.ok) { lastError = `${url} → ${resp.status}`; continue; }
-        const data = await resp.json() as Record<string, unknown>;
-
-        // The access token can be in several fields depending on the API version
-        const at = String(
-          data.accessToken ?? data.access_token ?? data.idToken ?? data.id_token ??
-          (data.AuthenticationResult && (data.AuthenticationResult as Record<string,unknown>).AccessToken) ??
-          ''
-        );
-        if (!at) { lastError = `${url} → respuesta sin accessToken`; continue; }
-
-        saveAccessToken(at);
-        setTokenObtained(new Date());
-        setTokenRefreshing(false);
-        return at;
-      } catch (e) {
-        lastError = `${url} → ${e instanceof Error ? e.message : String(e)}`;
-      }
+    try {
+      const body = new URLSearchParams({ refreshToken: refreshToken.trim() });
+      const resp = await fetch(REFRESH_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json, text/plain, */*' },
+        body,
+      });
+      if (!resp.ok) throw new Error(`${REFRESH_ENDPOINT} → ${resp.status} ${resp.statusText}`);
+      const data = await resp.json() as Record<string, unknown>;
+      const idToken = String(data.idToken ?? data.id_token ?? data.accessToken ?? data.access_token ?? '');
+      if (!idToken) throw new Error('La API no devolvió idToken en la respuesta');
+      saveAccessToken(idToken);
+      setTokenObtained(new Date());
+      setTokenRefreshing(false);
+      return idToken;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setTokenError(msg);
+      setTokenRefreshing(false);
+      throw new Error(msg);
     }
-
-    const msg = `No se pudo obtener el access token. Último error: ${lastError}`;
-    setTokenError(msg);
-    setTokenRefreshing(false);
-    throw new Error(msg);
   }
 
   // ── Headers factory (auto-refresh on demand) ────────────────────────────────
+  // Note: Authorization uses idToken directly (no "Bearer " prefix) — same as Python
   const makeHeaders = useCallback(async (forceRefresh = false): Promise<Record<string,string>> => {
     let at = accessTokenRef.current;
     if (!at || forceRefresh) at = await obtenerToken();
-    return { Authorization: `Bearer ${at}`, 'Content-Type': 'application/json' };
+    return { Authorization: at, 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*' };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshToken]);
 
