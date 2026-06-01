@@ -371,42 +371,105 @@ export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, da
   }
 
   // ── Masivo: parse Excel ──────────────────────────────────────────────────────
+  // Soporta la plantilla estándar (filas 1-3 = metadata, fila 4 = headers)
+  // y cualquier Excel genérico con columnas de documento/nombre.
+  // Permite filas con solo nombre (sin número de identificación).
   function handleMasivoFile(file: File) {
     setMasivoFile(file);
     setMasivoRows([]); setLogs([]); setMasivoError(''); setMasivoProgress(0);
     file.arrayBuffer().then(buf => {
       try {
-        const wb   = XLSX.read(buf, { type: 'array' });
-        const data = XLSX.utils.sheet_to_json<Record<string, string>>(
-          wb.Sheets[wb.SheetNames[0]], { defval: '' }
-        );
-        const norm = data.map(r => {
-          const out: Record<string, string> = {};
-          for (const [k, v] of Object.entries(r)) out[k.toLowerCase().trim()] = String(v).trim();
-          return out;
+        const wb = XLSX.read(buf, { type: 'array' });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+
+        // ── Detectar si es la plantilla estándar ─────────────────────────────
+        // La plantilla tiene filas de metadatos (No./Nombre/Fecha) antes de
+        // los headers reales. Detectamos esto leyendo la primera celda A1.
+        const rawAll = (XLSX.utils.sheet_to_json(ws, {
+          defval: '', header: 1,
+        }) as unknown) as unknown[][];
+
+        // Buscar la fila que contiene los headers reales (Tipo de identificación,
+        // Número de identificación, Nombre completo) — puede estar en cualquier fila
+        // de las primeras 10.
+        let headerRowIdx = 0;
+        const HEADER_KEYWORDS = ['tipo', 'número', 'numero', 'nombre', 'identificación', 'identificacion'];
+        for (let i = 0; i < Math.min(10, rawAll.length); i++) {
+          const rowStr = rawAll[i].map(c => String(c ?? '').toLowerCase());
+          const matches = HEADER_KEYWORDS.filter(kw => rowStr.some(c => c.includes(kw)));
+          if (matches.length >= 2) { headerRowIdx = i; break; }
+        }
+
+        // Reconstruir el JSON usando la fila de headers detectada
+        const headers = (rawAll[headerRowIdx] as unknown[]).map(h => String(h ?? '').trim());
+        const dataRows = rawAll.slice(headerRowIdx + 1);
+
+        const norm: Record<string, string>[] = dataRows
+          .map(row => {
+            const obj: Record<string, string> = {};
+            headers.forEach((h, i) => {
+              obj[h.toLowerCase()] = String((row as unknown[])[i] ?? '').trim();
+            });
+            return obj;
+          })
+          .filter(r => Object.values(r).some(v => v !== ''));
+
+        if (norm.length === 0) {
+          setMasivoError('No se encontraron filas con datos después de los encabezados.');
+          return;
+        }
+
+        // ── Mapear columnas ──────────────────────────────────────────────────
+        // Número de identificación
+        const docColKey = Object.keys(norm[0]).find(k =>
+          k.includes('número') || k.includes('numero') || k.includes('identificación') ||
+          k.includes('identificacion') || k.includes('documento') || k.includes('cedula') ||
+          k.includes('dni') || k.includes('nit') || k.includes('pasaporte')
+        ) ?? null;
+
+        // Nombre completo
+        const nomColKey = Object.keys(norm[0]).find(k =>
+          k.includes('nombre')
+        ) ?? null;
+
+        // Tipo de identificación
+        const tipoColKey = Object.keys(norm[0]).find(k =>
+          k.includes('tipo')
+        ) ?? null;
+
+        // Función para parsear tipo de identificación (texto o número)
+        function parseTipo(raw: string): number {
+          const v = raw.toLowerCase().trim();
+          if (!v || v === '') return 1;
+          const n = Number(v);
+          if (!isNaN(n) && n >= 1 && n <= 5) return n;
+          if (v.includes('extranjería') || v.includes('extranjeria') || v === 'ce') return 2;
+          if (v.includes('nit') || v === '3') return 3;
+          if (v.includes('pasaporte') || v === '4') return 4;
+          if (v.includes('tarjeta') || v === 'ti' || v === '5') return 5;
+          return 1; // default: Cédula de ciudadanía
+        }
+
+        // ── Construir filas ──────────────────────────────────────────────────
+        const rowsRaw = norm.map((r, idx) => {
+          const docNum  = docColKey ? (r[docColKey] ?? '') : '';
+          const nombre  = nomColKey ? (r[nomColKey] ?? '') : '';
+          const tipoRaw = tipoColKey ? (r[tipoColKey] ?? '') : '';
+          const tipoDoc = parseTipo(tipoRaw);
+          if (!docNum && !nombre) return null;
+          return { idx, documento: docNum, nombre, tipoDoc, status: 'pending' as const };
         });
+        const rows: MasivoRow[] = rowsRaw.filter((r): r is NonNullable<typeof r> => r !== null);
 
-        // Detect columns
-        const docCol = ['documento','cedula','identificacion','dni','id','nit','pasaporte']
-          .find(k => norm[0]?.[k] !== undefined);
-        if (!docCol) { setMasivoError('No se encontró columna de documento. Usa: documento, cedula, dni, nit, pasaporte.'); return; }
+        if (rows.length === 0) {
+          setMasivoError('No se encontraron filas válidas. Cada fila debe tener al menos nombre o número de identificación.');
+          return;
+        }
 
-        const rows: MasivoRow[] = norm.map((r, idx) => {
-          const docNum = r[docCol] ?? '';
-          const nomCol = ['nombre_completo','nombre completo','name','nombre'].find(k => r[k]);
-          const apCol  = ['apellido','apellidos','apellido_paterno','last_name'].find(k => r[k]);
-          const nombreCompleto = nomCol
-            ? (apCol ? `${r[nomCol]} ${r[apCol]}` : r[nomCol])
-            : (apCol ? r[apCol] : '');
-          const tipoDocRaw = r['tipo_documento'] ?? r['tipo_doc'] ?? r['tipodocumento'] ?? '1';
-          const tipoDocNum = Number(tipoDocRaw) || 1;
-          return { idx, documento: docNum, nombre: nombreCompleto, tipoDoc: tipoDocNum, status: 'pending' as const };
-        }).filter(r => r.documento);
-
-        if (rows.length === 0) { setMasivoError('El Excel no tiene filas con documento válido.'); return; }
+        const sinDoc = rows.filter(r => !r.documento).length;
         setMasivoRows(rows);
         setMasivoTotal(rows.length);
-        addLog('info', `📂 ${file.name} — ${rows.length} registros listos`);
+        addLog('info', `📂 ${file.name} — ${rows.length} registros listos${sinDoc > 0 ? ` (${sinDoc} solo por nombre, sin número)` : ''}`);
       } catch (e) {
         setMasivoError(`Error leyendo Excel: ${e instanceof Error ? e.message : String(e)}`);
       }
@@ -634,8 +697,8 @@ export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, da
             <div>
               <h2 className={`text-2xl font-black ${dark ? 'text-white' : 'text-slate-800'}`}>Consulta Masiva · Inspektor</h2>
               <p className={`text-sm mt-1 ${textMuted}`}>
-                Sube un Excel con columna <code className="font-mono text-indigo-400">documento</code> (obligatoria).
-                Opcionales: <code className="font-mono text-indigo-400">nombre</code>, <code className="font-mono text-indigo-400">apellido</code>, <code className="font-mono text-indigo-400">tipo_documento</code> (1–5, default 1).
+                Usa la <strong>plantilla estándar</strong> (columnas: Tipo de identificación · Número de identificación · Nombre completo)
+                o cualquier Excel con esas columnas. Puedes dejar el número en blanco si solo tienes el nombre.
               </p>
             </div>
 
@@ -657,7 +720,7 @@ export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, da
                   {masivoFile ? masivoFile.name : 'Arrastra tu Excel aquí o haz clic para seleccionar'}
                 </p>
                 <p className={`text-xs ${textMuted}`}>
-                  Formato <code className="font-mono text-indigo-400">.xlsx</code> · columna obligatoria: <code className="font-mono text-indigo-400">documento</code>
+                  Formato <code className="font-mono text-indigo-400">.xlsx</code> · Plantilla estándar o Excel con columnas de identificación y nombre
                 </p>
                 <input ref={fileInputRef} type="file" accept=".xlsx" className="hidden"
                   onChange={e => e.target.files?.[0] && handleMasivoFile(e.target.files[0])} />
