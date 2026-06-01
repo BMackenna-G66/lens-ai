@@ -1,0 +1,636 @@
+/**
+ * AdminDocFetcher — Lens AI
+ * Busca empresas en el Admin G66 por email o ID, lista sus documentos
+ * cargados con fecha/estado, y permite seleccionarlos para descarga o vista.
+ *
+ * ⚠ No modifica ningún módulo existente. Es 100% autónomo.
+ */
+
+import React, { useState, useCallback } from 'react';
+
+// ─── API ──────────────────────────────────────────────────────────────────────
+const API_BASE = 'https://api.global66.com';
+
+// ─── Document slot labels ─────────────────────────────────────────────────────
+const SLOT_LABELS: Record<string, string> = {
+  company_admin_user_document:                        'DNI Usuario Principal (no Rep. Legal)',
+  company_legal_representative_document:              'DNI Representantes Legales',
+  company_deeds_document:                             'Escritura de Constitución',
+  company_id_document:                                'Identificación Fiscal de la Empresa',
+  company_legal_representative_authorization_document:'Autorización Representantes Legales',
+  company_complementary_document:                     'Documentos Complementarios',
+  company_trade_chamber_document:                     'Formulario Beneficiario Final',
+  // Colombia-specific
+  company_rut_document:                               'RUT (CO)',
+  company_chamber_commerce_document:                  'Cámara de Comercio (CO)',
+  company_shareholder_composition_document:           'Composición Accionaria (CO)',
+  company_bank_certificate_document:                  'Certificado Bancario (CO)',
+  company_financial_statements_document:              'Estados Financieros (CO)',
+};
+
+const SLOT_ORDER = Object.keys(SLOT_LABELS);
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+interface DocumentLink {
+  id: number;
+  fileName: string;            // actual file name with timestamp
+  uploadedDateMillis: number;
+  status: string;
+}
+
+interface DocumentSlot {
+  slotKey: string;
+  label: string;
+  links: DocumentLink[];
+}
+
+interface CompanyResult {
+  id: number;
+  name?: string;
+  socialReason?: string;
+  country?: string;
+  complianceStatus?: string;
+  kycStage1?: string;
+}
+
+type SearchType = 'email' | 'id';
+
+// ─── Status badge colors ──────────────────────────────────────────────────────
+function statusColor(status: string): string {
+  const s = (status || '').toUpperCase();
+  if (s === 'APPROVED') return 'text-emerald-700 dark:text-emerald-400 bg-emerald-100 dark:bg-emerald-900/40 border-emerald-200 dark:border-emerald-700/50';
+  if (s.startsWith('REJECTED')) return 'text-red-700 dark:text-red-400 bg-red-100 dark:bg-red-900/40 border-red-200 dark:border-red-700/50';
+  if (s.startsWith('REQUESTED')) return 'text-blue-700 dark:text-blue-400 bg-blue-100 dark:bg-blue-900/40 border-blue-200 dark:border-blue-700/50';
+  if (s === 'PENDING') return 'text-amber-700 dark:text-amber-400 bg-amber-100 dark:bg-amber-900/40 border-amber-200 dark:border-amber-700/50';
+  return 'text-slate-500 dark:text-slate-400 bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700';
+}
+
+function formatDate(ms: number): string {
+  if (!ms) return '—';
+  return new Date(ms).toLocaleDateString('es-CL', { day: '2-digit', month: 'short', year: 'numeric' });
+}
+
+// ─── Parse documents from company API response ────────────────────────────────
+function parseDocuments(companyData: Record<string, unknown>): DocumentSlot[] {
+  // The API may nest documents in different fields depending on version
+  const candidates = [
+    companyData.documents,
+    companyData.documentSlots,
+    companyData.companyDocuments,
+    (companyData.content as unknown[])?.[0] && ((companyData.content as Record<string, unknown>[])[0]).documents,
+  ];
+
+  let rawSlots: Record<string, unknown>[] | null = null;
+
+  for (const c of candidates) {
+    if (Array.isArray(c) && c.length > 0) {
+      rawSlots = c as Record<string, unknown>[];
+      break;
+    }
+  }
+
+  if (!rawSlots) return [];
+
+  const slots: DocumentSlot[] = [];
+
+  for (const raw of rawSlots) {
+    const slotKey = String(raw.fileName ?? raw.slotKey ?? raw.key ?? raw.type ?? '');
+    if (!slotKey) continue;
+    const links = Array.isArray(raw.links) ? (raw.links as Record<string, unknown>[]).map(l => ({
+      id:                   Number(l.id ?? 0),
+      fileName:             String(l.fileName ?? l.name ?? ''),
+      uploadedDateMillis:   Number(l.uploadedDateMillis ?? l.uploadDate ?? 0),
+      status:               String(l.status ?? ''),
+    })) : [];
+
+    slots.push({
+      slotKey,
+      label: SLOT_LABELS[slotKey] ?? slotKey,
+      links: links.sort((a, b) => b.uploadedDateMillis - a.uploadedDateMillis),
+    });
+  }
+
+  // Sort by canonical slot order, then alpha
+  slots.sort((a, b) => {
+    const ia = SLOT_ORDER.indexOf(a.slotKey);
+    const ib = SLOT_ORDER.indexOf(b.slotKey);
+    if (ia === -1 && ib === -1) return a.label.localeCompare(b.label);
+    if (ia === -1) return 1;
+    if (ib === -1) return -1;
+    return ia - ib;
+  });
+
+  return slots;
+}
+
+// ─── Component ────────────────────────────────────────────────────────────────
+interface Props {
+  onBack: () => void;
+  darkMode?: boolean;
+}
+
+export const AdminDocFetcher: React.FC<Props> = ({ onBack, darkMode }) => {
+  const dark = darkMode ?? localStorage.getItem('darkMode') === 'true';
+
+  // ── Auth ────────────────────────────────────────────────────────────────────
+  const [token, setToken]           = useState<string>(() => sessionStorage.getItem('g66-admin-token') ?? '');
+  const [tokenVisible, setTokenVisible] = useState(false);
+
+  function saveToken(val: string) {
+    setToken(val);
+    sessionStorage.setItem('g66-admin-token', val);
+  }
+
+  // ── Search ──────────────────────────────────────────────────────────────────
+  const [searchType, setSearchType] = useState<SearchType>('email');
+  const [searchValue, setSearchValue] = useState('');
+  const [loading, setLoading]       = useState(false);
+  const [error, setError]           = useState('');
+
+  // ── Results ─────────────────────────────────────────────────────────────────
+  const [company, setCompany]       = useState<CompanyResult | null>(null);
+  const [slots, setSlots]           = useState<DocumentSlot[]>([]);
+  const [selected, setSelected]     = useState<Set<string>>(new Set()); // "slotKey::fileName"
+
+  // ── URL / download ──────────────────────────────────────────────────────────
+  const [urlStatus, setUrlStatus]   = useState<Record<string, 'loading' | 'ok' | 'error'>>({});
+
+  const headers = useCallback(() => ({
+    Authorization: `Bearer ${token}`,
+    'Content-Type': 'application/json',
+  }), [token]);
+
+  // ── Step 1: find company ────────────────────────────────────────────────────
+  async function buscarEmpresa() {
+    if (!token.trim()) { setError('Ingresa el Bearer Token del Admin G66.'); return; }
+    if (!searchValue.trim()) { setError('Ingresa un email o ID para buscar.'); return; }
+
+    setLoading(true); setError(''); setCompany(null); setSlots([]); setSelected(new Set());
+
+    try {
+      const param = searchType === 'email'
+        ? `email=${encodeURIComponent(searchValue.trim())}`
+        : `id=${encodeURIComponent(searchValue.trim())}`;
+
+      const resp = await fetch(`${API_BASE}/company/bo?page=0&size=5&${param}`, { headers: headers() });
+      if (!resp.ok) throw new Error(`API ${resp.status}: ${resp.statusText}`);
+      const data = await resp.json() as Record<string, unknown>;
+
+      // Handle both paginated {content:[...]} and direct array responses
+      const list = Array.isArray(data) ? data as Record<string, unknown>[]
+                 : Array.isArray(data.content) ? data.content as Record<string, unknown>[]
+                 : [data];
+
+      if (list.length === 0) throw new Error('No se encontró ninguna empresa con esos datos.');
+
+      const raw = list[0] as Record<string, unknown>;
+      const found: CompanyResult = {
+        id:               Number(raw.id),
+        name:             String(raw.name ?? raw.socialReason ?? raw.companyName ?? ''),
+        country:          String(raw.country ?? raw.countryCode ?? ''),
+        complianceStatus: String(raw.complianceStatus ?? raw.compliance_status ?? ''),
+        kycStage1:        String(raw.kycStage1 ?? raw.kyc_stage1 ?? raw.kycStatus ?? ''),
+      };
+      setCompany(found);
+
+      // Try to get documents from the same response first, then separate call
+      const docsFromSearch = parseDocuments(raw);
+      if (docsFromSearch.length > 0) {
+        setSlots(docsFromSearch);
+      } else {
+        await fetchDocuments(found.id, raw);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // ── Step 2: fetch documents ─────────────────────────────────────────────────
+  async function fetchDocuments(companyId: number, existingData?: Record<string, unknown>) {
+    if (existingData) {
+      const parsed = parseDocuments(existingData);
+      if (parsed.length > 0) { setSlots(parsed); return; }
+    }
+
+    // Try dedicated company detail endpoint
+    try {
+      const resp = await fetch(`${API_BASE}/company/bo?id=${companyId}&page=0&size=1`, { headers: headers() });
+      if (resp.ok) {
+        const data = await resp.json() as Record<string, unknown>;
+        const parsed = parseDocuments(data);
+        if (parsed.length > 0) { setSlots(parsed); return; }
+
+        // Also try the direct detail endpoint
+        const list = Array.isArray(data.content) ? data.content as Record<string, unknown>[] : [];
+        if (list.length > 0) {
+          const parsed2 = parseDocuments(list[0]);
+          if (parsed2.length > 0) { setSlots(parsed2); return; }
+        }
+      }
+    } catch { /* continue to next attempt */ }
+
+    // Last resort: country-based document list
+    try {
+      const country = company?.country || 'CL';
+      const resp = await fetch(`${API_BASE}/route/bo/documents/${country}?entityType=COMPANY&companyId=${companyId}`, { headers: headers() });
+      if (resp.ok) {
+        const data = await resp.json() as Record<string, unknown>;
+        const parsed = parseDocuments(data);
+        setSlots(parsed);
+      }
+    } catch { /* ignore */ }
+  }
+
+  // ── Get pre-signed URL ──────────────────────────────────────────────────────
+  async function getPresignedUrl(companyId: number, fileName: string): Promise<string> {
+    const fileKey = `prod/${companyId}/documents_company/${fileName}`;
+    const resp = await fetch(
+      `${API_BASE}/company/bo/pre-signed-url?fileKey=${encodeURIComponent(fileKey)}`,
+      { headers: headers() }
+    );
+    if (!resp.ok) throw new Error(`Pre-signed URL ${resp.status}`);
+    const data = await resp.json() as Record<string, unknown>;
+    // API may return the URL directly as string, or nested in {url:...}/{preSignedUrl:...}
+    return String(data.url ?? data.preSignedUrl ?? data.signedUrl ?? data.presignedUrl ?? data) ;
+  }
+
+  // ── Open selected in new tabs ───────────────────────────────────────────────
+  async function verDocumentos() {
+    if (!company || selected.size === 0) return;
+    const entries = [...selected];
+    for (const key of entries) {
+      const fileName = key.split('::')[1];
+      const uid = key;
+      setUrlStatus(s => ({ ...s, [uid]: 'loading' }));
+      try {
+        const url = await getPresignedUrl(company.id, fileName);
+        window.open(url, '_blank', 'noopener');
+        setUrlStatus(s => ({ ...s, [uid]: 'ok' }));
+      } catch {
+        setUrlStatus(s => ({ ...s, [uid]: 'error' }));
+      }
+    }
+  }
+
+  // ── Download selected ───────────────────────────────────────────────────────
+  async function descargarDocumentos() {
+    if (!company || selected.size === 0) return;
+    const entries = [...selected];
+    for (const key of entries) {
+      const [, fileName] = key.split('::');
+      setUrlStatus(s => ({ ...s, [key]: 'loading' }));
+      try {
+        const url = await getPresignedUrl(company.id, fileName);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = fileName;
+        a.target = '_blank';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setUrlStatus(s => ({ ...s, [key]: 'ok' }));
+        await new Promise(r => setTimeout(r, 400)); // stagger downloads
+      } catch {
+        setUrlStatus(s => ({ ...s, [key]: 'error' }));
+      }
+    }
+  }
+
+  // ── Select / deselect all with documents ───────────────────────────────────
+  function toggleAll() {
+    const allKeys = slots.flatMap(s => s.links.map(l => `${s.slotKey}::${l.fileName}`));
+    if (selected.size === allKeys.length) {
+      setSelected(new Set());
+    } else {
+      setSelected(new Set(allKeys));
+    }
+  }
+
+  function toggleItem(key: string) {
+    setSelected(s => {
+      const next = new Set(s);
+      next.has(key) ? next.delete(key) : next.add(key);
+      return next;
+    });
+  }
+
+  const totalDocs = slots.reduce((n, s) => n + s.links.length, 0);
+  const allKeys   = slots.flatMap(s => s.links.map(l => `${s.slotKey}::${l.fileName}`));
+  const allSelected = allKeys.length > 0 && selected.size === allKeys.length;
+
+  // ── Styles ──────────────────────────────────────────────────────────────────
+  const bg       = dark ? 'bg-gradient-to-br from-slate-900 via-slate-900 to-indigo-950' : 'bg-slate-50';
+  const cardBg   = dark ? 'bg-slate-800/50 border-slate-700/50' : 'bg-white border-slate-200 shadow-sm';
+  const navBg    = dark ? 'bg-slate-900/90 border-slate-700/50' : 'bg-white/95 border-slate-200 shadow-sm';
+  const text     = dark ? 'text-slate-100' : 'text-slate-900';
+  const muted    = dark ? 'text-slate-400' : 'text-slate-500';
+  const inputCls = dark
+    ? 'bg-slate-900/60 border-slate-600/50 text-white placeholder-slate-600 focus:border-indigo-500'
+    : 'bg-white border-slate-300 text-slate-800 placeholder-slate-400 focus:border-indigo-500';
+
+  return (
+    <div className={`min-h-screen ${bg} ${text} transition-colors`}>
+
+      {/* Nav */}
+      <nav className={`sticky top-0 z-50 backdrop-blur border-b px-6 py-3 flex items-center gap-3 flex-wrap ${navBg}`}>
+        <button
+          onClick={onBack}
+          className={`flex items-center gap-2 text-xs font-semibold transition-colors ${muted} hover:text-indigo-400`}
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+          </svg>
+          Inicio
+        </button>
+        <div className={`h-4 w-px ${dark ? 'bg-slate-700' : 'bg-slate-300'}`} />
+        <span className="text-sm font-black">🏢 Documentos de Empresa</span>
+        <span className={`text-xs font-medium ${muted}`}>Admin G66 · Búsqueda directa</span>
+      </nav>
+
+      <div className="max-w-4xl mx-auto px-6 py-8 space-y-6">
+
+        {/* ── Auth token ─────────────────────────────────────────────────── */}
+        <div className={`border rounded-2xl p-6 space-y-4 ${cardBg}`}>
+          <div>
+            <h2 className={`text-lg font-black ${dark ? 'text-white' : 'text-slate-800'}`}>
+              🔑 Autenticación Admin
+            </h2>
+            <p className={`text-xs mt-1 ${muted}`}>
+              Pega tu Bearer Token del Admin G66 (obtenido al iniciar sesión en{' '}
+              <code className="font-mono text-indigo-400">transferencias-admin.global66.com</code>
+              {' '}→ DevTools → Network → cualquier request → header{' '}
+              <code className="font-mono text-indigo-400">Authorization</code>).
+              Se guarda en sesión del navegador.
+            </p>
+          </div>
+          <div className="relative">
+            <input
+              type={tokenVisible ? 'text' : 'password'}
+              value={token}
+              onChange={e => saveToken(e.target.value)}
+              placeholder="Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6..."
+              className={`w-full border rounded-xl px-4 py-2.5 text-sm font-mono focus:outline-none transition-colors pr-20 ${inputCls}`}
+            />
+            <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-2">
+              <button
+                onClick={() => setTokenVisible(v => !v)}
+                className={`text-xs font-semibold px-2 py-1 rounded-lg ${dark ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-700'}`}
+              >
+                {tokenVisible ? 'Ocultar' : 'Ver'}
+              </button>
+              {token && (
+                <span className="text-emerald-400 text-xs">✓</span>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* ── Search ─────────────────────────────────────────────────────── */}
+        <div className={`border rounded-2xl p-6 space-y-4 ${cardBg}`}>
+          <h2 className={`text-lg font-black ${dark ? 'text-white' : 'text-slate-800'}`}>
+            🔍 Buscar Empresa
+          </h2>
+
+          {/* Type toggle */}
+          <div className={`flex gap-0 rounded-xl overflow-hidden w-fit border ${dark ? 'bg-slate-900/50 border-slate-700/50' : 'bg-slate-100 border-slate-200'}`}>
+            {(['email', 'id'] as SearchType[]).map(t => (
+              <button
+                key={t}
+                onClick={() => { setSearchType(t); setSearchValue(''); }}
+                className={`px-5 py-2 text-sm font-bold transition-all ${searchType === t ? 'bg-indigo-600 text-white' : `${muted} hover:text-indigo-400`}`}
+              >
+                {t === 'email' ? '📧 Por Email' : '🔢 Por ID Empresa'}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex gap-3">
+            <input
+              type={searchType === 'email' ? 'email' : 'text'}
+              value={searchValue}
+              onChange={e => setSearchValue(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && buscarEmpresa()}
+              placeholder={searchType === 'email' ? 'contacto@empresa.com' : 'ID numérico de la empresa'}
+              className={`flex-1 border rounded-xl px-4 py-2.5 text-sm focus:outline-none transition-colors ${inputCls}`}
+            />
+            <button
+              onClick={buscarEmpresa}
+              disabled={loading}
+              className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-bold px-6 py-2.5 rounded-xl text-sm transition-all"
+            >
+              {loading
+                ? <><div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> Buscando...</>
+                : <><svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}><path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg> Buscar</>
+              }
+            </button>
+          </div>
+
+          {error && (
+            <div className="bg-red-950/40 border border-red-800/50 rounded-xl px-4 py-3 text-sm text-red-300">
+              <strong>Error:</strong> {error}
+            </div>
+          )}
+        </div>
+
+        {/* ── Company found ───────────────────────────────────────────────── */}
+        {company && (
+          <div className={`border rounded-2xl p-5 flex items-start gap-4 ${dark ? 'bg-indigo-950/30 border-indigo-800/40' : 'bg-indigo-50 border-indigo-200'}`}>
+            <div className="w-12 h-12 bg-indigo-600/20 rounded-2xl flex items-center justify-center flex-shrink-0 border border-indigo-500/30">
+              <span className="text-2xl">🏢</span>
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-3 flex-wrap">
+                <h3 className={`text-lg font-black ${dark ? 'text-white' : 'text-slate-900'}`}>
+                  {company.name || `Empresa #${company.id}`}
+                </h3>
+                <span className={`text-xs font-mono font-bold px-2 py-0.5 rounded-lg border ${dark ? 'text-indigo-300 bg-indigo-950/50 border-indigo-700/50' : 'text-indigo-700 bg-indigo-100 border-indigo-200'}`}>
+                  ID {company.id}
+                </span>
+                {company.country && (
+                  <span className={`text-xs font-bold px-2 py-0.5 rounded-lg ${dark ? 'text-slate-300 bg-slate-800 border border-slate-700' : 'text-slate-600 bg-white border border-slate-200'}`}>
+                    {company.country}
+                  </span>
+                )}
+              </div>
+              <div className={`flex gap-4 mt-1 text-xs ${muted}`}>
+                {company.complianceStatus && company.complianceStatus !== 'undefined' && (
+                  <span>Compliance: <strong className={dark ? 'text-slate-200' : 'text-slate-700'}>{company.complianceStatus}</strong></span>
+                )}
+                {company.kycStage1 && company.kycStage1 !== 'undefined' && (
+                  <span>KYC I: <strong className={dark ? 'text-slate-200' : 'text-slate-700'}>{company.kycStage1}</strong></span>
+                )}
+              </div>
+              <p className={`text-xs mt-1 ${muted}`}>
+                {totalDocs === 0 ? 'Sin documentos cargados' : `${totalDocs} documento${totalDocs !== 1 ? 's' : ''} encontrado${totalDocs !== 1 ? 's' : ''} en ${slots.filter(s => s.links.length > 0).length} sección${slots.filter(s => s.links.length > 0).length !== 1 ? 'es' : ''}`}
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* ── Documents table ──────────────────────────────────────────────── */}
+        {company && slots.length > 0 && (
+          <div className={`border rounded-2xl overflow-hidden ${cardBg}`}>
+            {/* Table header */}
+            <div className={`px-6 py-4 flex items-center justify-between border-b ${dark ? 'border-slate-700/50' : 'border-slate-200'}`}>
+              <div className="flex items-center gap-3">
+                <h3 className={`text-base font-black ${dark ? 'text-white' : 'text-slate-800'}`}>
+                  📄 Documentos Cargados
+                </h3>
+                {selected.size > 0 && (
+                  <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-indigo-600 text-white">
+                    {selected.size} seleccionado{selected.size !== 1 ? 's' : ''}
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                <label className={`flex items-center gap-2 text-xs font-semibold cursor-pointer select-none ${muted}`}>
+                  <input
+                    type="checkbox"
+                    checked={allSelected}
+                    onChange={toggleAll}
+                    className="w-4 h-4 rounded accent-indigo-600"
+                  />
+                  Todos
+                </label>
+              </div>
+            </div>
+
+            {/* Table rows */}
+            <div className="divide-y divide-slate-200/60 dark:divide-slate-700/40">
+              {slots.map(slot => {
+                const hasLinks = slot.links.length > 0;
+                return (
+                  <div key={slot.slotKey} className={`${!hasLinks ? (dark ? 'opacity-40' : 'opacity-50') : ''}`}>
+                    {/* Slot header */}
+                    <div className={`px-6 py-2.5 flex items-center gap-2 ${dark ? 'bg-slate-800/30' : 'bg-slate-50/80'}`}>
+                      <span className={`text-[10px] font-black uppercase tracking-widest ${hasLinks ? (dark ? 'text-indigo-400' : 'text-indigo-600') : muted}`}>
+                        {slot.label}
+                      </span>
+                      {!hasLinks && (
+                        <span className={`text-[9px] font-bold uppercase tracking-widest ${muted}`}>— sin documentos</span>
+                      )}
+                      {slot.links.length > 1 && (
+                        <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${dark ? 'bg-amber-900/50 text-amber-400 border border-amber-700/50' : 'bg-amber-100 text-amber-700 border border-amber-200'}`}>
+                          {slot.links.length} versiones
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Document links */}
+                    {slot.links.map((link, idx) => {
+                      const key = `${slot.slotKey}::${link.fileName}`;
+                      const isSelected = selected.has(key);
+                      const isMostRecent = idx === 0 && slot.links.length > 1;
+                      const isOldest    = idx === slot.links.length - 1 && slot.links.length > 1;
+                      const uStatus     = urlStatus[key];
+
+                      return (
+                        <div
+                          key={link.id}
+                          onClick={() => hasLinks && toggleItem(key)}
+                          className={`px-6 py-3 flex items-center gap-4 cursor-pointer transition-colors ${
+                            isSelected
+                              ? dark ? 'bg-indigo-950/40 hover:bg-indigo-950/50' : 'bg-indigo-50 hover:bg-indigo-100/80'
+                              : dark ? 'hover:bg-slate-700/30' : 'hover:bg-slate-50'
+                          }`}
+                        >
+                          {/* Checkbox */}
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => toggleItem(key)}
+                            onClick={e => e.stopPropagation()}
+                            className="w-4 h-4 rounded accent-indigo-600 flex-shrink-0"
+                          />
+
+                          {/* File name */}
+                          <div className="flex-1 min-w-0">
+                            <p className={`text-xs font-mono truncate ${dark ? 'text-slate-200' : 'text-slate-700'}`}>
+                              {link.fileName}
+                            </p>
+                          </div>
+
+                          {/* Date */}
+                          <span className={`text-xs whitespace-nowrap ${muted}`}>
+                            {formatDate(link.uploadedDateMillis)}
+                          </span>
+
+                          {/* Recency badge (only when multiple versions) */}
+                          {isMostRecent && (
+                            <span className={`text-[9px] font-black uppercase tracking-widest px-1.5 py-0.5 rounded-full whitespace-nowrap ${dark ? 'bg-emerald-900/50 text-emerald-400 border border-emerald-700/50' : 'bg-emerald-100 text-emerald-700 border border-emerald-200'}`}>
+                              Más reciente
+                            </span>
+                          )}
+                          {isOldest && (
+                            <span className={`text-[9px] font-black uppercase tracking-widest px-1.5 py-0.5 rounded-full whitespace-nowrap ${dark ? 'bg-slate-700/50 text-slate-400 border border-slate-600/50' : 'bg-slate-100 text-slate-500 border border-slate-200'}`}>
+                              Más antiguo
+                            </span>
+                          )}
+
+                          {/* Status */}
+                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-lg border whitespace-nowrap ${statusColor(link.status)}`}>
+                            {link.status || '—'}
+                          </span>
+
+                          {/* URL status indicator */}
+                          {uStatus === 'loading' && <div className="w-4 h-4 border-2 border-indigo-400/30 border-t-indigo-400 rounded-full animate-spin flex-shrink-0" />}
+                          {uStatus === 'ok'      && <span className="text-emerald-400 text-xs flex-shrink-0">✓</span>}
+                          {uStatus === 'error'   && <span className="text-red-400 text-xs flex-shrink-0">✗</span>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Action buttons */}
+            {selected.size > 0 && (
+              <div className={`px-6 py-4 border-t flex flex-wrap gap-3 ${dark ? 'border-slate-700/50 bg-slate-800/30' : 'border-slate-200 bg-slate-50/80'}`}>
+                <button
+                  onClick={verDocumentos}
+                  className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white font-bold px-5 py-2.5 rounded-xl text-sm transition-all"
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                  </svg>
+                  Ver en navegador ({selected.size})
+                </button>
+                <button
+                  onClick={descargarDocumentos}
+                  className={`flex items-center gap-2 border font-bold px-5 py-2.5 rounded-xl text-sm transition-all ${dark ? 'border-emerald-600/50 text-emerald-400 hover:bg-emerald-950/40' : 'border-emerald-500 text-emerald-700 hover:bg-emerald-50'}`}
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                  </svg>
+                  Descargar ({selected.size})
+                </button>
+                <p className={`self-center text-xs ${muted}`}>
+                  💡 Tras descargar, sube los PDF al <strong>Analizador de Documentos</strong> en la suite Compliance.
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Empty state */}
+        {company && slots.length === 0 && !loading && (
+          <div className={`border rounded-2xl p-10 text-center ${cardBg}`}>
+            <div className="text-4xl mb-3">📂</div>
+            <p className={`font-semibold ${dark ? 'text-slate-300' : 'text-slate-600'}`}>
+              No se encontraron documentos para esta empresa
+            </p>
+            <p className={`text-xs mt-2 ${muted}`}>
+              Puede que la empresa aún no haya cargado documentos, o que el endpoint de documentos
+              no esté disponible en la respuesta actual.
+            </p>
+          </div>
+        )}
+
+      </div>
+    </div>
+  );
+};
