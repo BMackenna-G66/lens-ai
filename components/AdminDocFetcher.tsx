@@ -229,44 +229,68 @@ export const AdminDocFetcher: React.FC<Props> = ({ onBack, darkMode }) => {
       let raw: Record<string,unknown> | null = null;
       let usedParam = '';
 
+      const debugLog: string[] = [];
+
       for (const param of paramCandidates) {
-        const resp = await apiFetch(`${API_BASE}/company/bo?page=0&size=5&${param}`);
-        if (!resp.ok) continue;
-        const data = await resp.json() as Record<string,unknown>;
-        const list = Array.isArray(data) ? data as Record<string,unknown>[]
-                   : Array.isArray(data.content) ? data.content as Record<string,unknown>[]
-                   : (data.id ? [data] : []);
-        if (list.length > 0) { raw = list[0]; usedParam = param.split('=')[0]; break; }
+        const url = `${API_BASE}/company/bo?page=0&size=5&${param}`;
+        try {
+          const resp = await apiFetch(url);
+          debugLog.push(`GET ${url.split('?')[1]} → ${resp.status}`);
+          if (!resp.ok) continue;
+          const data = await resp.json() as Record<string,unknown>;
+          const list = Array.isArray(data) ? data as Record<string,unknown>[]
+                     : Array.isArray(data.content) ? data.content as Record<string,unknown>[]
+                     : (data.id ? [data] : []);
+          debugLog[debugLog.length-1] += ` (${list.length} resultados)`;
+          if (list.length > 0) { raw = list[0]; usedParam = param.split('=')[0]; break; }
+        } catch (e) {
+          debugLog.push(`GET ${param} → Error: ${e instanceof Error ? e.message : String(e)}`);
+        }
       }
 
-      // If GET params didn't work, try POST with filters body (same pattern as Python customer API)
+      // Try direct path lookup: GET /company/bo/{id}
       if (!raw && searchType === 'id') {
-        const filterField = 'companyId';
-        const resp = await apiFetch(`${API_BASE}/company/bo`, {
-          method: 'POST',
-          body: JSON.stringify({
-            filters: [{ field: filterField, operator: 'EQUAL', value: val }],
-          }),
-        });
-        if (resp.ok) {
-          const data = await resp.json() as Record<string,unknown>;
-          const list = Array.isArray(data.content) ? data.content as Record<string,unknown>[]
-                     : Array.isArray(data) ? data as Record<string,unknown>[] : [];
-          if (list.length > 0) { raw = list[0]; usedParam = 'POST filters'; }
+        try {
+          const url = `${API_BASE}/company/bo/${encodeURIComponent(val)}`;
+          const resp = await apiFetch(url);
+          debugLog.push(`GET /company/bo/${val} → ${resp.status}`);
+          if (resp.ok) {
+            const data = await resp.json() as Record<string,unknown>;
+            if (data.id) { raw = data; usedParam = 'path'; }
+          }
+        } catch (e) {
+          debugLog.push(`GET /company/bo/{id} → Error: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+
+      // Try POST with filters body (same pattern as Python customer API)
+      if (!raw && (searchType === 'id' || searchType === 'dni')) {
+        const filterField = searchType === 'id' ? 'companyId' : 'identificationNumber';
+        try {
+          const resp = await apiFetch(`${API_BASE}/company/bo`, {
+            method: 'POST',
+            body: JSON.stringify({
+              filters: [{ field: filterField, operator: 'EQUAL', value: val }],
+            }),
+          });
+          debugLog.push(`POST /company/bo filters[${filterField}] → ${resp.status}`);
+          if (resp.ok) {
+            const data = await resp.json() as Record<string,unknown>;
+            const list = Array.isArray(data.content) ? data.content as Record<string,unknown>[]
+                       : Array.isArray(data) ? data as Record<string,unknown>[] : [];
+            debugLog[debugLog.length-1] += ` (${list.length} resultados)`;
+            if (list.length > 0) { raw = list[0]; usedParam = 'POST filters'; }
+          }
+        } catch (e) {
+          debugLog.push(`POST filters → Error: ${e instanceof Error ? e.message : String(e)}`);
         }
       }
 
       if (!raw) {
+        // Show full debug log so user/dev can diagnose the real issue
         throw new Error(
-          `No se encontró ninguna empresa. ` +
-          `Parámetros probados: ${paramCandidates.map(p => p.split('=')[0]).join(', ')}` +
-          (searchType === 'id' ? ' + POST filters' : '') +
-          `. Verifica que el valor sea correcto — ` +
-          (searchType === 'id'
-            ? 'el ID debe ser el número interno de la empresa (columna "ID" en la tabla del Admin, ej: 4031569).'
-            : searchType === 'dni'
-            ? 'el DNI/RUT debe ser el documento fiscal de la empresa.'
-            : 'el email debe coincidir exactamente.')
+          `No se encontró ninguna empresa con ${searchType} = "${val}".\n\n` +
+          `Intentos realizados:\n${debugLog.join('\n')}`
         );
       }
 
@@ -513,8 +537,9 @@ export const AdminDocFetcher: React.FC<Props> = ({ onBack, darkMode }) => {
           </div>
 
           {error && (
-            <div className="bg-red-950/40 border border-red-800/50 rounded-xl px-4 py-3 text-sm text-red-300">
-              <strong>Error:</strong> {error}
+            <div className="bg-red-950/40 border border-red-800/50 rounded-xl px-4 py-3 text-red-300">
+              <p className="text-sm font-bold mb-2">Error:</p>
+              <pre className="text-xs whitespace-pre-wrap font-mono leading-relaxed">{error}</pre>
             </div>
           )}
         </div>
