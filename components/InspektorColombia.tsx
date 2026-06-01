@@ -1,4 +1,5 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useCallback } from 'react';
+import * as XLSX from 'xlsx';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 const INSPEKTOR_BASE = 'https://inspektor.datalaft.com:2121/api';
@@ -143,6 +144,28 @@ async function consultarInspektor(
   return (await resp.json()) as InspektorResult;
 }
 
+// Versión para masivo: recibe el token ya obtenido (evita un login por consulta).
+// Lanza 'TOKEN_EXPIRED' si recibe 401 para que el loop pueda refrescar y reintentar.
+async function consultarConToken(
+  token: string,
+  nombre: string,
+  identificacion: string,
+  tipoDocumento = 1,
+): Promise<InspektorResult> {
+  const resp = await fetch(`${INSPEKTOR_BASE}/ConsultaPrincipal`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      nombre, identificacion, tipoDocumento,
+      tienePrioridad_4: true, cantidadPalabras: '3',
+      procuraduria: true, ramaJudicial: true, ramaJEPMS: true,
+    }),
+  });
+  if (resp.status === 401) throw new Error('TOKEN_EXPIRED');
+  if (!resp.ok) throw new Error(`Consulta error ${resp.status}: ${resp.statusText}`);
+  return (await resp.json()) as InspektorResult;
+}
+
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
 function RiskBadge({ riesgo }: { riesgo: string }) {
@@ -271,7 +294,22 @@ interface InspektorColombiaProps {
   dark: boolean;
 }
 
+type TabMode = 'individual' | 'masivo';
+
+interface MasivoRow {
+  idx: number;
+  documento: string;
+  nombre: string;
+  tipoDoc: number;
+  status: 'pending' | 'processing' | 'done' | 'error';
+  result?: InspektorResult;
+  error?: string;
+}
+interface LogLine { type: 'ok' | 'err' | 'info'; text: string; }
+
 export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, dark }) => {
+  // ── Individual state ─────────────────────────────────────────────────────────
+  const [tab, setTab]             = useState<TabMode>('individual');
   const [nombre, setNombre]       = useState('');
   const [documento, setDocumento] = useState('');
   const [tipoDoc, setTipoDoc]     = useState(1);
@@ -279,6 +317,27 @@ export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, da
   const [error, setError]         = useState('');
   const [result, setResult]       = useState<InspektorResult | null>(null);
   const resultRef = useRef<HTMLDivElement>(null);
+
+  // ── Masivo state ─────────────────────────────────────────────────────────────
+  const [masivoFile, setMasivoFile]       = useState<File | null>(null);
+  const [masivoRows, setMasivoRows]       = useState<MasivoRow[]>([]);
+  const [masivoRunning, setMasivoRunning] = useState(false);
+  const [masivoIsPaused, setMasivoIsPaused] = useState(false);
+  const [masivoProgress, setMasivoProgress] = useState(0);
+  const [masivoTotal, setMasivoTotal]     = useState(0);
+  const [logs, setLogs]                   = useState<LogLine[]>([]);
+  const [masivoError, setMasivoError]     = useState('');
+  const [delay, setDelay]                 = useState(1.5);
+  const [isDrag, setIsDrag]               = useState(false);
+  const abortRef  = useRef(false);
+  const pausedRef = useRef(false);
+  const logRef    = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const addLog = useCallback((type: LogLine['type'], text: string) => {
+    setLogs(l => [...l.slice(-300), { type, text }]);
+    setTimeout(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, 50);
+  }, []);
 
   const bg       = dark ? 'bg-gradient-to-br from-slate-900 via-slate-900 to-indigo-950' : 'bg-gradient-to-br from-white via-violet-50/40 to-white';
   const cardBg   = dark ? 'bg-slate-800/50 border-slate-700/50' : 'bg-white border-violet-200/70 shadow-sm';
@@ -311,7 +370,220 @@ export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, da
     }
   }
 
-  // Derived result data
+  // ── Masivo: parse Excel ──────────────────────────────────────────────────────
+  function handleMasivoFile(file: File) {
+    setMasivoFile(file);
+    setMasivoRows([]); setLogs([]); setMasivoError(''); setMasivoProgress(0);
+    file.arrayBuffer().then(buf => {
+      try {
+        const wb   = XLSX.read(buf, { type: 'array' });
+        const data = XLSX.utils.sheet_to_json<Record<string, string>>(
+          wb.Sheets[wb.SheetNames[0]], { defval: '' }
+        );
+        const norm = data.map(r => {
+          const out: Record<string, string> = {};
+          for (const [k, v] of Object.entries(r)) out[k.toLowerCase().trim()] = String(v).trim();
+          return out;
+        });
+
+        // Detect columns
+        const docCol = ['documento','cedula','identificacion','dni','id','nit','pasaporte']
+          .find(k => norm[0]?.[k] !== undefined);
+        if (!docCol) { setMasivoError('No se encontró columna de documento. Usa: documento, cedula, dni, nit, pasaporte.'); return; }
+
+        const rows: MasivoRow[] = norm.map((r, idx) => {
+          const docNum = r[docCol] ?? '';
+          const nomCol = ['nombre_completo','nombre completo','name','nombre'].find(k => r[k]);
+          const apCol  = ['apellido','apellidos','apellido_paterno','last_name'].find(k => r[k]);
+          const nombreCompleto = nomCol
+            ? (apCol ? `${r[nomCol]} ${r[apCol]}` : r[nomCol])
+            : (apCol ? r[apCol] : '');
+          const tipoDocRaw = r['tipo_documento'] ?? r['tipo_doc'] ?? r['tipodocumento'] ?? '1';
+          const tipoDocNum = Number(tipoDocRaw) || 1;
+          return { idx, documento: docNum, nombre: nombreCompleto, tipoDoc: tipoDocNum, status: 'pending' as const };
+        }).filter(r => r.documento);
+
+        if (rows.length === 0) { setMasivoError('El Excel no tiene filas con documento válido.'); return; }
+        setMasivoRows(rows);
+        setMasivoTotal(rows.length);
+        addLog('info', `📂 ${file.name} — ${rows.length} registros listos`);
+      } catch (e) {
+        setMasivoError(`Error leyendo Excel: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    });
+  }
+
+  // ── Masivo: process loop ─────────────────────────────────────────────────────
+  async function procesarMasivo() {
+    if (masivoRows.length === 0) return;
+    setMasivoRunning(true); setMasivoIsPaused(false);
+    abortRef.current = false; pausedRef.current = false;
+    setLogs([]); setMasivoProgress(0);
+
+    const results: MasivoRow[] = masivoRows.map(r => ({ ...r, status: 'pending' as const }));
+    setMasivoRows([...results]);
+
+    // Obtain initial token — reused across the loop, refreshed on 401
+    let token = '';
+    try {
+      addLog('info', '🔑 Obteniendo token Inspektor…');
+      token = await inspektorLogin();
+      addLog('info', '✓ Token obtenido');
+    } catch (e) {
+      addLog('err', `✗ No se pudo autenticar con Inspektor: ${e instanceof Error ? e.message : String(e)}`);
+      setMasivoRunning(false); return;
+    }
+
+    let done = 0, alerts = 0, errors = 0;
+
+    for (let i = 0; i < results.length; i++) {
+      if (abortRef.current) { addLog('info', '⛔ Proceso cancelado'); break; }
+
+      // Pause: wait until unpaused
+      while (pausedRef.current && !abortRef.current) {
+        await new Promise(r => setTimeout(r, 300));
+      }
+      if (abortRef.current) { addLog('info', '⛔ Proceso cancelado'); break; }
+
+      const row = results[i];
+      results[i] = { ...row, status: 'processing' };
+      setMasivoRows([...results]);
+
+      const label = row.nombre ? `${row.documento} (${row.nombre})` : row.documento;
+
+      try {
+        let r: InspektorResult;
+        try {
+          r = await consultarConToken(token, row.nombre || row.documento, row.documento, row.tipoDoc);
+        } catch (e) {
+          if (e instanceof Error && e.message === 'TOKEN_EXPIRED') {
+            addLog('info', `  ↳ Token expirado — refrescando…`);
+            token = await inspektorLogin();
+            r = await consultarConToken(token, row.nombre || row.documento, row.documento, row.tipoDoc);
+          } else throw e;
+        }
+
+        const cant = r.cantCoincidencias ?? 0;
+        const hasAlert = cant > 0;
+        if (hasAlert) alerts++;
+        results[i] = { ...row, status: 'done', result: r };
+        addLog(hasAlert ? 'err' : 'ok',
+          `${hasAlert ? '⚠' : '✓'} [${i+1}/${results.length}] ${label} — ${cant} coincidencia${cant !== 1 ? 's' : ''} · ${getRiesgo(cant)}`
+        );
+      } catch (e) {
+        errors++;
+        results[i] = { ...row, status: 'error', error: e instanceof Error ? e.message : String(e) };
+        addLog('err', `✗ [${i+1}/${results.length}] ${label} — ${results[i].error}`);
+      }
+
+      done++;
+      setMasivoRows([...results]);
+      setMasivoProgress(i + 1);
+
+      if (delay > 0 && i < results.length - 1) await new Promise(r => setTimeout(r, delay * 1000));
+    }
+
+    addLog('info', `✅ Completado — ${done} procesados, ${alerts} alertas, ${errors} errores`);
+    setMasivoRunning(false); setMasivoIsPaused(false);
+  }
+
+  // ── Masivo: export Excel ─────────────────────────────────────────────────────
+  function exportarExcelMasivo() {
+    const done = masivoRows.filter(r => r.status === 'done' && r.result);
+    if (done.length === 0) return;
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const ts  = `${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}`;
+
+    // Hoja 1: Resultados
+    const resultados = masivoRows.map(r => {
+      const res = r.result;
+      const cant = res?.cantCoincidencias ?? 0;
+      const listas = res?.listas ?? [];
+      const grupoObj = listas.filter(esGrupoObjetivo).length;
+      const procRecs = getProcuraduriaRecords(res?.procuraduria).length;
+      const rjProc   = getRamaJudicialProcesos(res?.ramaJudicial).length;
+      const jepms    = getJEPMSItems(res?.ramaJudicialJEPMS).length;
+      return {
+        'Documento':              r.documento,
+        'Nombre consultado':      r.nombre || '—',
+        'Tipo Documento':         r.tipoDoc,
+        'Estado':                 r.status,
+        'Error':                  r.error ?? '',
+        'Riesgo':                 r.status === 'done' ? getRiesgo(cant) : '—',
+        'Coincidencias totales':  r.status === 'done' ? cant : '—',
+        'Grupo Objetivo':         r.status === 'done' ? grupoObj : '—',
+        'Otras listas':           r.status === 'done' ? listas.filter(i => !esGrupoObjetivo(i)).length : '—',
+        'Listas propias':         r.status === 'done' ? (res?.listas_propias?.length ?? 0) : '—',
+        'Procuraduría':           r.status === 'done' ? procRecs : '—',
+        'Rama Judicial':          r.status === 'done' ? rjProc : '—',
+        'JEPMS':                  r.status === 'done' ? jepms : '—',
+        'N° Consulta':            res?.numConsulta ?? '',
+      };
+    });
+
+    // Hoja 2: Detalle coincidencias (una fila por lista con alerta)
+    const coincidencias: Record<string, unknown>[] = [];
+    for (const r of done) {
+      const listas = r.result?.listas ?? [];
+      for (const item of listas) {
+        coincidencias.push({
+          'Documento':        r.documento,
+          'Nombre':           r.nombre || '—',
+          'Grupo Lista':      getGrupoLista(item),
+          'Tipo Lista':       item.nombreTipoLista ?? '—',
+          'Nombre detectado': item.nombreCompleto ?? '—',
+          'Doc detectado':    item.documentoIdentidad ?? '—',
+          'PEP':              item.peps ?? '—',
+          'Delito':           item.delito ?? '—',
+          'Prioridad':        item.Prioridad ?? item.prioridad ?? '—',
+          'Fuente':           item.fuenteConsulta ?? '—',
+        });
+      }
+    }
+
+    // Hoja 3: Procuraduría
+    const procSheet: Record<string, unknown>[] = [];
+    for (const r of done) {
+      for (const rec of getProcuraduriaRecords(r.result?.procuraduria)) {
+        procSheet.push({
+          'Documento consultado': r.documento,
+          'Nombre consultado':    r.nombre || '—',
+          'Nombre registro':      rec.name ?? '—',
+          'Identificación':       rec.identification ?? '—',
+          'N° SIRI':              rec.num_siri ?? '—',
+          'Sanciones':            (rec.sanciones ?? []).map(s => s.sancion).join('; '),
+          'Delitos':              (rec.delitos ?? []).map(d => d.descripcion).join('; '),
+          'Inhabilidades':        (rec.inhabilidades ?? []).map(i => i.inhabilidad_legal).join('; '),
+        });
+      }
+    }
+
+    // Hoja 4: Resumen
+    const alertCount   = done.filter(r => (r.result?.cantCoincidencias ?? 0) > 0).length;
+    const grupoObjCount = done.filter(r => (r.result?.listas ?? []).some(esGrupoObjetivo)).length;
+    const cleanCount   = done.filter(r => (r.result?.cantCoincidencias ?? 0) === 0).length;
+    const errCount     = masivoRows.filter(r => r.status === 'error').length;
+    const resumen = [
+      { Métrica: 'Total procesados',       Valor: done.length },
+      { Métrica: 'Con alertas',             Valor: alertCount },
+      { Métrica: 'Grupo Objetivo activado', Valor: grupoObjCount },
+      { Métrica: 'Sin coincidencias',       Valor: cleanCount },
+      { Métrica: 'Errores API',             Valor: errCount },
+    ];
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(resultados),    'Resultados Inspektor');
+    if (coincidencias.length > 0)
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(coincidencias), 'Coincidencias');
+    if (procSheet.length > 0)
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(procSheet),    'Procuraduria');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(resumen),       'Resumen');
+    XLSX.writeFile(wb, `inspektor_masivo_${ts}.xlsx`);
+  }
+
+  // ── Derived result data (individual) ────────────────────────────────────────
   const cant = result?.cantCoincidencias ?? 0;
   const riesgo = getRiesgo(cant);
   const listasAll = result?.listas ?? [];
@@ -340,10 +612,192 @@ export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, da
         <div className={`h-4 w-px ${dark ? 'bg-slate-700' : 'bg-violet-200'}`} />
         <span className="text-sm font-black">🇨🇴 Colombianos</span>
         <span className={`text-xs font-medium ${textMuted}`}>Inspektor · DataLAFT</span>
+
+        <div className={`flex gap-1 rounded-xl p-1 ml-2 ${dark ? 'bg-slate-800/60' : 'bg-violet-100/70'}`}>
+          {([['individual', '🔍 Individual'], ['masivo', '📊 Masivo']] as [TabMode, string][]).map(([t, label]) => (
+            <button key={t} onClick={() => setTab(t)}
+              className={`text-xs font-bold px-4 py-2 rounded-lg transition-all ${
+                tab === t ? 'bg-indigo-600 text-white' : dark ? `${textMuted} hover:text-indigo-400` : 'text-violet-700 hover:text-violet-900'
+              }`}>
+              {label}
+            </button>
+          ))}
+        </div>
         <div className="ml-auto" />
       </nav>
 
       <div className="max-w-4xl mx-auto px-6 py-8 space-y-6">
+
+        {/* ── TAB: MASIVO ────────────────────────────────────────────────────── */}
+        {tab === 'masivo' && (
+          <div className="space-y-6">
+            <div>
+              <h2 className={`text-2xl font-black ${dark ? 'text-white' : 'text-slate-800'}`}>Consulta Masiva · Inspektor</h2>
+              <p className={`text-sm mt-1 ${textMuted}`}>
+                Sube un Excel con columna <code className="font-mono text-indigo-400">documento</code> (obligatoria).
+                Opcionales: <code className="font-mono text-indigo-400">nombre</code>, <code className="font-mono text-indigo-400">apellido</code>, <code className="font-mono text-indigo-400">tipo_documento</code> (1–5, default 1).
+              </p>
+            </div>
+
+            {/* Drop zone */}
+            <div className={`border rounded-2xl p-6 space-y-5 ${cardBg}`}>
+              <div
+                onDragOver={e => { e.preventDefault(); setIsDrag(true); }}
+                onDragLeave={() => setIsDrag(false)}
+                onDrop={e => { e.preventDefault(); setIsDrag(false); const f = e.dataTransfer.files[0]; if (f) handleMasivoFile(f); }}
+                onClick={() => fileInputRef.current?.click()}
+                className={`border-2 border-dashed rounded-xl p-10 text-center cursor-pointer transition-colors ${
+                  isDrag ? 'border-indigo-500 bg-indigo-500/10' :
+                  masivoFile ? (dark ? 'border-emerald-600/50 bg-emerald-950/20' : 'border-emerald-400 bg-emerald-50') :
+                  dark ? 'border-slate-600 hover:border-indigo-500 hover:bg-indigo-500/5' : 'border-slate-300 hover:border-indigo-400 hover:bg-indigo-50'
+                }`}
+              >
+                <div className="text-4xl mb-3">{masivoFile ? '📊' : '📂'}</div>
+                <p className={`text-base font-semibold mb-1 ${dark ? 'text-slate-200' : 'text-slate-700'}`}>
+                  {masivoFile ? masivoFile.name : 'Arrastra tu Excel aquí o haz clic para seleccionar'}
+                </p>
+                <p className={`text-xs ${textMuted}`}>
+                  Formato <code className="font-mono text-indigo-400">.xlsx</code> · columna obligatoria: <code className="font-mono text-indigo-400">documento</code>
+                </p>
+                <input ref={fileInputRef} type="file" accept=".xlsx" className="hidden"
+                  onChange={e => e.target.files?.[0] && handleMasivoFile(e.target.files[0])} />
+              </div>
+
+              {/* Delay config */}
+              <div className="flex items-center gap-4 flex-wrap">
+                <div className="flex items-center gap-2">
+                  <label className={`text-xs font-bold uppercase tracking-widest whitespace-nowrap ${dark ? 'text-slate-400' : 'text-violet-600'}`}>Delay (seg)</label>
+                  <input type="number" value={delay} step={0.5} min={0}
+                    onChange={e => setDelay(parseFloat(e.target.value) || 0)}
+                    className={`w-20 border rounded-lg px-3 py-1.5 text-sm focus:outline-none ${inputCls}`} />
+                </div>
+                {masivoRows.length > 0 && (
+                  <span className={`text-xs ${textMuted}`}>{masivoRows.length} registros cargados</span>
+                )}
+              </div>
+
+              {/* Controls */}
+              <div className="flex gap-3 flex-wrap">
+                <button onClick={procesarMasivo}
+                  disabled={masivoRows.length === 0 || masivoRunning}
+                  className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-bold px-6 py-2.5 rounded-xl text-sm transition-all">
+                  {masivoRunning
+                    ? <><div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> Procesando…</>
+                    : '⚡ Procesar'}
+                </button>
+
+                {masivoRunning && !masivoIsPaused && (
+                  <button onClick={() => { setMasivoIsPaused(true); pausedRef.current = true; }}
+                    className={`font-bold px-5 py-2.5 rounded-xl text-sm border transition-all ${dark ? 'border-amber-600/50 text-amber-400 hover:bg-amber-950/40' : 'border-amber-500 text-amber-700 hover:bg-amber-50'}`}>
+                    ⏸ Pausar
+                  </button>
+                )}
+                {masivoRunning && masivoIsPaused && (
+                  <button onClick={() => { setMasivoIsPaused(false); pausedRef.current = false; }}
+                    className="flex items-center gap-2 bg-amber-600 hover:bg-amber-500 text-white font-bold px-5 py-2.5 rounded-xl text-sm transition-all">
+                    ▶ Reanudar
+                  </button>
+                )}
+                {masivoRunning && (
+                  <button onClick={() => { abortRef.current = true; }}
+                    className="flex items-center gap-2 bg-red-700 hover:bg-red-600 text-white font-bold px-5 py-2.5 rounded-xl text-sm transition-all">
+                    ⛔ Cancelar
+                  </button>
+                )}
+                {masivoRows.some(r => r.status === 'done') && !masivoRunning && (
+                  <button onClick={exportarExcelMasivo}
+                    className={`flex items-center gap-2 border font-bold px-5 py-2.5 rounded-xl text-sm transition-all ${dark ? 'border-emerald-600/50 text-emerald-400 hover:bg-emerald-950/40' : 'border-emerald-500 text-emerald-700 hover:bg-emerald-50'}`}>
+                    📥 Exportar Excel
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {masivoError && (
+              <div className={`border rounded-xl px-5 py-4 text-sm ${dark ? 'bg-red-950/40 border-red-800/50 text-red-300' : 'bg-red-50 border-red-300 text-red-700'}`}>
+                <strong>Error:</strong> {masivoError}
+              </div>
+            )}
+
+            {/* Progress + log */}
+            {(masivoRunning || logs.length > 0) && (
+              <div className={`border rounded-2xl p-6 space-y-4 ${cardBg}`}>
+                <div className="flex items-center justify-between">
+                  <span className={`text-xs font-bold uppercase tracking-widest ${textMuted}`}>Progreso</span>
+                  <span className={`text-sm font-bold ${dark ? 'text-slate-300' : 'text-slate-600'}`}>
+                    {masivoProgress} / {masivoTotal}
+                    {masivoIsPaused && <span className="ml-2 text-amber-400">⏸ En pausa</span>}
+                  </span>
+                </div>
+                <div className={`w-full h-2 rounded-full ${dark ? 'bg-slate-700' : 'bg-slate-200'}`}>
+                  <div className="h-2 rounded-full bg-indigo-600 transition-all"
+                    style={{ width: masivoTotal > 0 ? `${(masivoProgress / masivoTotal) * 100}%` : '0%' }} />
+                </div>
+                <div ref={logRef}
+                  className={`h-48 overflow-y-auto rounded-xl p-3 font-mono text-xs space-y-0.5 ${dark ? 'bg-slate-900/60' : 'bg-slate-50'}`}>
+                  {logs.map((l, i) => (
+                    <p key={i} className={
+                      l.type === 'ok'   ? 'text-emerald-400' :
+                      l.type === 'err'  ? 'text-red-400' :
+                      dark ? 'text-slate-500' : 'text-slate-400'
+                    }>{l.text}</p>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Results summary table */}
+            {masivoRows.some(r => r.status === 'done' || r.status === 'error') && (
+              <div className={`border rounded-2xl overflow-hidden ${cardBg}`}>
+                <div className={`px-6 py-4 border-b flex items-center justify-between ${dark ? 'border-slate-700/50' : 'border-slate-200'}`}>
+                  <h3 className={`text-base font-black ${dark ? 'text-white' : 'text-slate-800'}`}>Resultados</h3>
+                  <div className="flex gap-4 text-xs">
+                    {[
+                      ['✓', masivoRows.filter(r => r.status === 'done' && (r.result?.cantCoincidencias ?? 0) === 0).length, 'text-emerald-400'],
+                      ['⚠', masivoRows.filter(r => r.status === 'done' && (r.result?.cantCoincidencias ?? 0) > 0).length, 'text-red-400'],
+                      ['✗', masivoRows.filter(r => r.status === 'error').length, 'text-slate-500'],
+                    ].map(([icon, count, cls]) => (
+                      <span key={String(icon)} className={`font-bold ${cls}`}>{icon} {String(count)}</span>
+                    ))}
+                  </div>
+                </div>
+                <div className="divide-y divide-slate-200/40 dark:divide-slate-700/30 max-h-96 overflow-y-auto">
+                  {masivoRows.filter(r => r.status !== 'pending').map(r => {
+                    const cant = r.result?.cantCoincidencias ?? 0;
+                    const hasAlert = r.status === 'done' && cant > 0;
+                    const statusIcon = r.status === 'processing' ? '⏳' : r.status === 'error' ? '✗' : cant > 0 ? '⚠' : '✓';
+                    return (
+                      <div key={r.idx} className={`px-6 py-3 flex items-center gap-4 text-sm ${
+                        hasAlert ? (dark ? 'bg-red-950/20' : 'bg-red-50/50') : ''
+                      }`}>
+                        <span className={r.status === 'error' ? 'text-slate-400' : hasAlert ? 'text-red-400' : 'text-emerald-400'}>
+                          {statusIcon}
+                        </span>
+                        <code className={`font-mono text-xs flex-shrink-0 ${dark ? 'text-slate-300' : 'text-slate-600'}`}>{r.documento}</code>
+                        <span className={`flex-1 text-xs truncate ${textMuted}`}>{r.nombre || '—'}</span>
+                        {r.status === 'done' && (
+                          <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${
+                            cant === 0
+                              ? dark ? 'text-emerald-400 bg-emerald-900/30' : 'text-emerald-700 bg-emerald-100'
+                              : dark ? 'text-red-400 bg-red-900/30' : 'text-red-700 bg-red-100'
+                          }`}>
+                            {cant > 0 ? `${cant} alerta${cant !== 1 ? 's' : ''}` : 'Limpio'} · {getRiesgo(cant)}
+                          </span>
+                        )}
+                        {r.status === 'error' && (
+                          <span className={`text-xs ${dark ? 'text-red-400' : 'text-red-600'} truncate max-w-[200px]`}>{r.error}</span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── TAB: INDIVIDUAL ────────────────────────────────────────────────── */}
+        {tab === 'individual' && <>
 
         {/* Search form */}
         <div className={`border rounded-2xl p-6 ${cardBg}`}>
@@ -616,6 +1070,7 @@ export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, da
 
           </div>
         )}
+        </> /* end tab individual */}
       </div>
     </div>
   );
