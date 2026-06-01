@@ -10,13 +10,12 @@ import { CriminalApp } from './components/CriminalProfiler/CriminalApp';
 import { GeneralDashboard } from './components/GeneralDashboard';
 import { AdminModule } from './components/AdminModule';
 import { RegcheqTool } from './components/RegcheqTool';
-import { AdminDocFetcher } from './components/AdminDocFetcher';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { IconFiles, IconAlertTriangle, IconWallet, IconScale } from './components/IconComponents';
 import { trackModuleVisit, ModuleKey } from './services/analyticsService';
 
 type TabKey = 'dashboard' | 'analyzer' | 'tools' | 'crypto' | 'compliance';
-type Suite = 'compliance' | 'criminal' | 'admin' | 'general-dashboard' | 'regcheq' | 'admin-docs' | null;
+type Suite = 'compliance' | 'criminal' | 'admin' | 'general-dashboard' | 'regcheq' | null;
 
 const AppContent: React.FC = () => {
   const { user, isLoading: authLoading, firebaseReady, profileLoading, role, userProfile } = useAuth();
@@ -78,9 +77,6 @@ const AppContent: React.FC = () => {
     mainContent = (role !== 'Lider' || userProfile?.modules?.generalDashboard === false)
       ? <AccessDenied msg="Acceso restringido" />
       : <GeneralDashboard onBack={() => setActiveSuite(null)} />;
-
-  } else if (activeSuite === 'admin-docs') {
-    mainContent = <AdminDocFetcher onBack={() => setActiveSuite(null)} darkMode={darkMode} />;
 
   } else if (activeSuite === 'regcheq') {
     mainContent = <RegcheqTool
