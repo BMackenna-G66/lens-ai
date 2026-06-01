@@ -54,7 +54,7 @@ interface CompanyResult {
   complianceStatus?: string;
   kycStage1?: string;
 }
-type SearchType = 'email' | 'id';
+type SearchType = 'email' | 'id' | 'dni';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function statusColor(status: string): string {
@@ -199,7 +199,7 @@ export const AdminDocFetcher: React.FC<Props> = ({ onBack, darkMode }) => {
   const [selected, setSelected]       = useState<Set<string>>(new Set());
   const [urlStatus, setUrlStatus]     = useState<Record<string, 'loading'|'ok'|'error'>>({});
 
-  // ── Find company ────────────────────────────────────────────────────────────
+  // ── Find company — tries multiple param strategies until one returns data ───
   async function buscarEmpresa() {
     if (!refreshToken.trim() && !accessToken.trim()) {
       setError('Ingresa tu Refresh Token primero.'); return;
@@ -207,22 +207,69 @@ export const AdminDocFetcher: React.FC<Props> = ({ onBack, darkMode }) => {
     if (!searchValue.trim()) { setError('Ingresa un email o ID para buscar.'); return; }
 
     setLoading(true); setError(''); setCompany(null); setSlots([]); setSelected(new Set());
+    const val = searchValue.trim();
+
+    // Build the list of GET params to try in order.
+    // For ID:  ?id=, ?companyId=, ?ids= (the admin UI label says "IDs separados por coma")
+    // For DNI: ?dni=, ?identification=, ?identificationNumber=
+    // For email: ?email= (single strategy, already known to work)
+    const paramCandidates: string[] =
+      searchType === 'email' ? [`email=${encodeURIComponent(val)}`] :
+      searchType === 'dni'   ? [
+        `dni=${encodeURIComponent(val)}`,
+        `identification=${encodeURIComponent(val)}`,
+        `identificationNumber=${encodeURIComponent(val)}`,
+      ] : /* id */ [
+        `id=${encodeURIComponent(val)}`,
+        `companyId=${encodeURIComponent(val)}`,
+        `ids=${encodeURIComponent(val)}`,
+      ];
+
     try {
-      const param = searchType === 'email'
-        ? `email=${encodeURIComponent(searchValue.trim())}`
-        : `id=${encodeURIComponent(searchValue.trim())}`;
+      let raw: Record<string,unknown> | null = null;
+      let usedParam = '';
 
-      const resp = await apiFetch(`${API_BASE}/company/bo?page=0&size=5&${param}`);
-      if (!resp.ok) throw new Error(`API ${resp.status}: ${resp.statusText}`);
-      const data = await resp.json() as Record<string, unknown>;
+      for (const param of paramCandidates) {
+        const resp = await apiFetch(`${API_BASE}/company/bo?page=0&size=5&${param}`);
+        if (!resp.ok) continue;
+        const data = await resp.json() as Record<string,unknown>;
+        const list = Array.isArray(data) ? data as Record<string,unknown>[]
+                   : Array.isArray(data.content) ? data.content as Record<string,unknown>[]
+                   : (data.id ? [data] : []);
+        if (list.length > 0) { raw = list[0]; usedParam = param.split('=')[0]; break; }
+      }
 
-      const list = Array.isArray(data) ? data as Record<string,unknown>[]
-                 : Array.isArray(data.content) ? data.content as Record<string,unknown>[]
-                 : [data];
+      // If GET params didn't work, try POST with filters body (same pattern as Python customer API)
+      if (!raw && searchType === 'id') {
+        const filterField = 'companyId';
+        const resp = await apiFetch(`${API_BASE}/company/bo`, {
+          method: 'POST',
+          body: JSON.stringify({
+            filters: [{ field: filterField, operator: 'EQUAL', value: val }],
+          }),
+        });
+        if (resp.ok) {
+          const data = await resp.json() as Record<string,unknown>;
+          const list = Array.isArray(data.content) ? data.content as Record<string,unknown>[]
+                     : Array.isArray(data) ? data as Record<string,unknown>[] : [];
+          if (list.length > 0) { raw = list[0]; usedParam = 'POST filters'; }
+        }
+      }
 
-      if (list.length === 0) throw new Error('No se encontró ninguna empresa con esos datos.');
+      if (!raw) {
+        throw new Error(
+          `No se encontró ninguna empresa. ` +
+          `Parámetros probados: ${paramCandidates.map(p => p.split('=')[0]).join(', ')}` +
+          (searchType === 'id' ? ' + POST filters' : '') +
+          `. Verifica que el valor sea correcto — ` +
+          (searchType === 'id'
+            ? 'el ID debe ser el número interno de la empresa (columna "ID" en la tabla del Admin, ej: 4031569).'
+            : searchType === 'dni'
+            ? 'el DNI/RUT debe ser el documento fiscal de la empresa.'
+            : 'el email debe coincidir exactamente.')
+        );
+      }
 
-      const raw = list[0];
       const found: CompanyResult = {
         id:               Number(raw.id),
         name:             String(raw.name ?? raw.socialReason ?? raw.companyName ?? ''),
@@ -231,6 +278,7 @@ export const AdminDocFetcher: React.FC<Props> = ({ onBack, darkMode }) => {
         kycStage1:        String(raw.kycStage1 ?? raw.kycStatus ?? ''),
       };
       setCompany(found);
+      console.info(`[AdminDocFetcher] Empresa encontrada con param: ${usedParam}`);
 
       const docsFromSearch = parseDocuments(raw);
       if (docsFromSearch.length > 0) { setSlots(docsFromSearch); }
@@ -422,13 +470,25 @@ export const AdminDocFetcher: React.FC<Props> = ({ onBack, darkMode }) => {
           <h2 className={`text-lg font-black ${dark ? 'text-white' : 'text-slate-800'}`}>🔍 Buscar Empresa</h2>
 
           <div className={`flex gap-0 rounded-xl overflow-hidden w-fit border ${dark ? 'bg-slate-900/50 border-slate-700/50' : 'bg-slate-100 border-slate-200'}`}>
-            {(['email','id'] as SearchType[]).map(t => (
-              <button key={t} onClick={() => { setSearchType(t); setSearchValue(''); }}
-                className={`px-5 py-2 text-sm font-bold transition-all ${searchType === t ? 'bg-indigo-600 text-white' : `${muted} hover:text-indigo-400`}`}>
-                {t === 'email' ? '📧 Por Email' : '🔢 Por ID Empresa'}
+            {([
+              { key: 'email', label: '📧 Email' },
+              { key: 'id',    label: '🔢 ID Empresa' },
+              { key: 'dni',   label: '📄 DNI / RUT' },
+            ] as { key: SearchType; label: string }[]).map(({ key, label }) => (
+              <button key={key} onClick={() => { setSearchType(key); setSearchValue(''); }}
+                className={`px-4 py-2 text-sm font-bold transition-all ${searchType === key ? 'bg-indigo-600 text-white' : `${muted} hover:text-indigo-400`}`}>
+                {label}
               </button>
             ))}
           </div>
+
+          {searchType === 'id' && (
+            <p className={`text-xs ${muted}`}>
+              💡 El <strong>ID Empresa</strong> es el número interno de la columna "ID" en la tabla del Admin
+              (ej: <code className="font-mono text-indigo-400">4031569</code>), no el RUT/DNI.
+              Para buscar por documento fiscal usa la opción <strong>DNI / RUT</strong>.
+            </p>
+          )}
 
           <div className="flex gap-3">
             <input
@@ -436,7 +496,11 @@ export const AdminDocFetcher: React.FC<Props> = ({ onBack, darkMode }) => {
               value={searchValue}
               onChange={e => setSearchValue(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && buscarEmpresa()}
-              placeholder={searchType === 'email' ? 'contacto@empresa.com' : 'ID numérico de la empresa'}
+              placeholder={
+                searchType === 'email' ? 'contacto@empresa.com' :
+                searchType === 'id'    ? 'Ej: 4031569 (ID numérico interno)' :
+                                         'RUT o número de documento fiscal'
+              }
               className={`flex-1 border rounded-xl px-4 py-2.5 text-sm focus:outline-none transition-colors ${inputCls}`}
             />
             <button onClick={buscarEmpresa} disabled={loading || (!hasToken && !refreshToken.trim())}
