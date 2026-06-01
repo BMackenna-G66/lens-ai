@@ -54,7 +54,7 @@ interface CompanyResult {
   complianceStatus?: string;
   kycStage1?: string;
 }
-type SearchType = 'email' | 'id' | 'dni';
+type SearchType = 'email' | 'id' | 'dni' | 'name';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function statusColor(status: string): string {
@@ -210,19 +210,28 @@ export const AdminDocFetcher: React.FC<Props> = ({ onBack, darkMode }) => {
     const val = searchValue.trim();
 
     // Build the list of GET params to try in order.
-    // For ID:  ?id=, ?companyId=, ?ids= (the admin UI label says "IDs separados por coma")
-    // For DNI: ?dni=, ?identification=, ?identificationNumber=
-    // For email: ?email= (single strategy, already known to work)
     const paramCandidates: string[] =
-      searchType === 'email' ? [`email=${encodeURIComponent(val)}`] :
-      searchType === 'dni'   ? [
+      searchType === 'email' ? [
+        `email=${encodeURIComponent(val)}`,
+      ] :
+      searchType === 'name' ? [
+        `name=${encodeURIComponent(val)}`,
+        `companyName=${encodeURIComponent(val)}`,
+        `search=${encodeURIComponent(val)}`,
+        `q=${encodeURIComponent(val)}`,
+      ] :
+      searchType === 'dni' ? [
         `dni=${encodeURIComponent(val)}`,
-        `identification=${encodeURIComponent(val)}`,
         `identificationNumber=${encodeURIComponent(val)}`,
+        `identification=${encodeURIComponent(val)}`,
+        `rut=${encodeURIComponent(val)}`,
       ] : /* id */ [
         `id=${encodeURIComponent(val)}`,
         `companyId=${encodeURIComponent(val)}`,
         `ids=${encodeURIComponent(val)}`,
+        `identifier=${encodeURIComponent(val)}`,
+        `companyIdentifier=${encodeURIComponent(val)}`,
+        `search=${encodeURIComponent(val)}`,
       ];
 
     try {
@@ -287,10 +296,28 @@ export const AdminDocFetcher: React.FC<Props> = ({ onBack, darkMode }) => {
       }
 
       if (!raw) {
-        // Show full debug log so user/dev can diagnose the real issue
+        // Diagnostic: fetch first page without filters to check if token can see ANY companies
+        let diagMsg = '';
+        try {
+          const diagResp = await apiFetch(`${API_BASE}/company/bo?page=0&size=3`);
+          if (diagResp.ok) {
+            const diagData = await diagResp.json() as Record<string,unknown>;
+            const total = diagData.totalElements ?? diagData.total ?? '?';
+            const content = Array.isArray(diagData.content) ? diagData.content as Record<string,unknown>[] : [];
+            if (content.length > 0) {
+              const sample = content[0];
+              const sampleKeys = Object.keys(sample).filter(k => !['listas','documents'].includes(k)).slice(0,8).join(', ');
+              diagMsg = `\n\n🔍 Diagnóstico (sin filtros): ${total} empresas visibles.\nCampos del objeto empresa: ${sampleKeys}\nEjemplo ID: ${sample.id ?? sample.companyId ?? '?'}`;
+            } else {
+              diagMsg = `\n\n⚠ Sin filtros también devuelve 0 resultados. Verifica permisos del token.`;
+            }
+          }
+        } catch { /* ignore diag errors */ }
+
         throw new Error(
           `No se encontró ninguna empresa con ${searchType} = "${val}".\n\n` +
-          `Intentos realizados:\n${debugLog.join('\n')}`
+          `Intentos realizados:\n${debugLog.join('\n')}` +
+          diagMsg
         );
       }
 
@@ -498,6 +525,7 @@ export const AdminDocFetcher: React.FC<Props> = ({ onBack, darkMode }) => {
               { key: 'email', label: '📧 Email' },
               { key: 'id',    label: '🔢 ID Empresa' },
               { key: 'dni',   label: '📄 DNI / RUT' },
+              { key: 'name',  label: '🏢 Nombre' },
             ] as { key: SearchType; label: string }[]).map(({ key, label }) => (
               <button key={key} onClick={() => { setSearchType(key); setSearchValue(''); }}
                 className={`px-4 py-2 text-sm font-bold transition-all ${searchType === key ? 'bg-indigo-600 text-white' : `${muted} hover:text-indigo-400`}`}>
@@ -523,6 +551,7 @@ export const AdminDocFetcher: React.FC<Props> = ({ onBack, darkMode }) => {
               placeholder={
                 searchType === 'email' ? 'contacto@empresa.com' :
                 searchType === 'id'    ? 'Ej: 4031569 (ID numérico interno)' :
+                searchType === 'name'  ? 'Comercializadora Nordicos SpA' :
                                          'RUT o número de documento fiscal'
               }
               className={`flex-1 border rounded-xl px-4 py-2.5 text-sm focus:outline-none transition-colors ${inputCls}`}
