@@ -20,7 +20,7 @@ const NOMBRE_LISTA: Record<string, string> = {
   un:                         'ONU',
   eu:                         'Unión Europea',
   rtp:                        'RTP / PDI',
-  secondCriminalCasesChile:   'Causas Penales Chile',
+  causasPenalesRegcheq:        'Causas Penales Chile',
   pdi:                        'PDI Chile',
   gafi:                       'GAFI',
   screeningGlobal:            'Screening Global',
