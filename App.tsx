@@ -10,11 +10,12 @@ import { CriminalApp } from './components/CriminalProfiler/CriminalApp';
 import { GeneralDashboard } from './components/GeneralDashboard';
 import { AdminModule } from './components/AdminModule';
 import { RegcheqTool } from './components/RegcheqTool';
+import { BatchAnalyzer } from './components/BatchAnalyzer';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { IconFiles, IconAlertTriangle, IconWallet, IconScale } from './components/IconComponents';
 import { trackModuleVisit, ModuleKey } from './services/analyticsService';
 
-type TabKey = 'dashboard' | 'analyzer' | 'tools' | 'crypto' | 'compliance';
+type TabKey = 'dashboard' | 'analyzer' | 'batch' | 'tools' | 'crypto' | 'compliance';
 type Suite = 'compliance' | 'criminal' | 'admin' | 'general-dashboard' | 'regcheq' | null;
 
 const AppContent: React.FC = () => {
@@ -95,6 +96,7 @@ const AppContent: React.FC = () => {
     const tabs: { key: TabKey; label: string; icon: React.ReactNode }[] = [
       { key: 'dashboard', label: 'Dashboard', icon: <span className="text-base">📊</span> },
       { key: 'analyzer', label: 'Analizador de Documentos', icon: <IconFiles className="w-5 h-5" /> },
+      { key: 'batch', label: 'Analizador Batch', icon: <span className="text-base">📦</span> },
       { key: 'tools', label: 'Límites Transaccionales', icon: <IconAlertTriangle className="w-5 h-5" /> },
       { key: 'crypto', label: 'Lens - Crypto', icon: <IconWallet className="w-5 h-5" /> },
       { key: 'compliance', label: 'Evaluador AML', icon: <IconScale className="w-5 h-5" /> },
@@ -132,6 +134,7 @@ const AppContent: React.FC = () => {
           </div>
           <div style={{ display: activeTab === 'dashboard'  ? 'block' : 'none' }}><Dashboard /></div>
           <div style={{ display: activeTab === 'analyzer'   ? 'block' : 'none' }}><DocumentAnalyzer /></div>
+          <div style={{ display: activeTab === 'batch'      ? 'block' : 'none' }}><BatchAnalyzer /></div>
           <div style={{ display: activeTab === 'tools'      ? 'block' : 'none' }}><TransactionalLimits /></div>
           <div style={{ display: activeTab === 'crypto'     ? 'block' : 'none' }}><CryptoLens /></div>
           <div style={{ display: activeTab === 'compliance' ? 'block' : 'none' }}><ComplianceLens /></div>

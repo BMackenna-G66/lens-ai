@@ -1570,3 +1570,125 @@ export const generateCriminalProfilePdf = async (profile: PersonProfile): Promis
   const safeName = `${profile.nombre}_${profile.apellido}`.replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_-]/g, '');
   doc.save(`Perfil_${safeName}_${new Date().toISOString().slice(0,10)}.pdf`);
 };
+
+// ─── Batch Company PDF ────────────────────────────────────────────────────────
+export interface BatchDocSummary {
+  docName: string;
+  extractedData: ExtractedField[];
+  executiveSummary?: string;
+}
+
+export const generateBatchCompanyPdf = async (
+  companyName: string,
+  docs: BatchDocSummary[]
+): Promise<Blob> => {
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const margin = 14;
+  const generationDate = new Date().toLocaleString('es-CL');
+
+  // ── Header bar ──
+  doc.setFillColor(...NAVY);
+  doc.rect(0, 0, pageWidth, 38, 'F');
+  doc.setFillColor(...INDIGO);
+  doc.rect(0, 38, pageWidth, 2, 'F');
+
+  const logoData = await loadLogoBase64();
+  if (logoData) {
+    try { doc.addImage(logoData, 'JPEG', pageWidth - 58, 8, 44, 13); } catch { /* no logo */ }
+  }
+
+  doc.setTextColor(...WHITE);
+  doc.setFontSize(13);
+  doc.setFont('helvetica', 'bold');
+  doc.text('FICHA EMPRESA — ANÁLISIS BATCH', margin, 17);
+  doc.setFontSize(9);
+  doc.setFont('helvetica', 'normal');
+  doc.text(`Generado: ${generationDate}  |  Documentos analizados: ${docs.length}`, margin, 26);
+
+  // ── Company name banner ──
+  let yPos = 48;
+  doc.setFillColor(230, 235, 250);
+  doc.rect(0, yPos, pageWidth, 14, 'F');
+  doc.setTextColor(...NAVY);
+  doc.setFontSize(14);
+  doc.setFont('helvetica', 'bold');
+  const nameLines = doc.splitTextToSize(companyName.toUpperCase(), pageWidth - margin * 2);
+  doc.text(nameLines[0], margin, yPos + 9);
+  yPos += 20;
+
+  // ── One section per document ──
+  for (let i = 0; i < docs.length; i++) {
+    const { docName, extractedData, executiveSummary } = docs[i];
+
+    if (yPos > 250) { doc.addPage(); yPos = 20; }
+
+    // Section header
+    doc.setFillColor(241, 245, 255);
+    doc.rect(margin, yPos - 3, pageWidth - margin * 2, 9, 'F');
+    doc.setDrawColor(...INDIGO);
+    doc.setLineWidth(0.5);
+    doc.line(margin, yPos - 3, margin, yPos + 6);
+    doc.setTextColor(79, 70, 229);
+    doc.setFontSize(9);
+    doc.setFont('helvetica', 'bold');
+    doc.text(`Documento ${i + 1}: ${docName}`, margin + 3, yPos + 3);
+    yPos += 12;
+
+    // Fields table
+    const validFields = extractedData.filter(
+      f => f.value && f.value !== 'N/A' && f.value !== 'No especificado' && f.value !== 'No encontrado'
+    );
+    if (validFields.length > 0) {
+      autoTable(doc, {
+        startY: yPos,
+        margin: { left: margin, right: margin },
+        head: [['Campo', 'Valor extraído']],
+        body: validFields.map(f => [f.field, f.value]),
+        styles: { fontSize: 7.5, cellPadding: { top: 2, bottom: 2, left: 3, right: 3 }, overflow: 'linebreak' },
+        headStyles: { fillColor: NAVY as [number, number, number], textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+        alternateRowStyles: { fillColor: [247, 249, 255] },
+        columnStyles: { 0: { fontStyle: 'bold', cellWidth: 52 }, 1: { cellWidth: 'auto' } },
+        tableWidth: pageWidth - margin * 2,
+      });
+      yPos = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 6;
+    }
+
+    // Executive summary
+    if (executiveSummary) {
+      if (yPos > 260) { doc.addPage(); yPos = 20; }
+      doc.setFillColor(240, 253, 244);
+      doc.setDrawColor(34, 197, 94);
+      doc.setLineWidth(0.3);
+      doc.roundedRect(margin, yPos, pageWidth - margin * 2, 6, 1, 1, 'FD');
+      doc.setTextColor(21, 128, 61);
+      doc.setFontSize(7.5);
+      doc.setFont('helvetica', 'bold');
+      doc.text('RESUMEN EJECUTIVO', margin + 3, yPos + 4);
+      yPos += 9;
+
+      doc.setTextColor(...DARK_TEXT);
+      doc.setFontSize(7.5);
+      doc.setFont('helvetica', 'normal');
+      const lines = doc.splitTextToSize(executiveSummary, pageWidth - margin * 2 - 4);
+      const maxLines = 20;
+      lines.slice(0, maxLines).forEach((line: string) => {
+        if (yPos > 278) { doc.addPage(); yPos = 20; }
+        doc.text(line, margin + 2, yPos);
+        yPos += 4.5;
+      });
+      yPos += 5;
+    }
+  }
+
+  // ── Page numbers ──
+  const totalPages = (doc as unknown as { internal: { pages: unknown[] } }).internal.pages.length - 1;
+  for (let p = 1; p <= totalPages; p++) {
+    doc.setPage(p);
+    doc.setFontSize(7);
+    doc.setTextColor(...MID_GRAY);
+    doc.text(`Pág. ${p} / ${totalPages}`, pageWidth - margin, doc.internal.pageSize.getHeight() - 6, { align: 'right' });
+  }
+
+  return doc.output('blob');
+};
