@@ -25,10 +25,8 @@ type ItemStatus = 'pending' | 'processing' | 'done' | 'error';
 
 interface BatchDoc {
   file: File;
-  status: ItemStatus;
+  ocrStatus: ItemStatus;
   error?: string;
-  extractedData?: ExtractedField[];
-  executiveSummary?: string;
 }
 
 interface BatchCompany {
@@ -36,33 +34,24 @@ interface BatchCompany {
   name: string;
   docs: BatchDoc[];
   status: ItemStatus;
+  statusLabel?: string;
   error?: string;
   pdfBlob?: Blob;
-  mergedFields?: ExtractedField[];
+  extractedData?: ExtractedField[];
+  executiveSummary?: string;
   errorCount: number;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-const SECS_COMPLETO = 45;
-const SECS_INDIVIDUAL = 12;
+// One company = one consolidated analysis (all docs combined), not per-doc
+// OCR is fast (~2s/doc), analysis is the slow part (15-40s flat per company)
+const SECS_COMPLETO = 60;   // per company
+const SECS_INDIVIDUAL = 20; // per company
 
 function estimateMins(companies: BatchCompany[], mode: BatchMode): number {
-  const totalDocs = companies.reduce((s, c) => s + c.docs.length, 0);
   const secs = mode === 'completo' ? SECS_COMPLETO : SECS_INDIVIDUAL;
-  return Math.ceil((totalDocs * secs) / 60);
-}
-
-function mergeFields(allDocs: BatchDoc[]): ExtractedField[] {
-  const map = new Map<string, string>();
-  for (const d of allDocs) {
-    for (const f of d.extractedData ?? []) {
-      const existing = map.get(f.field);
-      const isUseful = f.value && f.value !== 'No especificado' && f.value !== 'N/A' && f.value !== 'No encontrado';
-      if (!existing || (isUseful && !existing)) map.set(f.field, f.value);
-    }
-  }
-  return Array.from(map.entries()).map(([field, value]) => ({ field, value }));
+  return Math.ceil((companies.length * secs) / 60);
 }
 
 // ─── Status badge ─────────────────────────────────────────────────────────────
@@ -99,7 +88,9 @@ export const BatchAnalyzer: React.FC = () => {
   const doneCompanies = companies.filter(c => c.status === 'done').length;
   const errorCompanies = companies.filter(c => c.status === 'error').length;
   const estMins = estimateMins(companies, mode);
-  const progress = companies.length > 0 ? Math.round((doneCompanies + errorCompanies) / companies.length * 100) : 0;
+  const progress = companies.length > 0
+    ? Math.round((doneCompanies + errorCompanies) / companies.length * 100)
+    : 0;
 
   // ── Folder parsing ──
   const handleFolderSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -110,7 +101,6 @@ export const BatchAnalyzer: React.FC = () => {
     files.forEach(file => {
       const rel = (file as File & { webkitRelativePath: string }).webkitRelativePath;
       const parts = rel.split('/');
-      // Expect: rootFolder/CompanyFolder/file — need length >= 3
       if (parts.length >= 3) {
         const company = parts[1];
         if (!groups[company]) groups[company] = [];
@@ -123,7 +113,7 @@ export const BatchAnalyzer: React.FC = () => {
       .map(([name, fs]) => ({
         id: `${name}_${Date.now()}_${Math.random()}`,
         name,
-        docs: fs.map(f => ({ file: f, status: 'pending' as const })),
+        docs: fs.map(f => ({ file: f, ocrStatus: 'pending' as const })),
         status: 'pending' as const,
         errorCount: 0,
       }));
@@ -131,15 +121,14 @@ export const BatchAnalyzer: React.FC = () => {
     setCompanies(queue);
     setFinished(false);
     stopRef.current = false;
-    // Reset file input so same folder can be reloaded
     if (fileInputRef.current) fileInputRef.current.value = '';
   }, []);
 
-  // ── Immutable updaters (use functional form to avoid stale closure) ──
-  const setCompanyStatus = (idx: number, patch: Partial<BatchCompany>) =>
+  // ── State updaters ──
+  const patchCompany = (idx: number, patch: Partial<BatchCompany>) =>
     setCompanies(prev => prev.map((c, i) => i === idx ? { ...c, ...patch } : c));
 
-  const setDocStatus = (ci: number, di: number, patch: Partial<BatchDoc>) =>
+  const patchDoc = (ci: number, di: number, patch: Partial<BatchDoc>) =>
     setCompanies(prev => prev.map((c, i) => {
       if (i !== ci) return c;
       return { ...c, docs: c.docs.map((d, j) => j === di ? { ...d, ...patch } : d) };
@@ -155,94 +144,97 @@ export const BatchAnalyzer: React.FC = () => {
     setFinished(false);
     stopRef.current = false;
 
-    // Snapshot companies at start to iterate safely
     const snapshot = [...companies];
 
     for (let ci = 0; ci < snapshot.length; ci++) {
       if (stopRef.current) break;
 
-      setCompanyStatus(ci, { status: 'processing' });
       const company = snapshot[ci];
-      const processedDocs: BatchDoc[] = [];
+      patchCompany(ci, { status: 'processing', statusLabel: 'Extrayendo texto (OCR)...' });
+      setCurrentLabel(`${company.name} — extrayendo ${company.docs.length} doc(s)...`);
+
+      // ── Phase 1: OCR all docs in parallel ──
+      // Mark all docs as processing
+      setCompanies(prev => prev.map((c, i) => {
+        if (i !== ci) return c;
+        return { ...c, docs: c.docs.map(d => ({ ...d, ocrStatus: 'processing' as const })) };
+      }));
+
+      const texts: string[] = [];
       let errorCount = 0;
 
-      for (let di = 0; di < company.docs.length; di++) {
-        if (stopRef.current) break;
-
-        const docFile = company.docs[di].file;
-        setCurrentLabel(`${company.name} — ${docFile.name} (${di + 1}/${company.docs.length})`);
-        setDocStatus(ci, di, { status: 'processing' });
-
+      await Promise.all(company.docs.map(async (doc, di) => {
         try {
-          // 1. OCR / text extraction
-          const text = await getTextFromFile(docFile);
-
-          // 2. Country detection
-          const country = await detectCountryWithGemini(text);
-
-          // 3. Field extraction
-          const prompt = GEMINI_PROMPT_TEMPLATE(text, country);
-          const { extractedData } = await analyzeDocumentWithGemini(prompt);
-
-          // 4. Full analysis suite (completo mode) — silent failures per sub-analysis
-          if (mode === 'completo') {
-            await Promise.allSettled([
-              analyzeDocumentForRisks(text),
-              analyzeDocumentIntegrity(text),
-              analyzeFinancialDocumentWithGemini(text),
-              analyzeBankStatementWithGemini(text),
-              analyzeTaxFolderWithGemini(text),
-              analyzeCrossCheckWithGemini(text),
-            ]);
-          }
-
-          // 5. Executive summary
-          const executiveSummary = await generateExecutiveSummary(extractedData, docFile.name);
-
-          const done: BatchDoc = { file: docFile, status: 'done', extractedData, executiveSummary };
-          processedDocs.push(done);
-          setDocStatus(ci, di, { status: 'done', extractedData, executiveSummary });
-
+          const text = await getTextFromFile(doc.file);
+          texts[di] = text;
+          patchDoc(ci, di, { ocrStatus: 'done' });
         } catch (err) {
-          const error = err instanceof Error ? err.message : 'Error desconocido';
-          processedDocs.push({ file: docFile, status: 'error', error });
-          setDocStatus(ci, di, { status: 'error', error });
+          const error = err instanceof Error ? err.message : 'Error OCR';
+          patchDoc(ci, di, { ocrStatus: 'error', error });
           errorCount++;
         }
-      }
+      }));
 
       if (stopRef.current) {
-        setCompanyStatus(ci, { status: 'error', error: 'Detenido manualmente' });
+        patchCompany(ci, { status: 'error', error: 'Detenido manualmente' });
         break;
       }
 
-      // ── Generate consolidated PDF for this company ──
+      const validTexts = texts.filter(Boolean);
+      if (validTexts.length === 0) {
+        patchCompany(ci, { status: 'error', error: 'No se pudo extraer texto de ningún documento', errorCount });
+        continue;
+      }
+
+      // ── Phase 2: Consolidated analysis (all docs combined → one analysis) ──
+      const combinedText = validTexts.join('\n\n');
+      const fileNames = company.docs.map(d => d.file.name).join(', ');
+
       try {
-        const docSummaries = processedDocs
-          .filter(d => d.status === 'done' && d.extractedData)
-          .map(d => ({
-            docName: d.file.name,
-            extractedData: d.extractedData!,
-            executiveSummary: d.executiveSummary,
-          }));
+        patchCompany(ci, { statusLabel: 'Detectando país...' });
+        setCurrentLabel(`${company.name} — analizando...`);
+        const country = await detectCountryWithGemini(combinedText);
 
-        const pdfBlob = docSummaries.length > 0
-          ? await generateBatchCompanyPdf(company.name, docSummaries)
-          : undefined;
+        patchCompany(ci, { statusLabel: 'Extrayendo campos...' });
+        const prompt = GEMINI_PROMPT_TEMPLATE(combinedText, country);
+        const { extractedData } = await analyzeDocumentWithGemini(prompt);
 
-        const mergedFields = mergeFields(processedDocs.filter(d => d.status === 'done'));
+        if (mode === 'completo') {
+          patchCompany(ci, { statusLabel: 'Análisis de riesgos y cumplimiento...' });
+          await Promise.allSettled([
+            analyzeDocumentForRisks(combinedText),
+            analyzeDocumentIntegrity(combinedText),
+            analyzeFinancialDocumentWithGemini(combinedText),
+            analyzeBankStatementWithGemini(combinedText),
+            analyzeTaxFolderWithGemini(combinedText),
+            analyzeCrossCheckWithGemini(combinedText),
+          ]);
+        }
 
-        setCompanyStatus(ci, {
-          status: errorCount === company.docs.length ? 'error' : 'done',
+        patchCompany(ci, { statusLabel: 'Generando resumen ejecutivo...' });
+        const executiveSummary = await generateExecutiveSummary(extractedData, fileNames);
+
+        patchCompany(ci, { statusLabel: 'Generando ficha PDF...' });
+        setCurrentLabel(`${company.name} — generando ficha...`);
+
+        const pdfBlob = await generateBatchCompanyPdf(company.name, [{
+          docName: fileNames,
+          extractedData,
+          executiveSummary,
+        }]);
+
+        patchCompany(ci, {
+          status: 'done',
+          statusLabel: undefined,
           pdfBlob,
-          mergedFields,
+          extractedData,
+          executiveSummary,
           errorCount,
-          docs: processedDocs,
-          error: errorCount === company.docs.length ? 'Todos los documentos fallaron' : undefined,
         });
+
       } catch (err) {
-        const error = err instanceof Error ? err.message : 'Error generando PDF';
-        setCompanyStatus(ci, { status: 'error', error, errorCount, docs: processedDocs });
+        const error = err instanceof Error ? err.message : 'Error en análisis';
+        patchCompany(ci, { status: 'error', error, errorCount });
       }
     }
 
@@ -262,6 +254,16 @@ export const BatchAnalyzer: React.FC = () => {
   };
 
   // ── Downloads ──
+  const downloadCompanyPdf = (c: BatchCompany) => {
+    if (!c.pdfBlob) return;
+    const url = URL.createObjectURL(c.pdfBlob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${c.name}.pdf`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   const downloadZip = async () => {
     const zip = new JSZip();
     companies.forEach(c => {
@@ -279,12 +281,12 @@ export const BatchAnalyzer: React.FC = () => {
   const exportExcel = () => {
     const summaryRows = companies.map(c => {
       const fm: Record<string, string> = {};
-      (c.mergedFields ?? []).forEach(f => { fm[f.field] = f.value; });
+      (c.extractedData ?? []).forEach(f => { fm[f.field] = f.value; });
       return {
         'Empresa': c.name,
         'Estado': c.status === 'done' ? 'OK' : c.status === 'error' ? 'Error' : 'Pendiente',
-        'Documentos OK': c.docs.filter(d => d.status === 'done').length,
-        'Documentos con Error': c.errorCount,
+        'Documentos': c.docs.length,
+        'Documentos con Error OCR': c.errorCount,
         'Razón Social': fm['Razón Social'] ?? '',
         'RUT Sociedad': fm['RUT de la sociedad'] ?? '',
         'Representante Legal': fm['Representante Legal'] ?? '',
@@ -300,7 +302,7 @@ export const BatchAnalyzer: React.FC = () => {
     const errorRows: Record<string, string>[] = [];
     companies.forEach(c => {
       c.docs.forEach(d => {
-        if (d.status === 'error') {
+        if (d.ocrStatus === 'error') {
           errorRows.push({ 'Empresa': c.name, 'Documento': d.file.name, 'Error': d.error ?? '' });
         }
       });
@@ -309,7 +311,7 @@ export const BatchAnalyzer: React.FC = () => {
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summaryRows), 'Resultados');
     if (errorRows.length > 0) {
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(errorRows), 'Errores');
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(errorRows), 'Errores OCR');
     }
     const date = new Date().toLocaleDateString('es-CL').replace(/\//g, '-');
     XLSX.writeFile(wb, `batch_resultados_${date}.xlsx`);
@@ -334,40 +336,39 @@ export const BatchAnalyzer: React.FC = () => {
         <div>
           <h2 className="text-2xl font-black text-slate-900 dark:text-white">Analizador Batch</h2>
           <p className="text-slate-500 dark:text-slate-400 text-sm mt-1">
-            Carga una carpeta con subcarpetas por empresa. Cada subcarpeta = una empresa con sus documentos.
+            Carga una carpeta con subcarpetas por empresa. Todos los documentos de cada empresa se analizan como un consolidado.
           </p>
         </div>
-        {finished && (
-          <div className="flex gap-2">
-            <button
-              onClick={exportExcel}
-              className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-xl transition-colors"
-            >
-              📊 Excel resumen
-            </button>
-            {companies.some(c => c.pdfBlob) && (
+        {(running || finished) && companies.some(c => c.pdfBlob) && (
+          <div className="flex gap-2 flex-wrap">
+            {finished && (
               <button
-                onClick={downloadZip}
-                className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-xl transition-colors"
+                onClick={exportExcel}
+                className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-xl transition-colors"
               >
-                📦 Descargar fichas (.zip)
+                📊 Excel resumen
               </button>
             )}
+            <button
+              onClick={downloadZip}
+              className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-xl transition-colors"
+            >
+              📦 Todas las fichas (.zip)
+            </button>
           </div>
         )}
       </div>
 
-      {/* ── Setup panel (visible when not running and no companies yet, or after reset) ── */}
+      {/* ── Setup panel ── */}
       {!running && companies.length === 0 && (
         <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl p-6 space-y-6">
 
-          {/* Mode selector */}
           <div>
             <p className="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-3">Tipo de análisis</p>
             <div className="flex gap-3">
               {([
-                { key: 'completo' as const, label: 'Análisis Completo', desc: '6 análisis + ficha resumen · ~45s/doc', icon: '🔬' },
-                { key: 'individual' as const, label: 'Análisis Individual', desc: 'Solo ficha resumen · ~12s/doc', icon: '⚡' },
+                { key: 'completo' as const, label: 'Análisis Completo', desc: 'Riesgos + Integridad + Financiero + Ficha consolidada', icon: '🔬' },
+                { key: 'individual' as const, label: 'Solo Ficha', desc: 'Extracción de campos + resumen ejecutivo', icon: '⚡' },
               ] as const).map(opt => (
                 <button
                   key={opt.key}
@@ -386,7 +387,6 @@ export const BatchAnalyzer: React.FC = () => {
             </div>
           </div>
 
-          {/* Folder structure hint */}
           <div className="bg-slate-50 dark:bg-slate-800 rounded-xl p-4 text-xs font-mono text-slate-600 dark:text-slate-400 space-y-0.5">
             <p className="font-sans font-semibold text-slate-700 dark:text-slate-300 text-xs mb-2 not-italic">Estructura de carpetas esperada:</p>
             <p>📁 carpeta_madre/</p>
@@ -397,7 +397,6 @@ export const BatchAnalyzer: React.FC = () => {
             <p className="pl-8">📄 contrato.pdf</p>
           </div>
 
-          {/* Folder picker */}
           <div
             onClick={() => fileInputRef.current?.click()}
             className="border-2 border-dashed border-slate-300 dark:border-slate-600 rounded-2xl p-10 text-center cursor-pointer hover:border-indigo-400 hover:bg-indigo-50/30 dark:hover:bg-indigo-950/20 transition-all group"
@@ -422,11 +421,9 @@ export const BatchAnalyzer: React.FC = () => {
         </div>
       )}
 
-      {/* ── Preview + launch (companies loaded, not yet running) ── */}
+      {/* ── Preview + launch ── */}
       {!running && !finished && companies.length > 0 && (
         <div className="space-y-4">
-
-          {/* Summary card */}
           <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl p-5">
             <div className="flex items-center justify-between flex-wrap gap-4">
               <div className="flex gap-6">
@@ -440,7 +437,7 @@ export const BatchAnalyzer: React.FC = () => {
                 </div>
                 <div className="text-center">
                   <div className="text-2xl font-black text-amber-600">~{estMins} min</div>
-                  <div className="text-xs text-slate-500 dark:text-slate-400">estimado ({mode})</div>
+                  <div className="text-xs text-slate-500 dark:text-slate-400">estimado · {mode}</div>
                 </div>
               </div>
               <div className="flex gap-2">
@@ -460,7 +457,6 @@ export const BatchAnalyzer: React.FC = () => {
             </div>
           </div>
 
-          {/* Company list preview */}
           <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl divide-y divide-slate-100 dark:divide-slate-800 overflow-hidden">
             {companies.map(c => (
               <div key={c.id} className="px-4 py-3 flex items-center justify-between gap-3">
@@ -475,8 +471,6 @@ export const BatchAnalyzer: React.FC = () => {
       {/* ── Running state ── */}
       {running && (
         <div className="space-y-4">
-
-          {/* Progress bar + controls */}
           <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl p-5 space-y-4">
             <div className="flex items-center justify-between">
               <div>
@@ -504,11 +498,11 @@ export const BatchAnalyzer: React.FC = () => {
             </div>
           </div>
 
-          {/* Live company queue */}
           <CompanyQueue
             companies={companies}
             expandedCompanies={expandedCompanies}
             onToggle={toggleExpand}
+            onDownloadPdf={downloadCompanyPdf}
           />
         </div>
       )}
@@ -516,8 +510,6 @@ export const BatchAnalyzer: React.FC = () => {
       {/* ── Finished state ── */}
       {finished && !running && (
         <div className="space-y-4">
-
-          {/* Summary banner */}
           <div className={`rounded-2xl p-5 border ${
             errorCompanies === companies.length
               ? 'bg-red-50 dark:bg-red-950/30 border-red-200 dark:border-red-800'
@@ -547,12 +539,11 @@ export const BatchAnalyzer: React.FC = () => {
             </div>
           </div>
 
-          {/* Results list */}
           <CompanyQueue
             companies={companies}
             expandedCompanies={expandedCompanies}
             onToggle={toggleExpand}
-            showPdfDownload
+            onDownloadPdf={downloadCompanyPdf}
           />
         </div>
       )}
@@ -566,59 +557,73 @@ const CompanyQueue: React.FC<{
   companies: BatchCompany[];
   expandedCompanies: Set<string>;
   onToggle: (id: string) => void;
-  showPdfDownload?: boolean;
-}> = ({ companies, expandedCompanies, onToggle, showPdfDownload }) => {
-  const downloadPdf = (c: BatchCompany) => {
-    if (!c.pdfBlob) return;
-    const url = URL.createObjectURL(c.pdfBlob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${c.name}.pdf`;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
-  return (
-    <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl overflow-hidden divide-y divide-slate-100 dark:divide-slate-800">
-      {companies.map(c => {
-        const expanded = expandedCompanies.has(c.id);
-        return (
-          <div key={c.id}>
+  onDownloadPdf: (c: BatchCompany) => void;
+}> = ({ companies, expandedCompanies, onToggle, onDownloadPdf }) => (
+  <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl overflow-hidden divide-y divide-slate-100 dark:divide-slate-800">
+    {companies.map(c => {
+      const expanded = expandedCompanies.has(c.id);
+      return (
+        <div key={c.id}>
+          <div className="px-4 py-3 flex items-center gap-3">
+            {/* Expand toggle */}
             <button
               onClick={() => onToggle(c.id)}
-              className="w-full px-4 py-3 flex items-center gap-3 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors text-left"
+              className="text-slate-400 text-xs hover:text-slate-600 dark:hover:text-slate-300 shrink-0 w-4"
             >
-              <span className="text-slate-400 text-xs">{expanded ? '▼' : '▶'}</span>
-              <span className="flex-1 text-sm font-medium text-slate-800 dark:text-slate-200 truncate">{c.name}</span>
-              <span className="text-xs text-slate-400 shrink-0">{c.docs.length} docs</span>
-              <StatusBadge status={c.status} />
-              {showPdfDownload && c.pdfBlob && (
-                <button
-                  onClick={e => { e.stopPropagation(); downloadPdf(c); }}
-                  className="text-xs text-indigo-600 dark:text-indigo-400 hover:underline font-semibold shrink-0"
-                >
-                  PDF ↓
-                </button>
-              )}
+              {expanded ? '▼' : '▶'}
             </button>
 
-            {expanded && (
-              <div className="px-4 pb-3 space-y-1.5 bg-slate-50/50 dark:bg-slate-800/30">
-                {c.docs.map((d, di) => (
-                  <div key={di} className="flex items-center gap-3 py-1.5 border-b border-slate-100 dark:border-slate-700/50 last:border-0">
-                    <span className="text-slate-400 text-xs w-4 shrink-0">{di + 1}.</span>
-                    <span className="flex-1 text-xs text-slate-600 dark:text-slate-300 truncate">{d.file.name}</span>
-                    <StatusBadge status={d.status} label={d.status === 'error' ? (d.error?.slice(0, 40) ?? 'Error') : undefined} />
-                  </div>
-                ))}
-                {c.error && (
-                  <p className="text-xs text-red-500 dark:text-red-400 pt-1">{c.error}</p>
-                )}
-              </div>
+            {/* Company name */}
+            <span className="flex-1 text-sm font-medium text-slate-800 dark:text-slate-200 truncate">{c.name}</span>
+
+            {/* Doc count */}
+            <span className="text-xs text-slate-400 shrink-0">{c.docs.length} doc{c.docs.length !== 1 ? 's' : ''}</span>
+
+            {/* Status or live phase label */}
+            {c.status === 'processing' && c.statusLabel
+              ? <span className="text-[10px] font-semibold text-blue-600 dark:text-blue-400 animate-pulse shrink-0 max-w-[160px] truncate">{c.statusLabel}</span>
+              : <StatusBadge status={c.status} />
+            }
+
+            {/* PDF download — visible as soon as blob is ready, even mid-run */}
+            {c.pdfBlob && (
+              <button
+                onClick={() => onDownloadPdf(c)}
+                className="flex items-center gap-1 text-xs text-white bg-indigo-600 hover:bg-indigo-700 px-2.5 py-1 rounded-lg font-semibold shrink-0 transition-colors"
+              >
+                📄 PDF
+              </button>
             )}
           </div>
-        );
-      })}
-    </div>
-  );
-};
+
+          {expanded && (
+            <div className="px-4 pb-3 bg-slate-50/50 dark:bg-slate-800/30 space-y-1">
+              <p className="text-[10px] font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wide pt-1 pb-0.5">
+                Documentos incluidos en el análisis consolidado
+              </p>
+              {c.docs.map((d, di) => (
+                <div key={di} className="flex items-center gap-3 py-1 border-b border-slate-100 dark:border-slate-700/50 last:border-0">
+                  <span className="text-slate-400 text-xs w-4 shrink-0">{di + 1}.</span>
+                  <span className="flex-1 text-xs text-slate-600 dark:text-slate-300 truncate">{d.file.name}</span>
+                  <StatusBadge
+                    status={d.ocrStatus}
+                    label={d.ocrStatus === 'error' ? (d.error?.slice(0, 40) ?? 'Error OCR') : undefined}
+                  />
+                </div>
+              ))}
+              {c.error && (
+                <p className="text-xs text-red-500 dark:text-red-400 pt-1">{c.error}</p>
+              )}
+              {c.executiveSummary && (
+                <div className="mt-2 pt-2 border-t border-slate-200 dark:border-slate-700">
+                  <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide mb-1">Resumen ejecutivo</p>
+                  <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed line-clamp-4">{c.executiveSummary}</p>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      );
+    })}
+  </div>
+);
