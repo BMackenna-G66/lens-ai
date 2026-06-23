@@ -60,10 +60,11 @@ export async function getIdToken(forceRefresh = false): Promise<string> {
     localStorage.getItem(LS_BASIC) ||
     DEFAULT_BASIC_TOKEN;
 
+  // Python app sends data= (form-encoded), not json= — must match exactly
   const res = await fetch(`${BASE_URL}/admin/refresh-token`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ refreshToken }),
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ refreshToken }),
   });
 
   if (!res.ok) {
