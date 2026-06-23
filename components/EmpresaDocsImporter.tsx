@@ -74,7 +74,7 @@ const TokenSetup: React.FC<{ onStatusChange: () => void }> = ({ onStatusChange }
             ? <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400">SSO activo</span>
             : status.basic
               ? <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400">Token básico</span>
-              : <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400">Sin token</span>
+              : <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400">Token por defecto</span>
           }
         </div>
         <span className="text-slate-400 text-xs">{open ? '▲' : '▼'}</span>
@@ -280,10 +280,10 @@ export const EmpresaDocsImporter: React.FC<Props> = ({ onCompaniesReady }) => {
       {/* Token setup — always visible, collapsed by default when token is active */}
       <TokenSetup onStatusChange={() => setTokenOk(hasAnyToken())} />
 
-      {/* No-token warning */}
-      {!tokenOk && (
-        <div className="bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-xl px-4 py-3 text-xs text-amber-700 dark:text-amber-400">
-          ⚠️ Configura el Refresh Token SSO arriba antes de buscar empresas.
+      {/* Hint when using default token (no SSO) */}
+      {!getTokenStatus().sso && (
+        <div className="bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-3 text-xs text-slate-500 dark:text-slate-400">
+          ℹ️ Usando token por defecto — búsqueda por Company ID disponible. Para buscar por DNI o email, configura el Token SSO arriba.
         </div>
       )}
 

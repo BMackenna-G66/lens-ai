@@ -1,11 +1,21 @@
 // EmpresaDocs auth — browser equivalent of the Python auth module.
 // Refresh Token (SSO priority) → ID Token via POST /admin/refresh-token.
 // ID Token is cached in memory; Refresh Tokens are persisted in localStorage.
+//
+// Priority (mirrors Python app):
+//   1. SSO token from localStorage     (full permissions — DNI/email search)
+//   2. Basic token from localStorage   (user-supplied override)
+//   3. DEFAULT_BASIC_TOKEN             (hardcoded default, same as Python GLOBAL66_REFRESH_TOKEN)
 
 const BASE_URL = 'https://api.global66.com';
 
 const LS_SSO   = 'empresadocs_sso_refresh_token';
 const LS_BASIC = 'empresadocs_basic_refresh_token';
+
+// Default basic refresh token — same value hardcoded in empresa_docs_app.py.
+// Provides immediate access without manual configuration (Company ID search).
+// For DNI/email search, upgrade to SSO token via the auth panel.
+const DEFAULT_BASIC_TOKEN = 'eyJjdHkiOiJKV1QiLCJlbmMiOiJBMjU2R0NNIiwiYWxnIjoiUlNBLU9BRVAifQ.hU-KCkwhfQ3_aTuS-WalQdnlZ8_w1-0JRRSuNjILu3PCf0HQl3kr1S-MAV207oex48aAsJejgriGAjfebOZObeQ5NdLrT5aaHD9BPqIvVyY9yEQfCpzOwOUZDYDpvrFlT6F6spQGwwsRqB4xrVXz5viO28cq9toKHg3wRraak7lIPKvAjRDqIrzyVzQ6ZNRxoHF5aidigZiquJoizib0hLowXOY1eUL5jZbBeMr-dI3om_hmyf0fXOKrZpzB6V0nz7EHDO7FyWINiDiEdij91Jh1qbybjza-VCPTinNvE_NCeKowxRFXWlJ_9TETCRZZepKwm8JXC760SmaqOKkgNg.HPpdgV-Rve7go4P3.8DwwHGrjdZvmcXWeWlw8OpwLmE6d7sT_tJ_h2zEOdM5U-jHJgsezubdWsakUOJi4oY10CuAcMYTiz5aJpg6fynHVvt8O4_2kEw3MY_7JSZ5y9l99jeS9OtVr8pk65uRjCVrNtxfsHxZW47xgeMbcRK7vdIC0cjMiweEabjBKPTZvSHlNDEMHZyIK5ZWHhFXp0sVMmd4VqxZ6xsqrV7Y_kV3ZdT0rpRlaW-572EURwMQfxbGULnbX8-0X4NSrulJgsKI4kiWR1IqzWrThxTEnfl2ZRKaWisCvG8WRRdHaXR6Dqvaf53DUDskWXcwAxTQK-F1yRUMvn6KHlBEalv8xbUSbzCWqGhuSf-WZ4bCHmxVZOf-_S6c-bfbqLAkXR40RSJJ3P3Fn8pDotCeDVAkxOe9fJT2uq10-ttCdArX6GZRZaw5QfMdMAfjWEiGxgK1KwBCrWRzGPMECzh-OkPxreDJEPCVQsl6xBckDocZ5N7maQDDrZkm2YMAYdcC7w5UHShiBfCtVmDl3lZHv7As0EHRuuR_u6XNKWrzfWI8fEBg9jmcDC4YcymIZlb-w2fmUGvbNQosZHmBzd1ne_Y3Y-Qrza_crXMi1hJ7h_Cw3AOF8GaL6TnryGvNrfCDyXi5WdN67mZc_Jx9QZ7_XWjJ_1fwBp3SH8lGLrn7ZZ2YoXR0KnJJrhxSt4rW8Rg2s9OMNUopICqgSjjRRcSsWmcag0L6kk7-kNiY9McudKhUCJA1N56FZqZuKFRQy02FwlIGqUx8Iu9zV1ing2PVzonde3eF3lRU0YJ1vqRdgnCoFlFGnVtzQDqweTerOqP8zf32urrUixx7kjuEpkAYMn4jFe8c8PCifPFX12AIF2bub186DPEXofRsTgFFrOCp2AmxeC0OiSFhBJ1Tpfn4Q11HMNCiRAnrJQogGUmNtBSQ6r_K3W3JASpHRi7R6Qjdy6EL6b7n40iHjX7O4EoXG4Ulfc0b5UFEmc678Sz3DImhKehqtz8wwj9HlJudptvRfyXFXyZTCrAIu1hTU4PbBp3Hdbtw9sNki13rAuHfjLGCsw0dRe9ucsJ4x20yJprpgGO6WcW_zfaBhg5smPeihCywO1LHnzQ0NPpEvmVc2NAsFh0_ot0oLzOkrnhZiHqqeBRbVaj_ui60zgTOlTaO0QWDzBiJSyICkupbBbvG0F2OBG8qcMsJaWj5QStkreTwZgrRULaRReTck4m7pnKEyMGuQNGzEQGlBg1DDJY82XiZE7qHqICTkW6QmSc4tQSpZ1Jo_nGlWgxUk.SWEaNfFKH3kaVTBU5SbimA';
 
 let cachedIdToken: string | null = null;
 
@@ -27,15 +37,15 @@ export function clearTokens(): void {
   cachedIdToken = null;
 }
 
-export function getTokenStatus(): { sso: boolean; basic: boolean } {
-  return {
-    sso:   !!localStorage.getItem(LS_SSO),
-    basic: !!localStorage.getItem(LS_BASIC),
-  };
+export function getTokenStatus(): { sso: boolean; basic: boolean; usingDefault: boolean } {
+  const sso   = !!localStorage.getItem(LS_SSO);
+  const basic = !!localStorage.getItem(LS_BASIC);
+  return { sso, basic, usingDefault: !sso && !basic };
 }
 
+// Always true — DEFAULT_BASIC_TOKEN is always available as fallback
 export function hasAnyToken(): boolean {
-  return !!(localStorage.getItem(LS_SSO) || localStorage.getItem(LS_BASIC));
+  return true;
 }
 
 // ─── ID Token acquisition ─────────────────────────────────────────────────────
@@ -44,10 +54,11 @@ export function hasAnyToken(): boolean {
 export async function getIdToken(forceRefresh = false): Promise<string> {
   if (cachedIdToken && !forceRefresh) return cachedIdToken;
 
-  const refreshToken = localStorage.getItem(LS_SSO) || localStorage.getItem(LS_BASIC);
-  if (!refreshToken) {
-    throw new Error('No hay Refresh Token configurado. Pega el SSO Token en la sección EmpresaDocs.');
-  }
+  // Priority: SSO (localStorage) > Basic (localStorage) > hardcoded default
+  const refreshToken =
+    localStorage.getItem(LS_SSO) ||
+    localStorage.getItem(LS_BASIC) ||
+    DEFAULT_BASIC_TOKEN;
 
   const res = await fetch(`${BASE_URL}/admin/refresh-token`, {
     method: 'POST',
