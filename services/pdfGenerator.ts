@@ -1578,9 +1578,21 @@ export interface BatchDocSummary {
   executiveSummary?: string;
 }
 
+export interface BatchCompanyPdfMetadata {
+  source: 'local_folder' | 'empresa_docs';
+  companyId?: string;
+  identificationNumber?: string;
+  country?: string;
+  complianceStatus?: string;
+  kycStage1?: string;
+  docsAnalyzed?: number;
+  docsFailed?: number;
+}
+
 export const generateBatchCompanyPdf = async (
   companyName: string,
-  docs: BatchDocSummary[]
+  docs: BatchDocSummary[],
+  metadata?: BatchCompanyPdfMetadata
 ): Promise<Blob> => {
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
   const pageWidth = doc.internal.pageSize.getWidth();
@@ -1604,7 +1616,7 @@ export const generateBatchCompanyPdf = async (
   doc.text('FICHA EMPRESA — ANÁLISIS BATCH', margin, 17);
   doc.setFontSize(9);
   doc.setFont('helvetica', 'normal');
-  doc.text(`Generado: ${generationDate}  |  Documentos analizados: ${docs.length}`, margin, 26);
+  doc.text(`Generado: ${generationDate}  |  Documentos analizados: ${metadata?.docsAnalyzed ?? docs.length}`, margin, 26);
 
   // ── Company name banner ──
   let yPos = 48;
@@ -1616,6 +1628,38 @@ export const generateBatchCompanyPdf = async (
   const nameLines = doc.splitTextToSize(companyName.toUpperCase(), pageWidth - margin * 2);
   doc.text(nameLines[0], margin, yPos + 9);
   yPos += 20;
+
+  // ── Origin metadata block ──
+  if (metadata) {
+    const isEmpresaDocs = metadata.source === 'empresa_docs';
+    const metaRows: [string, string][] = isEmpresaDocs
+      ? [
+          ['Origen', 'EmpresaDocs'],
+          ...(metadata.companyId        ? [['Company ID', metadata.companyId] as [string, string]]              : []),
+          ...(metadata.identificationNumber ? [['RUT / DNI', metadata.identificationNumber] as [string, string]] : []),
+          ...(metadata.country          ? [['País', metadata.country] as [string, string]]                       : []),
+          ...(metadata.complianceStatus ? [['Compliance Status', metadata.complianceStatus] as [string, string]] : []),
+          ...(metadata.kycStage1        ? [['KYC Stage', metadata.kycStage1] as [string, string]]                : []),
+          ['Documentos analizados', String(metadata.docsAnalyzed ?? 0)],
+          ['Documentos fallidos',   String(metadata.docsFailed ?? 0)],
+        ]
+      : [
+          ['Origen', 'Carpeta Local'],
+          ['Nombre carpeta', companyName],
+          ['Documentos analizados', String(metadata.docsAnalyzed ?? 0)],
+          ['Documentos fallidos',   String(metadata.docsFailed ?? 0)],
+        ];
+
+    autoTable(doc, {
+      startY: yPos,
+      margin: { left: margin, right: margin },
+      body: metaRows,
+      styles: { fontSize: 7.5, cellPadding: { top: 2, bottom: 2, left: 3, right: 3 } },
+      columnStyles: { 0: { fontStyle: 'bold', cellWidth: 52, fillColor: [241, 245, 255] }, 1: { cellWidth: 'auto' } },
+      tableWidth: pageWidth - margin * 2,
+    });
+    yPos = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 8;
+  }
 
   // ── One section per document ──
   for (let i = 0; i < docs.length; i++) {
