@@ -49,27 +49,35 @@ export async function fromEmpresaDocs(
       const fileName = doc.fileName ?? fileKey.split('/').pop() ?? 'documento';
 
       try {
-        const blob = await downloadEmpresaDoc(fileKey);
+        const { blob, presignedUrl } = await downloadEmpresaDoc(fileKey);
         return {
           id: crypto.randomUUID(),
           fileName,
           source: 'empresa_docs',
           blob,
           fileKey,
+          presignedUrl,
           slot: doc.slot,
           documentStatus: doc.status,
           uploadedDate: doc.date,
         };
       } catch (err) {
+        // Preserve the presigned URL even on failure so the UI can offer a manual link.
+        const presignedUrl =
+          (err as Error & { presignedUrl?: string }).presignedUrl ?? '';
+        const isCors = err instanceof Error && err.message === 'CORS_BLOCK';
         return {
           id: crypto.randomUUID(),
           fileName,
           source: 'empresa_docs',
           fileKey,
+          presignedUrl,
           slot: doc.slot,
           documentStatus: doc.status,
           uploadedDate: doc.date,
-          error: err instanceof Error ? err.message : 'Error descargando desde S3',
+          error: isCors
+            ? 'Descarga bloqueada por CORS (abre el PDF manualmente)'
+            : err instanceof Error ? err.message : 'Error descargando desde S3',
         };
       }
     })

@@ -8,6 +8,7 @@ export interface BatchDocumentInput {
   file?: File;           // local_folder origin
   blob?: Blob;           // empresa_docs origin (downloaded from S3)
   fileKey?: string;
+  presignedUrl?: string; // stored even when download fails — allows manual open
   slot?: string;
   documentStatus?: string;
   uploadedDate?: string;

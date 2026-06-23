@@ -224,9 +224,45 @@ export async function getEmpresaDocsCompany(companyId: string): Promise<EmpresaD
 
 export { authGetPresignedUrl as getPresignedUrl };
 
-export async function downloadEmpresaDoc(fileKey: string): Promise<Blob> {
-  const url = await authGetPresignedUrl(fileKey);
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Error descargando desde S3 (${res.status})`);
-  return res.blob();
+// Returns { blob, presignedUrl } so callers can show "open" links even on failure.
+export async function downloadEmpresaDoc(
+  fileKey: string
+): Promise<{ blob: Blob; presignedUrl: string }> {
+  // If fileKey is already a full URL (some API versions embed direct S3 links),
+  // try fetching it directly and skip the presigned-URL step.
+  const isFullUrl = fileKey.startsWith('https://') || fileKey.startsWith('http://');
+
+  let presignedUrl = isFullUrl ? fileKey : '';
+
+  if (!isFullUrl) {
+    // Step 1: get the presigned URL from the API (same CORS as /company/bo).
+    try {
+      presignedUrl = await authGetPresignedUrl(fileKey);
+      console.debug('[EmpresaDocs] presigned URL:', presignedUrl.substring(0, 90) + '…');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[EmpresaDocs] presigned-URL step failed:', msg);
+      throw new Error(`Error obteniendo URL firmada: ${msg}`);
+    }
+  }
+
+  // Step 2: download the file from S3 (cross-origin — requires CORS on S3 bucket).
+  try {
+    const res = await fetch(presignedUrl, { credentials: 'omit' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    return { blob, presignedUrl };
+  } catch (err) {
+    if (err instanceof TypeError) {
+      // TypeError = network-level failure, almost always CORS on S3.
+      console.warn(
+        '[EmpresaDocs] S3 download blocked (CORS). presignedUrl stored for manual access.',
+        presignedUrl
+      );
+      const corsErr = new Error('CORS_BLOCK') as Error & { presignedUrl: string };
+      corsErr.presignedUrl = presignedUrl;
+      throw corsErr;
+    }
+    throw err;
+  }
 }

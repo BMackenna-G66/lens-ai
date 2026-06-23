@@ -18,6 +18,7 @@ interface BatchDocState {
   slot?: string;
   ocrStatus: ItemStatus;
   error?: string;
+  presignedUrl?: string;
 }
 
 interface BatchCompanyState {
@@ -64,6 +65,7 @@ function toCompanyState(c: BatchCompanyInput): BatchCompanyState {
       slot: d.slot,
       ocrStatus: d.error ? 'error' : 'pending',
       error: d.error,
+      presignedUrl: d.presignedUrl,
     })),
     status: 'pending',
     errorCount: 0,
@@ -584,10 +586,26 @@ const CompanyQueue: React.FC<{
                   <span className="text-slate-400 text-xs w-4 shrink-0">{di + 1}.</span>
                   <span className="flex-1 text-xs text-slate-600 dark:text-slate-300 truncate">{d.fileName}</span>
                   {d.slot && <span className="text-[9px] text-slate-400 shrink-0">{d.slot}</span>}
+                  {d.ocrStatus === 'error' && d.presignedUrl && (
+                    <a
+                      href={d.presignedUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[10px] text-blue-500 hover:text-blue-700 shrink-0 underline"
+                      title="Abrir PDF en nueva pestaña"
+                    >
+                      Abrir ↗
+                    </a>
+                  )}
                   <StatusBadge status={d.ocrStatus} label={d.ocrStatus === 'error' ? (d.error?.slice(0, 40) ?? 'Error OCR') : undefined} />
                 </div>
               ))}
               {c.error && <p className="text-xs text-red-500 dark:text-red-400 pt-1">{c.error}</p>}
+              {c.docs.length > 0 && c.docs.every(d => d.ocrStatus === 'error' && d.presignedUrl) && (
+                <p className="text-[10px] text-amber-600 dark:text-amber-400 pt-1">
+                  Los PDFs no se pudieron descargar directamente (restricción CORS de S3). Haz clic en "Abrir ↗" para descargar cada uno y luego analízalos con la opción Carpeta Local.
+                </p>
+              )}
               {c.executiveSummary && (
                 <div className="mt-2 pt-2 border-t border-slate-200 dark:border-slate-700">
                   <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide mb-1">Resumen ejecutivo</p>
