@@ -224,18 +224,45 @@ export async function getEmpresaDocsCompany(companyId: string): Promise<EmpresaD
 
 export { authGetPresignedUrl as getPresignedUrl };
 
+// Python Flask app running locally acts as a CORS-free proxy for S3 downloads.
+// Port 5050 matches empresa_docs_app.py default.
+const PYTHON_PROXY = 'http://localhost:5050';
+
+async function downloadViaProxy(fileKey: string): Promise<Blob | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  try {
+    const res = await fetch(
+      `${PYTHON_PROXY}/api/download-bytes?fileKey=${encodeURIComponent(fileKey)}`,
+      { signal: controller.signal }
+    );
+    if (!res.ok) return null;
+    return res.blob();
+  } catch {
+    // Proxy not running — fall through to direct approach
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Returns { blob, presignedUrl } so callers can show "open" links even on failure.
 export async function downloadEmpresaDoc(
   fileKey: string
 ): Promise<{ blob: Blob; presignedUrl: string }> {
-  // If fileKey is already a full URL (some API versions embed direct S3 links),
-  // try fetching it directly and skip the presigned-URL step.
-  const isFullUrl = fileKey.startsWith('https://') || fileKey.startsWith('http://');
+  // Strategy 1: local Python proxy (empresa_docs_app.py on localhost:5050).
+  // Avoids all S3 CORS issues — the proxy downloads server-side.
+  const proxyBlob = await downloadViaProxy(fileKey);
+  if (proxyBlob) {
+    return { blob: proxyBlob, presignedUrl: '' };
+  }
 
+  // Strategy 2: direct S3 fetch via presigned URL.
+  // Works if S3 bucket has CORS configured for this origin (may fail on GitHub Pages).
+  const isFullUrl = fileKey.startsWith('https://') || fileKey.startsWith('http://');
   let presignedUrl = isFullUrl ? fileKey : '';
 
   if (!isFullUrl) {
-    // Step 1: get the presigned URL from the API (same CORS as /company/bo).
     try {
       presignedUrl = await authGetPresignedUrl(fileKey);
       console.debug('[EmpresaDocs] presigned URL:', presignedUrl.substring(0, 90) + '…');
@@ -246,7 +273,6 @@ export async function downloadEmpresaDoc(
     }
   }
 
-  // Step 2: download the file from S3 (cross-origin — requires CORS on S3 bucket).
   try {
     const res = await fetch(presignedUrl, { credentials: 'omit' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -254,11 +280,7 @@ export async function downloadEmpresaDoc(
     return { blob, presignedUrl };
   } catch (err) {
     if (err instanceof TypeError) {
-      // TypeError = network-level failure, almost always CORS on S3.
-      console.warn(
-        '[EmpresaDocs] S3 download blocked (CORS). presignedUrl stored for manual access.',
-        presignedUrl
-      );
+      console.warn('[EmpresaDocs] S3 bloqueado por CORS. Inicia empresa_docs_app.py en localhost:5050.');
       const corsErr = new Error('CORS_BLOCK') as Error & { presignedUrl: string };
       corsErr.presignedUrl = presignedUrl;
       throw corsErr;
