@@ -485,6 +485,71 @@ Responde en formato JSON:
 }
 `;
 
+export const GEMINI_BATCH_ENRICHMENT_PROMPT = (documentText: string): string => `
+Eres un analista de compliance KYB especializado en documentos corporativos, tributarios e identitarios latinoamericanos.
+
+Analiza el siguiente conjunto de documentos y extrae la información estructurada solicitada.
+
+REGLAS CRÍTICAS:
+1. Solo extrae información EXPLÍCITAMENTE presente en los documentos. No inventes, no inferas.
+2. Si un campo no está presente en ningún documento, usa exactamente el string: "No disponible"
+3. Para campos booleanos de consistencia: usa true si los documentos coinciden, false si hay discrepancia, null si no hay suficientes documentos para comparar.
+4. Responde ÚNICAMENTE con el objeto JSON válido. Sin texto antes ni después.
+5. No calcules riesgos, no hagas juicios AML, solo extrae y estructura.
+
+DOCUMENTOS:
+---
+${documentText.slice(0, 28000)}
+---
+
+Devuelve ÚNICAMENTE este JSON:
+{
+  "estructuraSocietaria": {
+    "tipoSociedad": "SpA | S.A. | Ltda. | SRL | otro tipo, o No disponible",
+    "cantidadAccionistas": "número entero como string, o No disponible",
+    "participacionAccionaria": "Nombre Accionista: XX%\\nNombre Accionista2: XX% (uno por línea), o No disponible",
+    "accionistaControlador": "nombre completo del accionista con mayor participación, o No disponible",
+    "formaAdministracion": "Administrador Único | Directorio | Gerente | otro, o No disponible"
+  },
+  "restriccionesSocietarias": {
+    "restriccionTransferenciaAcciones": "descripción textual si existe expresamente, o No disponible",
+    "derechoPreferente": "descripción textual si existe expresamente, o No disponible",
+    "delegacionFacultades": "descripción textual si existe expresamente, o No disponible"
+  },
+  "informacionTributaria": {
+    "fechaInicioActividades": "DD-MM-AAAA o No disponible",
+    "empresaMenorTamano": "Sí | No | No disponible",
+    "actividadesEconomicas": ["463020 | Descripción actividad", "otro código | descripción"]
+  },
+  "verificacionRepresentante": {
+    "documentoIdentidad": "número de documento o No disponible",
+    "nacionalidad": "código país (CHL, COL, PER, etc.) o No disponible",
+    "fechaNacimiento": "AAAA-MM-DD o No disponible",
+    "sexo": "M | F | No disponible",
+    "lugarNacimiento": "ciudad o No disponible",
+    "fechaEmisionDocumento": "fecha o No disponible",
+    "fechaExpiracionDocumento": "fecha o No disponible",
+    "identityVerification": "PASSED | FAILED | No disponible",
+    "similarity": "PASSED | FAILED | No disponible",
+    "liveness": "PASSED | FAILED | No disponible",
+    "riskScore": "número o No disponible"
+  },
+  "informacionComercial": {
+    "marcasRepresentadas": "marcas separadas por coma, o No disponible",
+    "correosCorporativos": "emails separados por coma, o No disponible",
+    "telefonosCorporativos": "teléfonos separados por coma, o No disponible",
+    "horarioAtencion": "horario o No disponible"
+  },
+  "consistenciaDocumental": {
+    "razonSocialConsistente": true,
+    "rutConsistente": true,
+    "representanteConsistente": true,
+    "fechaConstitucionConsistente": true,
+    "inconsistencias": []
+  }
+}
+`;
+
 export const GEMINI_EXECUTIVE_SUMMARY_PROMPT = (extractedFields: string, fileName: string): string => `
 Eres un analista legal senior especializado en escrituras públicas latinoamericanas.
 Basándote en los siguientes campos extraídos del documento "${fileName}", genera un resumen ejecutivo profesional y conciso.

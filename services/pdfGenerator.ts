@@ -1589,10 +1589,80 @@ export interface BatchCompanyPdfMetadata {
   docsFailed?: number;
 }
 
+// ─── Batch enrichment PDF helpers ────────────────────────────────────────────
+
+import { BatchEnrichedData } from '../types/batch';
+
+const NA = 'No disponible';
+const isNA = (v?: string) => !v || v === NA || v === 'N/A' || v === 'No especificado';
+
+function addEnrichedSection(
+  doc: InstanceType<typeof jsPDF>,
+  title: string,
+  rows: [string, string][],
+  startY: number,
+  margin: number,
+  pageWidth: number,
+  accentColor: [number, number, number] = [79, 70, 229]
+): number {
+  let yPos = startY;
+  if (yPos > 260) { doc.addPage(); yPos = 20; }
+
+  doc.setFillColor(241, 245, 255);
+  doc.rect(margin, yPos - 3, pageWidth - margin * 2, 9, 'F');
+  doc.setDrawColor(...accentColor);
+  doc.setLineWidth(0.6);
+  doc.line(margin, yPos - 3, margin, yPos + 6);
+  doc.setTextColor(...accentColor);
+  doc.setFontSize(8.5);
+  doc.setFont('helvetica', 'bold');
+  doc.text(title.toUpperCase(), margin + 3, yPos + 3);
+  yPos += 11;
+
+  if (rows.length === 0) return yPos + 3;
+
+  autoTable(doc, {
+    startY: yPos,
+    margin: { left: margin, right: margin },
+    body: rows,
+    styles: { fontSize: 7.5, cellPadding: { top: 2, bottom: 2, left: 3, right: 3 }, overflow: 'linebreak' },
+    columnStyles: { 0: { fontStyle: 'bold', cellWidth: 58, fillColor: [245, 247, 255] }, 1: { cellWidth: 'auto' } },
+    tableWidth: pageWidth - margin * 2,
+  });
+  return (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 8;
+}
+
+function buildValidacionesList(enrichedData: BatchEnrichedData): { pass: boolean; text: string }[] {
+  const items: { pass: boolean; text: string }[] = [];
+  const c = enrichedData.consistenciaDocumental;
+  const v = enrichedData.verificacionRepresentante;
+  const t = enrichedData.informacionTributaria;
+
+  if (c) {
+    if (c.razonSocialConsistente != null)
+      items.push({ pass: !!c.razonSocialConsistente, text: c.razonSocialConsistente ? 'Razón social consistente entre documentos' : 'Inconsistencia detectada en Razón Social' });
+    if (c.rutConsistente != null)
+      items.push({ pass: !!c.rutConsistente, text: c.rutConsistente ? 'RUT consistente entre documentos' : 'Inconsistencia detectada en RUT' });
+    if (c.representanteConsistente != null)
+      items.push({ pass: !!c.representanteConsistente, text: c.representanteConsistente ? 'Representante Legal consistente entre documentos' : 'Inconsistencia detectada en Representante Legal' });
+    if (c.fechaConstitucionConsistente != null)
+      items.push({ pass: !!c.fechaConstitucionConsistente, text: c.fechaConstitucionConsistente ? 'Fecha de constitución consistente entre documentos' : 'Inconsistencia detectada en Fecha de Constitución' });
+    if (c.inconsistencias && c.inconsistencias.length > 0)
+      c.inconsistencias.forEach(i => items.push({ pass: false, text: i }));
+  }
+  if (v?.identityVerification && v.identityVerification !== NA)
+    items.push({ pass: v.identityVerification === 'PASSED', text: v.identityVerification === 'PASSED' ? 'Representante validado mediante Jumio' : `Validación Jumio: ${v.identityVerification}` });
+  if (t?.actividadesEconomicas && t.actividadesEconomicas.length > 0)
+    items.push({ pass: true, text: 'Actividades económicas vigentes identificadas' });
+
+  return items;
+}
+
 export const generateBatchCompanyPdf = async (
   companyName: string,
   docs: BatchDocSummary[],
-  metadata?: BatchCompanyPdfMetadata
+  metadata?: BatchCompanyPdfMetadata,
+  enrichedData?: BatchEnrichedData
 ): Promise<Blob> => {
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
   const pageWidth = doc.internal.pageSize.getWidth();
@@ -1661,6 +1731,98 @@ export const generateBatchCompanyPdf = async (
     yPos = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 8;
   }
 
+  // ── Enriched sections (new) ──────────────────────────────────────────────────
+  if (enrichedData) {
+    const { estructuraSocietaria: es, restriccionesSocietarias: rs,
+            informacionTributaria: it, verificacionRepresentante: vr,
+            informacionComercial: ic, consistenciaDocumental: cd } = enrichedData;
+
+    // 1. Estructura Societaria
+    if (es) {
+      const rows: [string, string][] = [
+        ['Tipo de Sociedad',         es.tipoSociedad        ?? NA],
+        ['Cantidad de Accionistas',  es.cantidadAccionistas ?? NA],
+        ['Accionista Controlador',   es.accionistaControlador ?? NA],
+        ['Participación Accionaria', es.participacionAccionaria ?? NA],
+        ['Forma de Administración',  es.formaAdministracion ?? NA],
+      ].filter(([, v]) => !isNA(v)) as [string, string][];
+      if (rows.length > 0)
+        yPos = addEnrichedSection(doc, 'Estructura Societaria', rows, yPos, margin, pageWidth, [30, 58, 95]);
+    }
+
+    // 2. Restricciones Societarias
+    if (rs) {
+      const rows: [string, string][] = [
+        ['Restricción transferencia de acciones', rs.restriccionTransferenciaAcciones ?? NA],
+        ['Derecho preferente de accionistas',     rs.derechoPreferente               ?? NA],
+        ['Delegación de facultades permitida',    rs.delegacionFacultades            ?? NA],
+      ].filter(([, v]) => !isNA(v)) as [string, string][];
+      if (rows.length > 0)
+        yPos = addEnrichedSection(doc, 'Restricciones y Particularidades', rows, yPos, margin, pageWidth, [120, 53, 15]);
+    }
+
+    // 3. Información Tributaria
+    if (it) {
+      const actividadesStr = it.actividadesEconomicas && it.actividadesEconomicas.length > 0
+        ? it.actividadesEconomicas.join('\n')
+        : NA;
+      const rows: [string, string][] = [
+        ['Fecha Inicio Actividades',     it.fechaInicioActividades ?? NA],
+        ['Empresa de Menor Tamaño',      it.empresaMenorTamano    ?? NA],
+        ['Actividades Económicas (SII)', actividadesStr],
+      ].filter(([, v]) => !isNA(v)) as [string, string][];
+      if (rows.length > 0)
+        yPos = addEnrichedSection(doc, 'Información Tributaria', rows, yPos, margin, pageWidth, [21, 128, 61]);
+    }
+
+    // 4. Verificación Representante Legal
+    if (vr) {
+      const idRows: [string, string][] = [
+        ['Documento Identidad',       vr.documentoIdentidad      ?? NA],
+        ['Nacionalidad',              vr.nacionalidad             ?? NA],
+        ['Fecha Nacimiento',          vr.fechaNacimiento          ?? NA],
+        ['Sexo',                      vr.sexo                     ?? NA],
+        ['Lugar Nacimiento',          vr.lugarNacimiento          ?? NA],
+        ['Fecha Emisión Documento',   vr.fechaEmisionDocumento    ?? NA],
+        ['Fecha Expiración Documento',vr.fechaExpiracionDocumento ?? NA],
+      ].filter(([, v]) => !isNA(v)) as [string, string][];
+      const valRows: [string, string][] = [
+        ['Identity Verification', vr.identityVerification ?? NA],
+        ['Similarity',            vr.similarity           ?? NA],
+        ['Liveness',              vr.liveness             ?? NA],
+        ['Risk Score',            vr.riskScore            ?? NA],
+      ].filter(([, v]) => !isNA(v)) as [string, string][];
+      if (idRows.length > 0 || valRows.length > 0)
+        yPos = addEnrichedSection(doc, 'Validación Identidad Representante', [...idRows, ...valRows], yPos, margin, pageWidth, [109, 40, 217]);
+    }
+
+    // 5. Información Comercial
+    if (ic) {
+      const rows: [string, string][] = [
+        ['Marcas representadas',   ic.marcasRepresentadas    ?? NA],
+        ['Correos corporativos',   ic.correosCorporativos    ?? NA],
+        ['Teléfonos corporativos', ic.telefonosCorporativos  ?? NA],
+        ['Horario atención',       ic.horarioAtencion        ?? NA],
+      ].filter(([, v]) => !isNA(v)) as [string, string][];
+      if (rows.length > 0)
+        yPos = addEnrichedSection(doc, 'Información Comercial', rows, yPos, margin, pageWidth, [14, 116, 144]);
+    }
+
+    // 6. Consistencia Documental
+    if (cd) {
+      const consistRows: [string, string][] = [
+        ['Razón Social Consistente',         cd.razonSocialConsistente       == null ? 'Sin datos suficientes' : cd.razonSocialConsistente       ? 'Sí' : 'No — Discrepancia detectada'],
+        ['RUT Consistente',                  cd.rutConsistente               == null ? 'Sin datos suficientes' : cd.rutConsistente               ? 'Sí' : 'No — Discrepancia detectada'],
+        ['Representante Consistente',        cd.representanteConsistente     == null ? 'Sin datos suficientes' : cd.representanteConsistente     ? 'Sí' : 'No — Discrepancia detectada'],
+        ['Fecha Constitución Consistente',   cd.fechaConstitucionConsistente == null ? 'Sin datos suficientes' : cd.fechaConstitucionConsistente ? 'Sí' : 'No — Discrepancia detectada'],
+      ];
+      if (cd.inconsistencias && cd.inconsistencias.length > 0)
+        consistRows.push(['Inconsistencias detectadas', cd.inconsistencias.join('\n')]);
+      yPos = addEnrichedSection(doc, 'Validación Cruzada Documental', consistRows, yPos, margin, pageWidth, [185, 28, 28]);
+    }
+  }
+  // ─────────────────────────────────────────────────────────────────────────────
+
   // ── One section per document ──
   for (let i = 0; i < docs.length; i++) {
     const { docName, extractedData, executiveSummary } = docs[i];
@@ -1722,6 +1884,38 @@ export const generateBatchCompanyPdf = async (
         yPos += 4.5;
       });
       yPos += 5;
+    }
+
+    // VALIDACIONES DOCUMENTALES — rendered once, after last doc's summary
+    if (i === docs.length - 1 && enrichedData) {
+      const validaciones = buildValidacionesList(enrichedData);
+      if (validaciones.length > 0) {
+        if (yPos > 250) { doc.addPage(); yPos = 20; }
+        doc.setFillColor(30, 58, 138);
+        doc.setDrawColor(30, 58, 138);
+        doc.setLineWidth(0.3);
+        doc.roundedRect(margin, yPos, pageWidth - margin * 2, 6, 1, 1, 'FD');
+        doc.setTextColor(255, 255, 255);
+        doc.setFontSize(7.5);
+        doc.setFont('helvetica', 'bold');
+        doc.text('VALIDACIONES DOCUMENTALES', margin + 3, yPos + 4);
+        yPos += 9;
+
+        validaciones.forEach(({ pass, text }) => {
+          if (yPos > 280) { doc.addPage(); yPos = 20; }
+          const icon = pass ? '✓' : '✗';
+          const color: [number, number, number] = pass ? [21, 128, 61] : [185, 28, 28];
+          doc.setTextColor(...color);
+          doc.setFontSize(7);
+          doc.setFont('helvetica', 'bold');
+          doc.text(icon, margin + 2, yPos);
+          doc.setTextColor(...DARK_TEXT);
+          doc.setFont('helvetica', 'normal');
+          doc.text(text, margin + 8, yPos);
+          yPos += 5;
+        });
+        yPos += 4;
+      }
     }
   }
 

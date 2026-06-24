@@ -1,6 +1,7 @@
 import { GoogleGenAI, GenerateContentResponse, Type } from "@google/genai";
-import { API_KEY_PLACEHOLDER, PREDEFINED_FIELDS, GEMINI_COMPARISON_PROMPT_TEMPLATE, GEMINI_CHAT_SYSTEM_INSTRUCTION, GEMINI_COUNTRY_DETECTION_PROMPT_TEMPLATE, GEMINI_RISK_ANALYSIS_PROMPT_TEMPLATE, GEMINI_INTEGRITY_ANALYSIS_PROMPT_TEMPLATE, GEMINI_FINANCIAL_PROMPT_TEMPLATE, GEMINI_BANK_STATEMENT_PROMPT_TEMPLATE, GEMINI_CROSS_ANALYSIS_PROMPT_TEMPLATE, GEMINI_CRYPTO_FORENSIC_PROMPT, GEMINI_COMPLIANCE_AUDIT_PROMPT, GEMINI_TAX_FOLDER_PROMPT_TEMPLATE, GEMINI_CRYPTO_PATTERN_ALERT_PROMPT, GEMINI_EXECUTIVE_SUMMARY_PROMPT, GEMINI_COMPLIANCE_VS_MANUAL_PROMPT } from "../constants";
+import { API_KEY_PLACEHOLDER, PREDEFINED_FIELDS, GEMINI_COMPARISON_PROMPT_TEMPLATE, GEMINI_CHAT_SYSTEM_INSTRUCTION, GEMINI_COUNTRY_DETECTION_PROMPT_TEMPLATE, GEMINI_RISK_ANALYSIS_PROMPT_TEMPLATE, GEMINI_INTEGRITY_ANALYSIS_PROMPT_TEMPLATE, GEMINI_FINANCIAL_PROMPT_TEMPLATE, GEMINI_BANK_STATEMENT_PROMPT_TEMPLATE, GEMINI_CROSS_ANALYSIS_PROMPT_TEMPLATE, GEMINI_CRYPTO_FORENSIC_PROMPT, GEMINI_COMPLIANCE_AUDIT_PROMPT, GEMINI_TAX_FOLDER_PROMPT_TEMPLATE, GEMINI_CRYPTO_PATTERN_ALERT_PROMPT, GEMINI_EXECUTIVE_SUMMARY_PROMPT, GEMINI_COMPLIANCE_VS_MANUAL_PROMPT, GEMINI_BATCH_ENRICHMENT_PROMPT } from "../constants";
 import { ExtractedField, ComparisonResult, RiskAnalysisResult, IntegrityAnalysisResult, FinancialAnalysisResult, BankStatementAnalysisResult, CombinedAnalysisResult, CryptoWalletProfile, CryptoRiskAssessment, ComplianceAnalysisResult, TaxFolderAnalysisResult, PatternAnalysisResult, ComplianceVsManualResult } from "../types";
+import { BatchEnrichedData } from "../types/batch";
 import { KEYWORDS_BY_COUNTRY } from "./countryKeywords";
 
 const getApiKey = (): string | undefined => process.env.API_KEY;
@@ -216,6 +217,22 @@ export const generateExecutiveSummary = async (extractedData: ExtractedField[], 
     });
     fireTokenEvent('Resumen Ejecutivo', primaryAnalysisModel, response.usageMetadata as UsageMeta);
     return response.text || 'No se pudo generar el resumen ejecutivo.';
+  });
+};
+
+export const analyzeBatchEnrichment = async (documentText: string): Promise<BatchEnrichedData> => {
+  return executeWithRetry(async (ai) => {
+    const response = await ai.models.generateContent({
+      model: primaryAnalysisModel,
+      contents: GEMINI_BATCH_ENRICHMENT_PROMPT(documentText),
+      config: jsonConfig,
+    });
+    fireTokenEvent('Batch Enrichment', primaryAnalysisModel, response.usageMetadata as UsageMeta);
+    try {
+      return JSON.parse(extractJsonFromResponse(response.text)) as BatchEnrichedData;
+    } catch {
+      return {};
+    }
   });
 };
 

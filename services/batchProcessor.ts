@@ -1,4 +1,4 @@
-import { BatchCompanyInput, BatchMode } from '../types/batch';
+import { BatchCompanyInput, BatchMode, BatchEnrichedData } from '../types/batch';
 import { ExtractedField } from '../types';
 import { GEMINI_PROMPT_TEMPLATE } from '../constants';
 import {
@@ -11,6 +11,7 @@ import {
   analyzeBankStatementWithGemini,
   analyzeTaxFolderWithGemini,
   analyzeCrossCheckWithGemini,
+  analyzeBatchEnrichment,
 } from './geminiService';
 import { getTextFromFile } from './fileProcessorService';
 import { generateBatchCompanyPdf } from './pdfGenerator';
@@ -104,6 +105,12 @@ export async function processOneCompany(
   onPhase('Generando resumen ejecutivo...');
   const executiveSummary = await generateExecutiveSummary(extractedData, fileNames);
 
+  onPhase('Enriqueciendo ficha...');
+  let enrichedData: BatchEnrichedData = {};
+  try {
+    enrichedData = await analyzeBatchEnrichment(combinedText);
+  } catch { /* non-critical — PDF se genera igual sin datos enriquecidos */ }
+
   onPhase('Generando ficha PDF...');
   const pdfBlob = await generateBatchCompanyPdf(
     company.companyName,
@@ -117,7 +124,8 @@ export async function processOneCompany(
       kycStage1: company.companyMetadata?.kycStage1,
       docsAnalyzed: validTexts.length,
       docsFailed: errorCount,
-    }
+    },
+    enrichedData
   );
 
   return { extractedData, executiveSummary, pdfBlob, errorCount };

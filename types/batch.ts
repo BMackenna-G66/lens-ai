@@ -15,6 +15,54 @@ export interface BatchDocumentInput {
   error?: string;        // pre-existing download error
 }
 
+// ─── Enriched batch analysis data (new sections added to Ficha Empresa) ─────────
+
+export interface BatchEnrichedData {
+  estructuraSocietaria?: {
+    tipoSociedad?: string;
+    cantidadAccionistas?: string;
+    participacionAccionaria?: string;
+    accionistaControlador?: string;
+    formaAdministracion?: string;
+  };
+  restriccionesSocietarias?: {
+    restriccionTransferenciaAcciones?: string;
+    derechoPreferente?: string;
+    delegacionFacultades?: string;
+  };
+  informacionTributaria?: {
+    fechaInicioActividades?: string;
+    empresaMenorTamano?: string;
+    actividadesEconomicas?: string[];
+  };
+  verificacionRepresentante?: {
+    documentoIdentidad?: string;
+    nacionalidad?: string;
+    fechaNacimiento?: string;
+    sexo?: string;
+    lugarNacimiento?: string;
+    fechaEmisionDocumento?: string;
+    fechaExpiracionDocumento?: string;
+    identityVerification?: string;
+    similarity?: string;
+    liveness?: string;
+    riskScore?: string;
+  };
+  informacionComercial?: {
+    marcasRepresentadas?: string;
+    correosCorporativos?: string;
+    telefonosCorporativos?: string;
+    horarioAtencion?: string;
+  };
+  consistenciaDocumental?: {
+    razonSocialConsistente?: boolean | null;
+    rutConsistente?: boolean | null;
+    representanteConsistente?: boolean | null;
+    fechaConstitucionConsistente?: boolean | null;
+    inconsistencias?: string[];
+  };
+}
+
 export interface CompanyMetadata {
   complianceStatus?: string;
   kycStage1?: string;
