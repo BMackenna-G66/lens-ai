@@ -85,6 +85,15 @@ interface PerfilResult {
   listas: Record<string, ListaEntry>;
   ficha: Record<string, string>;
   decision?: DecisionResult;
+  // Enriched fields (populated for all persons, used primarily for legal)
+  personType?: string;
+  datosContacto?: Record<string, unknown>;
+  actividadEconomica?: Record<string, unknown>;
+  ultimoTimbraje?: Record<string, number | string>;
+  riesgoDetallado?: Record<string, unknown>;
+  personasRelacionadas?: PersonaRelacionada[];
+  formularios?: Record<string, Record<string, unknown>>;
+  auditoria?: Record<string, unknown>;
 }
 interface ListaInteres {
   dni: string;
@@ -94,6 +103,17 @@ interface ListaInteres {
   status: string;
 }
 interface LogLine { type: 'ok'|'err'|'info'; text: string; }
+
+interface PersonaRelacionada {
+  dni?: string;
+  name?: string;
+  type?: string[];
+  percentage?: number;
+  country?: string;
+  nationality?: string | null;
+  tagFile?: string[];
+  comments?: string | null;
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function formatVal(v: unknown): string {
@@ -260,6 +280,11 @@ async function fetchPerfil(dniVal: string): Promise<PerfilResult> {
     decision = computeDecisionFromCrimes(additionalData);
   }
 
+  // ── Enriched data ────────────────────────────────────────────────────────────
+  const situacion = (perfil.situacionTributaria ?? {}) as Record<string, unknown>;
+  const forms     = (perfil.forms ?? {})             as Record<string, Record<string, unknown>>;
+  const persons   = ((perfil.personsRelations ?? []) as PersonaRelacionada[]);
+
   return {
     dni: dniVal,
     nombre: perfil.name ?? perfil.socialReason ?? '',
@@ -268,6 +293,42 @@ async function fetchPerfil(dniVal: string): Promise<PerfilResult> {
     listas,
     ficha,
     decision,
+    personType: String(perfil.personType ?? ''),
+    datosContacto: {
+      country:       perfil.country,
+      region:        perfil.region,
+      province:      perfil.province,
+      city:          perfil.city,
+      address:       perfil.address,
+      fiscalAddress: perfil.fiscalAddress,
+      phone:         perfil.phone,
+    },
+    actividadEconomica: {
+      businessType:             perfil.businessType,
+      bussinesType:             perfil.bussinesType,
+      sales:                    perfil.sales,
+      nombre_sii:               situacion.Name,
+      fecha_inicio_actividades: situacion.fecha_inicio_actividades,
+      es_empresa_menor_tamano:  situacion.es_empresa_menor_tamano,
+      autorizado_moneda_ext:    situacion.autorizado_moneda_extranjera,
+      situaciones_irregulares:  (situacion.situaciones_irregulares as string[] | undefined) ?? [],
+      activities:               (situacion.Activities as unknown[]) ?? [],
+      ultima_actualizacion_sii: situacion.ultima_actualizacion,
+    },
+    ultimoTimbraje: (situacion.ultimo_timbraje ?? {}) as Record<string, number | string>,
+    riesgoDetallado: {
+      score:           perfil.score,
+      calculatedRisk:  perfil.calculatedRisk,
+      effectiveRisk:   perfil.effectiveRisk,
+      overwrittenRisk: perfil.overwrittenRisk,
+      associatedRisk:  listasRaw.associatedRisk ?? null,
+    },
+    personasRelacionadas: persons,
+    formularios: forms,
+    auditoria: {
+      created_at: perfil.created_at,
+      updated_at: perfil.updated_at,
+    },
   };
 }
 
@@ -393,6 +454,182 @@ async function generatePDF(result: PerfilResult) {
       margin: { left: margin, right: margin },
     });
     curY = getLastY() + 6;
+  }
+
+  // ── Legal person sections ──────────────────────────────────────────────────
+  if (result.personType === 'legal') {
+    const dc  = result.datosContacto    ?? {};
+    const ae  = result.actividadEconomica ?? {};
+    const tt  = result.ultimoTimbraje   ?? {};
+    const rd  = result.riesgoDetallado  ?? {};
+    const pr  = result.personasRelacionadas ?? [];
+    const fm  = result.formularios      ?? {};
+
+    const addSectionTitle = (title: string) => {
+      if (curY > pageH - 30) { doc.addPage(); curY = 20; }
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(...PDF_NAVY);
+      doc.text(title, margin, curY + 4);
+      doc.setFillColor(...PDF_INDIGO);
+      doc.rect(margin, curY + 5.5, pageW - margin * 2, 0.5, 'F');
+      curY += 9;
+    };
+
+    // Contacto y Ubicación
+    addSectionTitle('DATOS DE CONTACTO Y UBICACIÓN');
+    autoTable(doc, {
+      startY: curY,
+      head: [['Campo', 'Valor']],
+      body: [
+        ['País',              String(dc.country       ?? '—')],
+        ['Región',            String(dc.region        ?? '—')],
+        ['Ciudad',            String(dc.city          ?? '—')],
+        ['Dirección',         String(dc.address       ?? '—')],
+        ['Dirección Fiscal',  String(dc.fiscalAddress ?? '—')],
+        ['Teléfono',          String(dc.phone         ?? '—')],
+      ].filter(([,v]) => v !== '—'),
+      theme: 'grid',
+      headStyles: { fillColor: PDF_NAVY, textColor: PDF_WHITE, fontSize: 7, fontStyle: 'bold' },
+      bodyStyles: { fontSize: 8, textColor: PDF_DTEXT },
+      alternateRowStyles: { fillColor: PDF_LGRAY },
+      columnStyles: { 0: { fontStyle: 'bold', cellWidth: 50 } },
+      margin: { left: margin, right: margin },
+    });
+    curY = getLastY() + 6;
+
+    // Actividad Económica
+    addSectionTitle('ACTIVIDAD ECONÓMICA');
+    const aeRows: string[][] = [
+      ['Sector',             String(ae.businessType              ?? '—')],
+      ['Giro SII',           String(ae.bussinesType              ?? '—')],
+      ['Rango de Ventas',    String(ae.sales                     ?? '—')],
+      ['Inicio Actividades', ae.fecha_inicio_actividades ? String(ae.fecha_inicio_actividades).split('T')[0] : '—'],
+      ['Empresa Menor Tamaño', ae.es_empresa_menor_tamano === true ? 'Sí' : ae.es_empresa_menor_tamano === false ? 'No' : '—'],
+      ['Aut. Moneda Extranjera', ae.autorizado_moneda_ext === true ? 'Sí' : ae.autorizado_moneda_ext === false ? 'No' : '—'],
+    ].filter(([,v]) => v !== '—');
+    autoTable(doc, {
+      startY: curY,
+      head: [['Campo', 'Valor']],
+      body: aeRows,
+      theme: 'grid',
+      headStyles: { fillColor: PDF_NAVY, textColor: PDF_WHITE, fontSize: 7, fontStyle: 'bold' },
+      bodyStyles: { fontSize: 8, textColor: PDF_DTEXT },
+      alternateRowStyles: { fillColor: PDF_LGRAY },
+      columnStyles: { 0: { fontStyle: 'bold', cellWidth: 50 } },
+      margin: { left: margin, right: margin },
+    });
+    curY = getLastY() + 4;
+
+    // Activities SII
+    if (Array.isArray(ae.activities) && (ae.activities as unknown[]).length > 0) {
+      autoTable(doc, {
+        startY: curY,
+        head: [['Código', 'Nombre Actividad', 'Categoría', 'Fecha', 'Afecto IVA']],
+        body: (ae.activities as Record<string,unknown>[]).map(a => [
+          String(a.Code ?? ''), String(a.Name ?? ''), String(a.Category ?? ''),
+          a.Date ? String(a.Date).split('T')[0] : '—',
+          a.SubjectToVAT === true ? 'Sí' : 'No',
+        ]),
+        theme: 'grid',
+        headStyles: { fillColor: [60, 80, 120] as [number,number,number], textColor: PDF_WHITE, fontSize: 6.5, fontStyle: 'bold' },
+        bodyStyles: { fontSize: 7.5, textColor: PDF_DTEXT },
+        alternateRowStyles: { fillColor: PDF_LGRAY },
+        columnStyles: { 0: { cellWidth: 18 }, 4: { cellWidth: 18 } },
+        margin: { left: margin, right: margin },
+      });
+      curY = getLastY() + 4;
+    }
+
+    // Último timbraje
+    if (Object.keys(tt).length > 0) {
+      if (curY > pageH - 40) { doc.addPage(); curY = 20; }
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(8); doc.setTextColor(...PDF_MGRAY);
+      doc.text('ÚLTIMO TIMBRAJE POR DOCUMENTO', margin, curY + 4);
+      curY += 7;
+      autoTable(doc, {
+        startY: curY,
+        head: [['Documento', 'Año']],
+        body: Object.entries(tt).map(([d, y]) => [d, String(y)]),
+        theme: 'grid',
+        headStyles: { fillColor: [60, 80, 120] as [number,number,number], textColor: PDF_WHITE, fontSize: 6.5, fontStyle: 'bold' },
+        bodyStyles: { fontSize: 7.5, textColor: PDF_DTEXT },
+        alternateRowStyles: { fillColor: PDF_LGRAY },
+        columnStyles: { 1: { cellWidth: 20 } },
+        margin: { left: margin, right: margin },
+      });
+      curY = getLastY() + 6;
+    }
+
+    // Riesgo Detallado
+    addSectionTitle('RIESGO DETALLADO');
+    const ar = (rd.associatedRisk as Record<string,unknown> | null | undefined);
+    const arInfo = (ar?.info as Record<string,unknown>) ?? {};
+    const riesgoRows: string[][] = [
+      ['Score',               String(rd.score          ?? '—')],
+      ['Riesgo Calculado',    String(rd.calculatedRisk ?? '—')],
+      ['Riesgo Efectivo',     String(rd.effectiveRisk  ?? '—')],
+      ['Riesgo Sobreescrito', String(rd.overwrittenRisk ?? '—')],
+    ];
+    if (ar) {
+      riesgoRows.push(['Riesgo Asociado — Nivel', String(arInfo.riskForDetail ?? ar.risk ?? '—')]);
+      riesgoRows.push(['Riesgo Asociado — Total personas', String(arInfo.totalAssociatedPeople ?? '—')]);
+      riesgoRows.push(['Riesgo Asociado — Con riesgo', String(arInfo.associatedPeopleWithRisk ?? '—')]);
+    }
+    autoTable(doc, {
+      startY: curY,
+      head: [['Campo', 'Valor']],
+      body: riesgoRows.filter(([,v]) => v !== '—'),
+      theme: 'grid',
+      headStyles: { fillColor: PDF_NAVY, textColor: PDF_WHITE, fontSize: 7, fontStyle: 'bold' },
+      bodyStyles: { fontSize: 8, textColor: PDF_DTEXT },
+      alternateRowStyles: { fillColor: PDF_LGRAY },
+      columnStyles: { 0: { fontStyle: 'bold', cellWidth: 60 } },
+      margin: { left: margin, right: margin },
+    });
+    curY = getLastY() + 6;
+
+    // Personas Relacionadas
+    if (pr.length > 0) {
+      addSectionTitle(`PERSONAS RELACIONADAS (${pr.length})`);
+      autoTable(doc, {
+        startY: curY,
+        head: [['Nombre', 'DNI', 'Rol(es)', 'Participación', 'Tags', 'País']],
+        body: pr.map(p => [
+          p.name ?? '—', p.dni ?? '—',
+          (p.type ?? []).join(' / ') || '—',
+          p.percentage != null ? `${p.percentage}%` : '—',
+          (p.tagFile ?? []).join(' · ') || '—',
+          p.country ?? '—',
+        ]),
+        theme: 'grid',
+        headStyles: { fillColor: PDF_NAVY, textColor: PDF_WHITE, fontSize: 6.5, fontStyle: 'bold' },
+        bodyStyles: { fontSize: 7.5, textColor: PDF_DTEXT },
+        alternateRowStyles: { fillColor: PDF_LGRAY },
+        columnStyles: { 3: { cellWidth: 24 }, 5: { cellWidth: 20 } },
+        margin: { left: margin, right: margin },
+      });
+      curY = getLastY() + 6;
+    }
+
+    // Formularios
+    const formEntries = Object.entries(fm);
+    if (formEntries.length > 0) {
+      addSectionTitle('FORMULARIOS');
+      autoTable(doc, {
+        startY: curY,
+        head: [['Formulario', 'Estado', 'Fecha Firma']],
+        body: formEntries.map(([name, data]) => [
+          name,
+          String(data?.status ?? 'Sin estado'),
+          data?.signedDate ? String(data.signedDate).split('T')[0] : '—',
+        ]),
+        theme: 'grid',
+        headStyles: { fillColor: PDF_NAVY, textColor: PDF_WHITE, fontSize: 7, fontStyle: 'bold' },
+        bodyStyles: { fontSize: 8, textColor: PDF_DTEXT },
+        alternateRowStyles: { fillColor: PDF_LGRAY },
+        margin: { left: margin, right: margin },
+      });
+      curY = getLastY() + 6;
+    }
   }
 
   // ── Resultados de listas ──
@@ -684,6 +921,216 @@ function DecisionBox({ decision, dark }: { decision: DecisionResult; dark: boole
   );
 }
 
+function fmtBool(v: unknown): string {
+  if (v === true)  return '✓ Sí';
+  if (v === false) return '✗ No';
+  return v == null ? '—' : String(v);
+}
+function fmtDate(v: unknown): string {
+  if (!v) return '—';
+  const s = String(v);
+  return s.includes('T') ? s.split('T')[0] : s;
+}
+
+function LegalPersonDetail({ result, dark }: { result: PerfilResult; dark: boolean }): React.ReactNode {
+  const dc  = (result.datosContacto    ?? {}) as Record<string, unknown>;
+  const ae  = (result.actividadEconomica ?? {}) as Record<string, unknown>;
+  const rd  = (result.riesgoDetallado  ?? {}) as Record<string, unknown>;
+  const tt  = (result.ultimoTimbraje   ?? {}) as Record<string, number | string>;
+  const pr  = result.personasRelacionadas ?? [];
+  const fm  = (result.formularios      ?? {}) as Record<string, Record<string, unknown>>;
+  const aud = (result.auditoria        ?? {}) as Record<string, unknown>;
+
+  const sectionHd = dark ? 'text-slate-400' : 'text-violet-500';
+  const divider   = dark ? 'bg-slate-700/50' : 'bg-violet-200/60';
+  const cellBg    = dark ? 'bg-slate-900/40 border-slate-700/40' : 'bg-violet-50/60 border-violet-200/60';
+  const labelTxt  = dark ? 'text-slate-500' : 'text-violet-500';
+  const valTxt    = dark ? 'text-slate-200' : 'text-slate-800';
+  const tblBorder = dark ? 'border-slate-700/50' : 'border-violet-200/60';
+  const thCls     = dark ? 'bg-slate-800/60 text-slate-400' : 'bg-violet-100/70 text-violet-700';
+  const trHov     = dark ? 'hover:bg-slate-800/40' : 'hover:bg-violet-50/50';
+
+  const renderInfoCell = (label: string, value: string): React.JSX.Element => (
+    <div className={`border rounded-xl px-3 py-2.5 ${cellBg}`}>
+      <div className={`text-[9px] font-bold uppercase tracking-widest mb-1 ${labelTxt}`}>{label}</div>
+      <div className={`text-sm font-semibold ${valTxt}`}>{value || '—'}</div>
+    </div>
+  );
+
+  const renderSectionHeader = (title: string): React.JSX.Element => (
+    <div className="flex items-center gap-3 mt-6 mb-3">
+      <span className={`text-[10px] font-bold uppercase tracking-widest ${sectionHd}`}>{title}</span>
+      <div className={`flex-1 h-px ${divider}`} />
+    </div>
+  );
+
+  const ar = (rd.associatedRisk as Record<string, unknown> | null | undefined);
+
+  return (
+    <div>
+      {/* ── Contacto y Ubicación ── */}
+      {renderSectionHeader("Datos de Contacto y Ubicación")}
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+        {renderInfoCell("País",             String(dc.country       ?? '—'))}
+        {renderInfoCell("Región",           String(dc.region        ?? '—'))}
+        {renderInfoCell("Ciudad",           String(dc.city          ?? '—'))}
+        {renderInfoCell("Dirección",        String(dc.address       ?? '—'))}
+        {renderInfoCell("Dirección Fiscal", String(dc.fiscalAddress ?? '—'))}
+        {renderInfoCell("Teléfono",         String(dc.phone         ?? '—'))}
+      </div>
+
+      {/* ── Actividad Económica ── */}
+      {renderSectionHeader("Actividad Económica")}
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+        {renderInfoCell("Sector",               String(ae.businessType              ?? '—'))}
+        {renderInfoCell("Giro SII",             String(ae.bussinesType              ?? '—'))}
+        {renderInfoCell("Rango de Ventas",      String(ae.sales                     ?? '—'))}
+        {renderInfoCell("Inicio Actividades",   fmtDate(ae.fecha_inicio_actividades))}
+        {renderInfoCell("Empresa Menor Tamaño", fmtBool(ae.es_empresa_menor_tamano))}
+        {renderInfoCell("Aut. Moneda Ext.",     fmtBool(ae.autorizado_moneda_ext))}
+      </div>
+
+      {/* Activities SII table */}
+      {Array.isArray(ae.activities) && (ae.activities as unknown[]).length > 0 && (
+        <>
+          <p className={`text-[10px] font-bold uppercase tracking-widest mt-3 mb-1.5 ${labelTxt}`}>Actividades SII</p>
+          <div className={`overflow-x-auto rounded-lg border ${tblBorder}`}>
+            <table className="w-full text-xs">
+              <thead>
+                <tr className={thCls}>
+                  {['Código','Nombre','Categoría','Fecha','Afecto IVA'].map(h => (
+                    <th key={h} className="px-3 py-2 text-left font-bold uppercase tracking-wider whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {(ae.activities as Record<string, unknown>[]).map((a, i) => (
+                  <tr key={i} className={`border-t ${tblBorder} ${trHov}`}>
+                    <td className={`px-3 py-2 font-mono ${valTxt}`}>{String(a.Code ?? '—')}</td>
+                    <td className={`px-3 py-2 ${valTxt}`}>{String(a.Name ?? '—')}</td>
+                    <td className={`px-3 py-2 ${valTxt}`}>{String(a.Category ?? '—')}</td>
+                    <td className={`px-3 py-2 ${valTxt}`}>{fmtDate(a.Date)}</td>
+                    <td className={`px-3 py-2 ${valTxt}`}>{fmtBool(a.SubjectToVAT)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      {/* Último timbraje */}
+      {Object.keys(tt).length > 0 && (
+        <>
+          <p className={`text-[10px] font-bold uppercase tracking-widest mt-3 mb-1.5 ${labelTxt}`}>Último Timbraje por Documento</p>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+            {Object.entries(tt).map(([doc, year]) => (
+              <div key={doc}>{renderInfoCell(doc, String(year))}</div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {/* ── Riesgo Detallado ── */}
+      {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+      {renderSectionHeader("Riesgo Detallado") as any}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        {renderInfoCell("Score",               String(rd.score           ?? '—'))}
+        {renderInfoCell("Riesgo Calculado",    String(rd.calculatedRisk  ?? '—'))}
+        {renderInfoCell("Riesgo Efectivo",     String(rd.effectiveRisk   ?? '—'))}
+        {renderInfoCell("Riesgo Sobreescrito", String(rd.overwrittenRisk ?? '—'))}
+      </div>
+      {ar != null && (Boolean(ar.coincidence) || Boolean((ar.info as Record<string,unknown>)?.totalAssociatedPeople)) && (
+        <div className={`mt-2 rounded-xl border px-4 py-3 text-sm space-y-1 ${
+          Boolean(ar.coincidence)
+            ? dark ? 'bg-amber-950/30 border-amber-800/50 text-amber-300' : 'bg-amber-50 border-amber-300 text-amber-800'
+            : dark ? 'bg-slate-800/40 border-slate-700/40 text-slate-300' : 'bg-slate-50 border-slate-200 text-slate-700'
+        }`}>
+          <p className="font-bold text-[10px] uppercase tracking-widest opacity-70">Riesgo Asociado</p>
+          {(() => {
+            const info = (ar.info as Record<string,unknown>) ?? {};
+            return (
+              <div className="grid grid-cols-3 gap-4 text-xs">
+                <span>Nivel: <strong>{String(info.riskForDetail ?? ar.risk ?? '—')}</strong></span>
+                <span>Personas vinculadas: <strong>{String(info.totalAssociatedPeople ?? '—')}</strong></span>
+                <span>Con riesgo: <strong>{String(info.associatedPeopleWithRisk ?? '—')}</strong></span>
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* ── Personas Relacionadas ── */}
+      {pr.length > 0 && (
+        <>
+          {renderSectionHeader(`Personas Relacionadas (${pr.length})`)}
+          <div className={`overflow-x-auto rounded-lg border ${tblBorder}`}>
+            <table className="w-full text-xs">
+              <thead>
+                <tr className={thCls}>
+                  {['Nombre','DNI','Rol(es)','Participación','Tags','País'].map(h => (
+                    <th key={h} className="px-3 py-2 text-left font-bold uppercase tracking-wider whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {pr.map((p, i) => (
+                  <tr key={i} className={`border-t ${tblBorder} ${trHov}`}>
+                    <td className={`px-3 py-2 font-medium ${valTxt}`}>{p.name ?? '—'}</td>
+                    <td className={`px-3 py-2 font-mono ${valTxt}`}>{p.dni ?? '—'}</td>
+                    <td className={`px-3 py-2 ${valTxt}`}>{(p.type ?? []).join(' · ') || '—'}</td>
+                    <td className={`px-3 py-2 ${valTxt}`}>{p.percentage != null ? `${p.percentage}%` : '—'}</td>
+                    <td className={`px-3 py-2 ${valTxt}`}>{(p.tagFile ?? []).join(' · ') || '—'}</td>
+                    <td className={`px-3 py-2 ${valTxt}`}>{p.country ?? '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      {/* ── Formularios ── */}
+      {Object.keys(fm).length > 0 && (
+        <>
+          {renderSectionHeader("Formularios")}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            {Object.entries(fm).map(([name, data]) => {
+              const status = data?.status;
+              const signed = data?.signedDate ? fmtDate(data.signedDate) : null;
+              const statCls = status === 'signed'
+                ? 'text-emerald-400'
+                : status === 'pending'
+                  ? 'text-amber-400'
+                  : dark ? 'text-slate-500' : 'text-slate-400';
+              return (
+                <div key={name} className={`border rounded-xl px-3 py-2.5 ${cellBg}`}>
+                  <div className={`text-[9px] font-bold uppercase tracking-widest mb-1 ${labelTxt}`}>{name}</div>
+                  <div className={`text-sm font-semibold ${status ? statCls : valTxt}`}>
+                    {String(status ?? 'Sin estado')}
+                  </div>
+                  {signed && <div className={`text-[10px] mt-0.5 ${labelTxt}`}>Firmado: {signed}</div>}
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {/* ── Auditoría ── */}
+      {(aud.created_at || aud.updated_at) && (
+        <>
+          {renderSectionHeader("Auditoría del Registro")}
+          <div className="grid grid-cols-2 gap-2">
+            {!!aud.created_at && renderInfoCell("Creado",      fmtDate(aud.created_at))}
+            {!!aud.updated_at && renderInfoCell("Actualizado", fmtDate(aud.updated_at))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function ResultCard({ result, dark }: { result: PerfilResult; dark: boolean }) {
   const hitCount = Object.values(result.listas).filter(e => e.coincidence).length;
   const bg    = dark ? 'bg-slate-800/50 border-slate-700/50' : 'bg-white border-violet-200/70 shadow-sm';
@@ -743,6 +1190,11 @@ function ResultCard({ result, dark }: { result: PerfilResult; dark: boolean }) {
           </>
         )}
       </div>
+
+      {/* ── Legal person enriched data ── */}
+      {result.personType === 'legal' && (
+        <LegalPersonDetail result={result} dark={dark} />
+      )}
 
       <div>
         <div className="flex items-center gap-3 mb-3">
