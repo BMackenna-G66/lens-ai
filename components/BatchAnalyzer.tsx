@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import * as XLSX from 'xlsx';
 import JSZip from 'jszip';
 import { ExtractedField } from '../types';
@@ -112,6 +112,20 @@ export const BatchAnalyzer: React.FC = () => {
   const [expandedCompanies, setExpandedCompanies] = useState<Set<string>>(new Set());
   const stopRef   = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [tabHidden, setTabHidden]     = useState(false);
+  const [wasHiddenDuring, setWasHiddenDuring] = useState(false);
+
+  useEffect(() => {
+    const handler = () => {
+      setTabHidden(document.hidden);
+      if (document.hidden) setWasHiddenDuring(true);
+    };
+    document.addEventListener('visibilitychange', handler);
+    return () => document.removeEventListener('visibilitychange', handler);
+  }, []);
+
+  // Reset "was hidden" when a new batch starts
+  const resetWasHidden = useCallback(() => setWasHiddenDuring(false), []);
 
   // ── Derived ──
   const totalDocs       = pendingInput.reduce((s, c) => s + c.documents.length, 0);
@@ -157,6 +171,7 @@ export const BatchAnalyzer: React.FC = () => {
       return;
     }
 
+    resetWasHidden();
     // Initialise runtime state from pending input
     const states = pendingInput.map(toCompanyState);
     setCompanyStates(states);
@@ -469,6 +484,20 @@ export const BatchAnalyzer: React.FC = () => {
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* ── Background-tab warning ── */}
+      {running && !tabHidden && wasHiddenDuring && (
+        <div className="bg-orange-50 dark:bg-orange-900/30 border border-orange-300 dark:border-orange-700 rounded-xl px-4 py-3 flex items-center gap-3 text-sm text-orange-800 dark:text-orange-300">
+          <span className="text-lg">⚠️</span>
+          <span><strong>El proceso se pausó mientras estabas fuera.</strong> El navegador congela el JS en pestañas inactivas. Ahora sigue corriendo — mantén esta pestaña activa hasta que termine.</span>
+        </div>
+      )}
+      {running && !wasHiddenDuring && (
+        <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-xl px-4 py-2 flex items-center gap-2 text-xs text-blue-700 dark:text-blue-400">
+          <span>ℹ️</span>
+          <span>Mantén esta pestaña activa mientras procesa — el navegador puede pausar el proceso si cambias de pestaña.</span>
         </div>
       )}
 
