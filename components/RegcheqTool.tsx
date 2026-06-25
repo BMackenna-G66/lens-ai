@@ -307,6 +307,7 @@ async function fetchPerfil(dniVal: string): Promise<PerfilResult> {
       businessType:             perfil.businessType,
       bussinesType:             perfil.bussinesType,
       sales:                    perfil.sales,
+      rut_contribuyente:        situacion.rut_contribuyente,
       nombre_sii:               situacion.Name,
       fecha_inicio_actividades: situacion.fecha_inicio_actividades,
       es_empresa_menor_tamano:  situacion.es_empresa_menor_tamano,
@@ -499,12 +500,16 @@ async function generatePDF(result: PerfilResult) {
     // Actividad Económica
     addSectionTitle('ACTIVIDAD ECONÓMICA');
     const aeRows: string[][] = [
-      ['Sector',             String(ae.businessType              ?? '—')],
-      ['Giro SII',           String(ae.bussinesType              ?? '—')],
-      ['Rango de Ventas',    String(ae.sales                     ?? '—')],
-      ['Inicio Actividades', ae.fecha_inicio_actividades ? String(ae.fecha_inicio_actividades).split('T')[0] : '—'],
+      ['RUT Contribuyente',   String(ae.rut_contribuyente ?? '—')],
+      ['Nombre SII',          String(ae.nombre_sii        ?? '—')],
+      ['Sector',              String(ae.businessType      ?? '—')],
+      ['Giro SII',            String(ae.bussinesType      ?? '—')],
+      ['Rango de Ventas',     String(ae.sales             ?? '—')],
+      ['Inicio Actividades',  ae.fecha_inicio_actividades ? String(ae.fecha_inicio_actividades).split('T')[0] : '—'],
       ['Empresa Menor Tamaño', ae.es_empresa_menor_tamano === true ? 'Sí' : ae.es_empresa_menor_tamano === false ? 'No' : '—'],
       ['Aut. Moneda Extranjera', ae.autorizado_moneda_ext === true ? 'Sí' : ae.autorizado_moneda_ext === false ? 'No' : '—'],
+      ['Última Act. SII',     ae.ultima_actualizacion_sii ? String(ae.ultima_actualizacion_sii).split('T')[0] : '—'],
+      ...((ae.situaciones_irregulares as string[] | undefined ?? []).map((s, i) => [`Situación Irregular ${i + 1}`, s])),
     ].filter(([,v]) => v !== '—');
     autoTable(doc, {
       startY: curY,
@@ -982,13 +987,24 @@ function LegalPersonDetail({ result, dark }: { result: PerfilResult; dark: boole
       {/* ── Actividad Económica ── */}
       {renderSectionHeader("Actividad Económica")}
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-        {renderInfoCell("Sector",               String(ae.businessType              ?? '—'))}
-        {renderInfoCell("Giro SII",             String(ae.bussinesType              ?? '—'))}
-        {renderInfoCell("Rango de Ventas",      String(ae.sales                     ?? '—'))}
+        {renderInfoCell("RUT Contribuyente",    String(ae.rut_contribuyente          ?? '—'))}
+        {renderInfoCell("Nombre SII",           String(ae.nombre_sii                 ?? '—'))}
+        {renderInfoCell("Sector",               String(ae.businessType               ?? '—'))}
+        {renderInfoCell("Giro SII",             String(ae.bussinesType               ?? '—'))}
+        {renderInfoCell("Rango de Ventas",      String(ae.sales                      ?? '—'))}
         {renderInfoCell("Inicio Actividades",   fmtDate(ae.fecha_inicio_actividades))}
         {renderInfoCell("Empresa Menor Tamaño", fmtBool(ae.es_empresa_menor_tamano))}
         {renderInfoCell("Aut. Moneda Ext.",     fmtBool(ae.autorizado_moneda_ext))}
+        {renderInfoCell("Última Act. SII",      fmtDate(ae.ultima_actualizacion_sii))}
       </div>
+      {Array.isArray(ae.situaciones_irregulares) && (ae.situaciones_irregulares as string[]).length > 0 && (
+        <div className={`mt-2 rounded-xl border px-4 py-3 text-sm ${dark ? 'bg-amber-950/30 border-amber-800/50 text-amber-300' : 'bg-amber-50 border-amber-300 text-amber-800'}`}>
+          <p className="font-bold text-[10px] uppercase tracking-widest opacity-70 mb-1">Situaciones Irregulares SII</p>
+          <ul className="list-disc list-inside space-y-0.5 text-xs">
+            {(ae.situaciones_irregulares as string[]).map((s, i) => <li key={i}>{s}</li>)}
+          </ul>
+        </div>
+      )}
 
       {/* Activities SII table */}
       {Array.isArray(ae.activities) && (ae.activities as unknown[]).length > 0 && (
