@@ -21,12 +21,24 @@ echo "▶ 2/5  Login en Cloudflare (se abrirá el navegador; da clic en Allow)..
 npx wrangler login
 
 echo "▶ 3/5  Desplegando el Worker..."
+# Nota: no usar 'set -e' aquí — si el deploy falla queremos ver la salida.
+set +e
 DEPLOY_OUT="$(npx wrangler deploy 2>&1)"
+DEPLOY_RC=$?
+set -e
 echo "$DEPLOY_OUT"
-URL="$(printf '%s\n' "$DEPLOY_OUT" | grep -oE 'https://[a-zA-Z0-9._-]+\.workers\.dev' | head -n1)"
 
+if [ $DEPLOY_RC -ne 0 ]; then
+  echo ""
+  echo "✖ El deploy falló (código $DEPLOY_RC). Revisa el error de arriba."
+  echo "  Causa típica en cuentas nuevas: falta registrar tu subdominio workers.dev"
+  echo "  una vez en https://dash.cloudflare.com → Workers & Pages."
+  exit 1
+fi
+
+URL="$(printf '%s\n' "$DEPLOY_OUT" | grep -oE 'https://[a-zA-Z0-9._-]+\.workers\.dev' | head -n1)"
 if [ -z "$URL" ]; then
-  echo "✖ No pude detectar la URL del Worker. Mírala en la salida de arriba y configúrala a mano."
+  echo "✖ Deploy OK pero no detecté la URL. Mírala arriba y configúrala a mano."
   exit 1
 fi
 echo "✓ Worker desplegado: $URL"

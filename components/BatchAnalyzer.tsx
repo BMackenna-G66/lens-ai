@@ -1,12 +1,14 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import * as XLSX from 'xlsx';
 import JSZip from 'jszip';
-import { ExtractedField } from '../types';
+import { ExtractedField, ChatMessage } from '../types';
 import { BatchCompanyInput, BatchSourceType, BatchMode, CompanyMetadata } from '../types/batch';
 import { fromLocalFolder } from '../services/batchInputNormalizer';
 import { processOneCompany } from '../services/batchProcessor';
-import { hasValidApiKeys } from '../services/geminiService';
+import { hasValidApiKeys, getChatResponse } from '../services/geminiService';
+import { GEMINI_CHAT_SYSTEM_INSTRUCTION } from '../constants';
 import { EmpresaDocsImporter } from './EmpresaDocsImporter';
+import { DocumentChat } from './DocumentChat';
 
 // ─── Runtime state types (UI-only, not part of the input contract) ────────────
 
@@ -39,6 +41,9 @@ interface BatchCompanyState {
   extractedData?: ExtractedField[];
   executiveSummary?: string;
   errorCount: number;
+  rawText?: string;                // texto consolidado — contexto del chat
+  chatMessages?: ChatMessage[];    // conversación por empresa
+  isChatLoading?: boolean;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -110,6 +115,7 @@ export const BatchAnalyzer: React.FC = () => {
   const [finished, setFinished]       = useState(false);
   const [currentLabel, setCurrentLabel] = useState('');
   const [expandedCompanies, setExpandedCompanies] = useState<Set<string>>(new Set());
+  const [activeChatCompanyId, setActiveChatCompanyId] = useState<string | null>(null);
   const stopRef   = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [tabHidden, setTabHidden]     = useState(false);
@@ -164,6 +170,57 @@ export const BatchAnalyzer: React.FC = () => {
       return { ...c, docs: c.docs.map(d => d.id === docId ? { ...d, ...patch } : d) };
     }));
 
+  // ── Chat por empresa (mismo patrón que el Analizador de Documentos) ──
+  const toggleCompanyChat = (companyId: string) =>
+    setActiveChatCompanyId(prev => (prev === companyId ? null : companyId));
+
+  // Contexto acotado SOLO a la información de esta empresa.
+  const buildCompanyContext = (c: BatchCompanyState): string => {
+    let ctx = `Empresa: ${c.companyName}`;
+    if (c.companyId) ctx += ` (Company ID: ${c.companyId})`;
+    if (c.identificationNumber) ctx += ` · RUT/DNI: ${c.identificationNumber}`;
+    if (c.country) ctx += ` · ${c.country}`;
+    ctx += '\n\n';
+    if (c.extractedData && c.extractedData.length > 0) {
+      ctx += 'FICHA EXTRAÍDA:\n' + c.extractedData.map(f => `${f.field}: ${f.value}`).join('\n') + '\n\n';
+    }
+    if (c.executiveSummary) ctx += `RESUMEN EJECUTIVO:\n${c.executiveSummary}\n\n`;
+    ctx += `TEXTO CONSOLIDADO DE LOS DOCUMENTOS:\n${c.rawText || 'No disponible.'}`;
+    return ctx;
+  };
+
+  const handleSendCompanyChat = async (companyId: string, messageText: string) => {
+    if (!hasValidApiKeys()) return;
+    const company = companyStates.find(c => c.id === companyId);
+    if (!company) return;
+
+    const userMessage: ChatMessage = { id: `user-${Date.now()}`, role: 'user', text: messageText, timestamp: new Date().toISOString() };
+    const loadingMessage: ChatMessage = { id: `model-${Date.now()}`, role: 'model', text: '...', timestamp: new Date().toISOString(), isLoading: true };
+
+    setCompanyStates(prev => prev.map(c => c.id === companyId
+      ? { ...c, chatMessages: [...(c.chatMessages || []), userMessage, loadingMessage], isChatLoading: true }
+      : c));
+
+    try {
+      const context = buildCompanyContext(company);
+      const history: { role: 'user' | 'model', parts: { text: string }[] }[] = [];
+      history.push({ role: 'user', parts: [{ text: `CONTEXTO: ${context}` }] });
+      history.push({ role: 'model', parts: [{ text: 'Entendido. Usaré solo este contexto.' }] });
+      (company.chatMessages || []).forEach(msg => history.push({ role: msg.role, parts: [{ text: msg.text }] }));
+
+      const responseText = await getChatResponse(GEMINI_CHAT_SYSTEM_INSTRUCTION, history, messageText);
+      const aiMessage: ChatMessage = { ...loadingMessage, text: responseText, isLoading: false };
+      setCompanyStates(prev => prev.map(c => c.id === companyId
+        ? { ...c, chatMessages: (c.chatMessages || []).map(m => m.id === loadingMessage.id ? aiMessage : m), isChatLoading: false }
+        : c));
+    } catch (error: any) {
+      const errorMessage: ChatMessage = { ...loadingMessage, text: `Error: ${error.message}`, isLoading: false, error: error.message };
+      setCompanyStates(prev => prev.map(c => c.id === companyId
+        ? { ...c, chatMessages: (c.chatMessages || []).map(m => m.id === loadingMessage.id ? errorMessage : m), isChatLoading: false }
+        : c));
+    }
+  };
+
   // ── Batch loop ──
   const startBatch = async () => {
     if (!hasValidApiKeys()) {
@@ -211,6 +268,7 @@ export const BatchAnalyzer: React.FC = () => {
           extractedData: result.extractedData,
           executiveSummary: result.executiveSummary,
           errorCount: result.errorCount,
+          rawText: result.rawText,
         });
 
       } catch (err) {
@@ -524,7 +582,7 @@ export const BatchAnalyzer: React.FC = () => {
               </div>
             </div>
           </div>
-          <CompanyQueue companies={companyStates} expandedCompanies={expandedCompanies} onToggle={toggleExpand} onDownloadPdf={downloadCompanyPdf} />
+          <CompanyQueue companies={companyStates} expandedCompanies={expandedCompanies} onToggle={toggleExpand} onDownloadPdf={downloadCompanyPdf} activeChatCompanyId={activeChatCompanyId} onToggleChat={toggleCompanyChat} onSendChat={handleSendCompanyChat} isApiKeyOk={hasValidApiKeys()} />
         </div>
       )}
 
@@ -556,7 +614,7 @@ export const BatchAnalyzer: React.FC = () => {
               </button>
             </div>
           </div>
-          <CompanyQueue companies={companyStates} expandedCompanies={expandedCompanies} onToggle={toggleExpand} onDownloadPdf={downloadCompanyPdf} />
+          <CompanyQueue companies={companyStates} expandedCompanies={expandedCompanies} onToggle={toggleExpand} onDownloadPdf={downloadCompanyPdf} activeChatCompanyId={activeChatCompanyId} onToggleChat={toggleCompanyChat} onSendChat={handleSendCompanyChat} isApiKeyOk={hasValidApiKeys()} />
         </div>
       )}
     </div>
@@ -570,7 +628,11 @@ const CompanyQueue: React.FC<{
   expandedCompanies: Set<string>;
   onToggle: (id: string) => void;
   onDownloadPdf: (c: BatchCompanyState) => void;
-}> = ({ companies, expandedCompanies, onToggle, onDownloadPdf }) => (
+  activeChatCompanyId: string | null;
+  onToggleChat: (id: string) => void;
+  onSendChat: (id: string, messageText: string) => void;
+  isApiKeyOk: boolean;
+}> = ({ companies, expandedCompanies, onToggle, onDownloadPdf, activeChatCompanyId, onToggleChat, onSendChat, isApiKeyOk }) => (
   <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl overflow-hidden divide-y divide-slate-100 dark:divide-slate-800">
     {companies.map(c => {
       const expanded = expandedCompanies.has(c.id);
@@ -587,6 +649,20 @@ const CompanyQueue: React.FC<{
               ? <span className="text-[10px] font-semibold text-blue-600 dark:text-blue-400 animate-pulse shrink-0 max-w-[160px] truncate">{c.statusLabel}</span>
               : <StatusBadge status={c.status} />
             }
+            {c.status === 'done' && (
+              <button
+                onClick={() => onToggleChat(c.id)}
+                disabled={!isApiKeyOk}
+                title={isApiKeyOk ? 'Chatear solo con la información de esta empresa' : 'El chat requiere una API Key válida'}
+                className={`flex items-center gap-1 text-xs px-2.5 py-1 rounded-lg font-semibold shrink-0 transition-colors border disabled:opacity-50 disabled:cursor-not-allowed ${
+                  activeChatCompanyId === c.id
+                    ? 'bg-emerald-600 text-white border-emerald-600'
+                    : 'bg-white dark:bg-slate-800 text-emerald-700 dark:text-emerald-400 border-emerald-200 dark:border-emerald-800 hover:bg-emerald-50 dark:hover:bg-emerald-950/30'
+                }`}
+              >
+                💬 Chat
+              </button>
+            )}
             {c.pdfBlob && (
               <button
                 onClick={() => onDownloadPdf(c)}
@@ -596,6 +672,17 @@ const CompanyQueue: React.FC<{
               </button>
             )}
           </div>
+
+          {activeChatCompanyId === c.id && (
+            <div className="px-4 pb-4 bg-slate-50/50 dark:bg-slate-800/30">
+              <DocumentChat
+                documentId={c.id}
+                chatMessages={c.chatMessages || []}
+                isChatLoading={!!c.isChatLoading}
+                onSendMessage={(text) => onSendChat(c.id, text)}
+              />
+            </div>
+          )}
 
           {expanded && (
             <div className="px-4 pb-3 bg-slate-50/50 dark:bg-slate-800/30 space-y-1">
