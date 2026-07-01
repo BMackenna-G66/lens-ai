@@ -28,6 +28,7 @@ export interface ModulePermissions {
   criminal: boolean;
   generalDashboard: boolean;
   regcheq: boolean;
+  lens360: boolean;
 }
 
 export interface UserProfile {
@@ -138,7 +139,7 @@ export async function bootstrapUser(firebaseUser: {
     displayName: firebaseUser.displayName ?? '',
     photoURL: firebaseUser.photoURL ?? '',
     role: 'Analista',
-    modules: { compliance: true, criminal: true, generalDashboard: true, regcheq: true },
+    modules: { compliance: true, criminal: true, generalDashboard: true, regcheq: true, lens360: true },
     createdAt: Date.now(),
     lastLogin: Date.now(),
   };
@@ -181,7 +182,7 @@ export async function bootstrapUser(firebaseUser: {
       displayName: firebaseUser.displayName ?? '',
       photoURL: firebaseUser.photoURL ?? '',
       role,
-      modules: { compliance: true, criminal: true, generalDashboard: true, regcheq: true },
+      modules: { compliance: true, criminal: true, generalDashboard: true, regcheq: true, lens360: true },
       createdAt: Date.now(),
       lastLogin: Date.now(),
     };

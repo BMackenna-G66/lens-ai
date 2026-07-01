@@ -55,8 +55,35 @@ function computeCriminalDecision(additionalData: Record<string, unknown>[]): Len
 }
 
 // ─── Regcheq (GET /record/{dni}/{key}) ──────────────────────────────────────────
-async function fetchRegcheq(rut: string) {
-  const resp = await fetch(`${REGCHEQ_BASE}/record/${rut}/${REGCHEQ_KEY}`);
+const sleep = (ms: number) => new Promise(res => setTimeout(res, ms));
+
+// Crea/actualiza el registro en Regcheq (necesario si el RUT nunca fue consultado).
+async function createRegcheqRecord(rut: string, nombre: string, personType: Lens360PersonType): Promise<void> {
+  const body: Record<string, string> = { dni: rut, personType };
+  if (nombre) {
+    if (personType === 'legal') body.socialReason = nombre;
+    else {
+      // Nombre → name / fatherName (heurística simple: primer token = nombre, resto = apellidos)
+      const parts = nombre.trim().split(/\s+/);
+      body.name = (parts[0] ?? '').toUpperCase();
+      if (parts.length > 1) body.fatherName = parts.slice(1).join(' ').toUpperCase();
+    }
+  }
+  await fetch(`${REGCHEQ_BASE}/record/${REGCHEQ_KEY}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+}
+
+// GET del perfil; si es 404 (registro inexistente), lo crea vía POST y reintenta.
+async function fetchRegcheq(rut: string, nombre: string, personType: Lens360PersonType) {
+  let resp = await fetch(`${REGCHEQ_BASE}/record/${rut}/${REGCHEQ_KEY}`);
+  if (resp.status === 404) {
+    // El registro no existe aún → crear y reintentar (mismo patrón que el flujo masivo de Regcheq).
+    await createRegcheqRecord(rut, nombre, personType);
+    await sleep(1000);
+    resp = await fetch(`${REGCHEQ_BASE}/record/${rut}/${REGCHEQ_KEY}`);
+    if (resp.status === 404) { await sleep(2000); resp = await fetch(`${REGCHEQ_BASE}/record/${rut}/${REGCHEQ_KEY}`); }
+  }
   if (!resp.ok) throw new Error(`API ${resp.status}: ${resp.statusText}`);
   const perfil = await resp.json();
 
@@ -187,7 +214,7 @@ export async function search360(params: {
 
   // 1) Regcheq (siempre): AML Chile + causas penales + decisión criminal
   try {
-    const rc = await fetchRegcheq(rut);
+    const rc = await fetchRegcheq(rut, nombre, personType);
     result.nombre = rc.nombre || result.nombre;
     result.personType = rc.personType || personType;
     result.regcheqRisk = rc.regcheqRisk;

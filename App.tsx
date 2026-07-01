@@ -88,11 +88,13 @@ const AppContent: React.FC = () => {
     />;
 
   } else if (activeSuite === 'lens360') {
-    mainContent = <Lens360
-      onBack={() => setActiveSuite(null)}
-      darkMode={darkMode}
-      onToggleDarkMode={() => setDarkMode(d => !d)}
-    />;
+    mainContent = (userProfile?.modules?.lens360 ?? true)
+      ? <Lens360
+          onBack={() => setActiveSuite(null)}
+          darkMode={darkMode}
+          onToggleDarkMode={() => setDarkMode(d => !d)}
+        />
+      : <AccessDenied msg="Módulo desactivado por tu administrador" />;
 
   } else if (activeSuite === 'criminal') {
     mainContent = (userProfile?.modules?.criminal ?? true)
