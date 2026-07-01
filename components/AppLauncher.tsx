@@ -142,6 +142,7 @@ export const AppLauncher: React.FC<AppLauncherProps> = ({ onSelect }) => {
         )}
 
         {/* Vista 360° — full width */}
+        {(userProfile?.modules?.lens360 ?? true) && (
         <div className="mt-6">
           <button
             onClick={() => onSelect('lens360')}
@@ -172,6 +173,7 @@ export const AppLauncher: React.FC<AppLauncherProps> = ({ onSelect }) => {
             </div>
           </button>
         </div>
+        )}
 
         {/* Líder-only cards */}
         {role === 'Lider' && (
