@@ -74,16 +74,14 @@ async function createRegcheqRecord(rut: string, nombre: string, personType: Lens
   });
 }
 
-// GET del perfil; si es 404 (registro inexistente), lo crea vía POST y reintenta.
+// Crea/refresca el registro SIEMPRE antes de consultar — dispara el screening real
+// (mismo efecto que marcar "crear ficha" en el módulo Regcheq). Sin este POST, el GET
+// puede devolver un registro existente pero sin coincidencias, aunque sí las tenga.
 async function fetchRegcheq(rut: string, nombre: string, personType: Lens360PersonType) {
+  await createRegcheqRecord(rut, nombre, personType);
+  await sleep(1200); // dar tiempo a que la API indexe el screening
   let resp = await fetch(`${REGCHEQ_BASE}/record/${rut}/${REGCHEQ_KEY}`);
-  if (resp.status === 404) {
-    // El registro no existe aún → crear y reintentar (mismo patrón que el flujo masivo de Regcheq).
-    await createRegcheqRecord(rut, nombre, personType);
-    await sleep(1000);
-    resp = await fetch(`${REGCHEQ_BASE}/record/${rut}/${REGCHEQ_KEY}`);
-    if (resp.status === 404) { await sleep(2000); resp = await fetch(`${REGCHEQ_BASE}/record/${rut}/${REGCHEQ_KEY}`); }
-  }
+  if (resp.status === 404) { await sleep(2000); resp = await fetch(`${REGCHEQ_BASE}/record/${rut}/${REGCHEQ_KEY}`); }
   if (!resp.ok) throw new Error(`API ${resp.status}: ${resp.statusText}`);
   const perfil = await resp.json();
 
