@@ -21,6 +21,7 @@ export interface CompanyProcessResult {
   executiveSummary: string;
   pdfBlob: Blob;
   errorCount: number;
+  rawText: string;       // texto consolidado de todos los docs — contexto para el chat
 }
 
 export interface ProcessCallbacks {
@@ -128,5 +129,5 @@ export async function processOneCompany(
     enrichedData
   );
 
-  return { extractedData, executiveSummary, pdfBlob, errorCount };
+  return { extractedData, executiveSummary, pdfBlob, errorCount, rawText: combinedText };
 }
