@@ -41,17 +41,51 @@ const extractJsonFromResponse = (text: string): string => {
   return text.trim();
 };
 
+const MAX_ATTEMPTS = 3;
+const sleep = (ms: number) => new Promise<void>(res => setTimeout(res, ms));
+
+// Errores permanentes: no tiene sentido reintentar.
+const isPermanentError = (msg: string): boolean =>
+  msg.includes('api key not valid') || msg.includes('quota');
+
+// Errores transitorios (red, sobrecarga, rate-limit): reintentar con backoff.
+const isTransientError = (msg: string): boolean =>
+  msg.includes('failed to fetch') ||
+  msg.includes('networkerror') ||
+  msg.includes('fetch failed') ||
+  msg.includes('load failed') ||
+  msg.includes('timeout') ||
+  msg.includes('overloaded') ||
+  msg.includes('unavailable') ||
+  msg.includes('429') ||
+  msg.includes('500') ||
+  msg.includes('502') ||
+  msg.includes('503') ||
+  msg.includes('504');
+
 async function executeWithRetry<T>(apiCall: (ai: GoogleGenAI) => Promise<T>): Promise<T> {
   if (!hasValidApiKeys()) throw new Error("No hay API Keys de Gemini válidas configuradas.");
   const ai = getAiInstance();
-  try {
-    return await apiCall(ai);
-  } catch (error: any) {
-    let cleanMessage = error.message || "Error desconocido de la API.";
-    if (cleanMessage.includes("API key not valid")) cleanMessage = "La API Key de Gemini no es válida.";
-    else if (cleanMessage.toLowerCase().includes("quota")) cleanMessage = "Se ha excedido la cuota de la API de Gemini.";
-    throw new Error(`El análisis falló. Error: ${cleanMessage}`);
+
+  let lastError: any;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      return await apiCall(ai);
+    } catch (error: any) {
+      lastError = error;
+      const msg = (error?.message || '').toString().toLowerCase();
+      // No reintentar errores permanentes, ni tras el último intento.
+      if (isPermanentError(msg) || !isTransientError(msg) || attempt === MAX_ATTEMPTS) break;
+      await sleep(attempt * 1200); // backoff: 1.2s, 2.4s
+    }
   }
+
+  let cleanMessage = lastError?.message || "Error desconocido de la API.";
+  const lower = cleanMessage.toLowerCase();
+  if (lower.includes("api key not valid")) cleanMessage = "La API Key de Gemini no es válida.";
+  else if (lower.includes("quota")) cleanMessage = "Se ha excedido la cuota de la API de Gemini.";
+  else if (isTransientError(lower)) cleanMessage = "No se pudo conectar con Gemini tras varios intentos (error de red o sobrecarga). Reintenta en unos segundos.";
+  throw new Error(`El análisis falló. Error: ${cleanMessage}`);
 }
 
 const primaryAnalysisModel = 'gemini-2.5-flash';
