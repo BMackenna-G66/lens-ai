@@ -1,7 +1,7 @@
 import React from 'react';
 import { useAuth } from '../context/AuthContext';
 
-type Suite = 'compliance' | 'criminal' | 'admin' | 'general-dashboard' | 'regcheq';
+type Suite = 'compliance' | 'criminal' | 'admin' | 'general-dashboard' | 'regcheq' | 'lens360';
 
 interface AppLauncherProps {
   onSelect: (suite: Suite) => void;
@@ -140,6 +140,38 @@ export const AppLauncher: React.FC<AppLauncherProps> = ({ onSelect }) => {
             </button>
           </div>
         )}
+
+        {/* Vista 360° — full width */}
+        <div className="mt-6">
+          <button
+            onClick={() => onSelect('lens360')}
+            className="group relative w-full bg-white/80 dark:bg-slate-900/70 hover:bg-violet-50 dark:hover:bg-violet-950/40 border border-slate-200 dark:border-slate-700/50 hover:border-violet-400 dark:hover:border-violet-600/50 rounded-3xl p-8 text-left transition-all duration-300 hover:shadow-2xl hover:shadow-violet-100/50 dark:hover:shadow-violet-950/30 active:scale-[0.98]"
+          >
+            <div className="absolute top-4 right-4 opacity-0 group-hover:opacity-100 transition-opacity">
+              <div className="w-8 h-8 bg-violet-600 rounded-full flex items-center justify-center">
+                <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                </svg>
+              </div>
+            </div>
+            <div className="flex items-start gap-6">
+              <div className="w-16 h-16 bg-violet-100 dark:bg-violet-600/20 rounded-2xl flex items-center justify-center flex-shrink-0 border border-violet-200 dark:border-violet-500/30 group-hover:bg-violet-200 dark:group-hover:bg-violet-600/30 transition-colors">
+                <span className="text-3xl">🔭</span>
+              </div>
+              <div className="flex-1">
+                <h2 className="text-xl font-black text-slate-900 dark:text-white mb-2">Vista 360° — Consulta Consolidada</h2>
+                <p className="text-slate-500 dark:text-slate-400 text-sm font-medium mb-4 leading-relaxed">
+                  Ingresa un RUT/DNI y obtén en una sola pantalla el screening AML de Chile (Regcheq) y Colombia (Inspektor), los antecedentes penales y la decisión criminal, con un veredicto de riesgo unificado.
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {['🔍 Búsqueda por RUT', '🌐 Chile + Colombia', '⚖️ Decisión Criminal', '🎯 Veredicto Unificado'].map(tag => (
+                    <span key={tag} className="text-[10px] font-bold uppercase tracking-widest text-violet-700 dark:text-violet-400 bg-violet-100 dark:bg-violet-950/50 border border-violet-200 dark:border-violet-800/50 px-2 py-1 rounded-lg">{tag}</span>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </button>
+        </div>
 
         {/* Líder-only cards */}
         {role === 'Lider' && (

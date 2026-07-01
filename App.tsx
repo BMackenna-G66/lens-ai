@@ -10,13 +10,14 @@ import { CriminalApp } from './components/CriminalProfiler/CriminalApp';
 import { GeneralDashboard } from './components/GeneralDashboard';
 import { AdminModule } from './components/AdminModule';
 import { RegcheqTool } from './components/RegcheqTool';
+import { Lens360 } from './components/Lens360';
 import { BatchAnalyzer } from './components/BatchAnalyzer';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { IconFiles, IconAlertTriangle, IconWallet, IconScale } from './components/IconComponents';
 import { trackModuleVisit, ModuleKey } from './services/analyticsService';
 
 type TabKey = 'dashboard' | 'analyzer' | 'batch' | 'tools' | 'crypto' | 'compliance';
-type Suite = 'compliance' | 'criminal' | 'admin' | 'general-dashboard' | 'regcheq' | null;
+type Suite = 'compliance' | 'criminal' | 'admin' | 'general-dashboard' | 'regcheq' | 'lens360' | null;
 
 const AppContent: React.FC = () => {
   const { user, isLoading: authLoading, firebaseReady, profileLoading, role, userProfile } = useAuth();
@@ -81,6 +82,13 @@ const AppContent: React.FC = () => {
 
   } else if (activeSuite === 'regcheq') {
     mainContent = <RegcheqTool
+      onBack={() => setActiveSuite(null)}
+      darkMode={darkMode}
+      onToggleDarkMode={() => setDarkMode(d => !d)}
+    />;
+
+  } else if (activeSuite === 'lens360') {
+    mainContent = <Lens360
       onBack={() => setActiveSuite(null)}
       darkMode={darkMode}
       onToggleDarkMode={() => setDarkMode(d => !d)}
