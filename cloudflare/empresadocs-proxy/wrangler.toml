@@ -1,0 +1,7 @@
+name = "empresadocs-proxy"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+
+# Deploy:  cd cloudflare/empresadocs-proxy && npx wrangler deploy
+# La URL resultante (https://empresadocs-proxy.<tu-subdominio>.workers.dev)
+# va en la variable EMPRESADOCS_PROXY_URL del frontend.

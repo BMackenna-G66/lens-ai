@@ -632,7 +632,7 @@ const CompanyQueue: React.FC<{
               {c.error && <p className="text-xs text-red-500 dark:text-red-400 pt-1">{c.error}</p>}
               {c.docs.length > 0 && c.docs.every(d => d.ocrStatus === 'error' && d.presignedUrl) && (
                 <p className="text-[10px] text-amber-600 dark:text-amber-400 pt-1">
-                  ⚠ Descarga bloqueada por CORS de S3. Solución: inicia <strong>empresa_docs_app.py</strong> en tu máquina (localhost:5050) y vuelve a importar — Lens usará ese proxy automáticamente.
+                  ⚠ Descarga bloqueada por CORS de S3. No hay proxy disponible. Solución: configura el proxy cloud (<strong>EMPRESADOCS_PROXY_URL</strong>) o inicia <strong>empresa_docs_app.py</strong> en tu máquina (localhost:5050) y vuelve a importar.
                 </p>
               )}
               {c.executiveSummary && (

@@ -228,6 +228,22 @@ export { authGetPresignedUrl as getPresignedUrl };
 // Port 5050 matches empresa_docs_app.py default.
 const PYTHON_PROXY = 'http://localhost:5050';
 
+// Cloud relay (Cloudflare Worker) — descarga S3 server-side y devuelve los bytes
+// con CORS permitido. Funciona en cualquier PC sin proxy local. Se configura vía
+// EMPRESADOCS_PROXY_URL (ver cloudflare/empresadocs-proxy/). Vacío = se omite.
+const CLOUD_PROXY = (process.env.EMPRESADOCS_PROXY_URL || '').replace(/\/$/, '');
+
+async function downloadViaCloudRelay(presignedUrl: string): Promise<Blob | null> {
+  if (!CLOUD_PROXY || !presignedUrl) return null;
+  try {
+    const res = await fetch(`${CLOUD_PROXY}/relay?url=${encodeURIComponent(presignedUrl)}`);
+    if (!res.ok) return null;
+    return res.blob();
+  } catch {
+    return null;
+  }
+}
+
 async function downloadViaProxy(fileKey: string): Promise<Blob | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 5000);
@@ -280,7 +296,11 @@ export async function downloadEmpresaDoc(
     return { blob, presignedUrl };
   } catch (err) {
     if (err instanceof TypeError) {
-      console.warn('[EmpresaDocs] S3 bloqueado por CORS. Inicia empresa_docs_app.py en localhost:5050.');
+      // Strategy 3: cloud relay (Cloudflare Worker). Funciona en cualquier PC.
+      const relayBlob = await downloadViaCloudRelay(presignedUrl);
+      if (relayBlob) return { blob: relayBlob, presignedUrl };
+
+      console.warn('[EmpresaDocs] S3 bloqueado por CORS y sin proxy disponible. Configura EMPRESADOCS_PROXY_URL o inicia empresa_docs_app.py.');
       const corsErr = new Error('CORS_BLOCK') as Error & { presignedUrl: string };
       corsErr.presignedUrl = presignedUrl;
       throw corsErr;
