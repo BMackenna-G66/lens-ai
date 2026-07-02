@@ -41,6 +41,14 @@ export interface Lens360Inspektor {
   error?: string;        // si la consulta falló (p.ej. CORS)
 }
 
+export interface Lens360RelatedPerson {
+  dni: string;
+  name: string;
+  roles: string[];       // representante legal, beneficiario final, etc.
+  percentage?: number;   // % de participación (si aplica)
+  country?: string;
+}
+
 export interface Lens360Result {
   rut: string;
   nombre: string;
@@ -56,6 +64,8 @@ export interface Lens360Result {
   criminalProfile?: PersonProfile;   // perfil completo para la ficha detallada (Criminal Profiler)
   // Screening Colombia (Inspektor)
   inspektor?: Lens360Inspektor;
+  // Personas relacionadas (representantes legales, beneficiarios) para screening en cadena
+  related: Lens360RelatedPerson[];
   // Veredicto consolidado
   verdict: Lens360Verdict;
   verdictReasons: string[];

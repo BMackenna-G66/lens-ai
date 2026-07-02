@@ -3,7 +3,8 @@ import * as XLSX from 'xlsx';
 import JSZip from 'jszip';
 import { search360, hasRegcheqKey } from '../services/lens360Service';
 import { generateLens360Pdf, generateLens360Blob } from '../services/pdfGenerator';
-import { Lens360Result, Lens360Verdict, Lens360PersonType } from '../types/lens360';
+import { Lens360Result, Lens360Verdict, Lens360PersonType, Lens360RelatedPerson } from '../types/lens360';
+import { PersonProfile } from '../types/criminalTypes';
 import { ProfileDetails } from './CriminalProfiler/ProfileDetails';
 
 interface Lens360Props {
@@ -176,13 +177,32 @@ export const Lens360: React.FC<Lens360Props> = ({ onBack, darkMode, onToggleDark
 const ResultView: React.FC<{ result: Lens360Result }> = ({ result }) => {
   const v = VERDICT_STYLE[result.verdict];
   const coincidencias = result.amlHits.filter(h => h.coincidence);
-  const [showDetail, setShowDetail] = useState(false);
+  const [detailProfile, setDetailProfile] = useState<PersonProfile | null>(null);
   const [downloadingPdf, setDownloadingPdf] = useState(false);
+  const [relScreen, setRelScreen] = useState<Record<string, Lens360Result | 'loading'>>({});
+  const [screeningAll, setScreeningAll] = useState(false);
 
   const handleDownloadPdf = async () => {
     setDownloadingPdf(true);
     try { await generateLens360Pdf(result); }
     finally { setDownloadingPdf(false); }
+  };
+
+  const screenPerson = async (p: Lens360RelatedPerson) => {
+    if (!p.dni) return;
+    setRelScreen(prev => ({ ...prev, [p.dni]: 'loading' }));
+    try {
+      const res = await search360({ rut: p.dni, nombre: p.name, country: result.country, personType: 'natural' });
+      setRelScreen(prev => ({ ...prev, [p.dni]: res }));
+    } catch {
+      setRelScreen(prev => { const c = { ...prev }; delete c[p.dni]; return c; });
+    }
+  };
+
+  const screenAll = async () => {
+    setScreeningAll(true);
+    for (const p of result.related) { if (p.dni) await screenPerson(p); }
+    setScreeningAll(false);
   };
 
   return (
@@ -272,7 +292,7 @@ const ResultView: React.FC<{ result: Lens360Result }> = ({ result }) => {
               </ul>
               {result.criminalProfile && (
                 <button
-                  onClick={() => setShowDetail(true)}
+                  onClick={() => setDetailProfile(result.criminalProfile!)}
                   className="mt-3 w-full text-xs font-semibold text-indigo-700 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/40 hover:bg-indigo-100 dark:hover:bg-indigo-900/40 border border-indigo-200 dark:border-indigo-800 rounded-lg py-2 transition-colors"
                 >
                   🔍 Ver ficha de análisis criminal detallada
@@ -305,11 +325,58 @@ const ResultView: React.FC<{ result: Lens360Result }> = ({ result }) => {
         </Card>
       )}
 
+      {/* Personas relacionadas — screening en cadena */}
+      {result.related.length > 0 && (
+        <Card title="Personas Relacionadas" badge={`${result.related.length} persona(s)`}>
+          <div className="flex justify-end mb-2">
+            <button onClick={screenAll} disabled={screeningAll}
+              className="text-xs font-semibold text-indigo-700 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/40 hover:bg-indigo-100 dark:hover:bg-indigo-900/40 border border-indigo-200 dark:border-indigo-800 rounded-lg px-3 py-1.5 disabled:opacity-50">
+              {screeningAll ? '⏳ Consultando…' : '🔍 Consultar riesgo de todas'}
+            </button>
+          </div>
+          <ul className="space-y-2">
+            {result.related.map((p, i) => {
+              const s = p.dni ? relScreen[p.dni] : undefined;
+              return (
+                <li key={i} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-b border-slate-100 dark:border-slate-800 pb-2 last:border-0">
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-slate-800 dark:text-slate-200 truncate">{p.name || p.dni}</p>
+                    <p className="text-[11px] text-slate-400">
+                      {p.dni || 'sin RUT'}{p.roles.length ? ` · ${p.roles.join(', ')}` : ''}{p.percentage != null ? ` · ${p.percentage}%` : ''}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    {s === 'loading' ? (
+                      <span className="text-[11px] text-blue-500 animate-pulse">Consultando…</span>
+                    ) : s ? (
+                      <>
+                        <span className={`text-[10px] font-black px-2 py-1 rounded-lg border ${VERDICT_STYLE[s.verdict].cls}`}>{VERDICT_STYLE[s.verdict].label}</span>
+                        <span className="text-[10px] text-slate-400">{s.amlHits.filter(h => h.coincidence).length} AML · {s.crimes.length} causas</span>
+                        {s.criminalProfile && (
+                          <button onClick={() => setDetailProfile(s.criminalProfile!)} className="text-[10px] text-indigo-600 dark:text-indigo-400 underline">ficha</button>
+                        )}
+                      </>
+                    ) : p.dni ? (
+                      <button onClick={() => screenPerson(p)}
+                        className="text-[11px] font-semibold text-indigo-700 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800 rounded-lg px-2.5 py-1 hover:bg-indigo-50 dark:hover:bg-indigo-950/40">
+                        Consultar
+                      </button>
+                    ) : (
+                      <span className="text-[10px] text-slate-400">sin RUT</span>
+                    )}
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </Card>
+      )}
+
       {/* Ficha de análisis criminal detallada (reutiliza ProfileDetails del Criminal Profiler) */}
-      {showDetail && result.criminalProfile && (
+      {detailProfile && (
         <ProfileDetails
-          profile={result.criminalProfile}
-          onClose={() => setShowDetail(false)}
+          profile={detailProfile}
+          onClose={() => setDetailProfile(null)}
           onUpdate={() => { /* 360 es de solo lectura, sin persistencia */ }}
         />
       )}
@@ -372,7 +439,7 @@ const Lens360Masivo: React.FC = () => {
       } catch {
         acc.push({
           rut: row.rut, nombre: row.nombre || row.rut, personType: row.personType, country: row.country,
-          amlHits: [], crimes: [], verdict: 'SIN_DATOS', verdictReasons: ['Error en la consulta'],
+          amlHits: [], crimes: [], related: [], verdict: 'SIN_DATOS', verdictReasons: ['Error en la consulta'],
           sources: { regcheq: false, inspektor: false },
         });
       }

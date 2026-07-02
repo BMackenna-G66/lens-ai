@@ -7,7 +7,7 @@ import { applyEvaluationToProfile } from './criminalDataProcessor';
 import { CatalogData, PersonProfile, Crime } from '../types/criminalTypes';
 import {
   Lens360Result, Lens360ListHit, Lens360Crime,
-  Lens360CriminalDecision, Lens360InspektorHit, Lens360Verdict, Lens360PersonType,
+  Lens360CriminalDecision, Lens360InspektorHit, Lens360Verdict, Lens360PersonType, Lens360RelatedPerson,
 } from '../types/lens360';
 
 // ─── Config (mismas fuentes que RegcheqTool / InspektorColombia) ────────────────
@@ -180,12 +180,21 @@ async function fetchRegcheq(rut: string, nombre: string, personType: Lens360Pers
     criminalProfile = evaluated.profile;
   }
 
+  // Personas relacionadas (representantes legales, beneficiarios finales, etc.)
+  const related: Lens360RelatedPerson[] = ((perfil.personsRelations ?? []) as Record<string, unknown>[]).map(p => ({
+    dni: String(p['dni'] ?? '').trim(),
+    name: String(p['name'] ?? '').trim(),
+    roles: Array.isArray(p['type']) ? (p['type'] as unknown[]).map(String) : (p['type'] ? [String(p['type'])] : []),
+    percentage: typeof p['percentage'] === 'number' ? (p['percentage'] as number) : undefined,
+    country: p['country'] ? String(p['country']) : undefined,
+  })).filter(p => p.dni || p.name);
+
   return {
     nombre: perfilNombre,
     personType: String(perfil.personType ?? ''),
     regcheqRisk: (perfil.effectiveRisk ?? perfil.calculatedRisk ?? '') as string,
     pepLevel: (perfil.pepLevel ?? '') as string,
-    amlHits, crimes, criminalDecision, criminalProfile,
+    amlHits, crimes, criminalDecision, criminalProfile, related,
   };
 }
 
@@ -279,7 +288,7 @@ export async function search360(params: {
 
   const result: Lens360Result = {
     rut, nombre: nombre || rut, personType, country,
-    amlHits: [], crimes: [], verdict: 'SIN_DATOS', verdictReasons: [],
+    amlHits: [], crimes: [], related: [], verdict: 'SIN_DATOS', verdictReasons: [],
     sources: { regcheq: false, inspektor: false },
   };
 
@@ -294,6 +303,7 @@ export async function search360(params: {
     result.crimes = rc.crimes;
     result.criminalDecision = rc.criminalDecision;
     result.criminalProfile = rc.criminalProfile;
+    result.related = rc.related;
     result.sources.regcheq = true;
   } catch (e) {
     result.verdictReasons.push(`Regcheq no disponible: ${(e as Error).message}`);
