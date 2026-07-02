@@ -99,10 +99,14 @@ function evaluateCriminal(rut: string, nombre: string, additionalData: Record<st
   };
   applyEvaluationToProfile(profile, loadCriminalCatalog());
 
-  // Conteo precedentes / no precedentes (misma lógica que ProfileDetails).
-  const isPre = (c: Crime) => (c.catalogType || '').toUpperCase().includes('PRECEDENTE');
+  // Conteo precedentes / no precedentes.
+  // OJO: "DELITOS NO PRECEDENTES" también contiene "PRECEDENTE", así que hay que
+  // excluir explícitamente los "NO PRECEDENTE" antes de contar los precedentes.
+  const cat = (c: Crime) => (c.catalogType || '').toUpperCase();
+  const isNoPre = (c: Crime) => /NO[\s_]*PRECEDENTE/.test(cat(c));
+  const isPre = (c: Crime) => !isNoPre(c) && cat(c).includes('PRECEDENTE');
   const precedentes = profile.crimes.filter(isPre);
-  const noPrecedentes = profile.crimes.filter(c => !isPre(c));
+  const noPrecedentes = profile.crimes.filter(isNoPre);
   const sum = (arr: Crime[]) => arr.reduce((s, c) => s + (c.catalogValue || 0), 0);
 
   const decision = profile.preEvaluation ? {

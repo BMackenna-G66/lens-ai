@@ -187,9 +187,13 @@ export const ProfileDetails: React.FC<ProfileDetailsProps> = ({ profile, onClose
     return 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-600';
   };
 
-  // Score breakdown helpers
-  const precedentes = profile.crimes.filter(c => (c.catalogType || '').toUpperCase().includes('PRECEDENTE'));
-  const noPrecedentes = profile.crimes.filter(c => !(c.catalogType || '').toUpperCase().includes('PRECEDENTE'));
+  // Score breakdown helpers.
+  // "DELITOS NO PRECEDENTES" también contiene "PRECEDENTE"; hay que excluir los
+  // "NO PRECEDENTE" antes de contar los precedentes, si no todo cae en precedentes.
+  const catType = (c: Crime) => (c.catalogType || '').toUpperCase();
+  const isNoPre = (c: Crime) => /NO[\s_]*PRECEDENTE/.test(catType(c));
+  const precedentes = profile.crimes.filter(c => !isNoPre(c) && catType(c).includes('PRECEDENTE'));
+  const noPrecedentes = profile.crimes.filter(isNoPre);
   const preScore = precedentes.reduce((s, c) => s + (c.catalogValue || 0), 0);
   const noPreScore = noPrecedentes.reduce((s, c) => s + (c.catalogValue || 0), 0);
   const totalScore = preScore + noPreScore;
