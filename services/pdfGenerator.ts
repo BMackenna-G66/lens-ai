@@ -2,6 +2,7 @@
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { ExtractedField, CryptoWalletProfile, ComplianceAnalysisResult, FinancialDocumentProcess, FinancialDocumentType } from '../types';
+import { Lens360Result } from '../types/lens360';
 
 // Colors
 const NAVY = [30, 58, 95] as [number, number, number];       // #1e3a5f
@@ -1928,5 +1929,126 @@ export const generateBatchCompanyPdf = async (
     doc.text(`Pág. ${p} / ${totalPages}`, pageWidth - margin, doc.internal.pageSize.getHeight() - 6, { align: 'right' });
   }
 
+  return doc.output('blob');
+};
+
+// ─── Vista 360° — reporte consolidado ────────────────────────────────────────
+async function buildLens360Doc(r: Lens360Result): Promise<jsPDF> {
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const margin = 14;
+  const date = new Date().toLocaleString('es-CL');
+
+  // Header
+  doc.setFillColor(...NAVY); doc.rect(0, 0, pageWidth, 38, 'F');
+  doc.setFillColor(...INDIGO); doc.rect(0, 38, pageWidth, 2, 'F');
+  const logo = await loadLogoBase64();
+  if (logo) { try { doc.addImage(logo, 'JPEG', pageWidth - 58, 8, 44, 13); } catch { /* sin logo */ } }
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(16); doc.setTextColor(...WHITE);
+  doc.text('REPORTE 360°', margin, 16);
+  doc.setFontSize(9); doc.setFont('helvetica', 'normal'); doc.setTextColor(196, 210, 230);
+  doc.text('Consulta consolidada AML / Penal · LENS AI', margin, 23);
+
+  // Info box
+  doc.setFillColor(...LIGHT_GRAY); doc.setDrawColor(220, 228, 240);
+  doc.roundedRect(margin, 46, pageWidth - margin * 2, 22, 2, 2, 'FD');
+  doc.setFontSize(8); doc.setFont('helvetica', 'bold'); doc.setTextColor(...MID_GRAY);
+  doc.text('PERSONA / EMPRESA', margin + 4, 53);
+  doc.text('FECHA DE GENERACIÓN', pageWidth / 2, 53);
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.setTextColor(...DARK_TEXT);
+  doc.text(`${r.nombre} · ${r.rut}`.slice(0, 60), margin + 4, 61);
+  doc.text(date, pageWidth / 2, 61);
+
+  let y = 76;
+
+  // Veredicto
+  const vc: [number, number, number] = r.verdict === 'ALTO' ? [220, 38, 38]
+    : r.verdict === 'MEDIO' ? [217, 119, 6]
+    : r.verdict === 'BAJO' ? [5, 150, 105] : MID_GRAY;
+  doc.setFillColor(...vc); doc.roundedRect(margin, y, pageWidth - margin * 2, 12, 2, 2, 'F');
+  doc.setTextColor(...WHITE); doc.setFont('helvetica', 'bold'); doc.setFontSize(11);
+  doc.text(`VEREDICTO: RIESGO ${r.verdict}`, margin + 4, y + 8);
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(8);
+  doc.text(`${r.personType === 'legal' ? 'Persona jurídica' : 'Persona natural'} · ${r.country}${r.pepLevel ? ` · PEP: ${r.pepLevel}` : ''}`, pageWidth - margin - 4, y + 8, { align: 'right' });
+  y += 17;
+
+  doc.setTextColor(...DARK_TEXT); doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5);
+  r.verdictReasons.forEach(reason => {
+    const lines = doc.splitTextToSize(`•  ${reason}`, pageWidth - margin * 2);
+    doc.text(lines, margin, y); y += lines.length * 4.3;
+  });
+  y += 4;
+
+  // Screening AML Chile
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.setTextColor(...NAVY);
+  doc.text('Screening AML · Chile (Regcheq)', margin, y);
+  autoTable(doc, {
+    startY: y + 3,
+    head: [['Lista', 'Coincidencia', 'Riesgo']],
+    body: r.amlHits.length ? r.amlHits.map(h => [h.nombre, h.coincidence ? 'SÍ' : '—', h.risk || '—']) : [['Sin datos', '—', '—']],
+    theme: 'grid', headStyles: { fillColor: NAVY, textColor: WHITE, fontSize: 8, fontStyle: 'bold' },
+    bodyStyles: { fontSize: 8, textColor: DARK_TEXT }, margin: { left: margin, right: margin },
+    didDrawPage: d => addPageFooter(doc, d.pageNumber, 0, date),
+  });
+  y = (doc as any).lastAutoTable.finalY + 8;
+
+  // Antecedentes penales
+  if (r.criminalDecision || r.crimes.length) {
+    if (y > 235) { doc.addPage(); y = 20; }
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.setTextColor(...NAVY);
+    doc.text('Antecedentes Penales · Decisión Criminal', margin, y); y += 6;
+    if (r.criminalDecision) {
+      const cd = r.criminalDecision;
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(...DARK_TEXT);
+      const txt = `Decisión: ${cd.decision} — ${cd.razon}\nPuntaje: ${cd.totalEquivalente}  ·  Precedentes: ${cd.precedentes} (${cd.preScore} pts)  ·  No precedentes: ${cd.noPrecedentes} (${cd.noPreScore} pts)`;
+      const lines = doc.splitTextToSize(txt, pageWidth - margin * 2);
+      doc.text(lines, margin, y); y += lines.length * 4.3 + 3;
+    }
+    if (r.crimes.length) {
+      autoTable(doc, {
+        startY: y,
+        head: [['Delito', 'Estado', 'Fecha', 'RUC']],
+        body: r.crimes.map(c => [c.crimen, c.estado || '—', c.fecha || '—', c.ruc || '—']),
+        theme: 'grid', headStyles: { fillColor: NAVY, textColor: WHITE, fontSize: 8, fontStyle: 'bold' },
+        bodyStyles: { fontSize: 7.5, textColor: DARK_TEXT }, columnStyles: { 0: { cellWidth: 82 } },
+        margin: { left: margin, right: margin },
+        didDrawPage: d => addPageFooter(doc, d.pageNumber, 0, date),
+      });
+      y = (doc as any).lastAutoTable.finalY + 8;
+    }
+  }
+
+  // Screening Colombia (Inspektor)
+  if (r.country === 'CO' && r.inspektor) {
+    if (y > 235) { doc.addPage(); y = 20; }
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.setTextColor(...NAVY);
+    doc.text('Screening AML · Colombia (Inspektor)', margin, y); y += 4;
+    if (r.inspektor.error) {
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(...MID_GRAY);
+      doc.text(doc.splitTextToSize(`No disponible: ${r.inspektor.error}`, pageWidth - margin * 2), margin, y + 4);
+    } else {
+      autoTable(doc, {
+        startY: y,
+        head: [['Grupo', 'Detalle']],
+        body: r.inspektor.hits.length ? r.inspektor.hits.map(h => [h.grupo, h.detalle || '—']) : [['Sin coincidencias', '—']],
+        theme: 'grid', headStyles: { fillColor: NAVY, textColor: WHITE, fontSize: 8, fontStyle: 'bold' },
+        bodyStyles: { fontSize: 8, textColor: DARK_TEXT }, margin: { left: margin, right: margin },
+        didDrawPage: d => addPageFooter(doc, d.pageNumber, 0, date),
+      });
+    }
+  }
+
+  const totalPages = (doc as any).internal.getNumberOfPages();
+  for (let i = 1; i <= totalPages; i++) { doc.setPage(i); addPageFooter(doc, i, totalPages, date); }
+  return doc;
+}
+
+export const generateLens360Pdf = async (r: Lens360Result): Promise<void> => {
+  const doc = await buildLens360Doc(r);
+  doc.save(`360_${r.rut.replace(/[^a-z0-9_-]/gi, '_')}.pdf`);
+};
+
+export const generateLens360Blob = async (r: Lens360Result): Promise<Blob> => {
+  const doc = await buildLens360Doc(r);
   return doc.output('blob');
 };
