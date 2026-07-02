@@ -3,6 +3,8 @@
 // motor de decisión criminal (DEFAULT_CATALOG) para no tocar los módulos existentes.
 
 import { DEFAULT_CATALOG } from './defaultCatalogData';
+import { applyEvaluationToProfile } from './criminalDataProcessor';
+import { CatalogData, PersonProfile, Crime } from '../types/criminalTypes';
 import {
   Lens360Result, Lens360ListHit, Lens360Crime,
   Lens360CriminalDecision, Lens360InspektorHit, Lens360Verdict, Lens360PersonType,
@@ -33,25 +35,70 @@ const SANCTION_LISTS = new Set([
 
 export const hasRegcheqKey = (): boolean => !!REGCHEQ_KEY;
 
-// ─── Motor de decisión criminal (mismo cálculo que RegcheqTool) ─────────────────
-function computeCriminalDecision(additionalData: Record<string, unknown>[]): Lens360CriminalDecision | undefined {
-  if (!additionalData || additionalData.length === 0) return undefined;
-  const catalog = DEFAULT_CATALOG;
-  if (!catalog.items.length || !catalog.decisionTable.length) return undefined;
+// ─── Catálogo criminal ──────────────────────────────────────────────────────────
+// Usa el MISMO catálogo que el módulo Criminal Profiler (localStorage), con
+// fallback al de fábrica. Así el 360 respeta los parámetros y la tabla de decisión
+// que el usuario haya configurado.
+const CATALOG_STORAGE_KEY = 'criminal_profile_catalog';
+function loadCriminalCatalog(): CatalogData {
+  try {
+    const saved = localStorage.getItem(CATALOG_STORAGE_KEY);
+    if (saved) return JSON.parse(saved) as CatalogData;
+  } catch { /* JSON inválido → usar default */ }
+  return DEFAULT_CATALOG;
+}
 
-  const catalogMap = new Map(catalog.items.map(i => [i.nombre.toLowerCase(), i]));
-  let scoreTotal = 0;
-  for (const crime of additionalData) {
-    const nombre = String(crime['crimen'] ?? crime['Crimen'] ?? crime['delito'] ?? '').toLowerCase().trim();
-    if (!nombre) continue;
-    const match = catalogMap.get(nombre);
-    if (match) scoreTotal += match.valor;
+// Lectura de campo tolerante a mayúsculas/variantes (la API en vivo usa DELITO, RUC…).
+function pick(obj: Record<string, unknown>, ...keys: string[]): string {
+  for (const k of keys) {
+    const v = obj[k];
+    if (v != null && String(v).trim()) return String(v).trim();
   }
+  const lower = new Map(Object.keys(obj).map(k => [k.toLowerCase(), k]));
+  for (const k of keys) {
+    const real = lower.get(k.toLowerCase());
+    if (real) { const v = obj[real]; if (v != null && String(v).trim()) return String(v).trim(); }
+  }
+  return '';
+}
 
-  const sorted = [...catalog.decisionTable].sort((a, b) => b.totalEquivalente - a.totalEquivalente);
-  const rule = sorted.find(r => scoreTotal >= r.totalEquivalente);
-  if (!rule) return undefined;
-  return { decision: rule.decision, razon: rule.razon, totalEquivalente: scoreTotal };
+// Evalúa las causas penales con el motor real del Criminal Profiler.
+function evaluateCriminal(rut: string, additionalData: Record<string, unknown>[]): {
+  crimes: Lens360Crime[]; decision?: Lens360CriminalDecision;
+} {
+  const engineCrimes: Crime[] = additionalData.map((c, idx) => ({
+    id:       pick(c, 'RUC', 'RIT') || `c${idx}`,
+    tipo:     pick(c, 'Delito', 'delito', 'crimen', 'Crimen', 'crime'),
+    estado:   pick(c, 'Estado', 'estado') || 'S/E',
+    fecha:    pick(c, 'Fecha', 'FECHA_INGRESO', 'FECHA_CAMBIO_ESTADO', 'fecha'),
+    riesgo:   pick(c, 'Riesgo Delito', 'Riesgo', 'riesgo') || 'N/A',
+    rit:      pick(c, 'RIT', 'rit'),
+    ruc:      pick(c, 'RUC', 'ruc'),
+    tribunal: pick(c, 'Tribunal', 'tribunal'),
+  })).filter(c => c.tipo && c.tipo !== '0');
+
+  const crimes: Lens360Crime[] = engineCrimes.map(c => ({
+    crimen: c.tipo,
+    estado: c.estado !== 'S/E' ? c.estado : undefined,
+    fecha: c.fecha || undefined,
+    tribunal: c.tribunal || undefined,
+    ruc: c.ruc || undefined,
+  }));
+
+  if (engineCrimes.length === 0) return { crimes };
+
+  const profile: PersonProfile = {
+    rut, nombre: '', apellido: '', nombreCuenta: '', customerId: rut,
+    conInfo: true, isPep: false, crimes: engineCrimes,
+    totalCrimes: engineCrimes.length, totalHighRiskCrimes: 0, highestRisk: 'n/a',
+    status: 'Pendiente', selectedAction: '',
+  };
+  applyEvaluationToProfile(profile, loadCriminalCatalog());
+
+  const decision = profile.preEvaluation
+    ? { decision: profile.preEvaluation.decision, razon: profile.preEvaluation.razon, totalEquivalente: profile.preEvaluation.scoreTotal }
+    : undefined;
+  return { crimes, decision };
 }
 
 // ─── Regcheq (GET /record/{dni}/{key}) ──────────────────────────────────────────
@@ -97,21 +144,16 @@ async function fetchRegcheq(rut: string, nombre: string, personType: Lens360Pers
   }
   const amlHits = [...merged.values()];
 
-  // Causas Penales Chile → crímenes + decisión criminal
+  // Causas Penales Chile → crímenes + decisión criminal (motor real del Criminal Profiler)
   const causas = listasRaw['causasPenalesRegcheq'];
   let crimes: Lens360Crime[] = [];
   let criminalDecision: Lens360CriminalDecision | undefined;
   if (causas?.coincidence && causas.data) {
     const raw = causas.data as Record<string, unknown>;
     const additionalData = Array.isArray(raw['additionalData']) ? (raw['additionalData'] as Record<string, unknown>[]) : [];
-    crimes = additionalData.map(c => ({
-      crimen:   String(c['crimen'] ?? c['Crimen'] ?? c['delito'] ?? '—'),
-      estado:   c['estado']   ? String(c['estado'])   : undefined,
-      fecha:    c['fecha']    ? String(c['fecha'])    : undefined,
-      tribunal: c['tribunal'] ? String(c['tribunal']) : undefined,
-      ruc:      c['ruc']      ? String(c['ruc'])      : undefined,
-    }));
-    criminalDecision = computeCriminalDecision(additionalData);
+    const evaluated = evaluateCriminal(rut, additionalData);
+    crimes = evaluated.crimes;
+    criminalDecision = evaluated.decision;
   }
 
   return {
