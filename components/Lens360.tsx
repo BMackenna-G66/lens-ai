@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { search360, hasRegcheqKey } from '../services/lens360Service';
 import { Lens360Result, Lens360Verdict, Lens360PersonType } from '../types/lens360';
+import { ProfileDetails } from './CriminalProfiler/ProfileDetails';
 
 interface Lens360Props {
   onBack: () => void;
@@ -153,6 +154,7 @@ export const Lens360: React.FC<Lens360Props> = ({ onBack, darkMode, onToggleDark
 const ResultView: React.FC<{ result: Lens360Result }> = ({ result }) => {
   const v = VERDICT_STYLE[result.verdict];
   const coincidencias = result.amlHits.filter(h => h.coincidence);
+  const [showDetail, setShowDetail] = useState(false);
 
   return (
     <div className="space-y-5">
@@ -208,22 +210,36 @@ const ResultView: React.FC<{ result: Lens360Result }> = ({ result }) => {
             <div className="mb-3 p-2.5 rounded-lg bg-indigo-50 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-800">
               <p className="text-xs font-bold text-indigo-700 dark:text-indigo-400">Decisión: {result.criminalDecision.decision}</p>
               <p className="text-[11px] text-slate-600 dark:text-slate-400 mt-0.5">{result.criminalDecision.razon}</p>
-              <p className="text-[10px] text-slate-400 mt-0.5">Puntaje equivalente: {result.criminalDecision.totalEquivalente}</p>
+              <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-[10px] text-slate-500 dark:text-slate-400">
+                <span>Puntaje: <strong className="text-slate-700 dark:text-slate-300">{result.criminalDecision.totalEquivalente}</strong></span>
+                <span>Precedentes: <strong className="text-slate-700 dark:text-slate-300">{result.criminalDecision.precedentes}</strong> ({result.criminalDecision.preScore} pts)</span>
+                <span>No precedentes: <strong className="text-slate-700 dark:text-slate-300">{result.criminalDecision.noPrecedentes}</strong> ({result.criminalDecision.noPreScore} pts)</span>
+              </div>
             </div>
           )}
           {result.crimes.length === 0 ? (
             <p className="text-xs text-slate-400">Sin causas penales registradas.</p>
           ) : (
-            <ul className="space-y-1.5 max-h-52 overflow-y-auto">
-              {result.crimes.map((c, i) => (
-                <li key={i} className="text-xs border-b border-slate-100 dark:border-slate-800 pb-1.5 last:border-0">
-                  <span className="font-semibold text-slate-700 dark:text-slate-200">{c.crimen}</span>
-                  <span className="text-slate-400">
-                    {c.estado && ` · ${c.estado}`}{c.fecha && ` · ${c.fecha}`}{c.ruc && ` · RUC ${c.ruc}`}
-                  </span>
-                </li>
-              ))}
-            </ul>
+            <>
+              <ul className="space-y-1.5 max-h-52 overflow-y-auto">
+                {result.crimes.map((c, i) => (
+                  <li key={i} className="text-xs border-b border-slate-100 dark:border-slate-800 pb-1.5 last:border-0">
+                    <span className="font-semibold text-slate-700 dark:text-slate-200">{c.crimen}</span>
+                    <span className="text-slate-400">
+                      {c.estado && ` · ${c.estado}`}{c.fecha && ` · ${c.fecha}`}{c.ruc && ` · RUC ${c.ruc}`}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              {result.criminalProfile && (
+                <button
+                  onClick={() => setShowDetail(true)}
+                  className="mt-3 w-full text-xs font-semibold text-indigo-700 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/40 hover:bg-indigo-100 dark:hover:bg-indigo-900/40 border border-indigo-200 dark:border-indigo-800 rounded-lg py-2 transition-colors"
+                >
+                  🔍 Ver ficha de análisis criminal detallada
+                </button>
+              )}
+            </>
           )}
         </Card>
       </div>
@@ -248,6 +264,15 @@ const ResultView: React.FC<{ result: Lens360Result }> = ({ result }) => {
             </ul>
           )}
         </Card>
+      )}
+
+      {/* Ficha de análisis criminal detallada (reutiliza ProfileDetails del Criminal Profiler) */}
+      {showDetail && result.criminalProfile && (
+        <ProfileDetails
+          profile={result.criminalProfile}
+          onClose={() => setShowDetail(false)}
+          onUpdate={() => { /* 360 es de solo lectura, sin persistencia */ }}
+        />
       )}
     </div>
   );

@@ -63,8 +63,10 @@ function pick(obj: Record<string, unknown>, ...keys: string[]): string {
 }
 
 // Evalúa las causas penales con el motor real del Criminal Profiler.
-function evaluateCriminal(rut: string, additionalData: Record<string, unknown>[]): {
-  crimes: Lens360Crime[]; decision?: Lens360CriminalDecision;
+// Devuelve los crímenes, la decisión (con conteo precedentes/no precedentes) y el
+// PersonProfile completo (para la ficha detallada reutilizando ProfileDetails).
+function evaluateCriminal(rut: string, nombre: string, additionalData: Record<string, unknown>[]): {
+  crimes: Lens360Crime[]; decision?: Lens360CriminalDecision; profile?: PersonProfile;
 } {
   const engineCrimes: Crime[] = additionalData.map((c, idx) => ({
     id:       pick(c, 'RUC', 'RIT') || `c${idx}`,
@@ -87,18 +89,33 @@ function evaluateCriminal(rut: string, additionalData: Record<string, unknown>[]
 
   if (engineCrimes.length === 0) return { crimes };
 
+  const [first = '', ...rest] = nombre.trim().split(/\s+/);
   const profile: PersonProfile = {
-    rut, nombre: '', apellido: '', nombreCuenta: '', customerId: rut,
+    rut, nombre: nombre ? first : rut, apellido: rest.join(' '),
+    nombreCuenta: nombre || rut, customerId: rut,
     conInfo: true, isPep: false, crimes: engineCrimes,
     totalCrimes: engineCrimes.length, totalHighRiskCrimes: 0, highestRisk: 'n/a',
     status: 'Pendiente', selectedAction: '',
   };
   applyEvaluationToProfile(profile, loadCriminalCatalog());
 
-  const decision = profile.preEvaluation
-    ? { decision: profile.preEvaluation.decision, razon: profile.preEvaluation.razon, totalEquivalente: profile.preEvaluation.scoreTotal }
-    : undefined;
-  return { crimes, decision };
+  // Conteo precedentes / no precedentes (misma lógica que ProfileDetails).
+  const isPre = (c: Crime) => (c.catalogType || '').toUpperCase().includes('PRECEDENTE');
+  const precedentes = profile.crimes.filter(isPre);
+  const noPrecedentes = profile.crimes.filter(c => !isPre(c));
+  const sum = (arr: Crime[]) => arr.reduce((s, c) => s + (c.catalogValue || 0), 0);
+
+  const decision = profile.preEvaluation ? {
+    decision: profile.preEvaluation.decision,
+    razon: profile.preEvaluation.razon,
+    totalEquivalente: profile.preEvaluation.scoreTotal,
+    precedentes: precedentes.length,
+    noPrecedentes: noPrecedentes.length,
+    preScore: sum(precedentes),
+    noPreScore: sum(noPrecedentes),
+  } : undefined;
+
+  return { crimes, decision, profile };
 }
 
 // ─── Regcheq (GET /record/{dni}/{key}) ──────────────────────────────────────────
@@ -148,20 +165,23 @@ async function fetchRegcheq(rut: string, nombre: string, personType: Lens360Pers
   const causas = listasRaw['causasPenalesRegcheq'];
   let crimes: Lens360Crime[] = [];
   let criminalDecision: Lens360CriminalDecision | undefined;
+  let criminalProfile: PersonProfile | undefined;
+  const perfilNombre = (perfil.name ?? perfil.socialReason ?? nombre ?? '') as string;
   if (causas?.coincidence && causas.data) {
     const raw = causas.data as Record<string, unknown>;
     const additionalData = Array.isArray(raw['additionalData']) ? (raw['additionalData'] as Record<string, unknown>[]) : [];
-    const evaluated = evaluateCriminal(rut, additionalData);
+    const evaluated = evaluateCriminal(rut, perfilNombre, additionalData);
     crimes = evaluated.crimes;
     criminalDecision = evaluated.decision;
+    criminalProfile = evaluated.profile;
   }
 
   return {
-    nombre: (perfil.name ?? perfil.socialReason ?? '') as string,
+    nombre: perfilNombre,
     personType: String(perfil.personType ?? ''),
     regcheqRisk: (perfil.effectiveRisk ?? perfil.calculatedRisk ?? '') as string,
     pepLevel: (perfil.pepLevel ?? '') as string,
-    amlHits, crimes, criminalDecision,
+    amlHits, crimes, criminalDecision, criminalProfile,
   };
 }
 
@@ -208,12 +228,14 @@ function computeVerdict(r: Lens360Result): void {
     bump('MEDIO'); reasons.push(`Persona Expuesta Políticamente (PEP): ${r.pepLevel}`);
   }
 
-  if (r.criminalDecision) {
-    const d = r.criminalDecision.decision.toUpperCase();
-    if (/BLOQ|FORZAR/.test(d)) { bump('ALTO'); reasons.push(`Decisión penal: ${r.criminalDecision.decision}`); }
-    else if (/REVIS|UCR|COMPLIANCE/.test(d)) { bump('MEDIO'); reasons.push(`Decisión penal: ${r.criminalDecision.decision}`); }
-  } else if (r.crimes.length) {
-    bump('MEDIO'); reasons.push(`${r.crimes.length} causa(s) penal(es) registrada(s)`);
+  // Antecedentes penales: si hay causas, SIEMPRE se reporta (con la decisión si existe).
+  if (r.crimes.length > 0) {
+    const d = (r.criminalDecision?.decision ?? '').toUpperCase();
+    if (/BLOCK|BLOQ|FORZAR/.test(d)) bump('ALTO');
+    else if (/REVIS|UCR|COMPLIANCE/.test(d)) bump('MEDIO');
+    else bump('MEDIO'); // hay causas penales → al menos riesgo medio
+    const decTxt = r.criminalDecision ? ` — decisión: ${r.criminalDecision.decision}` : '';
+    reasons.push(`${r.crimes.length} causa(s) penal(es)${decTxt}`);
   }
 
   const otherHits = r.amlHits.filter(h => h.coincidence && !SANCTION_LISTS.has(h.nombre) && h.nombre !== 'Causas Penales Chile');
@@ -225,8 +247,13 @@ function computeVerdict(r: Lens360Result): void {
 
   if (r.regcheqRisk) {
     const rr = r.regcheqRisk.toUpperCase();
-    if (rr.includes('HIGH') || rr.includes('ALTO')) bump('ALTO');
-    else if (rr.includes('MEDIUM') || rr.includes('MEDIO')) bump('MEDIO');
+    const isHigh = rr.includes('HIGH') || rr.includes('ALTO');
+    const isMed = rr.includes('MEDIUM') || rr.includes('MEDIO');
+    if (isHigh) bump('ALTO');
+    else if (isMed) bump('MEDIO');
+    if ((isHigh || isMed) && !reasons.some(x => x.includes('Regcheq'))) {
+      reasons.push(`Riesgo calculado por Regcheq: ${r.regcheqRisk}`);
+    }
   }
 
   if (!r.sources.regcheq && !r.sources.inspektor) {
@@ -262,6 +289,7 @@ export async function search360(params: {
     result.amlHits = rc.amlHits;
     result.crimes = rc.crimes;
     result.criminalDecision = rc.criminalDecision;
+    result.criminalProfile = rc.criminalProfile;
     result.sources.regcheq = true;
   } catch (e) {
     result.verdictReasons.push(`Regcheq no disponible: ${(e as Error).message}`);
