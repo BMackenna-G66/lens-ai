@@ -88,8 +88,10 @@ async function executeWithRetry<T>(apiCall: (ai: GoogleGenAI) => Promise<T>): Pr
   throw new Error(`El análisis falló. Error: ${cleanMessage}`);
 }
 
-const primaryAnalysisModel = 'gemini-2.5-flash';
-const chatModel = 'gemini-2.5-flash';
+// Modelo Gemini. 'gemini-2.5-flash' fue deprecado por Google (404). Se usa el
+// Flash estable vigente. Alternativa auto-actualizable: 'gemini-flash-latest'.
+const primaryAnalysisModel = 'gemini-3.5-flash';
+const chatModel = 'gemini-3.5-flash';
 const jsonConfig = { responseMimeType: "application/json", thinkingConfig: { thinkingBudget: 0 } } as const;
 
 // ─── Token tracking (fire-and-forget) ────────────────────────────────────────
