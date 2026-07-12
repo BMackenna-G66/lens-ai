@@ -1,5 +1,10 @@
 import React, { useState, useRef, useCallback } from 'react';
 import * as XLSX from 'xlsx';
+import {
+  normalizeName, normalizeDni, mapTipoDoc, maskPii, dedupe, dedupeKey,
+  classify, retry, cacheGet, cachePut, buildMasivoWorkbook,
+  type Resultado, type Classification, type SummaryRow,
+} from '../services/inspektorMasivoService';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 const INSPEKTOR_BASE = 'https://inspektor.datalaft.com:2121/api';
@@ -298,12 +303,16 @@ type TabMode = 'individual' | 'masivo';
 
 interface MasivoRow {
   idx: number;
-  documento: string;
-  nombre: string;
+  documento: string;        // numeroDni normalizado
+  nombre: string;           // nombreCompleto normalizado
   tipoDoc: number;
-  status: 'pending' | 'processing' | 'done' | 'error';
+  tipoLabel: string;
+  status: 'pending' | 'processing' | 'done' | 'error' | 'skipped';
   result?: InspektorResult;
+  classification?: Classification;
+  resultado?: Resultado;    // SIN_HALLAZGOS / REVISAR / ALERTA / ERROR_*
   error?: string;
+  validationError?: string; // si está → ERROR_VALIDACION (no se consulta)
 }
 interface LogLine { type: 'ok' | 'err' | 'info'; text: string; }
 
@@ -328,6 +337,8 @@ export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, da
   const [logs, setLogs]                   = useState<LogLine[]>([]);
   const [masivoError, setMasivoError]     = useState('');
   const [delay, setDelay]                 = useState(1.5);
+  const [concurrency, setConcurrency]     = useState(3);
+  const [reanudar, setReanudar]           = useState(true);
   const [isDrag, setIsDrag]               = useState(false);
   const abortRef  = useRef(false);
   const pausedRef = useRef(false);
@@ -437,213 +448,182 @@ export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, da
           k.includes('tipo')
         ) ?? null;
 
-        // Función para parsear tipo de identificación (texto o número)
-        function parseTipo(raw: string): number {
-          const v = raw.toLowerCase().trim();
-          if (!v || v === '') return 1;
-          const n = Number(v);
-          if (!isNaN(n) && n >= 1 && n <= 5) return n;
-          if (v.includes('extranjería') || v.includes('extranjeria') || v === 'ce') return 2;
-          if (v.includes('nit') || v === '3') return 3;
-          if (v.includes('pasaporte') || v === '4') return 4;
-          if (v.includes('tarjeta') || v === 'ti' || v === '5') return 5;
-          return 1; // default: Cédula de ciudadanía
-        }
+        // ── Construir filas: normalizar + validar (vía inspektorMasivoService) ─
+        const rows: MasivoRow[] = norm.map((r, idx): MasivoRow => {
+          const numeroDni = normalizeDni(docColKey ? r[docColKey] : '');
+          const nombre    = normalizeName(nomColKey ? r[nomColKey] : '');
+          const tipoRaw   = tipoColKey ? (r[tipoColKey] ?? '') : '';
+          const mapped    = mapTipoDoc(tipoRaw);
 
-        // ── Construir filas ──────────────────────────────────────────────────
-        const rowsRaw = norm.map((r, idx) => {
-          const docNum  = docColKey ? (r[docColKey] ?? '') : '';
-          const nombre  = nomColKey ? (r[nomColKey] ?? '') : '';
-          const tipoRaw = tipoColKey ? (r[tipoColKey] ?? '') : '';
-          const tipoDoc = parseTipo(tipoRaw);
-          if (!docNum && !nombre) return null;
-          return { idx, documento: docNum, nombre, tipoDoc, status: 'pending' as const };
+          const base = { idx, documento: numeroDni, nombre, tipoDoc: mapped?.tipo ?? 1, tipoLabel: mapped?.label ?? '—' };
+          // Validaciones → ERROR_VALIDACION (no se consultan, no abortan)
+          if (!numeroDni && !nombre)
+            return { ...base, status: 'error', resultado: 'ERROR_VALIDACION', validationError: 'Fila vacía (sin nombre ni número)' };
+          if (!numeroDni)
+            return { ...base, status: 'error', resultado: 'ERROR_VALIDACION', validationError: 'Falta número de identificación' };
+          if (mapped === null)
+            return { ...base, status: 'error', resultado: 'ERROR_VALIDACION', validationError: `Tipo de documento no reconocido: "${tipoRaw}"` };
+          return { ...base, status: 'pending' };
         });
-        const rows: MasivoRow[] = rowsRaw.filter((r): r is NonNullable<typeof r> => r !== null);
 
-        if (rows.length === 0) {
-          setMasivoError('No se encontraron filas válidas. Cada fila debe tener al menos nombre o número de identificación.');
+        const validas = rows.filter(r => !r.validationError);
+        if (validas.length === 0) {
+          setMasivoError('No se encontraron filas válidas (todas quedaron con ERROR_VALIDACION).');
+          setMasivoRows(rows); setMasivoTotal(rows.length);
           return;
         }
-
-        const sinDoc = rows.filter(r => !r.documento).length;
+        const invalidas = rows.length - validas.length;
+        const unicas = dedupe(rows, r => r.documento).unique.length;
         setMasivoRows(rows);
         setMasivoTotal(rows.length);
-        addLog('info', `📂 ${file.name} — ${rows.length} registros listos${sinDoc > 0 ? ` (${sinDoc} solo por nombre, sin número)` : ''}`);
+        addLog('info', `📂 ${file.name} — ${rows.length} filas · ${unicas} únicas a consultar${invalidas > 0 ? ` · ${invalidas} con error de validación` : ''}`);
       } catch (e) {
         setMasivoError(`Error leyendo Excel: ${e instanceof Error ? e.message : String(e)}`);
       }
     });
   }
 
-  // ── Masivo: process loop ─────────────────────────────────────────────────────
+  // ── Masivo: process loop (dedup + concurrencia + reintentos + reanudación) ─────
   async function procesarMasivo() {
     if (masivoRows.length === 0) return;
     setMasivoRunning(true); setMasivoIsPaused(false);
     abortRef.current = false; pausedRef.current = false;
     setLogs([]); setMasivoProgress(0);
 
-    const results: MasivoRow[] = masivoRows.map(r => ({ ...r, status: 'pending' as const }));
+    // Partimos del estado actual: las filas ERROR_VALIDACION se conservan.
+    const results: MasivoRow[] = masivoRows.map(r =>
+      r.validationError ? r : { ...r, status: 'pending' as const, result: undefined, classification: undefined, resultado: undefined, error: undefined });
     setMasivoRows([...results]);
 
-    // Obtain initial token — reused across the loop, refreshed on 401
+    // Deduplicación por (tipo, número): una consulta por documento único.
+    const { unique, groups } = dedupe(results, r => r.documento);
+    addLog('info', `🔎 ${unique.length} documento(s) único(s) · ${results.length - unique.length - results.filter(r => r.validationError).length} duplicado(s) omitidos`);
+
+    // Token compartido, con refresco serializado (evita múltiples logins en paralelo).
     let token = '';
+    let refreshing: Promise<string> | null = null;
+    const refreshToken = () => (refreshing ??= inspektorLogin().finally(() => { refreshing = null; }));
     try {
       addLog('info', '🔑 Obteniendo token Inspektor…');
-      token = await inspektorLogin();
+      token = await refreshToken();
       addLog('info', '✓ Token obtenido');
     } catch (e) {
       addLog('err', `✗ No se pudo autenticar con Inspektor: ${e instanceof Error ? e.message : String(e)}`);
       setMasivoRunning(false); return;
     }
 
-    let done = 0, alerts = 0, errors = 0;
-
-    for (let i = 0; i < results.length; i++) {
-      if (abortRef.current) { addLog('info', '⛔ Proceso cancelado'); break; }
-
-      // Pause: wait until unpaused
-      while (pausedRef.current && !abortRef.current) {
-        await new Promise(r => setTimeout(r, 300));
-      }
-      if (abortRef.current) { addLog('info', '⛔ Proceso cancelado'); break; }
-
-      const row = results[i];
-      results[i] = { ...row, status: 'processing' };
-      setMasivoRows([...results]);
-
-      const label = row.nombre ? `${row.documento} (${row.nombre})` : row.documento;
-
+    // Una consulta (con refresco de token en 401) para un documento.
+    const queryOne = async (row: MasivoRow): Promise<InspektorResult> => {
       try {
-        let r: InspektorResult;
-        try {
-          r = await consultarConToken(token, row.nombre || row.documento, row.documento, row.tipoDoc);
-        } catch (e) {
-          if (e instanceof Error && e.message === 'TOKEN_EXPIRED') {
-            addLog('info', `  ↳ Token expirado — refrescando…`);
-            token = await inspektorLogin();
-            r = await consultarConToken(token, row.nombre || row.documento, row.documento, row.tipoDoc);
-          } else throw e;
-        }
-
-        const cant = r.cantCoincidencias ?? 0;
-        const hasAlert = cant > 0;
-        if (hasAlert) alerts++;
-        results[i] = { ...row, status: 'done', result: r };
-        addLog(hasAlert ? 'err' : 'ok',
-          `${hasAlert ? '⚠' : '✓'} [${i+1}/${results.length}] ${label} — ${cant} coincidencia${cant !== 1 ? 's' : ''} · ${getRiesgo(cant)}`
-        );
+        return await consultarConToken(token, row.nombre || row.documento, row.documento, row.tipoDoc);
       } catch (e) {
-        errors++;
-        results[i] = { ...row, status: 'error', error: e instanceof Error ? e.message : String(e) };
-        addLog('err', `✗ [${i+1}/${results.length}] ${label} — ${results[i].error}`);
+        if (e instanceof Error && e.message === 'TOKEN_EXPIRED') {
+          token = await refreshToken();
+          return await consultarConToken(token, row.nombre || row.documento, row.documento, row.tipoDoc);
+        }
+        throw e;
       }
+    };
 
-      done++;
+    // Aplica un resultado (o error) a TODAS las filas del grupo duplicado.
+    const applyToGroup = (key: string, patch: Partial<MasivoRow>) => {
+      const idxs = new Set(groups.get(key) ?? []);
+      for (let j = 0; j < results.length; j++) if (idxs.has(results[j].idx)) results[j] = { ...results[j], ...patch };
       setMasivoRows([...results]);
-      setMasivoProgress(i + 1);
+    };
 
-      if (delay > 0 && i < results.length - 1) await new Promise(r => setTimeout(r, delay * 1000));
-    }
+    let done = 0, alerts = 0, revisar = 0, errors = 0, cacheHits = 0;
+    let cursor = 0;
 
-    addLog('info', `✅ Completado — ${done} procesados, ${alerts} alertas, ${errors} errores`);
+    const worker = async () => {
+      while (true) {
+        if (abortRef.current) return;
+        while (pausedRef.current && !abortRef.current) await new Promise(r => setTimeout(r, 300));
+        if (abortRef.current) return;
+        const i = cursor++;
+        if (i >= unique.length) return;
+
+        const row = unique[i];
+        const key = dedupeKey(row.tipoDoc, row.documento);
+        applyToGroup(key, { status: 'processing' });
+        const label = maskPii(row.documento);
+        const at = Date.now();
+
+        try {
+          // Reanudación: si ya está en caché, no volvemos a consultar (protege el cupo).
+          let r = reanudar ? (await cacheGet(row.tipoDoc, row.documento)) as InspektorResult | undefined : undefined;
+          if (r) { cacheHits++; }
+          else {
+            r = await retry(() => queryOne(row), { retries: 3, baseMs: 700, onRetry: (a) => addLog('info', `  ↳ reintento ${a}/3 · ${label}`) });
+            await cachePut(row.tipoDoc, row.documento, r, at);
+            if (delay > 0) await new Promise(res => setTimeout(res, delay * 1000));
+          }
+
+          const cls = classify(r);
+          if (cls.resultado === 'ALERTA') alerts++; else if (cls.resultado === 'REVISAR') revisar++;
+          applyToGroup(key, { status: 'done', result: r, classification: cls, resultado: cls.resultado });
+          addLog(cls.resultado === 'ALERTA' ? 'err' : 'ok',
+            `${cls.resultado === 'ALERTA' ? '⚠' : '✓'} ${label} — ${cls.resultado} · ${cls.totalCoincidencias} coincidencia(s)${cls.prioridadMaxima ? ` · P${cls.prioridadMaxima}` : ''}${r === undefined ? '' : ''}`);
+        } catch (e) {
+          errors++;
+          applyToGroup(key, { status: 'error', resultado: 'ERROR_CONSULTA', error: e instanceof Error ? e.message : String(e) });
+          addLog('err', `✗ ${label} — ERROR_CONSULTA: ${results.find(x => x.documento === row.documento)?.error ?? ''}`);
+        }
+        done++;
+        setMasivoProgress(done);
+      }
+    };
+
+    const pool = Math.max(1, Math.min(concurrency, 8));
+    await Promise.all(Array.from({ length: pool }, () => worker()));
+
+    if (abortRef.current) addLog('info', '⛔ Proceso cancelado');
+    addLog('info', `✅ ${done}/${unique.length} consultados${cacheHits ? ` (${cacheHits} desde caché)` : ''} — ${alerts} alertas, ${revisar} a revisar, ${errors} errores`);
     setMasivoRunning(false); setMasivoIsPaused(false);
   }
 
-  // ── Masivo: export Excel ─────────────────────────────────────────────────────
+  // ── Masivo: export Excel (2 hojas: Resumen + Detalle, según spec) ──────────────
   function exportarExcelMasivo() {
-    const done = masivoRows.filter(r => r.status === 'done' && r.result);
-    if (done.length === 0) return;
+    if (masivoRows.length === 0) return;
 
     const now = new Date();
     const pad = (n: number) => String(n).padStart(2, '0');
     const ts  = `${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}`;
+    const fecha = now.toLocaleString('es-CL');
 
-    // Hoja 1: Resultados
-    const resultados = masivoRows.map(r => {
-      const res = r.result;
-      const cant = res?.cantCoincidencias ?? 0;
-      const listas = res?.listas ?? [];
-      const grupoObj = listas.filter(esGrupoObjetivo).length;
-      const procRecs = getProcuraduriaRecords(res?.procuraduria).length;
-      const rjProc   = getRamaJudicialProcesos(res?.ramaJudicial).length;
-      const jepms    = getJEPMSItems(res?.ramaJudicialJEPMS).length;
+    // Hoja "Resumen": una fila por registro de entrada, en el orden original.
+    const summary: SummaryRow[] = [...masivoRows].sort((a, b) => a.idx - b.idx).map(r => {
+      const cls = r.classification;
+      const resultado: Resultado = r.resultado
+        ?? (r.status === 'done' ? (cls?.resultado ?? 'SIN_HALLAZGOS') : 'ERROR_CONSULTA');
       return {
-        'Documento':              r.documento,
-        'Nombre consultado':      r.nombre || '—',
-        'Tipo Documento':         r.tipoDoc,
-        'Estado':                 r.status,
-        'Error':                  r.error ?? '',
-        'Riesgo':                 r.status === 'done' ? getRiesgo(cant) : '—',
-        'Coincidencias totales':  r.status === 'done' ? cant : '—',
-        'Grupo Objetivo':         r.status === 'done' ? grupoObj : '—',
-        'Otras listas':           r.status === 'done' ? listas.filter(i => !esGrupoObjetivo(i)).length : '—',
-        'Listas propias':         r.status === 'done' ? (res?.listas_propias?.length ?? 0) : '—',
-        'Procuraduría':           r.status === 'done' ? procRecs : '—',
-        'Rama Judicial':          r.status === 'done' ? rjProc : '—',
-        'JEPMS':                  r.status === 'done' ? jepms : '—',
-        'N° Consulta':            res?.numConsulta ?? '',
+        nombre_completo: r.nombre,
+        tipo_dni: r.tipoLabel,
+        numero_dni: r.documento,
+        resultado,
+        total_coincidencias: cls ? cls.totalCoincidencias : '',
+        prioridad_maxima: cls?.prioridadMaxima ?? '',
+        listas: cls ? cls.listas.join('; ') : '',
+        fecha_consulta: r.status === 'done' ? fecha : '',
+        observaciones: r.validationError ?? r.error ?? '',
       };
     });
 
-    // Hoja 2: Detalle coincidencias (una fila por lista con alerta)
-    const coincidencias: Record<string, unknown>[] = [];
-    for (const r of done) {
-      const listas = r.result?.listas ?? [];
-      for (const item of listas) {
-        coincidencias.push({
-          'Documento':        r.documento,
-          'Nombre':           r.nombre || '—',
-          'Grupo Lista':      getGrupoLista(item),
-          'Tipo Lista':       item.nombreTipoLista ?? '—',
-          'Nombre detectado': item.nombreCompleto ?? '—',
-          'Doc detectado':    item.documentoIdentidad ?? '—',
-          'PEP':              item.peps ?? '—',
-          'Delito':           item.delito ?? '—',
-          'Prioridad':        item.Prioridad ?? item.prioridad ?? '—',
-          'Fuente':           item.fuenteConsulta ?? '—',
+    // Hoja "Detalle": una fila por coincidencia.
+    const detail: Record<string, unknown>[] = [];
+    for (const r of masivoRows) {
+      if (!r.classification) continue;
+      for (const c of r.classification.coincidencias) {
+        detail.push({
+          nombre_completo: r.nombre, tipo_dni: r.tipoLabel, numero_dni: r.documento,
+          coincidencia_nombre: c.nombre, coincidencia_identificacion: c.identificacion,
+          prioridad: c.prioridad ?? '', grupo_lista: c.grupoLista, nombre_lista: c.nombreLista,
+          delito: c.delito, zona: c.zona, fuente: c.fuente, estado: c.estado,
         });
       }
     }
 
-    // Hoja 3: Procuraduría
-    const procSheet: Record<string, unknown>[] = [];
-    for (const r of done) {
-      for (const rec of getProcuraduriaRecords(r.result?.procuraduria)) {
-        procSheet.push({
-          'Documento consultado': r.documento,
-          'Nombre consultado':    r.nombre || '—',
-          'Nombre registro':      rec.name ?? '—',
-          'Identificación':       rec.identification ?? '—',
-          'N° SIRI':              rec.num_siri ?? '—',
-          'Sanciones':            (rec.sanciones ?? []).map(s => s.sancion).join('; '),
-          'Delitos':              (rec.delitos ?? []).map(d => d.descripcion).join('; '),
-          'Inhabilidades':        (rec.inhabilidades ?? []).map(i => i.inhabilidad_legal).join('; '),
-        });
-      }
-    }
-
-    // Hoja 4: Resumen
-    const alertCount   = done.filter(r => (r.result?.cantCoincidencias ?? 0) > 0).length;
-    const grupoObjCount = done.filter(r => (r.result?.listas ?? []).some(esGrupoObjetivo)).length;
-    const cleanCount   = done.filter(r => (r.result?.cantCoincidencias ?? 0) === 0).length;
-    const errCount     = masivoRows.filter(r => r.status === 'error').length;
-    const resumen = [
-      { Métrica: 'Total procesados',       Valor: done.length },
-      { Métrica: 'Con alertas',             Valor: alertCount },
-      { Métrica: 'Grupo Objetivo activado', Valor: grupoObjCount },
-      { Métrica: 'Sin coincidencias',       Valor: cleanCount },
-      { Métrica: 'Errores API',             Valor: errCount },
-    ];
-
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(resultados),    'Resultados Inspektor');
-    if (coincidencias.length > 0)
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(coincidencias), 'Coincidencias');
-    if (procSheet.length > 0)
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(procSheet),    'Procuraduria');
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(resumen),       'Resumen');
-    XLSX.writeFile(wb, `inspektor_masivo_${ts}.xlsx`);
+    XLSX.writeFile(buildMasivoWorkbook(summary, detail), `inspektor_masivo_${ts}.xlsx`);
   }
 
   // ── Derived result data (individual) ────────────────────────────────────────
@@ -726,14 +706,25 @@ export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, da
                   onChange={e => e.target.files?.[0] && handleMasivoFile(e.target.files[0])} />
               </div>
 
-              {/* Delay config */}
+              {/* Config: delay, concurrencia, reanudar */}
               <div className="flex items-center gap-4 flex-wrap">
                 <div className="flex items-center gap-2">
                   <label className={`text-xs font-bold uppercase tracking-widest whitespace-nowrap ${dark ? 'text-slate-400' : 'text-violet-600'}`}>Delay (seg)</label>
-                  <input type="number" value={delay} step={0.5} min={0}
+                  <input type="number" value={delay} step={0.5} min={0} disabled={masivoRunning}
                     onChange={e => setDelay(parseFloat(e.target.value) || 0)}
-                    className={`w-20 border rounded-lg px-3 py-1.5 text-sm focus:outline-none ${inputCls}`} />
+                    className={`w-20 border rounded-lg px-3 py-1.5 text-sm focus:outline-none disabled:opacity-50 ${inputCls}`} />
                 </div>
+                <div className="flex items-center gap-2">
+                  <label className={`text-xs font-bold uppercase tracking-widest whitespace-nowrap ${dark ? 'text-slate-400' : 'text-violet-600'}`}>Concurrencia</label>
+                  <input type="number" value={concurrency} step={1} min={1} max={8} disabled={masivoRunning}
+                    onChange={e => setConcurrency(Math.max(1, Math.min(8, parseInt(e.target.value) || 1)))}
+                    className={`w-16 border rounded-lg px-3 py-1.5 text-sm focus:outline-none disabled:opacity-50 ${inputCls}`} />
+                </div>
+                <label className={`flex items-center gap-2 text-xs font-bold uppercase tracking-widest cursor-pointer ${dark ? 'text-slate-400' : 'text-violet-600'}`}>
+                  <input type="checkbox" checked={reanudar} disabled={masivoRunning}
+                    onChange={e => setReanudar(e.target.checked)} className="rounded" />
+                  Reanudar (usar caché)
+                </label>
                 {masivoRows.length > 0 && (
                   <span className={`text-xs ${textMuted}`}>{masivoRows.length} registros cargados</span>
                 )}
@@ -767,7 +758,7 @@ export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, da
                     ⛔ Cancelar
                   </button>
                 )}
-                {masivoRows.some(r => r.status === 'done') && !masivoRunning && (
+                {masivoRows.length > 0 && !masivoRunning && (
                   <button onClick={exportarExcelMasivo}
                     className={`flex items-center gap-2 border font-bold px-5 py-2.5 rounded-xl text-sm transition-all ${dark ? 'border-emerald-600/50 text-emerald-400 hover:bg-emerald-950/40' : 'border-emerald-500 text-emerald-700 hover:bg-emerald-50'}`}>
                     📥 Exportar Excel
@@ -816,9 +807,10 @@ export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, da
                   <h3 className={`text-base font-black ${dark ? 'text-white' : 'text-slate-800'}`}>Resultados</h3>
                   <div className="flex gap-4 text-xs">
                     {[
-                      ['✓', masivoRows.filter(r => r.status === 'done' && (r.result?.cantCoincidencias ?? 0) === 0).length, 'text-emerald-400'],
-                      ['⚠', masivoRows.filter(r => r.status === 'done' && (r.result?.cantCoincidencias ?? 0) > 0).length, 'text-red-400'],
-                      ['✗', masivoRows.filter(r => r.status === 'error').length, 'text-slate-500'],
+                      ['✓', masivoRows.filter(r => r.resultado === 'SIN_HALLAZGOS').length, 'text-emerald-400'],
+                      ['🔍', masivoRows.filter(r => r.resultado === 'REVISAR').length, 'text-amber-400'],
+                      ['⚠', masivoRows.filter(r => r.resultado === 'ALERTA').length, 'text-red-400'],
+                      ['✗', masivoRows.filter(r => r.status === 'error' && r.resultado !== 'ALERTA').length, 'text-slate-500'],
                     ].map(([icon, count, cls]) => (
                       <span key={String(icon)} className={`font-bold ${cls}`}>{icon} {String(count)}</span>
                     ))}
@@ -826,9 +818,8 @@ export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, da
                 </div>
                 <div className="divide-y divide-slate-200/40 dark:divide-slate-700/30 max-h-96 overflow-y-auto">
                   {masivoRows.filter(r => r.status !== 'pending').map(r => {
-                    const cant = r.result?.cantCoincidencias ?? 0;
-                    const hasAlert = r.status === 'done' && cant > 0;
-                    const statusIcon = r.status === 'processing' ? '⏳' : r.status === 'error' ? '✗' : cant > 0 ? '⚠' : '✓';
+                    const hasAlert = r.resultado === 'ALERTA';
+                    const statusIcon = r.status === 'processing' ? '⏳' : r.status === 'error' ? (r.validationError ? '⚠' : '✗') : hasAlert ? '⚠' : r.resultado === 'REVISAR' ? '🔍' : '✓';
                     return (
                       <div key={r.idx} className={`px-6 py-3 flex items-center gap-4 text-sm ${
                         hasAlert ? (dark ? 'bg-red-950/20' : 'bg-red-50/50') : ''
@@ -838,17 +829,20 @@ export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, da
                         </span>
                         <code className={`font-mono text-xs flex-shrink-0 ${dark ? 'text-slate-300' : 'text-slate-600'}`}>{r.documento}</code>
                         <span className={`flex-1 text-xs truncate ${textMuted}`}>{r.nombre || '—'}</span>
-                        {r.status === 'done' && (
+                        {r.status === 'done' && r.classification && (
                           <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${
-                            cant === 0
-                              ? dark ? 'text-emerald-400 bg-emerald-900/30' : 'text-emerald-700 bg-emerald-100'
-                              : dark ? 'text-red-400 bg-red-900/30' : 'text-red-700 bg-red-100'
+                            r.resultado === 'ALERTA' ? (dark ? 'text-red-400 bg-red-900/30' : 'text-red-700 bg-red-100')
+                            : r.resultado === 'REVISAR' ? (dark ? 'text-amber-400 bg-amber-900/30' : 'text-amber-700 bg-amber-100')
+                            : (dark ? 'text-emerald-400 bg-emerald-900/30' : 'text-emerald-700 bg-emerald-100')
                           }`}>
-                            {cant > 0 ? `${cant} alerta${cant !== 1 ? 's' : ''}` : 'Limpio'} · {getRiesgo(cant)}
+                            {r.resultado} · {r.classification.totalCoincidencias} coincidencia{r.classification.totalCoincidencias !== 1 ? 's' : ''}
+                            {r.classification.prioridadMaxima ? ` · P${r.classification.prioridadMaxima}` : ''}
                           </span>
                         )}
                         {r.status === 'error' && (
-                          <span className={`text-xs ${dark ? 'text-red-400' : 'text-red-600'} truncate max-w-[200px]`}>{r.error}</span>
+                          <span className={`text-xs ${r.validationError ? (dark ? 'text-amber-400' : 'text-amber-600') : (dark ? 'text-red-400' : 'text-red-600')} truncate max-w-[240px]`}>
+                            {r.resultado ?? 'ERROR'} · {r.validationError ?? r.error}
+                          </span>
                         )}
                       </div>
                     );
