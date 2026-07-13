@@ -63,6 +63,36 @@ function groupBy<T>(rows: Record<string, unknown>[], map: (r: Record<string, unk
   return m;
 }
 
+// Prioridad numérica (1-4) de una coincidencia, o null.
+function prioridadDe(c: CoincidenciaLista): number | null {
+  const m = String(c.prioridad).match(/[1-4]/);
+  return m ? Number(m[0]) : null;
+}
+// Lista informativa (se excluye).
+function esInformativa(c: CoincidenciaLista): boolean {
+  return /INFORMATIVA/i.test(c.grupoLista);
+}
+
+// Filtra las coincidencias de un perfil según las reglas de negocio (Colombia):
+//  - Se excluyen listas informativas.
+//  - P4 y P2: nunca se muestran.
+//  - P1: siempre.
+//  - P3: solo si (a) el JEPMS de la persona tiene coincidencia exacta de documento
+//        (queryParam === identificationNumberResult, es decir identificacion_resultado
+//        === numero_dni) o (b) la propia coincidencia tiene identificación == documento.
+//  - Sin prioridad clara: se mantiene (no es P2/P4/informativa).
+function filtrarCoincidencias(coincidencias: CoincidenciaLista[], jepms: JepmsItem[], numeroDni: string): CoincidenciaLista[] {
+  const jepmsExacto = jepms.some(j => j.identificacionResultado && j.identificacionResultado === numeroDni);
+  return coincidencias.filter(c => {
+    if (esInformativa(c)) return false;
+    const p = prioridadDe(c);
+    if (p === 4 || p === 2) return false;
+    if (p === 1) return true;
+    if (p === 3) return jepmsExacto || (!!c.identificacion && c.identificacion === numeroDni);
+    return true;
+  });
+}
+
 export async function parseColombiaMasivo(file: File): Promise<ColombiaProfile[]> {
   const wb = XLSX.read(await file.arrayBuffer(), { type: 'array' });
 
@@ -93,18 +123,26 @@ export async function parseColombiaMasivo(file: File): Promise<ColombiaProfile[]
 
   return resumen.map((r): ColombiaProfile => {
     const dni = dniOf(r);
+    const jepms = jepmsByDni.get(dni) ?? [];
+    // Coincidencias filtradas según reglas de negocio (excluye P2/P4/informativas, P3 condicional).
+    const coincidencias = filtrarCoincidencias(listasByDni.get(dni) ?? [], jepms, dni);
+    // Derivados recalculados sobre lo que realmente se muestra.
+    const prioridades = coincidencias.map(prioridadDe).filter((p): p is number => p != null);
+    const prioridadMaxima = prioridades.length ? String(Math.min(...prioridades)) : '';
+    const listas = [...new Set(coincidencias.map(c => c.nombreLista || c.grupoLista).filter(Boolean))].join('; ');
+    const resultado = prioridades.includes(1) ? 'ALERTA' : coincidencias.length ? 'REVISAR' : 'SIN_HALLAZGOS';
     return {
       numeroDni: dni,
       nombre: S(r['nombre_completo'] ?? r['nombre']),
       tipoDni: S(r['tipo_dni'] ?? r['tipo']),
-      resultado: S(r['resultado']) || 'SIN_HALLAZGOS',
-      totalCoincidencias: Number(r['total_coincidencias']) || 0,
-      prioridadMaxima: S(r['prioridad_maxima']),
-      listas: S(r['listas']),
-      coincidencias: listasByDni.get(dni) ?? [],
+      resultado,
+      totalCoincidencias: coincidencias.length,
+      prioridadMaxima,
+      listas,
+      coincidencias,
       procuraduria: procByDni.get(dni) ?? [],
       ramaJudicial: ramaByDni.get(dni) ?? [],
-      jepms: jepmsByDni.get(dni) ?? [],
+      jepms,
       accion: '',
       estado: 'Pendiente',
       notas: '',
