@@ -3,7 +3,7 @@ import * as XLSX from 'xlsx';
 import {
   normalizeName, normalizeDni, mapTipoDoc, maskPii, dedupe, dedupeKey,
   classify, retry, cacheGet, cachePut, buildMasivoWorkbook,
-  type Resultado, type Classification, type SummaryRow,
+  type Resultado, type Classification,
 } from '../services/inspektorMasivoService';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -582,7 +582,7 @@ export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, da
     setMasivoRunning(false); setMasivoIsPaused(false);
   }
 
-  // ── Masivo: export Excel (2 hojas: Resumen + Detalle, según spec) ──────────────
+  // ── Masivo: export Excel (extracción completa, 5 hojas) ───────────────────────
   function exportarExcelMasivo() {
     if (masivoRows.length === 0) return;
 
@@ -590,40 +590,109 @@ export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, da
     const pad = (n: number) => String(n).padStart(2, '0');
     const ts  = `${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}`;
     const fecha = now.toLocaleString('es-CL');
+    const S = (v: unknown) => (v === null || v === undefined) ? '' : String(v);
+    const join = (arr: unknown[]) => arr.filter(x => x != null && String(x).trim() !== '').join(' / ');
 
-    // Hoja "Resumen": una fila por registro de entrada, en el orden original.
-    const summary: SummaryRow[] = [...masivoRows].sort((a, b) => a.idx - b.idx).map(r => {
+    const idOf = (r: MasivoRow) => ({ nombre_completo: r.nombre, tipo_dni: r.tipoLabel, numero_dni: r.documento });
+
+    // Hoja "Resumen": una fila por registro de entrada, en orden original.
+    const summary: Record<string, unknown>[] = [...masivoRows].sort((a, b) => a.idx - b.idx).map(r => {
       const cls = r.classification;
-      const resultado: Resultado = r.resultado
-        ?? (r.status === 'done' ? (cls?.resultado ?? 'SIN_HALLAZGOS') : 'ERROR_CONSULTA');
+      const res = r.result;
+      const resultado = r.resultado
+        ?? (r.status === 'done' ? (cls?.resultado ?? 'SIN_HALLAZGOS')
+          : r.status === 'error' ? 'ERROR_CONSULTA' : 'NO_CONSULTADO');
       return {
-        nombre_completo: r.nombre,
-        tipo_dni: r.tipoLabel,
-        numero_dni: r.documento,
+        ...idOf(r),
         resultado,
         total_coincidencias: cls ? cls.totalCoincidencias : '',
         prioridad_maxima: cls?.prioridadMaxima ?? '',
         listas: cls ? cls.listas.join('; ') : '',
+        total_procuraduria: res ? getProcuraduriaRecords(res.procuraduria).length : '',
+        total_rama_judicial: res ? getRamaJudicialProcesos(res.ramaJudicial).length : '',
+        total_jepms: res ? getJEPMSItems(res.ramaJudicialJEPMS).length : '',
+        n_consulta: S(res?.numConsulta),
         fecha_consulta: r.status === 'done' ? fecha : '',
         observaciones: r.validationError ?? r.error ?? '',
       };
     });
 
-    // Hoja "Detalle": una fila por coincidencia.
-    const detail: Record<string, unknown>[] = [];
+    // Hoja "Detalle_Listas": una fila por coincidencia (listas + listas_propias).
+    const detalleListas: Record<string, unknown>[] = [];
     for (const r of masivoRows) {
-      if (!r.classification) continue;
-      for (const c of r.classification.coincidencias) {
-        detail.push({
-          nombre_completo: r.nombre, tipo_dni: r.tipoLabel, numero_dni: r.documento,
-          coincidencia_nombre: c.nombre, coincidencia_identificacion: c.identificacion,
-          prioridad: c.prioridad ?? '', grupo_lista: c.grupoLista, nombre_lista: c.nombreLista,
-          delito: c.delito, zona: c.zona, fuente: c.fuente, estado: c.estado,
+      const push = (item: InspektorListaItem, origen: string) => detalleListas.push({
+        ...idOf(r), origen,
+        coincidencia_nombre: S(item.nombreCompleto),
+        coincidencia_identificacion: S(item.documentoIdentidad),
+        prioridad: S(item.Prioridad ?? item.prioridad),
+        grupo_lista: getGrupoLista(item),
+        nombre_lista: S(item.nombreTipoLista ?? item.tipoLista ?? item.nombreCategoria ?? item.categoria),
+        delito: S(item.delito),
+        pep: S(item.peps),
+        zona: S(item.zona),
+        fuente: S(item.fuenteConsulta),
+        fecha_actualizacion: S(item.fechaActualizacion),
+        raw_json: JSON.stringify(item),
+      });
+      (r.result?.listas ?? []).forEach(it => push(it, 'lista'));
+      (r.result?.listas_propias ?? []).forEach(it => push(it, 'lista_propia'));
+    }
+
+    // Hoja "Procuraduria": una fila por registro, con sub-arrays serializados completos.
+    const procuraduria: Record<string, unknown>[] = [];
+    for (const r of masivoRows) {
+      for (const rec of getProcuraduriaRecords(r.result?.procuraduria)) {
+        procuraduria.push({
+          ...idOf(r),
+          registro_nombre: S(rec.name),
+          registro_identificacion: S(rec.identification),
+          num_siri: S(rec.num_siri),
+          sanciones: (rec.sanciones ?? []).map(s => join([s.sancion, s.clase, s.termino])).join(' | '),
+          delitos: (rec.delitos ?? []).map(d => S(d.descripcion)).join(' | '),
+          instancias: (rec.instancias ?? []).map(i => join([i.nombre, i.autoridad, i.fecha_provincia, i.fecha_efecto_juridicos])).join(' | '),
+          inhabilidades: (rec.inhabilidades ?? []).map(i => join([i.modulo, i.inhabilidad_legal, i.fecha_inicio, i.fecha_fin])).join(' | '),
+          raw_json: JSON.stringify(rec),
         });
       }
     }
 
-    XLSX.writeFile(buildMasivoWorkbook(summary, detail), `inspektor_masivo_${ts}.xlsx`);
+    // Hoja "Rama_Judicial": una fila por proceso.
+    const ramaJudicial: Record<string, unknown>[] = [];
+    for (const r of masivoRows) {
+      for (const p of getRamaJudicialProcesos(r.result?.ramaJudicial)) {
+        ramaJudicial.push({
+          ...idOf(r),
+          id_proceso: S(p.idProceso), llave_proceso: S(p.llaveProceso),
+          despacho: S(p.despacho), departamento: S(p.departamento),
+          fecha_proceso: S(p.fechaProceso), fecha_ultima_actuacion: S(p.fechaUltimaActuacion),
+          es_privado: S(p.esPrivado), sujetos_procesales: S(p.sujetosProcesales),
+          raw_json: JSON.stringify(p),
+        });
+      }
+    }
+
+    // Hoja "JEPMS": una fila por resultado.
+    const jepms: Record<string, unknown>[] = [];
+    for (const r of masivoRows) {
+      for (const j of getJEPMSItems(r.result?.ramaJudicialJEPMS)) {
+        jepms.push({
+          ...idOf(r),
+          ciudad: S(j.cityName), nombre_resultado: S(j.nameResult),
+          identificacion_resultado: S(j.identificationNumberResult),
+          exito: S(j.isSuccess), fecha_consulta: S(j.queryDate), link: S(j.link),
+          raw_json: JSON.stringify(j),
+        });
+      }
+    }
+
+    const wb = buildMasivoWorkbook([
+      { name: 'Resumen', rows: summary },
+      { name: 'Detalle_Listas', rows: detalleListas },
+      { name: 'Procuraduria', rows: procuraduria },
+      { name: 'Rama_Judicial', rows: ramaJudicial },
+      { name: 'JEPMS', rows: jepms },
+    ]);
+    XLSX.writeFile(wb, `inspektor_masivo_${ts}.xlsx`);
   }
 
   // ── Derived result data (individual) ────────────────────────────────────────

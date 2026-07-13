@@ -202,24 +202,30 @@ export interface SummaryRow {
   fecha_consulta: string; observaciones: string;
 }
 
+// Ancho de columnas por contenido (union de todas las claves presentes) + autofiltro.
 function autofit(ws: XLSX.WorkSheet, rows: Record<string, unknown>[]): void {
   if (!rows.length) return;
-  const keys = Object.keys(rows[0]);
+  const keys = [...new Set(rows.flatMap(r => Object.keys(r)))];
   ws['!cols'] = keys.map(k => {
     const maxLen = Math.max(k.length, ...rows.map(r => String(r[k] ?? '').length));
-    return { wch: Math.min(60, Math.max(10, maxLen + 2)) };
+    return { wch: Math.min(80, Math.max(10, maxLen + 2)) };
   });
-  const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
-  ws['!autofilter'] = { ref: XLSX.utils.encode_range(range) };
+  ws['!autofilter'] = { ref: XLSX.utils.encode_range(XLSX.utils.decode_range(ws['!ref'] || 'A1')) };
 }
 
-export function buildMasivoWorkbook(summary: SummaryRow[], detail: Record<string, unknown>[]): XLSX.WorkBook {
+export interface SheetSpec { name: string; rows: Record<string, unknown>[]; }
+
+// Construye el workbook con N hojas (cada una con autoancho + autofiltro).
+// Una hoja vacía igual se crea con una fila indicativa para no romper el archivo.
+export function buildMasivoWorkbook(sheets: SheetSpec[]): XLSX.WorkBook {
   const wb = XLSX.utils.book_new();
-  const wsResumen = XLSX.utils.json_to_sheet(summary);
-  autofit(wsResumen, summary as unknown as Record<string, unknown>[]);
-  XLSX.utils.book_append_sheet(wb, wsResumen, 'Resumen');
-  const wsDetalle = XLSX.utils.json_to_sheet(detail.length ? detail : [{ Sin: 'coincidencias' }]);
-  autofit(wsDetalle, detail);
-  XLSX.utils.book_append_sheet(wb, wsDetalle, 'Detalle');
+  for (const { name, rows } of sheets) {
+    const data = rows.length ? rows : [{ '(sin registros)': '' }];
+    const ws = XLSX.utils.json_to_sheet(data);
+    autofit(ws, data);
+    // Nombre de hoja: máx 31 chars, sin caracteres prohibidos por Excel.
+    const safe = name.replace(/[:\\/?*[\]]/g, ' ').slice(0, 31);
+    XLSX.utils.book_append_sheet(wb, ws, safe);
+  }
   return wb;
 }
