@@ -3,6 +3,7 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { ExtractedField, CryptoWalletProfile, ComplianceAnalysisResult, FinancialDocumentProcess, FinancialDocumentType } from '../types';
 import { Lens360Result } from '../types/lens360';
+import { ColombiaProfile, buildTimeline } from './colombiaCriminalParser';
 
 // Colors
 const NAVY = [30, 58, 95] as [number, number, number];       // #1e3a5f
@@ -2051,4 +2052,127 @@ export const generateLens360Pdf = async (r: Lens360Result): Promise<void> => {
 export const generateLens360Blob = async (r: Lens360Result): Promise<Blob> => {
   const doc = await buildLens360Doc(r);
   return doc.output('blob');
+};
+
+// ─── Informe de Perfil — Colombia (mismo formato visual que el de Chile) ──────────
+export const generateColombiaProfilePdf = async (p: ColombiaProfile): Promise<void> => {
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const margin = 14;
+  const date = new Date().toLocaleString('es-CL');
+
+  // Header
+  doc.setFillColor(...NAVY); doc.rect(0, 0, pageWidth, 38, 'F');
+  doc.setFillColor(...INDIGO); doc.rect(0, 38, pageWidth, 2, 'F');
+  const logo = await loadLogoBase64();
+  if (logo) { try { doc.addImage(logo, 'JPEG', pageWidth - 58, 8, 44, 13); } catch { /* no logo */ } }
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(16); doc.setTextColor(...WHITE);
+  doc.text('INFORME DE PERFIL — COLOMBIA', margin, 16);
+  doc.setFontSize(9); doc.setFont('helvetica', 'normal'); doc.setTextColor(196, 210, 230);
+  doc.text('CriminalProfile AI · Compliance Team Global66', margin, 24);
+  doc.text(date, pageWidth - margin, 24, { align: 'right' });
+
+  let y = 48;
+
+  // Info box
+  doc.setFillColor(...LIGHT_GRAY); doc.setDrawColor(220, 228, 240);
+  doc.roundedRect(margin, y, pageWidth - margin * 2, 24, 2, 2, 'FD');
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(12); doc.setTextColor(...DARK_TEXT);
+  doc.text((p.nombre || p.numeroDni).toUpperCase(), margin + 4, y + 9);
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...MID_GRAY);
+  doc.text(`Documento: ${p.numeroDni} (${p.tipoDni})`, margin + 4, y + 16);
+  doc.text(`Resultado Inspektor: ${p.resultado}${p.prioridadMaxima ? ` · P${p.prioridadMaxima}` : ''}`, margin + 4, y + 21);
+  doc.text(`Coincidencias: ${p.totalCoincidencias}`, pageWidth - margin - 4, y + 16, { align: 'right' });
+  y += 32;
+
+  // Decisión manual
+  const acc = (p.accion || 'PENDIENTE').toLowerCase();
+  const isLib = acc.includes('liber'); const isBlock = acc.includes('block');
+  const fill: [number, number, number] = isLib ? [240, 253, 244] : isBlock ? [254, 242, 242] : [255, 251, 235];
+  const border: [number, number, number] = isLib ? [134, 239, 172] : isBlock ? [252, 165, 165] : [252, 211, 77];
+  const txt: [number, number, number] = isLib ? [21, 128, 61] : isBlock ? [185, 28, 28] : [146, 64, 14];
+  const notasLines = p.notas ? doc.splitTextToSize(`Notas: ${p.notas}`, pageWidth - margin * 2 - 8) : [];
+  const boxH = 16 + notasLines.length * 4;
+  doc.setFillColor(...fill); doc.setDrawColor(...border);
+  doc.roundedRect(margin, y, pageWidth - margin * 2, boxH, 2, 2, 'FD');
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(8); doc.setTextColor(...MID_GRAY);
+  doc.text('DECISIÓN MANUAL DEL ANALISTA', margin + 4, y + 6);
+  doc.setFontSize(12); doc.setTextColor(...txt);
+  doc.text((p.accion || 'PENDIENTE').toUpperCase(), margin + 4, y + 13);
+  if (notasLines.length) { doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...DARK_TEXT); doc.text(notasLines, margin + 4, y + 18); }
+  y += boxH + 8;
+
+  const sectionTitle = (t: string) => {
+    if (y > 250) { doc.addPage(); y = 20; }
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.setTextColor(...NAVY);
+    doc.text(t, margin, y); y += 2;
+  };
+  const afterTable = () => { y = (doc as any).lastAutoTable.finalY + 8; };
+  const tableOpts = {
+    theme: 'grid' as const, headStyles: { fillColor: NAVY, textColor: WHITE, fontSize: 8, fontStyle: 'bold' as const },
+    bodyStyles: { fontSize: 7.5, textColor: DARK_TEXT }, margin: { left: margin, right: margin },
+    didDrawPage: (d: { pageNumber: number }) => addPageFooter(doc, d.pageNumber, 0, date),
+  };
+
+  // Coincidencias en listas
+  sectionTitle(`Coincidencias en Listas (${p.coincidencias.length})`);
+  autoTable(doc, {
+    startY: y + 3,
+    head: [['Lista', 'Prio', 'Delito / Cargo', 'Zona', 'Fuente']],
+    body: p.coincidencias.length ? p.coincidencias.map(c => [c.nombreLista || c.grupoLista, c.prioridad, c.delito || c.pep, c.zona, c.fuente]) : [['Sin coincidencias', '', '', '', '']],
+    columnStyles: { 0: { cellWidth: 55 }, 2: { cellWidth: 55 } }, ...tableOpts,
+  });
+  afterTable();
+
+  // Procuraduría
+  if (p.procuraduria.length) {
+    sectionTitle(`Procuraduría (${p.procuraduria.length})`);
+    autoTable(doc, {
+      startY: y + 3,
+      head: [['Nombre', 'Sanciones', 'Inhabilidades']],
+      body: p.procuraduria.map(r => [r.nombre, r.sanciones, r.inhabilidades]),
+      ...tableOpts,
+    });
+    afterTable();
+  }
+
+  // Rama Judicial
+  if (p.ramaJudicial.length) {
+    sectionTitle(`Rama Judicial (${p.ramaJudicial.length})`);
+    autoTable(doc, {
+      startY: y + 3,
+      head: [['Despacho', 'Depto', 'Inicio', 'Últ. actuación']],
+      body: p.ramaJudicial.map(r => [r.despacho, r.departamento, r.fechaProceso.slice(0, 10), r.fechaUltimaActuacion.slice(0, 10)]),
+      columnStyles: { 0: { cellWidth: 70 } }, ...tableOpts,
+    });
+    afterTable();
+  }
+
+  // JEPMS
+  if (p.jepms.length) {
+    sectionTitle(`JEPMS (${p.jepms.length})`);
+    autoTable(doc, {
+      startY: y + 3,
+      head: [['Ciudad', 'Fecha', 'Link']],
+      body: p.jepms.map(j => [j.ciudad, j.fechaConsulta.slice(0, 10), j.link]),
+      columnStyles: { 2: { cellWidth: 90 } }, ...tableOpts,
+    });
+    afterTable();
+  }
+
+  // Línea de tiempo
+  const timeline = buildTimeline(p);
+  if (timeline.length) {
+    sectionTitle(`Línea de Tiempo (${timeline.length})`);
+    autoTable(doc, {
+      startY: y + 3,
+      head: [['Fecha', 'Tipo', 'Descripción']],
+      body: timeline.map(e => [e.fecha.slice(0, 10), e.tipo, e.descripcion]),
+      columnStyles: { 2: { cellWidth: 100 } }, ...tableOpts,
+    });
+  }
+
+  const totalPages = (doc as any).internal.getNumberOfPages();
+  for (let i = 1; i <= totalPages; i++) { doc.setPage(i); addPageFooter(doc, i, totalPages, date); }
+  doc.save(`perfil_colombia_${p.numeroDni.replace(/[^a-z0-9_-]/gi, '_')}.pdf`);
 };
