@@ -7,9 +7,13 @@ import {
 } from '../services/inspektorMasivoService';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
-const INSPEKTOR_BASE = 'https://inspektor.datalaft.com:2121/api';
+const INSPEKTOR_DIRECT = 'https://inspektor.datalaft.com:2121/api';
 const INSPEKTOR_USER = ((import.meta as unknown) as { env: Record<string, string> }).env.VITE_INSPEKTOR_USER ?? 'WS_Global81';
 const INSPEKTOR_PASS = ((import.meta as unknown) as { env: Record<string, string> }).env.VITE_INSPEKTOR_PASS ?? 'Risk5397#0ft';
+// Si hay proxy (Cloudflare Worker) configurado, se enrutan las llamadas por él
+// (evita CORS y problemas de ruta de red del navegador hacia Inspektor).
+const INSPEKTOR_PROXY = (process.env.EMPRESADOCS_PROXY_URL || '').replace(/\/$/, '');
+const INSPEKTOR_BASE = INSPEKTOR_PROXY ? `${INSPEKTOR_PROXY}/inspektor` : INSPEKTOR_DIRECT;
 const GRUPO_OBJETIVO = 'LISTAS ASOCIADAS A LA/FT/FPADM, CORRUPCIÓN U OTROS DELITOS (PENAL) Y EXTINCIÓN DE DOMINIO';
 
 // fetch con timeout — evita que el proceso masivo se "pegue" si Inspektor no responde.
