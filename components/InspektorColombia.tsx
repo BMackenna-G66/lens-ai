@@ -2,7 +2,7 @@ import React, { useState, useRef, useCallback } from 'react';
 import * as XLSX from 'xlsx';
 import {
   normalizeName, normalizeDni, mapTipoDoc, maskPii, dedupe, dedupeKey,
-  classify, retry, cacheGet, cachePut, buildMasivoWorkbook,
+  classify, retry, cacheGet, cachePut, cacheClear, buildMasivoWorkbook,
   type Resultado, type Classification,
 } from '../services/inspektorMasivoService';
 
@@ -695,6 +695,18 @@ export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, da
     XLSX.writeFile(wb, `inspektor_masivo_${ts}.xlsx`);
   }
 
+  // ── Masivo: reiniciar (empezar de cero) ──────────────────────────────────────
+  async function reiniciarMasivo() {
+    if (!confirm('¿Reiniciar y empezar de cero?\n\nSe borrará el archivo cargado, los resultados y la caché de consultas (las próximas consultas se volverán a pedir a Inspektor).')) return;
+    abortRef.current = true; pausedRef.current = false;
+    setMasivoRunning(false); setMasivoIsPaused(false);
+    setMasivoFile(null); setMasivoRows([]); setLogs([]);
+    setMasivoProgress(0); setMasivoTotal(0); setMasivoError('');
+    if (fileInputRef.current) fileInputRef.current.value = '';
+    await cacheClear();
+    addLog('info', '🔄 Proceso reiniciado — caché limpiada, listo para empezar de cero.');
+  }
+
   // ── Derived result data (individual) ────────────────────────────────────────
   const cant = result?.cantCoincidencias ?? 0;
   const riesgo = getRiesgo(cant);
@@ -831,6 +843,12 @@ export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, da
                   <button onClick={exportarExcelMasivo}
                     className={`flex items-center gap-2 border font-bold px-5 py-2.5 rounded-xl text-sm transition-all ${dark ? 'border-emerald-600/50 text-emerald-400 hover:bg-emerald-950/40' : 'border-emerald-500 text-emerald-700 hover:bg-emerald-50'}`}>
                     📥 Exportar Excel
+                  </button>
+                )}
+                {(masivoRows.length > 0 || masivoFile) && !masivoRunning && (
+                  <button onClick={reiniciarMasivo}
+                    className={`flex items-center gap-2 border font-bold px-5 py-2.5 rounded-xl text-sm transition-all ${dark ? 'border-slate-600/50 text-slate-300 hover:bg-slate-800/60' : 'border-slate-400 text-slate-600 hover:bg-slate-100'}`}>
+                    🔄 Reiniciar
                   </button>
                 )}
               </div>
