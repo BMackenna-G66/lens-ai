@@ -1,8 +1,12 @@
 import React, { useState, useMemo, useRef } from 'react';
 import * as XLSX from 'xlsx';
-import { ArrowLeft, Sun, Moon, FileSpreadsheet, Download, Search, X, ChevronRight, Clock, List } from 'lucide-react';
+import { ArrowLeft, Sun, Moon, FileSpreadsheet, Download, Search, X, ChevronRight, ChevronLeft, ChevronUp, ChevronDown, ArrowUpDown, Clock, List } from 'lucide-react';
 import { AnalysisAction } from '../../types/criminalTypes';
 import { parseColombiaMasivo, buildTimeline, ColombiaProfile } from '../../services/colombiaCriminalParser';
+import { generateColombiaProfilePdf } from '../../services/pdfGenerator';
+
+type SortKey = 'nombre' | 'numeroDni' | 'resultado' | 'totalCoincidencias' | 'accion' | 'estado';
+type SortOrder = 'asc' | 'desc' | null;
 
 interface Props { onBack: () => void; darkMode: boolean; onToggleDarkMode: () => void; }
 
@@ -20,6 +24,15 @@ const ACC_STYLE: Record<string, string> = {
   'Fully Blocked': 'text-red-700 dark:text-red-400',
 };
 
+const SortTh: React.FC<{ label: string; k: SortKey; sort: { key: SortKey; order: SortOrder }; onSort: (k: SortKey) => void; center?: boolean }> = ({ label, k, sort, onSort, center }) => (
+  <th onClick={() => onSort(k)} className={`px-4 py-3 font-bold cursor-pointer select-none hover:text-slate-700 dark:hover:text-slate-200 ${center ? 'text-center' : ''}`}>
+    <span className={`inline-flex items-center gap-1 ${center ? 'justify-center' : ''}`}>
+      {label}
+      {sort.key !== k || !sort.order ? <ArrowUpDown size={12} className="opacity-40" /> : sort.order === 'asc' ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+    </span>
+  </th>
+);
+
 export const ColombiaCriminalApp: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }) => {
   const [profiles, setProfiles] = useState<ColombiaProfile[]>([]);
   const [loading, setLoading] = useState(false);
@@ -27,7 +40,12 @@ export const ColombiaCriminalApp: React.FC<Props> = ({ onBack, darkMode, onToggl
   const [search, setSearch] = useState('');
   const [filterAccion, setFilterAccion] = useState('All');
   const [selected, setSelected] = useState<string | null>(null);
+  const [sort, setSort] = useState<{ key: SortKey; order: SortOrder }>({ key: 'nombre', order: null });
+  const [checked, setChecked] = useState<Set<string>>(new Set());
   const fileRef = useRef<HTMLInputElement>(null);
+
+  const toggleSort = (key: SortKey) => setSort(s =>
+    s.key !== key ? { key, order: 'asc' } : { key, order: s.order === 'asc' ? 'desc' : s.order === 'desc' ? null : 'asc' });
 
   const handleFile = async (file: File) => {
     setLoading(true); setError(null);
@@ -46,15 +64,38 @@ export const ColombiaCriminalApp: React.FC<Props> = ({ onBack, darkMode, onToggl
   const setAccion = (dni: string, accion: AnalysisAction) =>
     update(dni, { accion, estado: accion ? 'Revisado' : 'Pendiente' });
 
-  const filtered = useMemo(() => profiles.filter(p => {
-    const q = search.trim().toLowerCase();
-    if (q && !(`${p.nombre} ${p.numeroDni}`.toLowerCase().includes(q))) return false;
-    if (filterAccion !== 'All' && p.accion !== filterAccion) return false;
-    return true;
-  }), [profiles, search, filterAccion]);
+  const filtered = useMemo(() => {
+    const list = profiles.filter(p => {
+      const q = search.trim().toLowerCase();
+      if (q && !(`${p.nombre} ${p.numeroDni}`.toLowerCase().includes(q))) return false;
+      if (filterAccion !== 'All' && p.accion !== filterAccion) return false;
+      return true;
+    });
+    if (!sort.order) return list;
+    const dir = sort.order === 'asc' ? 1 : -1;
+    return [...list].sort((a, b) => {
+      const av = a[sort.key] ?? '', bv = b[sort.key] ?? '';
+      if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * dir;
+      return String(av).localeCompare(String(bv), 'es') * dir;
+    });
+  }, [profiles, search, filterAccion, sort]);
 
   const selectedProfile = profiles.find(p => p.numeroDni === selected) ?? null;
   const revisados = profiles.filter(p => p.estado === 'Revisado').length;
+
+  // Navegación entre fichas (según el orden filtrado actual)
+  const selIdx = selectedProfile ? filtered.findIndex(p => p.numeroDni === selectedProfile.numeroDni) : -1;
+  const goPrev = selIdx > 0 ? () => setSelected(filtered[selIdx - 1].numeroDni) : undefined;
+  const goNext = selIdx >= 0 && selIdx < filtered.length - 1 ? () => setSelected(filtered[selIdx + 1].numeroDni) : undefined;
+
+  // Selección masiva
+  const toggleCheck = (dni: string) => setChecked(s => { const n = new Set(s); n.has(dni) ? n.delete(dni) : n.add(dni); return n; });
+  const allChecked = filtered.length > 0 && filtered.every(p => checked.has(p.numeroDni));
+  const toggleAll = () => setChecked(allChecked ? new Set() : new Set(filtered.map(p => p.numeroDni)));
+  const bulkSetAccion = (accion: AnalysisAction) => {
+    setProfiles(prev => prev.map(p => checked.has(p.numeroDni) ? { ...p, accion, estado: accion ? 'Revisado' : 'Pendiente' } : p));
+    setChecked(new Set());
+  };
 
   const exportar = () => {
     if (profiles.length === 0) return;
@@ -142,24 +183,40 @@ export const ColombiaCriminalApp: React.FC<Props> = ({ onBack, darkMode, onToggl
               <span className="text-xs font-semibold text-slate-500 dark:text-slate-400">{revisados}/{profiles.length} revisados</span>
             </div>
 
+            {/* Barra de acción masiva */}
+            {checked.size > 0 && (
+              <div className="flex flex-wrap items-center gap-2 mb-3 bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800 rounded-xl px-4 py-2.5">
+                <span className="text-xs font-bold text-indigo-700 dark:text-indigo-300">{checked.size} seleccionado(s) → aplicar:</span>
+                {ACCIONES.map(a => (
+                  <button key={a} onClick={() => bulkSetAccion(a)}
+                    className={`text-xs font-semibold px-3 py-1.5 rounded-lg border bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-700 ${ACC_STYLE[a]}`}>
+                    {a}
+                  </button>
+                ))}
+                <button onClick={() => setChecked(new Set())} className="text-xs text-slate-500 hover:text-slate-700 ml-1">✕ Limpiar</button>
+              </div>
+            )}
+
             {/* Tabla */}
             <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="bg-slate-50 dark:bg-slate-800 text-left text-xs text-slate-500 dark:text-slate-400 uppercase tracking-wider">
-                      <th className="px-4 py-3 font-bold">Nombre</th>
-                      <th className="px-4 py-3 font-bold">Documento</th>
-                      <th className="px-4 py-3 font-bold">Inspektor</th>
-                      <th className="px-4 py-3 font-bold text-center">Coinc.</th>
-                      <th className="px-4 py-3 font-bold">Acción manual</th>
-                      <th className="px-4 py-3 font-bold">Estado</th>
+                      <th className="px-3 py-3 w-8"><input type="checkbox" checked={allChecked} onChange={toggleAll} className="rounded" /></th>
+                      <SortTh label="Nombre" k="nombre" sort={sort} onSort={toggleSort} />
+                      <SortTh label="Documento" k="numeroDni" sort={sort} onSort={toggleSort} />
+                      <SortTh label="Inspektor" k="resultado" sort={sort} onSort={toggleSort} />
+                      <SortTh label="Coinc." k="totalCoincidencias" sort={sort} onSort={toggleSort} center />
+                      <SortTh label="Acción manual" k="accion" sort={sort} onSort={toggleSort} />
+                      <SortTh label="Estado" k="estado" sort={sort} onSort={toggleSort} />
                       <th className="px-4 py-3 font-bold text-right">Ficha</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                     {filtered.map(p => (
-                      <tr key={p.numeroDni} className="hover:bg-slate-50 dark:hover:bg-slate-800/50">
+                      <tr key={p.numeroDni} className={`hover:bg-slate-50 dark:hover:bg-slate-800/50 ${checked.has(p.numeroDni) ? 'bg-indigo-50/50 dark:bg-indigo-950/20' : ''}`}>
+                        <td className="px-3 py-3"><input type="checkbox" checked={checked.has(p.numeroDni)} onChange={() => toggleCheck(p.numeroDni)} className="rounded" /></td>
                         <td className="px-4 py-3 font-medium text-slate-800 dark:text-slate-200">{p.nombre || '—'}</td>
                         <td className="px-4 py-3 font-mono text-xs text-slate-500 dark:text-slate-400">{p.numeroDni} · {p.tipoDni}</td>
                         <td className="px-4 py-3">
@@ -200,6 +257,8 @@ export const ColombiaCriminalApp: React.FC<Props> = ({ onBack, darkMode, onToggl
           profile={selectedProfile}
           onClose={() => setSelected(null)}
           onUpdate={update}
+          onPrev={goPrev}
+          onNext={goNext}
         />
       )}
     </div>
@@ -211,9 +270,17 @@ const ProfileDetalleColombia: React.FC<{
   profile: ColombiaProfile;
   onClose: () => void;
   onUpdate: (dni: string, patch: Partial<ColombiaProfile>) => void;
-}> = ({ profile: p, onClose, onUpdate }) => {
+  onPrev?: () => void;
+  onNext?: () => void;
+}> = ({ profile: p, onClose, onUpdate, onPrev, onNext }) => {
   const [tab, setTab] = useState<'listas' | 'procuraduria' | 'rama' | 'jepms' | 'timeline'>('listas');
+  const [pdfLoading, setPdfLoading] = useState(false);
   const timeline = useMemo(() => buildTimeline(p), [p]);
+
+  const downloadPdf = async () => {
+    setPdfLoading(true);
+    try { await generateColombiaProfilePdf(p); } finally { setPdfLoading(false); }
+  };
 
   const tabs: { key: typeof tab; label: string; count: number }[] = [
     { key: 'listas', label: 'Listas', count: p.coincidencias.length },
@@ -232,7 +299,17 @@ const ProfileDetalleColombia: React.FC<{
             <h2 className="text-xl font-black text-slate-900 dark:text-white">{p.nombre || p.numeroDni}</h2>
             <p className="text-[11px] text-slate-400 mt-0.5">{p.numeroDni} · {p.tipoDni} · Inspektor: {p.resultado}{p.prioridadMaxima ? ` (P${p.prioridadMaxima})` : ''}</p>
           </div>
-          <button onClick={onClose} className="p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500"><X size={20} /></button>
+          <div className="flex items-center gap-2">
+            <button onClick={downloadPdf} disabled={pdfLoading}
+              className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-widest bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-indigo-600 hover:text-white border border-slate-200 dark:border-slate-700 px-3 py-2 rounded-xl transition-all disabled:opacity-50">
+              <Download size={14} /> {pdfLoading ? '…' : 'PDF'}
+            </button>
+            <div className="flex items-center bg-slate-50 dark:bg-slate-800 rounded-xl border border-slate-100 dark:border-slate-700 p-1">
+              <button onClick={onPrev} disabled={!onPrev} className={`p-1.5 rounded-lg ${onPrev ? 'text-indigo-600 dark:text-indigo-400 hover:bg-white dark:hover:bg-slate-700' : 'text-slate-300 dark:text-slate-600 cursor-not-allowed'}`}><ChevronLeft size={18} /></button>
+              <button onClick={onNext} disabled={!onNext} className={`p-1.5 rounded-lg ${onNext ? 'text-indigo-600 dark:text-indigo-400 hover:bg-white dark:hover:bg-slate-700' : 'text-slate-300 dark:text-slate-600 cursor-not-allowed'}`}><ChevronRight size={18} /></button>
+            </div>
+            <button onClick={onClose} className="p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500"><X size={20} /></button>
+          </div>
         </div>
 
         {/* Decisión manual */}
