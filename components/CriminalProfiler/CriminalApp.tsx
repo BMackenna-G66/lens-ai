@@ -7,6 +7,7 @@ import { ProfileDetails } from './ProfileDetails';
 import { CatalogManager } from './CatalogManager';
 import { ComparisonView } from './ComparisonView';
 import { TriageView } from './TriageView';
+import { ColombiaCriminalApp } from './ColombiaCriminalApp';
 import {
   FileSpreadsheet, Search, Filter, ChevronRight, ShieldAlert, AlertCircle,
   Download, CheckCircle, ChevronUp, ChevronDown, ArrowUpDown, CheckSquare,
@@ -39,6 +40,7 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
   const [sortConfig, setSortConfig] = useState<{ key: SortKey; order: SortOrder }>({ key: 'rut', order: null });
   const [flowType, setFlowType] = useState<'emergency' | 'masivo'>('emergency');
   const [pepTab, setPepTab] = useState<'sanciones' | 'peps' | 'sin-antecedentes'>('sanciones');
+  const [country, setCountry] = useState<'CL' | 'CO' | null>(null);
   const sessionFileInputRef = useRef<HTMLInputElement>(null);
   const emergencyFileRef = useRef<HTMLInputElement>(null);
   const masivoFileRef = useRef<HTMLInputElement>(null);
@@ -194,6 +196,61 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
     return sortConfig.order === 'asc' ? <ChevronUp size={12} className="ml-1 text-indigo-400" /> : <ChevronDown size={12} className="ml-1 text-indigo-400" />;
   };
 
+  // ── Pantalla inicial: selección de país ──────────────────────────────────────
+  if (country === null) {
+    return (
+      <div className="min-h-screen flex flex-col bg-slate-100 dark:bg-slate-950">
+        <header className="bg-white dark:bg-indigo-950 py-4 px-6 sticky top-0 z-40 shadow-xl border-b border-slate-200 dark:border-indigo-900">
+          <div className="max-w-7xl mx-auto flex justify-between items-center gap-4">
+            <div className="flex items-center gap-4">
+              <button onClick={onBack} className="flex items-center gap-2 text-indigo-600 dark:text-indigo-400 hover:text-indigo-800 dark:hover:text-white text-xs font-black uppercase tracking-widest bg-slate-100 dark:bg-indigo-900/50 px-3 py-2 rounded-xl border border-slate-200 dark:border-indigo-800">
+                <ArrowLeft size={16} /> Inicio
+              </button>
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 bg-indigo-100 dark:bg-indigo-500/20 rounded-xl border border-indigo-200 dark:border-indigo-500/30">
+                  <ShieldAlert size={26} className="text-indigo-600 dark:text-indigo-300" />
+                </div>
+                <div>
+                  <h1 className="text-xl font-black text-slate-900 dark:text-white leading-none mb-1">CriminalProfile AI</h1>
+                  <p className="text-[10px] text-indigo-500 dark:text-indigo-400 font-bold uppercase tracking-[0.2em]">Agrupador de Registros Judiciales</p>
+                </div>
+              </div>
+            </div>
+            <button onClick={onToggleDarkMode} className="p-2.5 rounded-xl bg-slate-100 dark:bg-indigo-900/50 border border-slate-200 dark:border-indigo-800 text-slate-600 dark:text-indigo-300">
+              {darkMode ? <Sun size={18} /> : <Moon size={18} />}
+            </button>
+          </div>
+        </header>
+        <main className="flex-grow flex flex-col items-center justify-center px-6 py-16">
+          <h2 className="text-2xl font-black text-slate-900 dark:text-white mb-2 uppercase tracking-tight">Selecciona el País</h2>
+          <p className="text-slate-500 dark:text-slate-400 max-w-lg mb-10 text-center font-medium">Cada país tiene su propio flujo de análisis de perfiles.</p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 w-full max-w-2xl">
+            <button onClick={() => setCountry('CL')} className="bg-white dark:bg-slate-900 rounded-[2rem] border-2 border-slate-200 dark:border-slate-700 hover:border-indigo-400 dark:hover:border-indigo-500 hover:shadow-xl transition-all group p-10 flex flex-col items-center gap-4">
+              <span className="text-5xl">🇨🇱</span>
+              <div className="text-center">
+                <h4 className="font-black text-slate-900 dark:text-white uppercase text-sm mb-2">Chile</h4>
+                <p className="text-xs text-slate-500 dark:text-slate-400 font-medium">Flujo de Emergencia y Masivo (Regcheq) con catálogo de delitos y motor de decisión automático.</p>
+              </div>
+            </button>
+            <button onClick={() => setCountry('CO')} className="bg-white dark:bg-slate-900 rounded-[2rem] border-2 border-slate-200 dark:border-slate-700 hover:border-amber-400 dark:hover:border-amber-500 hover:shadow-xl transition-all group p-10 flex flex-col items-center gap-4">
+              <span className="text-5xl">🇨🇴</span>
+              <div className="text-center">
+                <h4 className="font-black text-slate-900 dark:text-white uppercase text-sm mb-2">Colombia</h4>
+                <p className="text-xs text-slate-500 dark:text-slate-400 font-medium">Carga el resultado del masivo Inspektor. Revisión y decisión manual (sin catálogo).</p>
+              </div>
+            </button>
+          </div>
+        </main>
+      </div>
+    );
+  }
+
+  // ── Flujo Colombia (componente aparte; Chile queda intacto abajo) ─────────────
+  if (country === 'CO') {
+    return <ColombiaCriminalApp onBack={() => setCountry(null)} darkMode={darkMode} onToggleDarkMode={onToggleDarkMode} />;
+  }
+
+  // ── Flujo Chile (el actual, sin cambios) ──────────────────────────────────────
   return (
     <div className="min-h-screen flex flex-col bg-slate-100 dark:bg-slate-950">
       {/* Header */}
