@@ -12,6 +12,22 @@ const INSPEKTOR_USER = ((import.meta as unknown) as { env: Record<string, string
 const INSPEKTOR_PASS = ((import.meta as unknown) as { env: Record<string, string> }).env.VITE_INSPEKTOR_PASS ?? 'Risk5397#0ft';
 const GRUPO_OBJETIVO = 'LISTAS ASOCIADAS A LA/FT/FPADM, CORRUPCIÓN U OTROS DELITOS (PENAL) Y EXTINCIÓN DE DOMINIO';
 
+// fetch con timeout — evita que el proceso masivo se "pegue" si Inspektor no responde.
+async function fetchWithTimeout(url: string, opts: RequestInit = {}, ms = 30000): Promise<Response> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  try {
+    return await fetch(url, { ...opts, signal: ctrl.signal });
+  } catch (e) {
+    if (e instanceof DOMException && e.name === 'AbortError') {
+      throw new Error(`Tiempo de espera agotado (${ms / 1000}s): Inspektor no respondió`);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface InspektorListaItem {
   nombreGrupoLista?: string; grupoLista?: string; grupo?: string;
@@ -115,11 +131,11 @@ function getJEPMSItems(data: unknown): InspektorJEPMSItem[] {
 
 // ─── API ──────────────────────────────────────────────────────────────────────
 async function inspektorLogin(): Promise<string> {
-  const resp = await fetch(`${INSPEKTOR_BASE}/Auth/login`, {
+  const resp = await fetchWithTimeout(`${INSPEKTOR_BASE}/Auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ user: INSPEKTOR_USER, password: INSPEKTOR_PASS }),
-  });
+  }, 20000);
   if (!resp.ok) throw new Error(`Login error ${resp.status}: ${resp.statusText}`);
   const data = await resp.json();
   return (data as { token: { access_token: string } }).token.access_token;
@@ -131,7 +147,7 @@ async function consultarInspektor(
   tipoDocumento = 1,
 ): Promise<InspektorResult> {
   const token = await inspektorLogin();
-  const resp = await fetch(`${INSPEKTOR_BASE}/ConsultaPrincipal`, {
+  const resp = await fetchWithTimeout(`${INSPEKTOR_BASE}/ConsultaPrincipal`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -144,7 +160,7 @@ async function consultarInspektor(
       ramaJudicial: true,
       ramaJEPMS: true,
     }),
-  });
+  }, 30000);
   if (!resp.ok) throw new Error(`Consulta error ${resp.status}: ${resp.statusText}`);
   return (await resp.json()) as InspektorResult;
 }
@@ -157,7 +173,7 @@ async function consultarConToken(
   identificacion: string,
   tipoDocumento = 1,
 ): Promise<InspektorResult> {
-  const resp = await fetch(`${INSPEKTOR_BASE}/ConsultaPrincipal`, {
+  const resp = await fetchWithTimeout(`${INSPEKTOR_BASE}/ConsultaPrincipal`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -165,7 +181,7 @@ async function consultarConToken(
       tienePrioridad_4: true, cantidadPalabras: '3',
       procuraduria: true, ramaJudicial: true, ramaJEPMS: true,
     }),
-  });
+  }, 30000);
   if (resp.status === 401) throw new Error('TOKEN_EXPIRED');
   if (!resp.ok) throw new Error(`Consulta error ${resp.status}: ${resp.statusText}`);
   return (await resp.json()) as InspektorResult;
@@ -498,6 +514,14 @@ export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, da
     // Deduplicación por (tipo, número): una consulta por documento único.
     const { unique, groups } = dedupe(results, r => r.documento);
     addLog('info', `🔎 ${unique.length} documento(s) único(s) · ${results.length - unique.length - results.filter(r => r.validationError).length} duplicado(s) omitidos`);
+
+    if (unique.length === 0) {
+      const invalidas = results.filter(r => r.validationError).length;
+      addLog('err', invalidas > 0
+        ? `✗ No hay documentos válidos para consultar (${invalidas} con error de validación). Revisa que el Excel tenga columnas de nombre, tipo y número.`
+        : '✗ No se detectaron documentos. Verifica el formato del Excel (encabezados de nombre, tipo y número).');
+      setMasivoRunning(false); return;
+    }
 
     // Token compartido, con refresco serializado (evita múltiples logins en paralelo).
     let token = '';
