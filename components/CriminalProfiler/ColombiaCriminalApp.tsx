@@ -5,7 +5,7 @@ import { AnalysisAction } from '../../types/criminalTypes';
 import { parseColombiaMasivo, buildTimeline, ColombiaProfile } from '../../services/colombiaCriminalParser';
 import { generateColombiaProfilePdf } from '../../services/pdfGenerator';
 
-type SortKey = 'nombre' | 'numeroDni' | 'resultado' | 'totalCoincidencias' | 'accion' | 'estado';
+type SortKey = 'nombre' | 'numeroDni' | 'resultado' | 'totalCoincidencias' | 'ramaJudicial' | 'accion' | 'estado';
 type SortOrder = 'asc' | 'desc' | null;
 
 interface Props { onBack: () => void; darkMode: boolean; onToggleDarkMode: () => void; }
@@ -39,6 +39,7 @@ export const ColombiaCriminalApp: React.FC<Props> = ({ onBack, darkMode, onToggl
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [filterAccion, setFilterAccion] = useState('All');
+  const [filterPrioridad, setFilterPrioridad] = useState('All');
   const [selected, setSelected] = useState<string | null>(null);
   const [sort, setSort] = useState<{ key: SortKey; order: SortOrder }>({ key: 'nombre', order: null });
   const [checked, setChecked] = useState<Set<string>>(new Set());
@@ -69,16 +70,19 @@ export const ColombiaCriminalApp: React.FC<Props> = ({ onBack, darkMode, onToggl
       const q = search.trim().toLowerCase();
       if (q && !(`${p.nombre} ${p.numeroDni}`.toLowerCase().includes(q))) return false;
       if (filterAccion !== 'All' && p.accion !== filterAccion) return false;
+      if (filterPrioridad !== 'All' && (p.prioridadMaxima || 'sin') !== filterPrioridad) return false;
       return true;
     });
     if (!sort.order) return list;
     const dir = sort.order === 'asc' ? 1 : -1;
+    const val = (p: ColombiaProfile): string | number =>
+      sort.key === 'ramaJudicial' ? p.ramaJudicial.length : (p[sort.key] ?? '');
     return [...list].sort((a, b) => {
-      const av = a[sort.key] ?? '', bv = b[sort.key] ?? '';
+      const av = val(a), bv = val(b);
       if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * dir;
       return String(av).localeCompare(String(bv), 'es') * dir;
     });
-  }, [profiles, search, filterAccion, sort]);
+  }, [profiles, search, filterAccion, filterPrioridad, sort]);
 
   const selectedProfile = profiles.find(p => p.numeroDni === selected) ?? null;
   const revisados = profiles.filter(p => p.estado === 'Revisado').length;
@@ -180,6 +184,13 @@ export const ColombiaCriminalApp: React.FC<Props> = ({ onBack, darkMode, onToggl
                 {ACCIONES.map(a => <option key={a} value={a}>{a}</option>)}
                 <option value="">Sin acción</option>
               </select>
+              <select value={filterPrioridad} onChange={e => setFilterPrioridad(e.target.value)}
+                className="px-3 py-2.5 rounded-xl text-sm bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-100">
+                <option value="All">Toda prioridad</option>
+                <option value="1">Prioridad 1</option>
+                <option value="3">Prioridad 3</option>
+                <option value="sin">Sin prioridad</option>
+              </select>
               <span className="text-xs font-semibold text-slate-500 dark:text-slate-400">{revisados}/{profiles.length} revisados</span>
             </div>
 
@@ -208,6 +219,7 @@ export const ColombiaCriminalApp: React.FC<Props> = ({ onBack, darkMode, onToggl
                       <SortTh label="Documento" k="numeroDni" sort={sort} onSort={toggleSort} />
                       <SortTh label="Inspektor" k="resultado" sort={sort} onSort={toggleSort} />
                       <SortTh label="Coinc." k="totalCoincidencias" sort={sort} onSort={toggleSort} center />
+                      <SortTh label="Rama Jud." k="ramaJudicial" sort={sort} onSort={toggleSort} center />
                       <SortTh label="Acción manual" k="accion" sort={sort} onSort={toggleSort} />
                       <SortTh label="Estado" k="estado" sort={sort} onSort={toggleSort} />
                       <th className="px-4 py-3 font-bold text-right">Ficha</th>
@@ -225,6 +237,11 @@ export const ColombiaCriminalApp: React.FC<Props> = ({ onBack, darkMode, onToggl
                           </span>
                         </td>
                         <td className="px-4 py-3 text-center text-slate-500 dark:text-slate-400">{p.totalCoincidencias}</td>
+                        <td className="px-4 py-3 text-center">
+                          {p.ramaJudicial.length > 0
+                            ? <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300">{p.ramaJudicial.length}</span>
+                            : <span className="text-slate-400">0</span>}
+                        </td>
                         <td className="px-4 py-3">
                           <select value={p.accion} onChange={e => setAccion(p.numeroDni, e.target.value as AnalysisAction)}
                             className={`px-2 py-1.5 rounded-lg text-xs font-semibold bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 ${ACC_STYLE[p.accion] ?? 'text-slate-500'}`}>
