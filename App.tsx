@@ -24,6 +24,10 @@ const AppContent: React.FC = () => {
   const [activeSuite, setActiveSuite] = useState<Suite>(null);
   const [activeTab, setActiveTab] = useState<TabKey>('dashboard');
   const [darkMode, setDarkMode] = useState<boolean>(() => localStorage.getItem('darkMode') === 'true');
+  const [pending360Rut, setPending360Rut] = useState<string | null>(null);
+
+  // Abre la Vista 360° con un RUT precargado (desde el Analizador / Batch).
+  const openLens360 = (rut: string) => { setPending360Rut(rut); setActiveSuite('lens360'); };
 
   useEffect(() => {
     if (darkMode) document.documentElement.classList.add('dark');
@@ -93,6 +97,8 @@ const AppContent: React.FC = () => {
           onBack={() => setActiveSuite(null)}
           darkMode={darkMode}
           onToggleDarkMode={() => setDarkMode(d => !d)}
+          initialRut={pending360Rut}
+          onConsumeInitialRut={() => setPending360Rut(null)}
         />
       : <AccessDenied msg="Módulo desactivado por tu administrador" />;
 
@@ -143,8 +149,8 @@ const AppContent: React.FC = () => {
             ))}
           </div>
           <div style={{ display: activeTab === 'dashboard'  ? 'block' : 'none' }}><Dashboard /></div>
-          <div style={{ display: activeTab === 'analyzer'   ? 'block' : 'none' }}><DocumentAnalyzer /></div>
-          <div style={{ display: activeTab === 'batch'      ? 'block' : 'none' }}><BatchAnalyzer /></div>
+          <div style={{ display: activeTab === 'analyzer'   ? 'block' : 'none' }}><DocumentAnalyzer onOpen360={openLens360} /></div>
+          <div style={{ display: activeTab === 'batch'      ? 'block' : 'none' }}><BatchAnalyzer onOpen360={openLens360} /></div>
           <div style={{ display: activeTab === 'tools'      ? 'block' : 'none' }}><TransactionalLimits /></div>
           <div style={{ display: activeTab === 'crypto'     ? 'block' : 'none' }}><CryptoLens /></div>
           <div style={{ display: activeTab === 'compliance' ? 'block' : 'none' }}><ComplianceLens /></div>

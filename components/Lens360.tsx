@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import * as XLSX from 'xlsx';
 import JSZip from 'jszip';
 import { search360, hasRegcheqKey } from '../services/lens360Service';
@@ -11,6 +11,8 @@ interface Lens360Props {
   onBack: () => void;
   darkMode: boolean;
   onToggleDarkMode: () => void;
+  initialRut?: string | null;          // RUT precargado (navegación desde Analizador/Batch)
+  onConsumeInitialRut?: () => void;
 }
 
 const VERDICT_STYLE: Record<Lens360Verdict, { label: string; cls: string; icon: string }> = {
@@ -30,7 +32,7 @@ const Card: React.FC<{ title: string; badge?: string; children: React.ReactNode 
   </div>
 );
 
-export const Lens360: React.FC<Lens360Props> = ({ onBack, darkMode, onToggleDarkMode }) => {
+export const Lens360: React.FC<Lens360Props> = ({ onBack, darkMode, onToggleDarkMode, initialRut, onConsumeInitialRut }) => {
   const [rut, setRut] = useState('');
   const [nombre, setNombre] = useState('');
   const [country, setCountry] = useState('CL');
@@ -42,12 +44,12 @@ export const Lens360: React.FC<Lens360Props> = ({ onBack, darkMode, onToggleDark
 
   const canSearch = rut.trim().length > 0 && (country !== 'CO' || nombre.trim().length > 0);
 
-  const handleSearch = async () => {
-    if (!canSearch || loading) return;
+  const runSearch = async (rutV: string, nombreV: string, countryV: string, ptV: Lens360PersonType) => {
+    if (!rutV.trim() || loading) return;
     if (!hasRegcheqKey()) { setError('Falta la variable de entorno VITE_REGCHEQ_API_KEY.'); return; }
     setLoading(true); setError(null); setResult(null);
     try {
-      const res = await search360({ rut: rut.trim(), nombre: nombre.trim(), country, personType });
+      const res = await search360({ rut: rutV.trim(), nombre: nombreV.trim(), country: countryV, personType: ptV });
       setResult(res);
     } catch (e) {
       setError(`La consulta falló. ${(e as Error).message}`);
@@ -55,6 +57,20 @@ export const Lens360: React.FC<Lens360Props> = ({ onBack, darkMode, onToggleDark
       setLoading(false);
     }
   };
+
+  const handleSearch = () => runSearch(rut, nombre, country, personType);
+
+  // Precarga desde el Analizador/Batch: setea el RUT (empresa chilena) y consulta.
+  useEffect(() => {
+    if (!initialRut) return;
+    setMode('individual');
+    setRut(initialRut);
+    setCountry('CL');
+    setPersonType('legal');
+    onConsumeInitialRut?.();
+    runSearch(initialRut, '', 'CL', 'legal');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialRut]);
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 p-4 md:p-8">

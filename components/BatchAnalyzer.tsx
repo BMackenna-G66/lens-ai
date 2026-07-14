@@ -2,6 +2,7 @@ import React, { useState, useRef, useCallback, useEffect } from 'react';
 import * as XLSX from 'xlsx';
 import JSZip from 'jszip';
 import { ExtractedField, ChatMessage } from '../types';
+import { RegcheqEnrichment } from '../types/lens360';
 import { BatchCompanyInput, BatchSourceType, BatchMode, CompanyMetadata } from '../types/batch';
 import { fromLocalFolder } from '../services/batchInputNormalizer';
 import { processOneCompany } from '../services/batchProcessor';
@@ -44,6 +45,7 @@ interface BatchCompanyState {
   rawText?: string;                // texto consolidado — contexto del chat
   chatMessages?: ChatMessage[];    // conversación por empresa
   isChatLoading?: boolean;
+  regcheqEnrichment?: RegcheqEnrichment; // screening AML + SII
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -106,7 +108,7 @@ const SourceBadge: React.FC<{ source: BatchSourceType }> = ({ source }) => (
 
 // ─── Main component ───────────────────────────────────────────────────────────
 
-export const BatchAnalyzer: React.FC = () => {
+export const BatchAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> = ({ onOpen360 }) => {
   const [sourceType, setSourceType]   = useState<BatchSourceType>('local_folder');
   const [mode, setMode]               = useState<BatchMode>('completo');
   const [pendingInput, setPendingInput] = useState<BatchCompanyInput[]>([]);
@@ -269,6 +271,7 @@ export const BatchAnalyzer: React.FC = () => {
           executiveSummary: result.executiveSummary,
           errorCount: result.errorCount,
           rawText: result.rawText,
+          regcheqEnrichment: result.regcheqEnrichment,
         });
 
       } catch (err) {
@@ -338,6 +341,12 @@ export const BatchAnalyzer: React.FC = () => {
         'Capital Social':          fm['Capital Social'] ?? '',
         'Objeto Social':           fm['Objeto Social'] ?? '',
         'Fecha Constitución':      fm['Fecha de Constitución'] ?? '',
+        'Regcheq Riesgo':          c.regcheqEnrichment?.regcheqRisk ?? '',
+        'Regcheq AML coincidencias': (c.regcheqEnrichment?.amlHits.filter(h => h.coincidence).map(h => h.nombre).join('; ')) ?? '',
+        'SII inicio actividades':  c.regcheqEnrichment?.tributaria?.presentaInicioActividades ?? '',
+        'SII fecha inicio':        c.regcheqEnrichment?.tributaria?.fechaInicioActividades ? c.regcheqEnrichment.tributaria.fechaInicioActividades.slice(0, 10) : '',
+        'SII actividades':         c.regcheqEnrichment?.tributaria ? String(c.regcheqEnrichment.tributaria.actividades.length) : '',
+        'SII situaciones irregulares': c.regcheqEnrichment?.tributaria?.situacionesIrregulares.join('; ') ?? '',
         'Error detalle':           c.error ?? '',
       };
     });
@@ -582,7 +591,7 @@ export const BatchAnalyzer: React.FC = () => {
               </div>
             </div>
           </div>
-          <CompanyQueue companies={companyStates} expandedCompanies={expandedCompanies} onToggle={toggleExpand} onDownloadPdf={downloadCompanyPdf} activeChatCompanyId={activeChatCompanyId} onToggleChat={toggleCompanyChat} onSendChat={handleSendCompanyChat} isApiKeyOk={hasValidApiKeys()} />
+          <CompanyQueue companies={companyStates} expandedCompanies={expandedCompanies} onToggle={toggleExpand} onDownloadPdf={downloadCompanyPdf} activeChatCompanyId={activeChatCompanyId} onToggleChat={toggleCompanyChat} onSendChat={handleSendCompanyChat} isApiKeyOk={hasValidApiKeys()} onOpen360={onOpen360} />
         </div>
       )}
 
@@ -614,7 +623,7 @@ export const BatchAnalyzer: React.FC = () => {
               </button>
             </div>
           </div>
-          <CompanyQueue companies={companyStates} expandedCompanies={expandedCompanies} onToggle={toggleExpand} onDownloadPdf={downloadCompanyPdf} activeChatCompanyId={activeChatCompanyId} onToggleChat={toggleCompanyChat} onSendChat={handleSendCompanyChat} isApiKeyOk={hasValidApiKeys()} />
+          <CompanyQueue companies={companyStates} expandedCompanies={expandedCompanies} onToggle={toggleExpand} onDownloadPdf={downloadCompanyPdf} activeChatCompanyId={activeChatCompanyId} onToggleChat={toggleCompanyChat} onSendChat={handleSendCompanyChat} isApiKeyOk={hasValidApiKeys()} onOpen360={onOpen360} />
         </div>
       )}
     </div>
@@ -632,7 +641,8 @@ const CompanyQueue: React.FC<{
   onToggleChat: (id: string) => void;
   onSendChat: (id: string, messageText: string) => void;
   isApiKeyOk: boolean;
-}> = ({ companies, expandedCompanies, onToggle, onDownloadPdf, activeChatCompanyId, onToggleChat, onSendChat, isApiKeyOk }) => (
+  onOpen360?: (rut: string) => void;
+}> = ({ companies, expandedCompanies, onToggle, onDownloadPdf, activeChatCompanyId, onToggleChat, onSendChat, isApiKeyOk, onOpen360 }) => (
   <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl overflow-hidden divide-y divide-slate-100 dark:divide-slate-800">
     {companies.map(c => {
       const expanded = expandedCompanies.has(c.id);
@@ -728,6 +738,38 @@ const CompanyQueue: React.FC<{
                   <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed line-clamp-4">{c.executiveSummary}</p>
                 </div>
               )}
+              {c.regcheqEnrichment?.encontrado && (() => {
+                const enr = c.regcheqEnrichment!;
+                const coincid = enr.amlHits.filter(h => h.coincidence);
+                const rut360 = (enr.tributaria?.rutContribuyente || c.identificationNumber || '').replace(/[.\s-]/g, '');
+                return (
+                  <div className="mt-2 pt-2 border-t border-slate-200 dark:border-slate-700">
+                    <div className="flex items-center justify-between gap-2 flex-wrap mb-1">
+                      <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">
+                        Regcheq — AML{enr.regcheqRisk ? ` · Riesgo: ${enr.regcheqRisk}` : ''} · SII
+                      </p>
+                      {coincid.length > 0 && onOpen360 && rut360 && (
+                        <button onClick={() => onOpen360(rut360)}
+                          className="text-[10px] font-bold uppercase tracking-widest bg-violet-600 hover:bg-violet-700 text-white px-2.5 py-1 rounded-lg">
+                          🔭 Ver 360°
+                        </button>
+                      )}
+                    </div>
+                    {coincid.length > 0 ? (
+                      <p className="text-[11px] text-red-600 dark:text-red-400">⚑ Coincidencias: {coincid.map(h => h.nombre).join(', ')}</p>
+                    ) : (
+                      <p className="text-[11px] text-slate-400">Sin coincidencias en listas.</p>
+                    )}
+                    {enr.tributaria && (
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                        SII: inicio actividades {enr.tributaria.presentaInicioActividades || '—'}
+                        {enr.tributaria.actividades.length ? ` · ${enr.tributaria.actividades.length} actividad(es)` : ''}
+                        {enr.tributaria.situacionesIrregulares.length ? ` · ⚠ ${enr.tributaria.situacionesIrregulares.length} situación(es) irregular(es)` : ''}
+                      </p>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
           )}
         </div>
