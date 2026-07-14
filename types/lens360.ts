@@ -49,6 +49,23 @@ export interface Lens360RelatedPerson {
   country?: string;
 }
 
+export interface Lens360Activity {
+  code: string; name: string; category: string; date: string; afectoIva: string;
+}
+
+// Situación tributaria (SII) — solo aplica a personas jurídicas.
+export interface Lens360Tributaria {
+  rutContribuyente: string;
+  nombreSii: string;
+  presentaInicioActividades: string;   // Sí / No / —
+  fechaInicioActividades: string;
+  empresaMenorTamano: string;          // Sí / No / —
+  monedaExtranjera: string;            // Sí / No / —
+  ultimaActualizacion: string;
+  situacionesIrregulares: string[];
+  actividades: Lens360Activity[];
+}
+
 export interface Lens360Result {
   rut: string;
   nombre: string;
@@ -66,6 +83,8 @@ export interface Lens360Result {
   inspektor?: Lens360Inspektor;
   // Personas relacionadas (representantes legales, beneficiarios) para screening en cadena
   related: Lens360RelatedPerson[];
+  // Situación tributaria (SII) — presente para personas jurídicas con datos
+  tributaria?: Lens360Tributaria;
   // Veredicto consolidado
   verdict: Lens360Verdict;
   verdictReasons: string[];
