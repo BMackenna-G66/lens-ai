@@ -34,28 +34,33 @@ export async function fetchRegcheqEnrichment(rut: string, nombre = ''): Promise<
   const empty: RegcheqEnrichment = { consultado: true, encontrado: false, amlHits: [] };
   if (!REGCHEQ_KEY) return { ...empty, error: 'Falta VITE_REGCHEQ_API_KEY' };
 
-  try {
-    // Crear/refrescar primero → dispara el screening y la búsqueda del SII.
-    await createRecord(rut, nombre);
+  const GET = `${REGCHEQ_BASE}/record/${rut}/${REGCHEQ_KEY}`;
+  const tieneSii = (p: Record<string, unknown> | null): boolean =>
+    !!p && Object.keys((p['situacionTributaria'] ?? {}) as Record<string, unknown>).length > 0;
 
-    // El SII (situacionTributaria) se puebla de forma asíncrona en Regcheq: para una
-    // ficha recién creada puede no estar listo en el primer GET. Reintentamos el GET
-    // con esperas crecientes hasta que el SII aparezca (o se agoten los intentos).
-    const delays = [1500, 2500, 3500, 4500];
+  try {
     let perfil: Record<string, unknown> | null = null;
-    for (let i = 0; i < delays.length; i++) {
-      await sleep(delays[i]);
-      const resp = await fetch(`${REGCHEQ_BASE}/record/${rut}/${REGCHEQ_KEY}`);
-      if (resp.status === 404) continue; // aún no indexada
-      if (!resp.ok) {
-        if (i === delays.length - 1) return { ...empty, error: `API ${resp.status}: ${resp.statusText}` };
-        continue;
+
+    // 1) GET primero: las fichas existentes ya traen el SII poblado → sin tocar nada.
+    try {
+      const r0 = await fetch(GET);
+      if (r0.ok) perfil = await r0.json();
+    } catch { /* seguimos al paso 2 */ }
+
+    // 2) Si no existe o le falta el SII, crear/refrescar y reintentar hasta poblarlo.
+    // (El SII se busca de forma asíncrona en Regcheq y puede tardar unos segundos.)
+    if (!tieneSii(perfil)) {
+      await createRecord(rut, nombre);
+      for (const wait of [1500, 2500, 3500, 4500]) {
+        await sleep(wait);
+        let resp: Response;
+        try { resp = await fetch(GET); } catch { continue; }
+        if (!resp.ok) continue;
+        perfil = await resp.json();
+        if (tieneSii(perfil)) break; // SII ya poblado → listo
       }
-      perfil = await resp.json();
-      const sitTmp = (perfil?.situacionTributaria ?? {}) as Record<string, unknown>;
-      if (Object.keys(sitTmp).length > 0) break; // SII ya poblado → listo
     }
-    if (!perfil) return { ...empty, error: 'Regcheq no devolvió la ficha (404).' };
+    if (!perfil) return { ...empty, error: 'Regcheq no devolvió la ficha.' };
 
     // Screening AML (smart-merge por nombre visible).
     const listasRaw = (perfil.listas ?? {}) as Record<string, Record<string, unknown>>;
