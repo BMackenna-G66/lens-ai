@@ -235,6 +235,16 @@ function computeDecisionFromCrimes(additionalData: Record<string,unknown>[]): De
   };
 }
 
+// Normaliza un RUT chileno: sin puntos/guiones/espacios y dígito verificador en
+// MAYÚSCULA (Regcheq es sensible a mayúsculas en la URL: "…k" ≠ "…K"). Solo actúa
+// si el valor tiene forma de RUT chileno; los pasaportes/IDs del modo global (que
+// pueden llevar letras con case significativo) se devuelven tal cual.
+function normalizaRutChileno(raw: string): string {
+  const v = (raw ?? '').trim();
+  if (/\d/.test(v) && /^[\d.\-\s]*[\dkK]$/.test(v)) return v.replace(/[.\s-]/g, '').toUpperCase();
+  return v;
+}
+
 // ─── API call ─────────────────────────────────────────────────────────────────
 async function fetchPerfil(dniVal: string): Promise<PerfilResult> {
   const resp = await fetch(`${API_BASE}/record/${dniVal}/${API_KEY}`);
@@ -1349,7 +1359,7 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) =>
 
   // ── Individual analysis ─────────────────────────────────────────────────────
   async function analizarPerfil() {
-    const dniVal = tipo === 'natural' ? natDni.trim() : legRut.trim();
+    const dniVal = normalizaRutChileno(tipo === 'natural' ? natDni : legRut);
     if (!dniVal) { setError('El campo DNI / RUT es obligatorio.'); return; }
     if (!API_KEY) { setError('Falta la variable de entorno VITE_REGCHEQ_API_KEY.'); return; }
     setLoading(true); setError(''); setResult(null);
@@ -1442,7 +1452,7 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) =>
     for (let i = 0; i < toProcess.length; i++) {
       if (abortRef.current) { addLog('info', '⛔ Proceso cancelado por el usuario'); break; }
       const row   = toProcess[i];
-      const dniV    = row[dniCol];
+      const dniV    = normalizaRutChileno(String(row[dniCol] ?? ''));
       const name    = row['nombre'] ?? row['name'] ?? row['razón social'] ?? row['razon social'] ?? '';
       const apellido = row['apellido'] ?? row['apellido_paterno'] ?? row['apellido paterno'] ?? '';
       const pais    = paisCol ? (row[paisCol] ?? '') : '';
