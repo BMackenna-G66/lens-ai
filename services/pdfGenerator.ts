@@ -1706,7 +1706,8 @@ export const generateBatchCompanyPdf = async (
   companyName: string,
   docs: BatchDocSummary[],
   metadata?: BatchCompanyPdfMetadata,
-  enrichedData?: BatchEnrichedData
+  enrichedData?: BatchEnrichedData,
+  enrichment?: RegcheqEnrichment
 ): Promise<Blob> => {
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
   const pageWidth = doc.internal.pageSize.getWidth();
@@ -1959,6 +1960,37 @@ export const generateBatchCompanyPdf = async (
           yPos += 5;
         });
         yPos += 4;
+      }
+    }
+  }
+
+  // ── Consulta Regcheq (AML + SII) ──
+  if (enrichment && enrichment.encontrado) {
+    if (yPos > 250) { doc.addPage(); yPos = 20; }
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.setTextColor(...NAVY);
+    doc.text('Consulta Regcheq — AML + SII', margin, yPos); yPos += 6;
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(...DARK_TEXT);
+    const coincid = enrichment.amlHits.filter(h => h.coincidence).map(h => h.nombre);
+    const amlLines = doc.splitTextToSize(`Riesgo Regcheq: ${enrichment.regcheqRisk || '—'}${enrichment.pepLevel ? ` · PEP: ${enrichment.pepLevel}` : ''}\nCoincidencias AML: ${coincid.length ? coincid.join(', ') : 'ninguna'}`, pageWidth - margin * 2);
+    doc.text(amlLines, margin, yPos); yPos += amlLines.length * 4.5 + 3;
+    const t = enrichment.tributaria;
+    if (t) {
+      const siiLines = doc.splitTextToSize(`SII — RUT: ${t.rutContribuyente || '—'} · Inicio actividades: ${t.presentaInicioActividades || '—'}${t.fechaInicioActividades ? ` (${t.fechaInicioActividades.slice(0, 10)})` : ''} · Empresa menor tamaño: ${t.empresaMenorTamano || '—'}`, pageWidth - margin * 2);
+      doc.text(siiLines, margin, yPos); yPos += siiLines.length * 4.5 + 2;
+      if (t.situacionesIrregulares.length) {
+        doc.setTextColor(146, 64, 14);
+        const irr = doc.splitTextToSize(`Situaciones irregulares: ${t.situacionesIrregulares.join(' · ')}`, pageWidth - margin * 2);
+        doc.text(irr, margin, yPos); yPos += irr.length * 4.5 + 2; doc.setTextColor(...DARK_TEXT);
+      }
+      if (t.actividades.length) {
+        autoTable(doc, {
+          startY: yPos,
+          head: [['Código', 'Actividad', 'Categoría', 'Fecha', 'IVA']],
+          body: t.actividades.map(a => [a.code, a.name, a.category, a.date ? a.date.slice(0, 10) : '', a.afectoIva]),
+          theme: 'grid', headStyles: { fillColor: NAVY, textColor: WHITE, fontSize: 8, fontStyle: 'bold' },
+          bodyStyles: { fontSize: 7.5, textColor: DARK_TEXT }, columnStyles: { 1: { cellWidth: 70 } },
+          margin: { left: margin, right: margin },
+        });
       }
     }
   }

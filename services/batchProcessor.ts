@@ -15,6 +15,8 @@ import {
 } from './geminiService';
 import { getTextFromFile } from './fileProcessorService';
 import { generateBatchCompanyPdf } from './pdfGenerator';
+import { fetchRegcheqEnrichment, hasRegcheqKey } from './regcheqEnrichment';
+import { RegcheqEnrichment } from '../types/lens360';
 
 export interface CompanyProcessResult {
   extractedData: ExtractedField[];
@@ -22,6 +24,7 @@ export interface CompanyProcessResult {
   pdfBlob: Blob;
   errorCount: number;
   rawText: string;       // texto consolidado de todos los docs — contexto para el chat
+  regcheqEnrichment?: RegcheqEnrichment; // screening AML + SII (empresas chilenas)
 }
 
 export interface ProcessCallbacks {
@@ -112,6 +115,16 @@ export async function processOneCompany(
     enrichedData = await analyzeBatchEnrichment(combinedText);
   } catch { /* non-critical — PDF se genera igual sin datos enriquecidos */ }
 
+  // ── Enriquecimiento Regcheq (AML + SII) — solo empresas chilenas ──────────────
+  onPhase('Consultando Regcheq (AML + SII)...');
+  let regcheqEnrichment: RegcheqEnrichment | undefined;
+  const rut = (company.identificationNumber || '').replace(/[.\s]/g, '').replace(/-/g, '');
+  const esChilena = rut.length >= 7 && /^[0-9]+[0-9kK]?$/.test(rut) && (!company.country || /chi|^cl$/i.test(company.country));
+  if (esChilena && hasRegcheqKey()) {
+    try { regcheqEnrichment = await fetchRegcheqEnrichment(rut, company.companyName); }
+    catch { /* no crítico — la ficha se genera igual */ }
+  }
+
   onPhase('Generando ficha PDF...');
   const pdfBlob = await generateBatchCompanyPdf(
     company.companyName,
@@ -126,8 +139,9 @@ export async function processOneCompany(
       docsAnalyzed: validTexts.length,
       docsFailed: errorCount,
     },
-    enrichedData
+    enrichedData,
+    regcheqEnrichment,
   );
 
-  return { extractedData, executiveSummary, pdfBlob, errorCount, rawText: combinedText };
+  return { extractedData, executiveSummary, pdfBlob, errorCount, rawText: combinedText, regcheqEnrichment };
 }

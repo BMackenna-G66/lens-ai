@@ -46,7 +46,7 @@ const keywordFieldMap: { [key: string]: string | undefined } = {
 
 const PROCESSING_LOCK_KEY = 'lens_ai_processing_lock';
 
-export const DocumentAnalyzer: React.FC = () => {
+export const DocumentAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> = ({ onOpen360 }) => {
   const [processedDocuments, setProcessedDocuments] = useState<ProcessedDocument[]>([]);
   const [processingQueue, setProcessingQueue] = useState<QueueItem[]>([]);
   const [currentProcessingJobInfo, setCurrentProcessingJobInfo] = useState<{ id: string, displayName: string, isConsolidated: boolean } | null>(null);
@@ -524,8 +524,9 @@ export const DocumentAnalyzer: React.FC = () => {
                                     onRequestRiskAnalysis={() => handleRequestRiskAnalysis(doc.id)} 
                                     onRequestIntegrityAnalysis={() => handleRequestIntegrityAnalysis(doc.id)} 
                                     onToggleChat={() => handleToggleChat(doc.id)} 
-                                    isChatActive={activeChatDocumentId === doc.id} 
-                                    isApiKeyOk={isKeyValid} 
+                                    isChatActive={activeChatDocumentId === doc.id}
+                                    isApiKeyOk={isKeyValid}
+                                    onOpen360={onOpen360}
                                 />
                             </div>
                             {activeChatDocumentId === doc.id && (
