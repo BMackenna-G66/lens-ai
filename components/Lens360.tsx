@@ -4,6 +4,7 @@ import JSZip from 'jszip';
 import { search360, hasRegcheqKey } from '../services/lens360Service';
 import { generateLens360Pdf, generateLens360Blob } from '../services/pdfGenerator';
 import { Lens360Result, Lens360Verdict, Lens360PersonType, Lens360RelatedPerson } from '../types/lens360';
+import { SEVERITY_META } from '../services/validationRules';
 import { PersonProfile } from '../types/criminalTypes';
 import { ProfileDetails } from './CriminalProfiler/ProfileDetails';
 
@@ -253,6 +254,19 @@ const ResultView: React.FC<{ result: Lens360Result }> = ({ result }) => {
             <li key={i} className="text-xs text-slate-600 dark:text-slate-300 flex gap-2"><span className="text-slate-400">•</span>{r}</li>
           ))}
         </ul>
+        {(result.alerts?.length ?? 0) > 0 && (
+          <div className="mt-3 border-t border-slate-100 dark:border-slate-800 pt-3">
+            <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-1.5">Alertas de validación</p>
+            <ul className="space-y-1">
+              {result.alerts!.map(a => (
+                <li key={a.id} className="text-xs flex gap-1.5" style={{ color: SEVERITY_META[a.severity].hex }}>
+                  <span>{SEVERITY_META[a.severity].emoji}</span>
+                  <span><span className="font-bold">{a.title}</span><span className="text-slate-500 dark:text-slate-400"> — {a.detail}</span></span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
         <p className="text-[10px] text-slate-400 mt-3">
           Fuentes consultadas: {result.sources.regcheq ? 'Regcheq ✓' : 'Regcheq ✗'}
           {result.country === 'CO' && (result.sources.inspektor ? ' · Inspektor ✓' : ' · Inspektor ✗')}
@@ -540,6 +554,8 @@ const Lens360Masivo: React.FC = () => {
       'SII empresa menor tamaño': r.tributaria?.empresaMenorTamano ?? '',
       'SII actividades': r.tributaria?.actividades.length ?? '',
       'SII situaciones irregulares': r.tributaria?.situacionesIrregulares.join('; ') ?? '',
+      'Alertas severidad máx.': (r.alerts?.length ? SEVERITY_META[r.alerts[0].severity].label : ''),
+      'Alertas validación': (r.alerts ?? []).map(a => `[${SEVERITY_META[a.severity].label}] ${a.title}`).join(' · '),
       Motivos: r.verdictReasons.join(' | '),
     }));
     const wb = XLSX.utils.book_new();

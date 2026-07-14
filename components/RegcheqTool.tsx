@@ -4,6 +4,8 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { DEFAULT_CATALOG } from '../services/defaultCatalogData';
 import { InspektorColombia } from './InspektorColombia';
+import { evaluateValidationRules, ValidationAlert, SEVERITY_META } from '../services/validationRules';
+import { Lens360Tributaria } from '../types/lens360';
 
 type CountryMode = null | 'chile' | 'colombia' | 'global';
 
@@ -94,6 +96,7 @@ interface PerfilResult {
   personasRelacionadas?: PersonaRelacionada[];
   formularios?: Record<string, Record<string, unknown>>;
   auditoria?: Record<string, unknown>;
+  alerts?: ValidationAlert[];
 }
 interface ListaInteres {
   dni: string;
@@ -295,6 +298,27 @@ async function fetchPerfil(dniVal: string): Promise<PerfilResult> {
   const forms     = (perfil.forms ?? {})             as Record<string, Record<string, unknown>>;
   const persons   = ((perfil.personsRelations ?? []) as PersonaRelacionada[]);
 
+  // ── Alertas de validación (motor de reglas compartido) ────────────────────────
+  const boolStr = (v: unknown) => v === true ? 'Sí' : v === false ? 'No' : '';
+  const tributariaAlertas: Lens360Tributaria = {
+    rutContribuyente: String(situacion.rut_contribuyente ?? ''),
+    nombreSii: String(situacion.Name ?? ''),
+    presentaInicioActividades: boolStr(situacion.presenta_inicio_actividades),
+    fechaInicioActividades: String(situacion.fecha_inicio_actividades ?? ''),
+    empresaMenorTamano: boolStr(situacion.es_empresa_menor_tamano),
+    monedaExtranjera: boolStr(situacion.autorizado_moneda_extranjera),
+    ultimaActualizacion: String(situacion.ultima_actualizacion ?? ''),
+    situacionesIrregulares: (situacion.situaciones_irregulares as string[] | undefined) ?? [],
+    actividades: [],
+  };
+  const tieneSii = !!(tributariaAlertas.rutContribuyente || tributariaAlertas.nombreSii || tributariaAlertas.fechaInicioActividades || tributariaAlertas.situacionesIrregulares.length);
+  const alerts = evaluateValidationRules({
+    regcheqRisk: String(perfil.effectiveRisk ?? perfil.calculatedRisk ?? ''),
+    pepLevel: String(perfil.pepLevel ?? ''),
+    amlHits: Object.entries(listas).map(([nombre, e]) => ({ nombre, coincidence: e.coincidence, risk: e.risk })),
+    tributaria: tieneSii ? tributariaAlertas : undefined,
+  });
+
   return {
     dni: dniVal,
     nombre: perfil.name ?? perfil.socialReason ?? '',
@@ -340,6 +364,7 @@ async function fetchPerfil(dniVal: string): Promise<PerfilResult> {
       created_at: perfil.created_at,
       updated_at: perfil.updated_at,
     },
+    alerts,
   };
 }
 
@@ -446,6 +471,25 @@ async function generatePDF(result: PerfilResult) {
     doc.text(`✓  Sin alertas — perfil limpio en todas las listas consultadas`, margin + 4, curY + 6.5);
   }
   curY += 14;
+
+  // ── Alertas de validación (motor de reglas) ──
+  if (result.alerts && result.alerts.length) {
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(...PDF_NAVY);
+    doc.text('ALERTAS DE VALIDACIÓN', margin, curY + 4);
+    doc.setFillColor(...PDF_INDIGO); doc.rect(margin, curY + 5.5, pageW - margin * 2, 0.5, 'F');
+    curY += 10;
+    doc.setFontSize(8);
+    for (const a of result.alerts) {
+      const meta = SEVERITY_META[a.severity];
+      const rgb = [parseInt(meta.hex.slice(1, 3), 16), parseInt(meta.hex.slice(3, 5), 16), parseInt(meta.hex.slice(5, 7), 16)] as [number, number, number];
+      doc.setTextColor(...rgb); doc.setFont('helvetica', 'bold');
+      const lines = doc.splitTextToSize(`•  [${meta.label}] ${a.title} — ${a.detail}`, pageW - margin * 2);
+      doc.setFont('helvetica', 'normal');
+      doc.text(lines, margin, curY); curY += lines.length * 4.2 + 1.5;
+    }
+    doc.setTextColor(...PDF_DTEXT);
+    curY += 3;
+  }
 
   // ── Datos del perfil ──
   if (Object.keys(result.ficha).length > 0) {
@@ -1199,6 +1243,20 @@ function ResultCard({ result, dark }: { result: PerfilResult; dark: boolean }) {
           </div>
         )}
 
+        {(result.alerts?.length ?? 0) > 0 && (
+          <div className={`mt-3 border rounded-xl px-4 py-3 ${dark ? 'bg-slate-900/50 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
+            <p className={`text-[10px] font-bold uppercase tracking-widest mb-2 ${muted}`}>Alertas de validación</p>
+            <div className="space-y-1.5">
+              {result.alerts!.map(a => (
+                <div key={a.id} className="flex items-start gap-2 text-sm" style={{ color: SEVERITY_META[a.severity].hex }}>
+                  <span>{SEVERITY_META[a.severity].emoji}</span>
+                  <span><span className="font-bold">{a.title}</span><span className={muted}> — {a.detail}</span></span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {Object.keys(result.ficha).length > 0 && (
           <>
             <div className="flex items-center gap-3 mt-5 mb-3">
@@ -1593,6 +1651,8 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) =>
       'Coincidencia_BIC':                         'False',
       'PEP_nivel':                                r.pep_level || '',
       'causas_penales_imputado':                  getImputado(r),
+      'Alertas severidad máx.':                   (r.alerts?.length ? SEVERITY_META[r.alerts[0].severity].label : ''),
+      'Alertas validación':                       (r.alerts ?? []).map(a => `[${SEVERITY_META[a.severity].label}] ${a.title}`).join(' · '),
       'regcheq_error':                            '',
     }));
 

@@ -10,6 +10,7 @@ import {
   Lens360CriminalDecision, Lens360InspektorHit, Lens360Verdict, Lens360PersonType, Lens360RelatedPerson,
   Lens360Tributaria,
 } from '../types/lens360';
+import { evaluateValidationRules } from './validationRules';
 
 // ─── Config (mismas fuentes que RegcheqTool / InspektorColombia) ────────────────
 const REGCHEQ_BASE = 'https://external-api.regcheq.com';
@@ -354,5 +355,15 @@ export async function search360(params: {
   }
 
   computeVerdict(result);
+
+  // Alertas del motor de reglas de validación (solo visual + PDF/Excel).
+  result.alerts = evaluateValidationRules({
+    regcheqRisk: result.regcheqRisk,
+    pepLevel: result.pepLevel,
+    amlHits: result.amlHits,
+    tributaria: result.tributaria,
+    penalCoincidencia: result.crimes.length > 0,
+  });
+
   return result;
 }

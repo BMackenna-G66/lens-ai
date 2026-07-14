@@ -3,6 +3,7 @@
 import React, { useState, useRef } from 'react';
 import { ProcessedDocument, FileProcessingStatus, SupplementaryDocumentAnalysis, SupplementaryAnalysisStatus, RiskAnalysisStatus, IntegrityAnalysisStatus, FidedignidadLevel } from '../types';
 import { LoadingSpinner } from './LoadingSpinner';
+import { SEVERITY_META } from '../services/validationRules';
 import { IconPdf, IconCheckCircle, IconXCircle, IconAlertTriangle, IconTrash, IconUpload, IconChevronDown, IconChevronUp, IconChatBubbleLeftRight, IconFiles, IconShieldCheck } from './IconComponents';
 
 interface DocumentCardProps {
@@ -280,6 +281,20 @@ export const DocumentCard: React.FC<DocumentCardProps> = ({
                           <p className="text-xs text-amber-600">No se pudo consultar Regcheq: {document.regcheqEnrichment.error}</p>
                         ) : (
                           <>
+                            {/* Alertas de validación (motor de reglas) — solo visual */}
+                            {(document.regcheqEnrichment.alerts?.length ?? 0) > 0 && (
+                              <div className="mb-3">
+                                <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-1">Alertas de validación</p>
+                                <div className="space-y-1">
+                                  {document.regcheqEnrichment.alerts!.map(a => (
+                                    <div key={a.id} className="flex items-start gap-1.5 text-xs" style={{ color: SEVERITY_META[a.severity].hex }}>
+                                      <span>{SEVERITY_META[a.severity].emoji}</span>
+                                      <span><span className="font-bold">{a.title}</span><span className="text-slate-500"> — {a.detail}</span></span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
                             <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-1">
                               Screening AML{document.regcheqEnrichment.regcheqRisk && ` · Riesgo: ${document.regcheqEnrichment.regcheqRisk}`}{document.regcheqEnrichment.pepLevel && ` · PEP: ${document.regcheqEnrichment.pepLevel}`}
                             </p>
