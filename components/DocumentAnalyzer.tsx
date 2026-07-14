@@ -214,13 +214,17 @@ export const DocumentAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> =
         updateDoc(FileProcessingStatus.COMPLETED, { extractedData, rawGeminiResponse: rawResponse, statusMessage: "Completado." });
         trackDocumentProcessed('analyzer', country, false);
 
-        // Enriquecimiento Regcheq (screening AML + SII) — solo empresas chilenas.
+        // Enriquecimiento Regcheq (screening AML + SII) — empresas chilenas.
+        // Señal robusta: RUT con formato chileno (7-8 dígitos + dígito verificador)
+        // + Razón Social presente (= empresa). No dependemos de la detección de país,
+        // que a veces no devuelve exactamente "chile".
         const val = (f: string) => extractedData.find(x => x.field.toLowerCase().includes(f))?.value?.trim() ?? '';
         const rutRaw = val('rut');
         const razon = val('razón social') || val('razon social');
         const rut = rutRaw.replace(/[.\s]/g, '').replace(/-/g, '');
         const esNoEspecificado = (v: string) => !v || /no especificado|n\/a|no aplica/i.test(v);
-        if (country === 'chile' && !esNoEspecificado(rutRaw) && !esNoEspecificado(razon) && rut.length >= 7 && hasRegcheqKey()) {
+        const rutChilenoValido = /^[0-9]{7,8}[0-9kK]$/.test(rut);
+        if (rutChilenoValido && !esNoEspecificado(razon) && hasRegcheqKey()) {
           updateDoc(FileProcessingStatus.COMPLETED, { regcheqEnrichment: { loading: true, consultado: true, encontrado: false, amlHits: [] } });
           try {
             const enr = await fetchRegcheqEnrichment(rut, razon);
