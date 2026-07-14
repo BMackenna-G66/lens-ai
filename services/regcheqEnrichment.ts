@@ -3,6 +3,7 @@
 // AML + la situación tributaria (SII). Autocontenido; no toca el flujo del 360.
 
 import { Lens360ListHit, Lens360Tributaria, RegcheqEnrichment } from '../types/lens360';
+import { evaluateValidationRules } from './validationRules';
 
 const REGCHEQ_BASE = 'https://external-api.regcheq.com';
 const REGCHEQ_KEY = ((import.meta as unknown) as { env: Record<string, string> }).env.VITE_REGCHEQ_API_KEY ?? '';
@@ -96,14 +97,20 @@ export async function fetchRegcheqEnrichment(rut: string, nombre = ''): Promise<
     };
     const hasTributaria = !!(tributariaRaw.rutContribuyente || tributariaRaw.nombreSii || tributariaRaw.fechaInicioActividades || actividades.length || tributariaRaw.situacionesIrregulares.length);
 
+    const regcheqRisk = (perfil.effectiveRisk ?? perfil.calculatedRisk ?? '') as string;
+    const pepLevel = (perfil.pepLevel ?? '') as string;
+    const tributaria = hasTributaria ? tributariaRaw : undefined;
+    const alerts = evaluateValidationRules({ regcheqRisk, pepLevel, amlHits, tributaria });
+
     return {
       consultado: true,
       encontrado: true,
       nombre: (perfil.name ?? perfil.socialReason ?? nombre) as string,
-      regcheqRisk: (perfil.effectiveRisk ?? perfil.calculatedRisk ?? '') as string,
-      pepLevel: (perfil.pepLevel ?? '') as string,
+      regcheqRisk,
+      pepLevel,
       amlHits,
-      tributaria: hasTributaria ? tributariaRaw : undefined,
+      tributaria,
+      alerts,
     };
   } catch (e) {
     return { ...empty, error: e instanceof Error ? e.message : String(e) };

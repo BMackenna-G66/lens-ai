@@ -63,6 +63,7 @@ export interface RegcheqEnrichment {
   pepLevel?: string;
   amlHits: Lens360ListHit[];
   tributaria?: Lens360Tributaria;
+  alerts?: import('../services/validationRules').ValidationAlert[];
   error?: string;
 }
 
@@ -101,5 +102,7 @@ export interface Lens360Result {
   // Veredicto consolidado
   verdict: Lens360Verdict;
   verdictReasons: string[];
+  // Alertas del motor de reglas de validación (solo visual + PDF/Excel)
+  alerts?: import('../services/validationRules').ValidationAlert[];
   sources: { regcheq: boolean; inspektor: boolean };
 }

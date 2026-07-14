@@ -4,6 +4,39 @@ import autoTable from 'jspdf-autotable';
 import { ExtractedField, CryptoWalletProfile, ComplianceAnalysisResult, FinancialDocumentProcess, FinancialDocumentType } from '../types';
 import { Lens360Result, RegcheqEnrichment } from '../types/lens360';
 import { ColombiaProfile, buildTimeline } from './colombiaCriminalParser';
+import { ValidationAlert, SEVERITY_META } from './validationRules';
+
+// Convierte el color hex de una severidad a tripleta RGB para jsPDF.
+const hexToRgb = (hex: string): [number, number, number] => {
+  const m = hex.replace('#', '');
+  return [parseInt(m.slice(0, 2), 16), parseInt(m.slice(2, 4), 16), parseInt(m.slice(4, 6), 16)];
+};
+
+// Dibuja el bloque "Alertas de Validación" en un PDF. Devuelve la nueva Y.
+// Compartido por el analizador individual, el batch y la Vista 360°.
+const drawValidationAlerts = (
+  doc: jsPDF, alerts: ValidationAlert[] | undefined, margin: number, pageWidth: number, startY: number
+): number => {
+  if (!alerts || !alerts.length) return startY;
+  let y = startY;
+  const pageHeight = doc.internal.pageSize.getHeight();
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(9.5); doc.setTextColor(30, 41, 59);
+  doc.text('Alertas de Validación', margin, y); y += 5;
+  doc.setFontSize(8);
+  for (const a of alerts) {
+    if (y > pageHeight - 25) { doc.addPage(); y = 20; }
+    const meta = SEVERITY_META[a.severity];
+    const [r, g, b] = hexToRgb(meta.hex);
+    doc.setTextColor(r, g, b); doc.setFont('helvetica', 'bold');
+    const lines = doc.splitTextToSize(`[${meta.label}] ${a.title} — ${a.detail}`, pageWidth - margin * 2 - 3);
+    doc.text('•', margin, y);
+    doc.setFont('helvetica', 'normal');
+    doc.text(lines, margin + 3, y);
+    y += lines.length * 4.2 + 1.5;
+  }
+  doc.setTextColor(30, 41, 59);
+  return y + 2;
+};
 
 // Colors
 const NAVY = [30, 58, 95] as [number, number, number];       // #1e3a5f
@@ -208,6 +241,9 @@ export const generatePdf = async (
     doc.text('Consulta Regcheq — AML + SII', margin, currentY);
     doc.setDrawColor(...INDIGO); doc.setLineWidth(0.5); doc.line(margin, currentY + 1.5, margin + 60, currentY + 1.5);
     currentY += 6;
+
+    // Alertas de validación (motor de reglas)
+    currentY = drawValidationAlerts(doc, enrichment.alerts, margin, pageWidth, currentY);
 
     // Screening AML
     doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(...DARK_TEXT);
@@ -1969,6 +2005,7 @@ export const generateBatchCompanyPdf = async (
     if (yPos > 250) { doc.addPage(); yPos = 20; }
     doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.setTextColor(...NAVY);
     doc.text('Consulta Regcheq — AML + SII', margin, yPos); yPos += 6;
+    yPos = drawValidationAlerts(doc, enrichment.alerts, margin, pageWidth, yPos);
     doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(...DARK_TEXT);
     const coincid = enrichment.amlHits.filter(h => h.coincidence).map(h => h.nombre);
     const amlLines = doc.splitTextToSize(`Riesgo Regcheq: ${enrichment.regcheqRisk || '—'}${enrichment.pepLevel ? ` · PEP: ${enrichment.pepLevel}` : ''}\nCoincidencias AML: ${coincid.length ? coincid.join(', ') : 'ninguna'}`, pageWidth - margin * 2);
@@ -2053,6 +2090,9 @@ async function buildLens360Doc(r: Lens360Result): Promise<jsPDF> {
     doc.text(lines, margin, y); y += lines.length * 4.3;
   });
   y += 4;
+
+  // Alertas de validación (motor de reglas)
+  y = drawValidationAlerts(doc, r.alerts, margin, pageWidth, y);
 
   // Screening AML Chile
   doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.setTextColor(...NAVY);

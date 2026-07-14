@@ -3,6 +3,7 @@ import * as XLSX from 'xlsx';
 import JSZip from 'jszip';
 import { ExtractedField, ChatMessage } from '../types';
 import { RegcheqEnrichment } from '../types/lens360';
+import { SEVERITY_META } from '../services/validationRules';
 import { BatchCompanyInput, BatchSourceType, BatchMode, CompanyMetadata } from '../types/batch';
 import { fromLocalFolder } from '../services/batchInputNormalizer';
 import { processOneCompany } from '../services/batchProcessor';
@@ -347,6 +348,8 @@ export const BatchAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> = ({
         'SII fecha inicio':        c.regcheqEnrichment?.tributaria?.fechaInicioActividades ? c.regcheqEnrichment.tributaria.fechaInicioActividades.slice(0, 10) : '',
         'SII actividades':         c.regcheqEnrichment?.tributaria ? String(c.regcheqEnrichment.tributaria.actividades.length) : '',
         'SII situaciones irregulares': c.regcheqEnrichment?.tributaria?.situacionesIrregulares.join('; ') ?? '',
+        'Alertas severidad máx.':  (() => { const a = c.regcheqEnrichment?.alerts ?? []; return a.length ? SEVERITY_META[a[0].severity].label : ''; })(),
+        'Alertas validación':      (c.regcheqEnrichment?.alerts ?? []).map(a => `[${SEVERITY_META[a.severity].label}] ${a.title}`).join(' · '),
         'Error detalle':           c.error ?? '',
       };
     });
@@ -755,6 +758,15 @@ const CompanyQueue: React.FC<{
                         </button>
                       )}
                     </div>
+                    {(enr.alerts?.length ?? 0) > 0 && (
+                      <div className="mb-1 space-y-0.5">
+                        {enr.alerts!.map(a => (
+                          <p key={a.id} className="text-[11px]" style={{ color: SEVERITY_META[a.severity].hex }}>
+                            {SEVERITY_META[a.severity].emoji} <span className="font-bold">{a.title}</span>
+                          </p>
+                        ))}
+                      </div>
+                    )}
                     {coincid.length > 0 ? (
                       <p className="text-[11px] text-red-600 dark:text-red-400">⚑ Coincidencias: {coincid.map(h => h.nombre).join(', ')}</p>
                     ) : (
