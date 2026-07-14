@@ -147,10 +147,18 @@ async function createRegcheqRecord(rut: string, nombre: string, personType: Lens
 // (mismo efecto que marcar "crear ficha" en el módulo Regcheq). Sin este POST, el GET
 // puede devolver un registro existente pero sin coincidencias, aunque sí las tenga.
 async function fetchRegcheq(rut: string, nombre: string, personType: Lens360PersonType) {
-  await createRegcheqRecord(rut, nombre, personType);
-  await sleep(1200); // dar tiempo a que la API indexe el screening
-  let resp = await fetch(`${REGCHEQ_BASE}/record/${rut}/${REGCHEQ_KEY}`);
-  if (resp.status === 404) { await sleep(2000); resp = await fetch(`${REGCHEQ_BASE}/record/${rut}/${REGCHEQ_KEY}`); }
+  // Normaliza el RUT: sin puntos/guiones/espacios y dígito verificador en MAYÚSCULA
+  // (Regcheq es sensible a la 'k'). Evita 404 por formato ("77139759k" vs "77139759K").
+  const rutN = rut.replace(/[.\s-]/g, '').toUpperCase();
+  const GET = `${REGCHEQ_BASE}/record/${rutN}/${REGCHEQ_KEY}`;
+  // GET primero: si la ficha ya existe, la devuelve al instante (no se queda sin datos).
+  let resp = await fetch(GET);
+  if (resp.status === 404) {
+    // No existe → crear/refrescar y reintentar hasta que se indexe.
+    await createRegcheqRecord(rutN, nombre, personType);
+    await sleep(1500); resp = await fetch(GET);
+    if (resp.status === 404) { await sleep(2500); resp = await fetch(GET); }
+  }
   if (!resp.ok) throw new Error(`API ${resp.status}: ${resp.statusText}`);
   const perfil = await resp.json();
 

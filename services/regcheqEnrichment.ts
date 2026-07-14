@@ -34,7 +34,9 @@ export async function fetchRegcheqEnrichment(rut: string, nombre = ''): Promise<
   const empty: RegcheqEnrichment = { consultado: true, encontrado: false, amlHits: [] };
   if (!REGCHEQ_KEY) return { ...empty, error: 'Falta VITE_REGCHEQ_API_KEY' };
 
-  const GET = `${REGCHEQ_BASE}/record/${rut}/${REGCHEQ_KEY}`;
+  // Normaliza: sin puntos/guiones/espacios y dígito verificador en MAYÚSCULA.
+  const rutN = rut.replace(/[.\s-]/g, '').toUpperCase();
+  const GET = `${REGCHEQ_BASE}/record/${rutN}/${REGCHEQ_KEY}`;
   const tieneSii = (p: Record<string, unknown> | null): boolean =>
     !!p && Object.keys((p['situacionTributaria'] ?? {}) as Record<string, unknown>).length > 0;
 
@@ -50,7 +52,7 @@ export async function fetchRegcheqEnrichment(rut: string, nombre = ''): Promise<
     // 2) Si no existe o le falta el SII, crear/refrescar y reintentar hasta poblarlo.
     // (El SII se busca de forma asíncrona en Regcheq y puede tardar unos segundos.)
     if (!tieneSii(perfil)) {
-      await createRecord(rut, nombre);
+      await createRecord(rutN, nombre);
       for (const wait of [1500, 2500, 3500, 4500]) {
         await sleep(wait);
         let resp: Response;

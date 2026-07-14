@@ -115,12 +115,15 @@ export async function processOneCompany(
     enrichedData = await analyzeBatchEnrichment(combinedText);
   } catch { /* non-critical — PDF se genera igual sin datos enriquecidos */ }
 
-  // ── Enriquecimiento Regcheq (AML + SII) — solo empresas chilenas ──────────────
+  // ── Enriquecimiento Regcheq (AML + SII) — empresas chilenas ───────────────────
   onPhase('Consultando Regcheq (AML + SII)...');
   let regcheqEnrichment: RegcheqEnrichment | undefined;
-  const rut = (company.identificationNumber || '').replace(/[.\s]/g, '').replace(/-/g, '');
-  // Empresa con RUT (>=7 dígitos) → se consulta Regcheq (AML + SII).
-  const tieneRut = rut.replace(/k$/i, '').length >= 7 && /^[0-9]+k?$/i.test(rut);
+  // RUT: primero el de la empresa; si falta (p.ej. carpeta local), el extraído del doc.
+  const rutFromDocs = extractedData.find(f => /rut/i.test(f.field))?.value ?? '';
+  const rutSrc = company.identificationNumber || rutFromDocs;
+  const rut = rutSrc.replace(/[.\s-]/g, '').toUpperCase();
+  // Empresa con RUT (>=7 dígitos + dígito verificador) → se consulta Regcheq.
+  const tieneRut = /^[0-9]{7,8}[0-9K]$/.test(rut);
   if (tieneRut && hasRegcheqKey()) {
     try { regcheqEnrichment = await fetchRegcheqEnrichment(rut, company.companyName); }
     catch { /* no crítico — la ficha se genera igual */ }
