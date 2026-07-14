@@ -35,13 +35,27 @@ export async function fetchRegcheqEnrichment(rut: string, nombre = ''): Promise<
   if (!REGCHEQ_KEY) return { ...empty, error: 'Falta VITE_REGCHEQ_API_KEY' };
 
   try {
-    // Crear/refrescar primero → dispara el screening y garantiza datos (no 404).
+    // Crear/refrescar primero → dispara el screening y la búsqueda del SII.
     await createRecord(rut, nombre);
-    await sleep(1200);
-    let resp = await fetch(`${REGCHEQ_BASE}/record/${rut}/${REGCHEQ_KEY}`);
-    if (resp.status === 404) { await sleep(2000); resp = await fetch(`${REGCHEQ_BASE}/record/${rut}/${REGCHEQ_KEY}`); }
-    if (!resp.ok) return { ...empty, error: `API ${resp.status}: ${resp.statusText}` };
-    const perfil = await resp.json();
+
+    // El SII (situacionTributaria) se puebla de forma asíncrona en Regcheq: para una
+    // ficha recién creada puede no estar listo en el primer GET. Reintentamos el GET
+    // con esperas crecientes hasta que el SII aparezca (o se agoten los intentos).
+    const delays = [1500, 2500, 3500, 4500];
+    let perfil: Record<string, unknown> | null = null;
+    for (let i = 0; i < delays.length; i++) {
+      await sleep(delays[i]);
+      const resp = await fetch(`${REGCHEQ_BASE}/record/${rut}/${REGCHEQ_KEY}`);
+      if (resp.status === 404) continue; // aún no indexada
+      if (!resp.ok) {
+        if (i === delays.length - 1) return { ...empty, error: `API ${resp.status}: ${resp.statusText}` };
+        continue;
+      }
+      perfil = await resp.json();
+      const sitTmp = (perfil?.situacionTributaria ?? {}) as Record<string, unknown>;
+      if (Object.keys(sitTmp).length > 0) break; // SII ya poblado → listo
+    }
+    if (!perfil) return { ...empty, error: 'Regcheq no devolvió la ficha (404).' };
 
     // Screening AML (smart-merge por nombre visible).
     const listasRaw = (perfil.listas ?? {}) as Record<string, Record<string, unknown>>;
