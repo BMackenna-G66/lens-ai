@@ -294,9 +294,10 @@ export const DocumentCard: React.FC<DocumentCardProps> = ({
                                 ))}
                               </div>
                             )}
-                            {document.regcheqEnrichment.tributaria && (
+                            {/* SII — siempre visible cuando se consultó Regcheq (con datos o nota) */}
+                            <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-1">Situación Tributaria (SII)</p>
+                            {document.regcheqEnrichment.tributaria ? (
                               <>
-                                <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-1">Situación Tributaria (SII)</p>
                                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-3 gap-y-1 text-xs mb-2">
                                   {[
                                     ['RUT contribuyente', document.regcheqEnrichment.tributaria.rutContribuyente],
@@ -319,6 +320,8 @@ export const DocumentCard: React.FC<DocumentCardProps> = ({
                                   </p>
                                 )}
                               </>
+                            ) : (
+                              <p className="text-xs text-slate-400">Sin datos tributarios (SII) en Regcheq para este RUT.</p>
                             )}
                           </>
                         )}
