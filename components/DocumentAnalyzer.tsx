@@ -18,6 +18,7 @@ import {
     generateExecutiveSummary
 } from '../services/geminiService';
 import { generatePdf } from '../services/pdfGenerator';
+import { fetchRegcheqEnrichment, hasRegcheqKey } from '../services/regcheqEnrichment';
 import { generateCsv } from '../services/csvGenerator';
 import { IconJson, IconCsv, IconAlertTriangle, IconAlertTriangleSolid, IconFileText, IconFiles, IconImport, IconExport } from './IconComponents';
 import { DocumentChat } from './DocumentChat';
@@ -212,6 +213,22 @@ export const DocumentAnalyzer: React.FC = () => {
         const { extractedData, rawResponse } = await analyzeDocumentWithGemini(prompt);
         updateDoc(FileProcessingStatus.COMPLETED, { extractedData, rawGeminiResponse: rawResponse, statusMessage: "Completado." });
         trackDocumentProcessed('analyzer', country, false);
+
+        // Enriquecimiento Regcheq (screening AML + SII) — solo empresas chilenas.
+        const val = (f: string) => extractedData.find(x => x.field.toLowerCase().includes(f))?.value?.trim() ?? '';
+        const rutRaw = val('rut');
+        const razon = val('razón social') || val('razon social');
+        const rut = rutRaw.replace(/[.\s]/g, '').replace(/-/g, '');
+        const esNoEspecificado = (v: string) => !v || /no especificado|n\/a|no aplica/i.test(v);
+        if (country === 'chile' && !esNoEspecificado(rutRaw) && !esNoEspecificado(razon) && rut.length >= 7 && hasRegcheqKey()) {
+          updateDoc(FileProcessingStatus.COMPLETED, { regcheqEnrichment: { loading: true, consultado: true, encontrado: false, amlHits: [] } });
+          try {
+            const enr = await fetchRegcheqEnrichment(rut, razon);
+            updateDoc(FileProcessingStatus.COMPLETED, { regcheqEnrichment: { ...enr, loading: false } });
+          } catch (e: any) {
+            updateDoc(FileProcessingStatus.COMPLETED, { regcheqEnrichment: { loading: false, consultado: true, encontrado: false, amlHits: [], error: e?.message } });
+          }
+        }
       } else {
         updateDoc(FileProcessingStatus.COMPLETED, { statusMessage: "Listo para chatear." });
         trackDocumentProcessed('analyzer');
@@ -360,7 +377,7 @@ export const DocumentAnalyzer: React.FC = () => {
         f => f.field.toLowerCase().includes('razón social') || f.field.toLowerCase().includes('razon social')
       )?.value?.trim();
       const pdfName = razonSocial ? `${razonSocial} - Analisis Lens AI` : doc.fileName;
-      await generatePdf(pdfName, doc.extractedData, summary);
+      await generatePdf(pdfName, doc.extractedData, summary, doc.regcheqEnrichment);
     } catch (error: any) {
       console.error('Error generating PDF:', error);
     }

@@ -434,6 +434,60 @@ export const DocumentCard: React.FC<DocumentCardProps> = ({
                             )}
                         </div>
                     )}
+
+                    {document.regcheqEnrichment && (
+                      <div className="mt-4 border-t border-slate-200 pt-4">
+                        <h4 className="text-sm font-bold text-slate-700 mb-2">🔎 Consulta Regcheq — AML + SII</h4>
+                        {document.regcheqEnrichment.loading ? (
+                          <p className="text-xs text-slate-400">Consultando Regcheq…</p>
+                        ) : document.regcheqEnrichment.error ? (
+                          <p className="text-xs text-amber-600">No se pudo consultar Regcheq: {document.regcheqEnrichment.error}</p>
+                        ) : (
+                          <>
+                            <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-1">
+                              Screening AML{document.regcheqEnrichment.regcheqRisk && ` · Riesgo: ${document.regcheqEnrichment.regcheqRisk}`}{document.regcheqEnrichment.pepLevel && ` · PEP: ${document.regcheqEnrichment.pepLevel}`}
+                            </p>
+                            {document.regcheqEnrichment.amlHits.length === 0 ? (
+                              <p className="text-xs text-slate-400 mb-3">Sin datos de listas.</p>
+                            ) : (
+                              <div className="flex flex-wrap gap-1.5 mb-3">
+                                {document.regcheqEnrichment.amlHits.map((h, i) => (
+                                  <span key={i} className={`text-[11px] px-2 py-1 rounded-lg border font-medium ${h.coincidence ? 'bg-red-50 text-red-700 border-red-200' : 'bg-slate-50 text-slate-400 border-slate-200'}`}>
+                                    {h.coincidence ? '⚑ ' : ''}{h.nombre}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                            {document.regcheqEnrichment.tributaria && (
+                              <>
+                                <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-1">Situación Tributaria (SII)</p>
+                                <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-3 gap-y-1 text-xs mb-2">
+                                  {[
+                                    ['RUT contribuyente', document.regcheqEnrichment.tributaria.rutContribuyente],
+                                    ['Nombre SII', document.regcheqEnrichment.tributaria.nombreSii],
+                                    ['Inicio actividades', document.regcheqEnrichment.tributaria.presentaInicioActividades],
+                                    ['Fecha inicio', document.regcheqEnrichment.tributaria.fechaInicioActividades ? document.regcheqEnrichment.tributaria.fechaInicioActividades.slice(0, 10) : ''],
+                                    ['Empresa menor tamaño', document.regcheqEnrichment.tributaria.empresaMenorTamano],
+                                    ['Última act. SII', document.regcheqEnrichment.tributaria.ultimaActualizacion ? document.regcheqEnrichment.tributaria.ultimaActualizacion.slice(0, 10) : ''],
+                                  ].map(([l, v]) => (
+                                    <div key={l}><span className="text-slate-400">{l}: </span><span className="text-slate-700 font-medium">{v || '—'}</span></div>
+                                  ))}
+                                </div>
+                                {document.regcheqEnrichment.tributaria.situacionesIrregulares.length > 0 && (
+                                  <p className="text-xs text-amber-600 mb-2">⚠ Situaciones irregulares: {document.regcheqEnrichment.tributaria.situacionesIrregulares.join(' · ')}</p>
+                                )}
+                                {document.regcheqEnrichment.tributaria.actividades.length > 0 && (
+                                  <p className="text-[11px] text-slate-500">
+                                    Actividades: {document.regcheqEnrichment.tributaria.actividades.map(a => a.name).filter(Boolean).slice(0, 6).join(' · ')}
+                                    {document.regcheqEnrichment.tributaria.actividades.length > 6 ? ` … (+${document.regcheqEnrichment.tributaria.actividades.length - 6})` : ''}
+                                  </p>
+                                )}
+                              </>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    )}
                 </>
             ) : (
                 <div className="h-full flex flex-col items-center justify-center text-slate-400 py-8">
