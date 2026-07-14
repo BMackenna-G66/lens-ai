@@ -496,6 +496,7 @@ REGLAS CRÍTICAS:
 3. Para campos booleanos de consistencia: usa true si los documentos coinciden, false si hay discrepancia, null si no hay suficientes documentos para comparar.
 4. Responde ÚNICAMENTE con el objeto JSON válido. Sin texto antes ni después.
 5. No calcules riesgos, no hagas juicios AML, solo extrae y estructura.
+6. NORMALIZACIÓN AL COMPARAR IDENTIFICADORES (RUT/RUN/DNI/NIT): antes de decidir si un RUT o número de documento es consistente entre documentos, NORMALIZA ambos valores eliminando puntos, guiones y espacios, y tratando el dígito verificador "k"/"K" como equivalente (sin distinguir mayúsculas). Ejemplo: "13.869.118-7" y "138691187" son el MISMO RUT → consistente. Una diferencia que es SOLO de formato (puntos, guión, espacios, mayúscula/minúscula del dígito verificador) NUNCA es una inconsistencia ni una "diferencia en el dígito verificador"; solo marca discrepancia si los dígitos normalizados realmente difieren.
 
 DOCUMENTOS:
 ---
