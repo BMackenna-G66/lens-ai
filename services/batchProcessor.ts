@@ -119,9 +119,9 @@ export async function processOneCompany(
   onPhase('Consultando Regcheq (AML + SII)...');
   let regcheqEnrichment: RegcheqEnrichment | undefined;
   const rut = (company.identificationNumber || '').replace(/[.\s]/g, '').replace(/-/g, '');
-  // Señal de empresa chilena: RUT con formato chileno (7-8 dígitos + dígito verificador).
-  const esChilena = /^[0-9]{7,8}[0-9kK]$/.test(rut);
-  if (esChilena && hasRegcheqKey()) {
+  // Empresa con RUT (>=7 dígitos) → se consulta Regcheq (AML + SII).
+  const tieneRut = rut.replace(/k$/i, '').length >= 7 && /^[0-9]+k?$/i.test(rut);
+  if (tieneRut && hasRegcheqKey()) {
     try { regcheqEnrichment = await fetchRegcheqEnrichment(rut, company.companyName); }
     catch { /* no crítico — la ficha se genera igual */ }
   }

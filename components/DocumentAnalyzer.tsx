@@ -182,7 +182,9 @@ export const DocumentAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> =
 
       if (docToProcess.purpose === 'extract') {
         updateDoc(FileProcessingStatus.DETECTING_COUNTRY, { statusMessage: "Detectando país..." });
-        const country = await detectCountryWithGemini(combinedText);
+        const countryRaw = await detectCountryWithGemini(combinedText);
+        // Normaliza el país: quita emojis/banderas y símbolos, deja solo la palabra en minúscula.
+        const country = countryRaw.replace(/[^\p{L}\s]/gu, ' ').replace(/\s+/g, ' ').trim().toLowerCase().replace(/^cl\b\s*/, '').trim() || countryRaw.trim().toLowerCase();
         const countryContextMap: { [key: string]: string } = {
           'chile': 'Estás analizando una escritura pública o documento legal chileno. Usa terminología legal chilena (RUT, SpA, SA, Ltda, Notaría, Conservador de Bienes Raíces).',
           'colombia': 'Estás analizando un documento legal colombiano. Usa terminología legal colombiana (NIT, SAS, SA, Ltda, Cámara de Comercio, matrícula mercantil).',
@@ -215,16 +217,15 @@ export const DocumentAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> =
         trackDocumentProcessed('analyzer', country, false);
 
         // Enriquecimiento Regcheq (screening AML + SII) — empresas chilenas.
-        // Señal robusta: RUT con formato chileno (7-8 dígitos + dígito verificador)
-        // + Razón Social presente (= empresa). No dependemos de la detección de país,
-        // que a veces no devuelve exactamente "chile".
+        // Disparo robusto: basta con tener un RUT (>=7 dígitos) + Razón Social (= empresa).
+        // No dependemos del formato exacto ni de la detección de país (que puede venir
+        // como "CL Chile", con bandera, etc.); el país solo suma como señal.
         const val = (f: string) => extractedData.find(x => x.field.toLowerCase().includes(f))?.value?.trim() ?? '';
         const rutRaw = val('rut');
         const razon = val('razón social') || val('razon social');
         const rut = rutRaw.replace(/[.\s]/g, '').replace(/-/g, '');
         const esNoEspecificado = (v: string) => !v || /no especificado|n\/a|no aplica/i.test(v);
-        const rutChilenoValido = /^[0-9]{7,8}[0-9kK]$/.test(rut);
-        if (rutChilenoValido && !esNoEspecificado(razon) && hasRegcheqKey()) {
+        if (rut.length >= 7 && !esNoEspecificado(rutRaw) && !esNoEspecificado(razon) && hasRegcheqKey()) {
           updateDoc(FileProcessingStatus.COMPLETED, { regcheqEnrichment: { loading: true, consultado: true, encontrado: false, amlHits: [] } });
           try {
             const enr = await fetchRegcheqEnrichment(rut, razon);
