@@ -8,6 +8,7 @@ import { CatalogData, PersonProfile, Crime } from '../types/criminalTypes';
 import {
   Lens360Result, Lens360ListHit, Lens360Crime,
   Lens360CriminalDecision, Lens360InspektorHit, Lens360Verdict, Lens360PersonType, Lens360RelatedPerson,
+  Lens360Tributaria,
 } from '../types/lens360';
 
 // ─── Config (mismas fuentes que RegcheqTool / InspektorColombia) ────────────────
@@ -180,6 +181,29 @@ async function fetchRegcheq(rut: string, nombre: string, personType: Lens360Pers
     criminalProfile = evaluated.profile;
   }
 
+  // Situación tributaria (SII) — misma respuesta, sin consulta extra.
+  const sit = (perfil.situacionTributaria ?? {}) as Record<string, unknown>;
+  const s = (v: unknown) => (v === null || v === undefined) ? '' : String(v).trim();
+  const boolStr = (v: unknown) => v === true ? 'Sí' : v === false ? 'No' : '';
+  const actividades = (Array.isArray(sit['Activities']) ? (sit['Activities'] as Record<string, unknown>[]) : []).map(a => ({
+    code: s(a['Code']), name: s(a['Name']), category: s(a['Category']),
+    date: s(a['Date']), afectoIva: boolStr(a['SubjectToVAT']),
+  }));
+  const tributariaRaw: Lens360Tributaria = {
+    rutContribuyente: s(sit['rut_contribuyente']),
+    nombreSii: s(sit['Name']),
+    presentaInicioActividades: boolStr(sit['presenta_inicio_actividades']),
+    fechaInicioActividades: s(sit['fecha_inicio_actividades']),
+    empresaMenorTamano: boolStr(sit['es_empresa_menor_tamano']),
+    monedaExtranjera: boolStr(sit['autorizado_moneda_extranjera']),
+    ultimaActualizacion: s(sit['ultima_actualizacion']),
+    situacionesIrregulares: Array.isArray(sit['situaciones_irregulares']) ? (sit['situaciones_irregulares'] as string[]) : [],
+    actividades,
+  };
+  // Solo si trae algo útil (evita mostrar la sección vacía para personas naturales).
+  const hasTributaria = !!(tributariaRaw.rutContribuyente || tributariaRaw.nombreSii || tributariaRaw.fechaInicioActividades || actividades.length || tributariaRaw.situacionesIrregulares.length);
+  const tributaria = hasTributaria ? tributariaRaw : undefined;
+
   // Personas relacionadas (representantes legales, beneficiarios finales, etc.)
   const related: Lens360RelatedPerson[] = ((perfil.personsRelations ?? []) as Record<string, unknown>[]).map(p => ({
     dni: String(p['dni'] ?? '').trim(),
@@ -194,7 +218,7 @@ async function fetchRegcheq(rut: string, nombre: string, personType: Lens360Pers
     personType: String(perfil.personType ?? ''),
     regcheqRisk: (perfil.effectiveRisk ?? perfil.calculatedRisk ?? '') as string,
     pepLevel: (perfil.pepLevel ?? '') as string,
-    amlHits, crimes, criminalDecision, criminalProfile, related,
+    amlHits, crimes, criminalDecision, criminalProfile, related, tributaria,
   };
 }
 
@@ -304,6 +328,7 @@ export async function search360(params: {
     result.criminalDecision = rc.criminalDecision;
     result.criminalProfile = rc.criminalProfile;
     result.related = rc.related;
+    result.tributaria = rc.tributaria;
     result.sources.regcheq = true;
   } catch (e) {
     result.verdictReasons.push(`Regcheq no disponible: ${(e as Error).message}`);

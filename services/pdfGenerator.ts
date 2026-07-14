@@ -2019,6 +2019,40 @@ async function buildLens360Doc(r: Lens360Result): Promise<jsPDF> {
     }
   }
 
+  // Servicio de Impuestos Internos (SII)
+  if (r.tributaria) {
+    const t = r.tributaria;
+    if (y > 235) { doc.addPage(); y = 20; }
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.setTextColor(...NAVY);
+    doc.text('Servicio de Impuestos Internos (SII)', margin, y); y += 6;
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(...DARK_TEXT);
+    const datos = [
+      `RUT contribuyente: ${t.rutContribuyente || '—'}`,
+      `Nombre SII: ${t.nombreSii || '—'}`,
+      `Inicio de actividades: ${t.presentaInicioActividades || '—'}${t.fechaInicioActividades ? ` (${t.fechaInicioActividades.slice(0, 10)})` : ''}`,
+      `Empresa menor tamaño: ${t.empresaMenorTamano || '—'}   ·   Moneda extranjera: ${t.monedaExtranjera || '—'}`,
+      `Última actualización SII: ${t.ultimaActualizacion ? t.ultimaActualizacion.slice(0, 10) : '—'}`,
+    ];
+    datos.forEach(line => { doc.text(doc.splitTextToSize(line, pageWidth - margin * 2), margin, y); y += 5; });
+    if (t.situacionesIrregulares.length) {
+      const lines = doc.splitTextToSize(`Situaciones irregulares: ${t.situacionesIrregulares.join(' · ')}`, pageWidth - margin * 2);
+      doc.setTextColor(146, 64, 14); doc.text(lines, margin, y); y += lines.length * 4.5; doc.setTextColor(...DARK_TEXT);
+    }
+    y += 2;
+    if (t.actividades.length) {
+      autoTable(doc, {
+        startY: y,
+        head: [['Código', 'Actividad', 'Categoría', 'Fecha', 'IVA']],
+        body: t.actividades.map(a => [a.code, a.name, a.category, a.date ? a.date.slice(0, 10) : '', a.afectoIva]),
+        theme: 'grid', headStyles: { fillColor: NAVY, textColor: WHITE, fontSize: 8, fontStyle: 'bold' },
+        bodyStyles: { fontSize: 7.5, textColor: DARK_TEXT }, columnStyles: { 1: { cellWidth: 70 } },
+        margin: { left: margin, right: margin },
+        didDrawPage: d => addPageFooter(doc, d.pageNumber, 0, date),
+      });
+      y = (doc as any).lastAutoTable.finalY + 8;
+    }
+  }
+
   // Screening Colombia (Inspektor)
   if (r.country === 'CO' && r.inspektor) {
     if (y > 235) { doc.addPage(); y = 20; }

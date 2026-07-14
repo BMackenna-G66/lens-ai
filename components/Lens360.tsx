@@ -303,6 +303,66 @@ const ResultView: React.FC<{ result: Lens360Result }> = ({ result }) => {
         </Card>
       </div>
 
+      {/* Servicio de Impuestos Internos (SII) — situación tributaria */}
+      {result.tributaria && (
+        <Card title="Servicio de Impuestos Internos (SII)" badge={result.tributaria.rutContribuyente ? `RUT ${result.tributaria.rutContribuyente}` : undefined}>
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-x-4 gap-y-2 text-xs">
+            {[
+              ['Nombre SII', result.tributaria.nombreSii],
+              ['Inicio de actividades', result.tributaria.presentaInicioActividades],
+              ['Fecha inicio actividades', result.tributaria.fechaInicioActividades ? result.tributaria.fechaInicioActividades.slice(0, 10) : ''],
+              ['Empresa menor tamaño', result.tributaria.empresaMenorTamano],
+              ['Autorizado moneda extranjera', result.tributaria.monedaExtranjera],
+              ['Última actualización SII', result.tributaria.ultimaActualizacion ? result.tributaria.ultimaActualizacion.slice(0, 10) : ''],
+            ].map(([label, val]) => (
+              <div key={label}>
+                <p className="text-[10px] uppercase tracking-wide text-slate-400">{label}</p>
+                <p className="font-medium text-slate-700 dark:text-slate-200">{val || '—'}</p>
+              </div>
+            ))}
+          </div>
+
+          {result.tributaria.situacionesIrregulares.length > 0 && (
+            <div className="mt-3 p-2.5 rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800">
+              <p className="text-[10px] font-bold uppercase tracking-wide text-amber-700 dark:text-amber-400 mb-1">Situaciones irregulares</p>
+              <ul className="list-disc list-inside text-xs text-amber-800 dark:text-amber-300 space-y-0.5">
+                {result.tributaria.situacionesIrregulares.map((s, i) => <li key={i}>{s}</li>)}
+              </ul>
+            </div>
+          )}
+
+          {result.tributaria.actividades.length > 0 && (
+            <div className="mt-3">
+              <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400 mb-1">Actividades económicas ({result.tributaria.actividades.length})</p>
+              <div className="overflow-x-auto">
+                <table className="w-full text-[11px]">
+                  <thead>
+                    <tr className="text-left text-slate-400 border-b border-slate-100 dark:border-slate-800">
+                      <th className="py-1 pr-2 font-semibold">Código</th>
+                      <th className="py-1 pr-2 font-semibold">Actividad</th>
+                      <th className="py-1 pr-2 font-semibold">Categoría</th>
+                      <th className="py-1 pr-2 font-semibold">Fecha</th>
+                      <th className="py-1 font-semibold">IVA</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {result.tributaria.actividades.map((a, i) => (
+                      <tr key={i} className="border-b border-slate-50 dark:border-slate-800/50 last:border-0">
+                        <td className="py-1 pr-2 text-slate-500 dark:text-slate-400">{a.code || '—'}</td>
+                        <td className="py-1 pr-2 text-slate-700 dark:text-slate-200">{a.name || '—'}</td>
+                        <td className="py-1 pr-2 text-slate-500 dark:text-slate-400">{a.category || '—'}</td>
+                        <td className="py-1 pr-2 text-slate-500 dark:text-slate-400">{a.date ? a.date.slice(0, 10) : '—'}</td>
+                        <td className="py-1 text-slate-500 dark:text-slate-400">{a.afectoIva || '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </Card>
+      )}
+
       {/* Colombia (Inspektor) */}
       {result.country === 'CO' && (
         <Card title="Screening AML · Colombia (Inspektor)" badge={result.inspektor ? `${result.inspektor.coincidencias} coincidencia(s)` : undefined}>
@@ -458,6 +518,12 @@ const Lens360Masivo: React.FC = () => {
       Precedentes: r.criminalDecision?.precedentes ?? '',
       'No precedentes': r.criminalDecision?.noPrecedentes ?? '',
       'Riesgo Regcheq': r.regcheqRisk ?? '', PEP: r.pepLevel ?? '',
+      'SII RUT contribuyente': r.tributaria?.rutContribuyente ?? '',
+      'SII inicio actividades': r.tributaria?.presentaInicioActividades ?? '',
+      'SII fecha inicio': r.tributaria?.fechaInicioActividades ? r.tributaria.fechaInicioActividades.slice(0, 10) : '',
+      'SII empresa menor tamaño': r.tributaria?.empresaMenorTamano ?? '',
+      'SII actividades': r.tributaria?.actividades.length ?? '',
+      'SII situaciones irregulares': r.tributaria?.situacionesIrregulares.join('; ') ?? '',
       Motivos: r.verdictReasons.join(' | '),
     }));
     const wb = XLSX.utils.book_new();
