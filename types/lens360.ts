@@ -53,6 +53,19 @@ export interface Lens360Activity {
   code: string; name: string; category: string; date: string; afectoIva: string;
 }
 
+// Enriquecimiento Regcheq (screening AML + SII) para el Analizador de Documentos y Batch.
+export interface RegcheqEnrichment {
+  loading?: boolean;        // consulta en curso
+  consultado: boolean;      // se intentó la consulta
+  encontrado: boolean;      // Regcheq devolvió datos
+  nombre?: string;
+  regcheqRisk?: string;
+  pepLevel?: string;
+  amlHits: Lens360ListHit[];
+  tributaria?: Lens360Tributaria;
+  error?: string;
+}
+
 // Situación tributaria (SII) — solo aplica a personas jurídicas.
 export interface Lens360Tributaria {
   rutContribuyente: string;

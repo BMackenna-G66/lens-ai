@@ -1,4 +1,6 @@
 
+import { RegcheqEnrichment } from './types/lens360';
+
 export enum FileProcessingStatus {
   QUEUED = 'QUEUED',
   READING = 'READING',
@@ -104,6 +106,7 @@ export interface ProcessedDocument {
   integrityAnalysisStatus?: IntegrityAnalysisStatus;
   integrityAnalysisResult?: IntegrityAnalysisResult;
   integrityAnalysisError?: string;
+  regcheqEnrichment?: RegcheqEnrichment; // screening AML + SII (solo empresas chilenas)
 }
 
 // Type for items in the processing queue, can be a single File or a consolidated job

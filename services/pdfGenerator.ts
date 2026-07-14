@@ -2,7 +2,7 @@
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { ExtractedField, CryptoWalletProfile, ComplianceAnalysisResult, FinancialDocumentProcess, FinancialDocumentType } from '../types';
-import { Lens360Result } from '../types/lens360';
+import { Lens360Result, RegcheqEnrichment } from '../types/lens360';
 import { ColombiaProfile, buildTimeline } from './colombiaCriminalParser';
 
 // Colors
@@ -54,7 +54,8 @@ const addPageFooter = (doc: jsPDF, pageNum: number, totalPages: number, date: st
 export const generatePdf = async (
   fileName: string,
   data: ExtractedField[],
-  executiveSummary?: string
+  executiveSummary?: string,
+  enrichment?: RegcheqEnrichment,
 ): Promise<void> => {
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
   const pageWidth = doc.internal.pageSize.getWidth();
@@ -198,6 +199,47 @@ export const generatePdf = async (
     doc.text(summaryLines, margin + 7, currentY + 7);
 
     currentY += boxHeight + 6;
+  }
+
+  // --- CONSULTA REGCHEQ (AML + SII) ---
+  if (enrichment && enrichment.encontrado) {
+    if (currentY > 235) { doc.addPage(); currentY = 20; }
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.setTextColor(...NAVY);
+    doc.text('Consulta Regcheq — AML + SII', margin, currentY);
+    doc.setDrawColor(...INDIGO); doc.setLineWidth(0.5); doc.line(margin, currentY + 1.5, margin + 60, currentY + 1.5);
+    currentY += 6;
+
+    // Screening AML
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(...DARK_TEXT);
+    const coincid = enrichment.amlHits.filter(h => h.coincidence).map(h => h.nombre);
+    const amlTxt = `Riesgo Regcheq: ${enrichment.regcheqRisk || '—'}${enrichment.pepLevel ? ` · PEP: ${enrichment.pepLevel}` : ''}\nCoincidencias AML: ${coincid.length ? coincid.join(', ') : 'ninguna'}`;
+    const amlLines = doc.splitTextToSize(amlTxt, pageWidth - margin * 2);
+    doc.text(amlLines, margin, currentY); currentY += amlLines.length * 4.5 + 3;
+
+    // SII
+    const t = enrichment.tributaria;
+    if (t) {
+      const siiTxt = `SII — RUT: ${t.rutContribuyente || '—'} · Inicio actividades: ${t.presentaInicioActividades || '—'}${t.fechaInicioActividades ? ` (${t.fechaInicioActividades.slice(0, 10)})` : ''} · Empresa menor tamaño: ${t.empresaMenorTamano || '—'}`;
+      const siiLines = doc.splitTextToSize(siiTxt, pageWidth - margin * 2);
+      doc.text(siiLines, margin, currentY); currentY += siiLines.length * 4.5 + 2;
+      if (t.situacionesIrregulares.length) {
+        doc.setTextColor(146, 64, 14);
+        const irr = doc.splitTextToSize(`Situaciones irregulares: ${t.situacionesIrregulares.join(' · ')}`, pageWidth - margin * 2);
+        doc.text(irr, margin, currentY); currentY += irr.length * 4.5 + 2; doc.setTextColor(...DARK_TEXT);
+      }
+      if (t.actividades.length) {
+        autoTable(doc, {
+          startY: currentY,
+          head: [['Código', 'Actividad', 'Categoría', 'Fecha', 'IVA']],
+          body: t.actividades.map(a => [a.code, a.name, a.category, a.date ? a.date.slice(0, 10) : '', a.afectoIva]),
+          theme: 'grid', headStyles: { fillColor: NAVY, textColor: WHITE, fontSize: 8, fontStyle: 'bold' },
+          bodyStyles: { fontSize: 7.5, textColor: DARK_TEXT }, columnStyles: { 1: { cellWidth: 70 } },
+          margin: { left: margin, right: margin },
+          didDrawPage: (d) => addPageFooter(doc, d.pageNumber, 0, generationDate),
+        });
+        currentY = (doc as any).lastAutoTable.finalY + 6;
+      }
+    }
   }
 
   // --- DISCLAIMER ---
