@@ -84,6 +84,7 @@ export interface CompanyMetadata {
   beneficialOwners?: unknown[];
   people?: unknown[];
   boardMembers?: unknown[];
+  adminRaw?: Record<string, unknown>;   // registro oficial completo de EmpresaDocs
 }
 
 export interface BatchCompanyInput {

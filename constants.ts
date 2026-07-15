@@ -559,22 +559,27 @@ Eres un analista de compliance KYB. Debes comparar la información EXTRAÍDA DE 
 
 REGLAS CRÍTICAS:
 1. Compara solo lo que puedas determinar con la información disponible. Si un lado no tiene el dato, ese campo es null (no lo cuentes como discrepancia).
-2. NORMALIZA antes de comparar:
-   - RUT/RUN/DNI/NIT: elimina puntos, guiones y espacios; trata "k"/"K" como equivalente. "13.869.118-7" y "138691187" son el MISMO RUT. Una diferencia SOLO de formato NUNCA es inconsistencia.
+2. NORMALIZACIÓN OBLIGATORIA antes de comparar (aplícala SIEMPRE):
+   - RUT/RUN/DNI/NIT: elimina TODOS los puntos, guiones y espacios, y trata "k"/"K" como equivalente, ANTES de comparar. Compara solo la secuencia de dígitos resultante + dígito verificador. "13.869.118-7", "13869118-7", "13.869.118 7" y "138691187" son EXACTAMENTE el MISMO RUT → consistente. Una diferencia de puntuación, guión, espacios o mayúsculas NUNCA cuenta como discrepancia ni la menciones en inconsistencias.
    - Nombres de personas y razones sociales: ignora mayúsculas/minúsculas, tildes, orden de nombres/apellidos y sufijos societarios (S.A., SpA, Ltda., etc.). "Sebastián Fontbona Urdangarín" y "SEBASTIAN FONTBONA" refieren a la misma persona → consistente.
    - Actividades económicas: compara por código y/o descripción equivalente; el orden no importa.
-3. Para cada campo booleano: true si coincide, false si hay discrepancia real, null si no hay datos suficientes en alguno de los dos lados.
-4. En "inconsistencias" describe SOLO discrepancias reales (no de formato), en frases cortas y claras en español.
-5. Responde ÚNICAMENTE con el objeto JSON válido. Sin texto antes ni después.
+3. QUÉ COMPARAR EN CADA CAMPO:
+   - razonSocialRutConsistente: razón social y RUT del documento vs los oficiales.
+   - representanteConsistente: representante(s) legal(es) del documento vs los oficiales.
+   - actividadesConsistente: las actividades económicas / giro del documento vs los campos de INDUSTRIA y ACTIVIDADES del registro oficial (busca en registroOficial claves como industry, activities, economicActivity, giro, rubro, etc.). Si el registro oficial no trae industria ni actividades, deja este campo en null.
+   - accionistasConsistente: los accionistas / beneficiarios finales que aparecen en LOS DOCUMENTOS vs los del registro oficial (representantesLegales/accionistasBeneficiarios/registroOficial). Si ninguno de los dos lados los declara, deja este campo en null.
+4. Para cada campo booleano: true si coincide, false si hay discrepancia real, null si no hay datos suficientes en alguno de los dos lados.
+5. En "inconsistencias" describe SOLO discrepancias reales (no de formato), en frases cortas y claras en español.
+6. Responde ÚNICAMENTE con el objeto JSON válido. Sin texto antes ni después.
 
 INFORMACIÓN EXTRAÍDA DE LOS DOCUMENTOS:
 ---
-${extraidoDeDocumentos.slice(0, 12000)}
+${extraidoDeDocumentos.slice(0, 14000)}
 ---
 
 DATOS OFICIALES REGISTRADOS (EmpresaDocs):
 ---
-${datosAdmin.slice(0, 12000)}
+${datosAdmin.slice(0, 20000)}
 ---
 
 Devuelve ÚNICAMENTE este JSON:
