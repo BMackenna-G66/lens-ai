@@ -1,4 +1,4 @@
-import { BatchCompanyInput, BatchMode, BatchEnrichedData } from '../types/batch';
+import { BatchCompanyInput, BatchMode, BatchEnrichedData, AdminComparisonResult } from '../types/batch';
 import { ExtractedField } from '../types';
 import { GEMINI_PROMPT_TEMPLATE } from '../constants';
 import {
@@ -12,6 +12,7 @@ import {
   analyzeTaxFolderWithGemini,
   analyzeCrossCheckWithGemini,
   analyzeBatchEnrichment,
+  analyzeAdminComparison,
 } from './geminiService';
 import { getTextFromFile } from './fileProcessorService';
 import { generateBatchCompanyPdf } from './pdfGenerator';
@@ -25,6 +26,7 @@ export interface CompanyProcessResult {
   errorCount: number;
   rawText: string;       // texto consolidado de todos los docs — contexto para el chat
   regcheqEnrichment?: RegcheqEnrichment; // screening AML + SII (empresas chilenas)
+  adminComparison?: AdminComparisonResult; // comparativa vs datos oficiales (solo EmpresaDocs)
 }
 
 export interface ProcessCallbacks {
@@ -115,6 +117,37 @@ export async function processOneCompany(
     enrichedData = await analyzeBatchEnrichment(combinedText);
   } catch { /* non-critical — PDF se genera igual sin datos enriquecidos */ }
 
+  // ── Comparativa contra Admin (solo EmpresaDocs, cuando hay datos oficiales) ────
+  let adminComparison: AdminComparisonResult | undefined;
+  const meta = company.companyMetadata;
+  const hayDatosAdmin = company.source === 'empresa_docs' && !!meta && (
+    (meta.legalRepresentatives?.length ?? 0) > 0 ||
+    (meta.beneficialOwners?.length ?? 0) > 0 ||
+    (meta.boardMembers?.length ?? 0) > 0 ||
+    !!company.identificationNumber
+  );
+  if (hayDatosAdmin) {
+    onPhase('Comparando contra datos de Admin...');
+    // Contexto extraído de los documentos (campos + estructura + actividades + representante).
+    const extraido = [
+      `Razón social (documento): ${company.companyName}`,
+      ...extractedData.map(f => `${f.field}: ${f.value}`),
+      enrichedData.estructuraSocietaria ? `Estructura societaria: ${JSON.stringify(enrichedData.estructuraSocietaria)}` : '',
+      enrichedData.informacionTributaria?.actividadesEconomicas?.length ? `Actividades económicas: ${enrichedData.informacionTributaria.actividadesEconomicas.join('; ')}` : '',
+      enrichedData.verificacionRepresentante ? `Representante (documento): ${JSON.stringify(enrichedData.verificacionRepresentante)}` : '',
+    ].filter(Boolean).join('\n');
+    // Datos oficiales de EmpresaDocs.
+    const datosAdmin = JSON.stringify({
+      razonSocial: company.companyName,
+      rut: company.identificationNumber,
+      representantesLegales: meta?.legalRepresentatives ?? [],
+      accionistasBeneficiarios: meta?.beneficialOwners ?? [],
+      directorio: meta?.boardMembers ?? [],
+    });
+    try { adminComparison = await analyzeAdminComparison(extraido, datosAdmin); }
+    catch { /* no crítico — la ficha se genera igual */ }
+  }
+
   // ── Enriquecimiento Regcheq (AML + SII) — empresas chilenas ───────────────────
   onPhase('Consultando Regcheq (AML + SII)...');
   let regcheqEnrichment: RegcheqEnrichment | undefined;
@@ -145,7 +178,8 @@ export async function processOneCompany(
     },
     enrichedData,
     regcheqEnrichment,
+    adminComparison,
   );
 
-  return { extractedData, executiveSummary, pdfBlob, errorCount, rawText: combinedText, regcheqEnrichment };
+  return { extractedData, executiveSummary, pdfBlob, errorCount, rawText: combinedText, regcheqEnrichment, adminComparison };
 }

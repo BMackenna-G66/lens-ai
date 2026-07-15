@@ -1,7 +1,7 @@
 import { GoogleGenAI, GenerateContentResponse, Type } from "@google/genai";
-import { API_KEY_PLACEHOLDER, PREDEFINED_FIELDS, GEMINI_COMPARISON_PROMPT_TEMPLATE, GEMINI_CHAT_SYSTEM_INSTRUCTION, GEMINI_COUNTRY_DETECTION_PROMPT_TEMPLATE, GEMINI_RISK_ANALYSIS_PROMPT_TEMPLATE, GEMINI_INTEGRITY_ANALYSIS_PROMPT_TEMPLATE, GEMINI_FINANCIAL_PROMPT_TEMPLATE, GEMINI_BANK_STATEMENT_PROMPT_TEMPLATE, GEMINI_CROSS_ANALYSIS_PROMPT_TEMPLATE, GEMINI_CRYPTO_FORENSIC_PROMPT, GEMINI_COMPLIANCE_AUDIT_PROMPT, GEMINI_TAX_FOLDER_PROMPT_TEMPLATE, GEMINI_CRYPTO_PATTERN_ALERT_PROMPT, GEMINI_EXECUTIVE_SUMMARY_PROMPT, GEMINI_COMPLIANCE_VS_MANUAL_PROMPT, GEMINI_BATCH_ENRICHMENT_PROMPT } from "../constants";
+import { API_KEY_PLACEHOLDER, PREDEFINED_FIELDS, GEMINI_COMPARISON_PROMPT_TEMPLATE, GEMINI_CHAT_SYSTEM_INSTRUCTION, GEMINI_COUNTRY_DETECTION_PROMPT_TEMPLATE, GEMINI_RISK_ANALYSIS_PROMPT_TEMPLATE, GEMINI_INTEGRITY_ANALYSIS_PROMPT_TEMPLATE, GEMINI_FINANCIAL_PROMPT_TEMPLATE, GEMINI_BANK_STATEMENT_PROMPT_TEMPLATE, GEMINI_CROSS_ANALYSIS_PROMPT_TEMPLATE, GEMINI_CRYPTO_FORENSIC_PROMPT, GEMINI_COMPLIANCE_AUDIT_PROMPT, GEMINI_TAX_FOLDER_PROMPT_TEMPLATE, GEMINI_CRYPTO_PATTERN_ALERT_PROMPT, GEMINI_EXECUTIVE_SUMMARY_PROMPT, GEMINI_COMPLIANCE_VS_MANUAL_PROMPT, GEMINI_BATCH_ENRICHMENT_PROMPT, GEMINI_ADMIN_COMPARISON_PROMPT } from "../constants";
 import { ExtractedField, ComparisonResult, RiskAnalysisResult, IntegrityAnalysisResult, FinancialAnalysisResult, BankStatementAnalysisResult, CombinedAnalysisResult, CryptoWalletProfile, CryptoRiskAssessment, ComplianceAnalysisResult, TaxFolderAnalysisResult, PatternAnalysisResult, ComplianceVsManualResult } from "../types";
-import { BatchEnrichedData } from "../types/batch";
+import { BatchEnrichedData, AdminComparisonResult } from "../types/batch";
 import { KEYWORDS_BY_COUNTRY } from "./countryKeywords";
 
 const getApiKey = (): string | undefined => process.env.API_KEY;
@@ -268,6 +268,34 @@ export const analyzeBatchEnrichment = async (documentText: string): Promise<Batc
       return JSON.parse(extractJsonFromResponse(response.text)) as BatchEnrichedData;
     } catch {
       return {};
+    }
+  });
+};
+
+export const analyzeAdminComparison = async (
+  extraidoDeDocumentos: string,
+  datosAdmin: string
+): Promise<AdminComparisonResult> => {
+  return executeWithRetry(async (ai) => {
+    const response = await ai.models.generateContent({
+      model: primaryAnalysisModel,
+      contents: GEMINI_ADMIN_COMPARISON_PROMPT(extraidoDeDocumentos, datosAdmin),
+      config: jsonConfig,
+    });
+    fireTokenEvent('Admin Comparison', primaryAnalysisModel, response.usageMetadata as UsageMeta);
+    try {
+      const parsed = JSON.parse(extractJsonFromResponse(response.text ?? '')) as Partial<AdminComparisonResult>;
+      return {
+        disponible: true,
+        razonSocialRutConsistente: parsed.razonSocialRutConsistente ?? null,
+        representanteConsistente: parsed.representanteConsistente ?? null,
+        actividadesConsistente: parsed.actividadesConsistente ?? null,
+        accionistasConsistente: parsed.accionistasConsistente ?? null,
+        inconsistencias: Array.isArray(parsed.inconsistencias) ? parsed.inconsistencias : [],
+        resumen: parsed.resumen,
+      };
+    } catch {
+      return { disponible: true, inconsistencias: [], resumen: 'No se pudo procesar la comparación.' };
     }
   });
 };

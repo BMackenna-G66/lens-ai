@@ -1671,7 +1671,7 @@ export interface BatchCompanyPdfMetadata {
 
 // ─── Batch enrichment PDF helpers ────────────────────────────────────────────
 
-import { BatchEnrichedData } from '../types/batch';
+import { BatchEnrichedData, AdminComparisonResult } from '../types/batch';
 
 const NA = 'No disponible';
 const isNA = (v?: string) => !v || v === NA || v === 'N/A' || v === 'No especificado';
@@ -1743,7 +1743,8 @@ export const generateBatchCompanyPdf = async (
   docs: BatchDocSummary[],
   metadata?: BatchCompanyPdfMetadata,
   enrichedData?: BatchEnrichedData,
-  enrichment?: RegcheqEnrichment
+  enrichment?: RegcheqEnrichment,
+  adminComparison?: AdminComparisonResult
 ): Promise<Blob> => {
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
   const pageWidth = doc.internal.pageSize.getWidth();
@@ -1901,6 +1902,22 @@ export const generateBatchCompanyPdf = async (
         consistRows.push(['Inconsistencias detectadas', cd.inconsistencias.join('\n')]);
       yPos = addEnrichedSection(doc, 'Validación Cruzada Documental', consistRows, yPos, margin, pageWidth, [185, 28, 28]);
     }
+  }
+
+  // 7. Comparativa contra Admin (EmpresaDocs) — datos extraídos vs registro oficial
+  if (adminComparison?.disponible) {
+    const ac = adminComparison;
+    const estado = (v: boolean | null | undefined) => v == null ? 'Sin datos suficientes' : v ? 'Sí' : 'No — Discrepancia detectada';
+    const adminRows: [string, string][] = [
+      ['Razón Social / RUT consistente', estado(ac.razonSocialRutConsistente)],
+      ['Representante Legal consistente', estado(ac.representanteConsistente)],
+      ['Actividades económicas consistentes', estado(ac.actividadesConsistente)],
+      ['Accionistas / beneficiarios consistentes', estado(ac.accionistasConsistente)],
+    ];
+    if (ac.inconsistencias.length > 0)
+      adminRows.push(['Inconsistencias detectadas', ac.inconsistencias.join('\n')]);
+    if (ac.resumen) adminRows.push(['Resumen', ac.resumen]);
+    yPos = addEnrichedSection(doc, 'Comparativa contra Admin (EmpresaDocs)', adminRows, yPos, margin, pageWidth, [180, 83, 9]);
   }
   // ─────────────────────────────────────────────────────────────────────────────
 

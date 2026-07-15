@@ -551,6 +551,43 @@ Devuelve ÚNICAMENTE este JSON:
 }
 `;
 
+// ─── COMPARATIVA CONTRA ADMIN (EmpresaDocs) ──────────────────────────────────
+// Compara lo extraído de los documentos vs los datos oficiales registrados en
+// EmpresaDocs (fuente de verdad administrativa).
+export const GEMINI_ADMIN_COMPARISON_PROMPT = (extraidoDeDocumentos: string, datosAdmin: string): string => `
+Eres un analista de compliance KYB. Debes comparar la información EXTRAÍDA DE LOS DOCUMENTOS de una empresa contra los DATOS OFICIALES registrados en el sistema administrativo (EmpresaDocs), que es la fuente de verdad.
+
+REGLAS CRÍTICAS:
+1. Compara solo lo que puedas determinar con la información disponible. Si un lado no tiene el dato, ese campo es null (no lo cuentes como discrepancia).
+2. NORMALIZA antes de comparar:
+   - RUT/RUN/DNI/NIT: elimina puntos, guiones y espacios; trata "k"/"K" como equivalente. "13.869.118-7" y "138691187" son el MISMO RUT. Una diferencia SOLO de formato NUNCA es inconsistencia.
+   - Nombres de personas y razones sociales: ignora mayúsculas/minúsculas, tildes, orden de nombres/apellidos y sufijos societarios (S.A., SpA, Ltda., etc.). "Sebastián Fontbona Urdangarín" y "SEBASTIAN FONTBONA" refieren a la misma persona → consistente.
+   - Actividades económicas: compara por código y/o descripción equivalente; el orden no importa.
+3. Para cada campo booleano: true si coincide, false si hay discrepancia real, null si no hay datos suficientes en alguno de los dos lados.
+4. En "inconsistencias" describe SOLO discrepancias reales (no de formato), en frases cortas y claras en español.
+5. Responde ÚNICAMENTE con el objeto JSON válido. Sin texto antes ni después.
+
+INFORMACIÓN EXTRAÍDA DE LOS DOCUMENTOS:
+---
+${extraidoDeDocumentos.slice(0, 12000)}
+---
+
+DATOS OFICIALES REGISTRADOS (EmpresaDocs):
+---
+${datosAdmin.slice(0, 12000)}
+---
+
+Devuelve ÚNICAMENTE este JSON:
+{
+  "razonSocialRutConsistente": true,
+  "representanteConsistente": true,
+  "actividadesConsistente": true,
+  "accionistasConsistente": true,
+  "inconsistencias": [],
+  "resumen": "una frase breve con la conclusión general de la comparación"
+}
+`;
+
 export const GEMINI_EXECUTIVE_SUMMARY_PROMPT = (extractedFields: string, fileName: string): string => `
 Eres un analista legal senior especializado en escrituras públicas latinoamericanas.
 Basándote en los siguientes campos extraídos del documento "${fileName}", genera un resumen ejecutivo profesional y conciso.

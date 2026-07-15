@@ -63,6 +63,19 @@ export interface BatchEnrichedData {
   };
 }
 
+// ─── Comparativa contra Admin (datos oficiales de EmpresaDocs) ──────────────────
+// Compara lo extraído de los documentos vs los datos registrados en EmpresaDocs
+// (representante legal, actividades, razón social/RUT, accionistas/beneficiarios).
+export interface AdminComparisonResult {
+  disponible: boolean;                          // había datos de admin para comparar
+  razonSocialRutConsistente?: boolean | null;
+  representanteConsistente?: boolean | null;
+  actividadesConsistente?: boolean | null;
+  accionistasConsistente?: boolean | null;
+  inconsistencias: string[];
+  resumen?: string;
+}
+
 export interface CompanyMetadata {
   complianceStatus?: string;
   kycStage1?: string;

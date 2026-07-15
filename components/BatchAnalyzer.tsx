@@ -4,7 +4,7 @@ import JSZip from 'jszip';
 import { ExtractedField, ChatMessage } from '../types';
 import { RegcheqEnrichment } from '../types/lens360';
 import { SEVERITY_META } from '../services/validationRules';
-import { BatchCompanyInput, BatchSourceType, BatchMode, CompanyMetadata } from '../types/batch';
+import { BatchCompanyInput, BatchSourceType, BatchMode, CompanyMetadata, AdminComparisonResult } from '../types/batch';
 import { fromLocalFolder } from '../services/batchInputNormalizer';
 import { processOneCompany } from '../services/batchProcessor';
 import { hasValidApiKeys, getChatResponse } from '../services/geminiService';
@@ -47,6 +47,7 @@ interface BatchCompanyState {
   chatMessages?: ChatMessage[];    // conversación por empresa
   isChatLoading?: boolean;
   regcheqEnrichment?: RegcheqEnrichment; // screening AML + SII
+  adminComparison?: AdminComparisonResult; // comparativa vs datos oficiales (EmpresaDocs)
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -273,6 +274,7 @@ export const BatchAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> = ({
           errorCount: result.errorCount,
           rawText: result.rawText,
           regcheqEnrichment: result.regcheqEnrichment,
+          adminComparison: result.adminComparison,
         });
 
       } catch (err) {
@@ -321,6 +323,9 @@ export const BatchAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> = ({
   };
 
   const exportExcel = () => {
+    // Estado de un campo de la comparativa contra Admin para el Excel.
+    const estadoAdmin = (v: boolean | null | undefined, disponible?: boolean): string =>
+      !disponible ? '' : v == null ? 'Sin datos' : v ? 'Consistente' : 'Discrepancia';
     const summaryRows = companyStates.map(c => {
       const fm: Record<string, string> = {};
       (c.extractedData ?? []).forEach(f => { fm[f.field] = f.value; });
@@ -350,6 +355,11 @@ export const BatchAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> = ({
         'SII situaciones irregulares': c.regcheqEnrichment?.tributaria?.situacionesIrregulares.join('; ') ?? '',
         'Alertas severidad máx.':  (() => { const a = c.regcheqEnrichment?.alerts ?? []; return a.length ? SEVERITY_META[a[0].severity].label : ''; })(),
         'Alertas validación':      (c.regcheqEnrichment?.alerts ?? []).map(a => `[${SEVERITY_META[a.severity].label}] ${a.title}`).join(' · '),
+        'Admin: razón social/RUT': estadoAdmin(c.adminComparison?.razonSocialRutConsistente, c.adminComparison?.disponible),
+        'Admin: representante':    estadoAdmin(c.adminComparison?.representanteConsistente, c.adminComparison?.disponible),
+        'Admin: actividades':      estadoAdmin(c.adminComparison?.actividadesConsistente, c.adminComparison?.disponible),
+        'Admin: accionistas':      estadoAdmin(c.adminComparison?.accionistasConsistente, c.adminComparison?.disponible),
+        'Admin: inconsistencias':  (c.adminComparison?.inconsistencias ?? []).join(' · '),
         'Error detalle':           c.error ?? '',
       };
     });
@@ -778,6 +788,37 @@ const CompanyQueue: React.FC<{
                         {enr.tributaria.actividades.length ? ` · ${enr.tributaria.actividades.length} actividad(es)` : ''}
                         {enr.tributaria.situacionesIrregulares.length ? ` · ⚠ ${enr.tributaria.situacionesIrregulares.length} situación(es) irregular(es)` : ''}
                       </p>
+                    )}
+                  </div>
+                );
+              })()}
+
+              {c.adminComparison?.disponible && (() => {
+                const ac = c.adminComparison!;
+                const rows: [string, boolean | null | undefined][] = [
+                  ['Razón social / RUT', ac.razonSocialRutConsistente],
+                  ['Representante legal', ac.representanteConsistente],
+                  ['Actividades económicas', ac.actividadesConsistente],
+                  ['Accionistas / beneficiarios', ac.accionistasConsistente],
+                ];
+                const icon = (v: boolean | null | undefined) => v == null ? '—' : v ? '✓' : '✗';
+                const color = (v: boolean | null | undefined) => v == null ? 'text-slate-400' : v ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400';
+                return (
+                  <div className="mt-2 pt-2 border-t border-slate-200 dark:border-slate-700">
+                    <p className="text-[10px] font-semibold text-amber-600 dark:text-amber-400 uppercase tracking-wide mb-1">
+                      Comparativa contra Admin (EmpresaDocs)
+                    </p>
+                    <div className="flex flex-wrap gap-x-3 gap-y-0.5">
+                      {rows.map(([label, v]) => (
+                        <span key={label} className={`text-[11px] ${color(v)}`}>{icon(v)} {label}</span>
+                      ))}
+                    </div>
+                    {ac.inconsistencias.length > 0 && (
+                      <ul className="mt-1 space-y-0.5">
+                        {ac.inconsistencias.map((inc, i) => (
+                          <li key={i} className="text-[11px] text-red-600 dark:text-red-400">⚠ {inc}</li>
+                        ))}
+                      </ul>
                     )}
                   </div>
                 );
