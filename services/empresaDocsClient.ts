@@ -210,6 +210,17 @@ export async function getEmpresaDocsCompany(companyId: string): Promise<EmpresaD
              []))
       : [];
 
+  // Registro crudo completo (menos 'documents', que ya se parseó aparte y pesa
+  // mucho). Conserva industria/actividades y demás campos oficiales para la
+  // comparativa contra Admin, sin depender de nombres de campo específicos.
+  const adminRaw: Record<string, unknown> = {};
+  if (company) {
+    for (const [k, v] of Object.entries(company)) {
+      if (k === 'documents') continue;
+      adminRaw[k] = v;
+    }
+  }
+
   return {
     documents,
     ficha,
@@ -217,6 +228,7 @@ export async function getEmpresaDocsCompany(companyId: string): Promise<EmpresaD
     benFinales,
     personas: users,
     directorio,
+    adminRaw,
   };
 }
 

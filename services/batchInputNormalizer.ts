@@ -99,6 +99,7 @@ export async function fromEmpresaDocs(
       beneficialOwners: detail.benFinales,
       people: detail.personas,
       boardMembers: detail.directorio,
+      adminRaw: detail.adminRaw,
     },
   };
 }

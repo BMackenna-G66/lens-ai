@@ -124,6 +124,7 @@ export async function processOneCompany(
     (meta.legalRepresentatives?.length ?? 0) > 0 ||
     (meta.beneficialOwners?.length ?? 0) > 0 ||
     (meta.boardMembers?.length ?? 0) > 0 ||
+    (meta.adminRaw && Object.keys(meta.adminRaw).length > 0) ||
     !!company.identificationNumber
   );
   if (hayDatosAdmin) {
@@ -136,13 +137,15 @@ export async function processOneCompany(
       enrichedData.informacionTributaria?.actividadesEconomicas?.length ? `Actividades económicas: ${enrichedData.informacionTributaria.actividadesEconomicas.join('; ')}` : '',
       enrichedData.verificacionRepresentante ? `Representante (documento): ${JSON.stringify(enrichedData.verificacionRepresentante)}` : '',
     ].filter(Boolean).join('\n');
-    // Datos oficiales de EmpresaDocs.
+    // Datos oficiales de EmpresaDocs. Incluye el registro crudo completo, que
+    // trae industria/actividades y demás campos oficiales para la comparación.
     const datosAdmin = JSON.stringify({
       razonSocial: company.companyName,
       rut: company.identificationNumber,
       representantesLegales: meta?.legalRepresentatives ?? [],
       accionistasBeneficiarios: meta?.beneficialOwners ?? [],
       directorio: meta?.boardMembers ?? [],
+      registroOficial: meta?.adminRaw ?? {},
     });
     try { adminComparison = await analyzeAdminComparison(extraido, datosAdmin); }
     catch { /* no crítico — la ficha se genera igual */ }

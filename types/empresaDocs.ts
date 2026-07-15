@@ -26,4 +26,5 @@ export interface EmpresaDocsDetail {
   benFinales?: unknown[];
   personas?: unknown[];
   directorio?: unknown[];
+  adminRaw?: Record<string, unknown>;   // registro oficial completo (sin 'documents')
 }
