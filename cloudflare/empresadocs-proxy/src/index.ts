@@ -8,7 +8,18 @@
  *    Reenvía la petición a https://inspektor.datalaft.com:2121/api/<path>
  *    desde los servidores de Cloudflare (evita CORS y problemas de ruta de red
  *    del navegador). Reenvía body + Authorization tal cual.
+ *
+ * 3) Regcheq situación tributaria (SII):  POST /regcheq/sii  body {fichaId, rut}
+ *    Hace login en la API interna de Regcheq (api.regcheq.com) con credenciales
+ *    guardadas como secret, dispara la consulta de situación tributaria y
+ *    devuelve el resultado. La API externa (external-api) no expone este trigger.
+ *    Secrets requeridos: REGCHEQ_EMAIL, REGCHEQ_PASSWORD.
  */
+
+interface Env {
+  REGCHEQ_EMAIL?: string;
+  REGCHEQ_PASSWORD?: string;
+}
 
 const ALLOWED_ORIGINS = [
   'https://bmackenna-g66.github.io', // GitHub Pages (producción)
@@ -18,6 +29,40 @@ const ALLOWED_ORIGINS = [
 
 const ALLOWED_HOST_SUFFIXES = ['.amazonaws.com']; // anti-SSRF para /relay
 const INSPEKTOR_BASE = 'https://inspektor.datalaft.com:2121/api';
+const REGCHEQ_BASE = 'https://api.regcheq.com';
+
+// ── Regcheq: login + cache de token ────────────────────────────────────────────
+let regcheqToken: { token: string; companyId: string; exp: number } | null = null;
+
+function decodeJwt(token: string): Record<string, unknown> {
+  const part = token.split('.')[1] ?? '';
+  const b64 = part.replace(/-/g, '+').replace(/_/g, '/') + '=='.slice((part.length + 3) % 4);
+  try { return JSON.parse(atob(b64)); } catch { return {}; }
+}
+
+async function regcheqLogin(env: Env): Promise<{ token: string; companyId: string }> {
+  const now = Math.floor(Date.now() / 1000);
+  // Reutiliza el token cacheado si le quedan >60s de vida.
+  if (regcheqToken && regcheqToken.exp - now > 60) {
+    return { token: regcheqToken.token, companyId: regcheqToken.companyId };
+  }
+  if (!env.REGCHEQ_EMAIL || !env.REGCHEQ_PASSWORD) {
+    throw new Error('Faltan secrets REGCHEQ_EMAIL / REGCHEQ_PASSWORD en el Worker');
+  }
+  const res = await fetchTimeout(`${REGCHEQ_BASE}/users/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: env.REGCHEQ_EMAIL, password: env.REGCHEQ_PASSWORD }),
+  }, 20000);
+  if (!res.ok) throw new Error(`Login Regcheq falló: HTTP ${res.status}`);
+  const data = (await res.json()) as { token?: string };
+  if (!data.token) throw new Error('Login Regcheq no devolvió token');
+  const payload = decodeJwt(data.token);
+  const companyId = String(payload['companyId'] ?? '');
+  const exp = Number(payload['exp'] ?? now + 3600);
+  regcheqToken = { token: data.token, companyId, exp };
+  return { token: data.token, companyId };
+}
 
 function corsHeaders(origin: string): Record<string, string> {
   const allow = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
@@ -43,13 +88,44 @@ async function fetchTimeout(url: string, init: RequestInit, ms: number): Promise
 }
 
 export default {
-  async fetch(request: Request): Promise<Response> {
+  async fetch(request: Request, env: Env): Promise<Response> {
     const origin = request.headers.get('Origin') || '';
     const cors = corsHeaders(origin);
 
     if (request.method === 'OPTIONS') return new Response(null, { headers: cors });
 
     const url = new URL(request.url);
+
+    // ── Regcheq situación tributaria: POST /regcheq/sii  body {fichaId, rut} ─────
+    if (url.pathname === '/regcheq/sii') {
+      if (request.method !== 'POST') return jsonError('Método no permitido', 405, cors);
+      let body: { fichaId?: string; rut?: string };
+      try { body = await request.json(); } catch { return jsonError('Body JSON inválido', 400, cors); }
+      const fichaId = (body.fichaId || '').trim();
+      const rut = (body.rut || '').replace(/[.\s-]/g, '').toUpperCase();
+      if (!fichaId || !rut) return jsonError('Faltan fichaId o rut', 400, cors);
+
+      let auth: { token: string; companyId: string };
+      try { auth = await regcheqLogin(env); }
+      catch (e) { return jsonError(e instanceof Error ? e.message : 'Error de login Regcheq', 502, cors); }
+
+      const target = `${REGCHEQ_BASE}/fichas-clientes/${encodeURIComponent(fichaId)}/situacion-tributaria`
+        + `?companyId=${encodeURIComponent(auth.companyId)}&rut=${encodeURIComponent(rut)}`;
+      let upstream: Response;
+      try {
+        upstream = await fetchTimeout(target, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${auth.token}` },
+        }, 30000);
+      } catch (e) {
+        return jsonError(`No se pudo disparar situación tributaria: ${e instanceof Error ? e.message : String(e)}`, 502, cors);
+      }
+      const bodyText = await upstream.text();
+      const headers = new Headers(cors);
+      headers.set('Content-Type', 'application/json');
+      headers.set('Cache-Control', 'no-store');
+      return new Response(bodyText, { status: upstream.status, headers });
+    }
 
     // ── Relay Inspektor: /inspektor/<path> → INSPEKTOR_BASE/<path> ──────────────
     if (url.pathname.startsWith('/inspektor/')) {
