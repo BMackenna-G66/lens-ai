@@ -217,15 +217,16 @@ export const DocumentAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> =
         trackDocumentProcessed('analyzer', country, false);
 
         // Enriquecimiento Regcheq (screening AML + SII) — empresas chilenas.
-        // Disparo robusto: basta con tener un RUT (>=7 dígitos) + Razón Social (= empresa).
-        // No dependemos del formato exacto ni de la detección de país (que puede venir
-        // como "CL Chile", con bandera, etc.); el país solo suma como señal.
+        // Disparo robusto: basta con detectar un RUT chileno válido. La razón social
+        // NO es requisito (para el SII alcanza el RUT); si existe, se usa como nombre
+        // al crear la ficha. No dependemos de la detección de país.
         const val = (f: string) => extractedData.find(x => x.field.toLowerCase().includes(f))?.value?.trim() ?? '';
         const rutRaw = val('rut');
         const razon = val('razón social') || val('razon social');
-        const rut = rutRaw.replace(/[.\s]/g, '').replace(/-/g, '');
-        const esNoEspecificado = (v: string) => !v || /no especificado|n\/a|no aplica/i.test(v);
-        if (rut.length >= 7 && !esNoEspecificado(rutRaw) && !esNoEspecificado(razon) && hasRegcheqKey()) {
+        const rut = rutRaw.replace(/[.\s-]/g, '').toUpperCase();
+        // RUT chileno válido: 7-8 dígitos + dígito verificador (0-9 o K).
+        const esRutValido = /^[0-9]{7,8}[0-9K]$/.test(rut);
+        if (esRutValido && hasRegcheqKey()) {
           updateDoc(FileProcessingStatus.COMPLETED, { regcheqEnrichment: { loading: true, consultado: true, encontrado: false, amlHits: [] } });
           try {
             const enr = await fetchRegcheqEnrichment(rut, razon);

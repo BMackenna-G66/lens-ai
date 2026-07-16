@@ -51,13 +51,18 @@ export async function fetchRegcheqEnrichment(rut: string, nombre = ''): Promise<
     } catch { /* seguimos al paso 2 */ }
 
     // 2) Si no existe o le falta el SII, crear/refrescar y reintentar hasta poblarlo.
-    // (El SII se busca de forma asíncrona en Regcheq y puede tardar unos segundos.)
+    // (El SII se busca de forma asíncrona en Regcheq y puede tardar bastantes segundos
+    //  en una ficha recién creada; por eso la ventana de reintentos es amplia.)
     if (!tieneSii(perfil)) {
       await createRecord(rutN, nombre);
-      for (const wait of [1500, 2500, 3500, 4500]) {
+      let recreado = false;
+      // ~30s de paciencia repartidos en reintentos progresivos.
+      for (const wait of [1500, 2500, 3500, 4500, 5000, 6000, 6000]) {
         await sleep(wait);
         let resp: Response;
         try { resp = await fetch(GET); } catch { continue; }
+        // Si el GET sigue en 404 a mitad de camino, reintenta crear la ficha una vez.
+        if (resp.status === 404 && !recreado) { recreado = true; await createRecord(rutN, nombre); continue; }
         if (!resp.ok) continue;
         perfil = await resp.json();
         if (tieneSii(perfil)) break; // SII ya poblado → listo
