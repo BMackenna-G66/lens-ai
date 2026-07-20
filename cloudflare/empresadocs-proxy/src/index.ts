@@ -82,12 +82,13 @@ export default {
       const exp = Number(payload['exp'] ?? 0);
       const now = Math.floor(Date.now() / 1000);
       if (exp && exp < now) return jsonError('REGCHEQ_SESSION_TOKEN expirado — refrescarlo', 401, cors);
-      const companyId = String(payload['companyId'] ?? '');
 
-      let body: { fichaId?: string; rut?: string };
+      let body: { fichaId?: string; rut?: string; companyId?: string };
       try { body = await request.json(); } catch { return jsonError('Body JSON inválido', 400, cors); }
       const fichaId = (body.fichaId || '').trim();
       const rut = (body.rut || '').replace(/[.\s-]/g, '').toUpperCase();
+      // companyId: preferir el que manda Lens (de la ficha); si no, el del JWT del token.
+      const companyId = (body.companyId || '').trim() || String(payload['companyId'] ?? '');
       if (!fichaId || !rut || !companyId) return jsonError('Faltan fichaId, rut o companyId', 400, cors);
 
       const target = `${REGCHEQ_INTERNAL_BASE}/fichas-clientes/${encodeURIComponent(fichaId)}/situacion-tributaria`
@@ -96,7 +97,10 @@ export default {
       try {
         upstream = await fetchTimeout(target, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+          // La API interna autentica con el header 'regcheq-auth' (token de sesión,
+          // ~24h), con el valor entre comillas. NO usa Authorization Bearer aquí.
+          headers: { 'Content-Type': 'application/json', 'regcheq-auth': `"${token}"` },
+          body: '{}',
         }, 30000);
       } catch (e) {
         return jsonError(`No se pudo disparar situación tributaria: ${e instanceof Error ? e.message : String(e)}`, 502, cors);

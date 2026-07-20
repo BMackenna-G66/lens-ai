@@ -13,14 +13,15 @@ export const siiProxyDisponible = (): boolean => !!PROXY;
 
 export async function triggerSiiViaProxy(
   fichaId: string,
-  rut: string
+  rut: string,
+  companyId = ''
 ): Promise<Record<string, unknown> | null> {
   if (!PROXY || !fichaId || !rut) return null;
   try {
     const res = await fetch(`${PROXY}/regcheq/sii`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fichaId, rut }),
+      body: JSON.stringify({ fichaId, rut, companyId }),
     });
     if (!res.ok) return null; // token vencido / error → el llamador cae al fallback
     const data = (await res.json()) as { response?: Record<string, unknown> } | Record<string, unknown>;

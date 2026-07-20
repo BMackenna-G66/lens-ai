@@ -65,8 +65,9 @@ export async function fetchRegcheqEnrichment(rut: string, nombre = ''): Promise<
 
       // 2b) Disparar el SII vía Worker (token de sesión) usando el _id como fichaId.
       const fichaId = perfil ? String((perfil as Record<string, unknown>)['_id'] ?? (perfil as Record<string, unknown>)['id'] ?? '') : '';
+      const companyId = perfil ? String((perfil as Record<string, unknown>)['companyId'] ?? '') : '';
       if (siiProxyDisponible() && fichaId) {
-        const sii = await triggerSiiViaProxy(fichaId, rutN);
+        const sii = await triggerSiiViaProxy(fichaId, rutN, companyId);
         if (sii && perfil) perfil['situacionTributaria'] = sii;
       }
 
