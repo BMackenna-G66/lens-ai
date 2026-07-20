@@ -170,7 +170,7 @@ async function fetchRegcheq(rut: string, nombre: string, personType: Lens360Pers
   if (!tieneSii && siiProxyDisponible()) {
     const fichaId = String(perfil._id ?? perfil.id ?? '');
     if (fichaId) {
-      const sii = await triggerSiiViaProxy(fichaId, rutN);
+      const sii = await triggerSiiViaProxy(fichaId, rutN, String(perfil.companyId ?? ''));
       if (sii) perfil.situacionTributaria = sii;
       else { // fallback: reconsultar tras el disparo
         await sleep(2500);
