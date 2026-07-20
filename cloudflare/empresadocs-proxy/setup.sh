@@ -14,13 +14,13 @@ GH_REPO="BMackenna-G66/lens-ai"
 
 cd "$SCRIPT_DIR"
 
-echo "▶ 1/5  Instalando wrangler..."
+echo "▶ 1/6  Instalando wrangler..."
 npm install
 
-echo "▶ 2/5  Login en Cloudflare (se abrirá el navegador; da clic en Allow)..."
+echo "▶ 2/6  Login en Cloudflare (se abrirá el navegador; da clic en Allow)..."
 npx wrangler login
 
-echo "▶ 3/5  Desplegando el Worker..."
+echo "▶ 3/6  Desplegando el Worker..."
 # Nota: no usar 'set -e' aquí — si el deploy falla queremos ver la salida.
 set +e
 DEPLOY_OUT="$(npx wrangler deploy 2>&1)"
@@ -43,13 +43,13 @@ if [ -z "$URL" ]; then
 fi
 echo "✓ Worker desplegado: $URL"
 
-echo "▶ 4/5  Escribiendo EMPRESADOCS_PROXY_URL en .env.local..."
+echo "▶ 4/6  Escribiendo EMPRESADOCS_PROXY_URL en .env.local..."
 touch "$REPO_ROOT/.env.local"
 sed -i '' '/^EMPRESADOCS_PROXY_URL=/d' "$REPO_ROOT/.env.local" 2>/dev/null || true
 printf 'EMPRESADOCS_PROXY_URL=%s\n' "$URL" >> "$REPO_ROOT/.env.local"
 echo "  ✓ $REPO_ROOT/.env.local"
 
-echo "▶ 5/5  Guardando el secret en GitHub y relanzando el deploy de producción..."
+echo "▶ 5/6  Guardando el secret en GitHub y relanzando el deploy de producción..."
 if command -v gh >/dev/null 2>&1; then
   gh secret set EMPRESADOCS_PROXY_URL --repo "$GH_REPO" --body "$URL"
   gh workflow run "Deploy to GitHub Pages" --repo "$GH_REPO" 2>/dev/null \
@@ -59,6 +59,22 @@ else
   echo "  ⚠ 'gh' no está instalado — configura el secret EMPRESADOCS_PROXY_URL a mano."
 fi
 
+echo "▶ 6/6  Token de sesión de Regcheq (para situación tributaria / SII)..."
+echo "  El Worker usa un token de sesión de la plataforma para disparar el SII"
+echo "  (equivale al botón 'situación tributaria'). El token dura ~24h: hay que"
+echo "  refrescarlo periódicamente volviendo a correr este paso."
+echo "  Cómo obtenerlo: entrá a app.regcheq.com, abrí DevTools → Network, buscá la"
+echo "  request 'users/login' y copiá el valor de 'token' de la respuesta (el JWT)."
+read -r -p "  ¿Configurar el token de sesión ahora? [s/N] " REPLY_RQ || REPLY_RQ="n"
+if [[ "$REPLY_RQ" =~ ^[sSyY]$ ]]; then
+  npx wrangler secret put REGCHEQ_SESSION_TOKEN
+  echo "  ✓ Token guardado como secret del Worker."
+else
+  echo "  ⏭  Omitido. Podés hacerlo (o refrescarlo) luego con:"
+  echo "     npx wrangler secret put REGCHEQ_SESSION_TOKEN"
+fi
+
 echo ""
 echo "✅ LISTO. El proxy quedó activo en: $URL"
 echo "   El Analizador Batch ya funcionará en cualquier PC, sin proxy local."
+echo "   La situación tributaria (SII) se dispara sola si cargaste el token de sesión."
