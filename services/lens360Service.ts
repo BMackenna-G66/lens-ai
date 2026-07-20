@@ -11,6 +11,7 @@ import {
   Lens360Tributaria,
 } from '../types/lens360';
 import { evaluateValidationRules } from './validationRules';
+import { triggerSiiViaProxy, siiProxyDisponible } from './regcheqSii';
 
 // ─── Config (mismas fuentes que RegcheqTool / InspektorColombia) ────────────────
 const REGCHEQ_BASE = 'https://external-api.regcheq.com';
@@ -162,6 +163,21 @@ async function fetchRegcheq(rut: string, nombre: string, personType: Lens360Pers
   }
   if (!resp.ok) throw new Error(`API ${resp.status}: ${resp.statusText}`);
   const perfil = await resp.json();
+
+  // Si la ficha no trae situación tributaria, dispararla vía el Worker (equivale al
+  // botón de la plataforma; la external-api no lo hace sola). Usa el _id como fichaId.
+  const tieneSii = Object.keys((perfil.situacionTributaria ?? {}) as Record<string, unknown>).length > 0;
+  if (!tieneSii && siiProxyDisponible()) {
+    const fichaId = String(perfil._id ?? perfil.id ?? '');
+    if (fichaId) {
+      const sii = await triggerSiiViaProxy(fichaId, rutN);
+      if (sii) perfil.situacionTributaria = sii;
+      else { // fallback: reconsultar tras el disparo
+        await sleep(2500);
+        try { const r = await fetch(GET); if (r.ok) { const p2 = await r.json(); if (Object.keys((p2.situacionTributaria ?? {})).length) perfil.situacionTributaria = p2.situacionTributaria; } } catch { /* ignore */ }
+      }
+    }
+  }
 
   const listasRaw = (perfil.listas ?? {}) as Record<string, Record<string, unknown>>;
   // Smart-merge: si dos claves comparten nombre visible, gana la que tiene coincidencia.

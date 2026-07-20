@@ -4,6 +4,7 @@
 
 import { Lens360ListHit, Lens360Tributaria, RegcheqEnrichment } from '../types/lens360';
 import { evaluateValidationRules } from './validationRules';
+import { triggerSiiViaProxy, siiProxyDisponible } from './regcheqSii';
 
 const REGCHEQ_BASE = 'https://external-api.regcheq.com';
 const REGCHEQ_KEY = ((import.meta as unknown) as { env: Record<string, string> }).env.VITE_REGCHEQ_API_KEY ?? '';
@@ -50,22 +51,35 @@ export async function fetchRegcheqEnrichment(rut: string, nombre = ''): Promise<
       if (r0.ok) perfil = await r0.json();
     } catch { /* seguimos al paso 2 */ }
 
-    // 2) Si no existe o le falta el SII, crear/refrescar y reintentar hasta poblarlo.
-    // (El SII se busca de forma asíncrona en Regcheq y puede tardar bastantes segundos
-    //  en una ficha recién creada; por eso la ventana de reintentos es amplia.)
+    // 2) Si le falta el SII: asegurar que la ficha exista, DISPARAR la situación
+    //    tributaria vía el Worker (equivale al botón de la plataforma) y leerla.
     if (!tieneSii(perfil)) {
-      await createRecord(rutN, nombre);
-      let recreado = false;
-      // ~30s de paciencia repartidos en reintentos progresivos.
-      for (const wait of [1500, 2500, 3500, 4500, 5000, 6000, 6000]) {
-        await sleep(wait);
-        let resp: Response;
-        try { resp = await fetch(GET); } catch { continue; }
-        // Si el GET sigue en 404 a mitad de camino, reintenta crear la ficha una vez.
-        if (resp.status === 404 && !recreado) { recreado = true; await createRecord(rutN, nombre); continue; }
-        if (!resp.ok) continue;
-        perfil = await resp.json();
-        if (tieneSii(perfil)) break; // SII ya poblado → listo
+      // 2a) Asegurar que la ficha exista (para tener su _id = fichaId).
+      if (!perfil) {
+        await createRecord(rutN, nombre);
+        for (const wait of [1500, 2500, 3500]) {
+          await sleep(wait);
+          try { const r = await fetch(GET); if (r.ok) { perfil = await r.json(); break; } } catch { /* reintenta */ }
+        }
+      }
+
+      // 2b) Disparar el SII vía Worker (token de sesión) usando el _id como fichaId.
+      const fichaId = perfil ? String((perfil as Record<string, unknown>)['_id'] ?? (perfil as Record<string, unknown>)['id'] ?? '') : '';
+      if (siiProxyDisponible() && fichaId) {
+        const sii = await triggerSiiViaProxy(fichaId, rutN);
+        if (sii && perfil) perfil['situacionTributaria'] = sii;
+      }
+
+      // 2c) Fallback: reconsultar el GET (tras el disparo, el SII queda en la ficha).
+      if (!tieneSii(perfil)) {
+        for (const wait of [2000, 3000, 4500, 6000]) {
+          await sleep(wait);
+          let resp: Response;
+          try { resp = await fetch(GET); } catch { continue; }
+          if (!resp.ok) continue;
+          perfil = await resp.json();
+          if (tieneSii(perfil)) break;
+        }
       }
     }
     if (!perfil) return { ...empty, error: 'Regcheq no devolvió la ficha.' };
