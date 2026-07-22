@@ -78,6 +78,8 @@ interface DecisionResult {
   precedentesCount: number;
   noPrecedentesCount: number;
   totalEquivalente: number;
+  causasConsideradas?: number;  // causas únicas por RUC usadas en el cálculo
+  causasTotales?: number;       // total de filas de causas recibidas
 }
 interface PerfilResult {
   dni: string;
@@ -217,13 +219,22 @@ function computeDecisionFromCrimes(additionalData: Record<string,unknown>[]): De
   if (!catalog.items.length || !catalog.decisionTable.length) return undefined;
 
   const catalogMap = new Map(catalog.items.map(i => [i.nombre.toLowerCase(), i]));
+  // Agrupar por RUC (misma lógica que el Criminal Profiler): una causa por RUC.
+  // Distintos delitos/filas con el mismo RUC = la misma causa → se cuenta una vez
+  // (se conserva la primera). Las filas sin RUC no se agrupan (cuentan individual).
+  const seen = new Set<string>();
   let scoreTotal = 0;
-  for (const crime of additionalData) {
+  let causasConsideradas = 0;
+  additionalData.forEach((crime, i) => {
+    const ruc = String(crime['RUC'] ?? crime['ruc'] ?? crime['RIT'] ?? crime['rit'] ?? '').trim();
+    const key = ruc || `__fila_${i}`;   // sin RUC → no se agrupa
+    if (seen.has(key)) return;           // mismo RUC ya contado → se omite
+    seen.add(key);
     const nombre = String(crime['crimen'] ?? crime['Crimen'] ?? crime['delito'] ?? '').toLowerCase().trim();
-    if (!nombre) continue;
+    if (!nombre) return;
     const match = catalogMap.get(nombre);
-    if (match) scoreTotal += match.valor;
-  }
+    if (match) { scoreTotal += match.valor; causasConsideradas++; }
+  });
 
   const sorted = [...catalog.decisionTable].sort((a, b) => b.totalEquivalente - a.totalEquivalente);
   const rule = sorted.find(r => scoreTotal >= r.totalEquivalente);
@@ -235,6 +246,8 @@ function computeDecisionFromCrimes(additionalData: Record<string,unknown>[]): De
     precedentesCount: rule.precedentesCount,
     noPrecedentesCount: rule.noPrecedentesCount,
     totalEquivalente: scoreTotal,
+    causasConsideradas,
+    causasTotales: additionalData.length,
   };
 }
 
@@ -975,6 +988,9 @@ function DecisionBox({ decision, dark }: { decision: DecisionResult; dark: boole
         <span>Precedentes: <strong className={dark ? 'text-slate-300' : 'text-slate-700'}>{decision.precedentesCount}</strong></span>
         <span>No-precedentes: <strong className={dark ? 'text-slate-300' : 'text-slate-700'}>{decision.noPrecedentesCount}</strong></span>
         <span>Equivalente total: <strong className={dark ? 'text-slate-300' : 'text-slate-700'}>{decision.totalEquivalente}</strong></span>
+        {decision.causasConsideradas != null && (
+          <span>Causas (por RUC): <strong className={dark ? 'text-slate-300' : 'text-slate-700'}>{decision.causasConsideradas}</strong>{decision.causasTotales != null && decision.causasTotales !== decision.causasConsideradas ? ` de ${decision.causasTotales}` : ''}</span>
+        )}
       </div>
     </div>
   );
@@ -1257,6 +1273,16 @@ function ResultCard({ result, dark }: { result: PerfilResult; dark: boolean }) {
           </div>
         )}
 
+        {result.decision && (
+          <div className="mt-4">
+            <div className="flex items-center gap-3 mb-3">
+              <span className={`text-[10px] font-bold uppercase tracking-widest ${muted}`}>Decisión (Motor local)</span>
+              <div className={`flex-1 h-px ${divider}`} />
+            </div>
+            <DecisionBox decision={result.decision} dark={dark} />
+          </div>
+        )}
+
         {Object.keys(result.ficha).length > 0 && (
           <>
             <div className="flex items-center gap-3 mt-5 mb-3">
@@ -1295,16 +1321,6 @@ function ResultCard({ result, dark }: { result: PerfilResult; dark: boolean }) {
             ))}
         </div>
       </div>
-
-      {result.decision && (
-        <div>
-          <div className="flex items-center gap-3 mb-3">
-            <span className={`text-[10px] font-bold uppercase tracking-widest ${muted}`}>Decisión (Motor local)</span>
-            <div className={`flex-1 h-px ${divider}`} />
-          </div>
-          <DecisionBox decision={result.decision} dark={dark} />
-        </div>
-      )}
     </div>
   );
 }
