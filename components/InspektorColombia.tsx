@@ -5,6 +5,7 @@ import {
   classify, retry, cacheGet, cachePut, cacheClear, buildMasivoWorkbook,
   type Resultado, type Classification,
 } from '../services/inspektorMasivoService';
+import { evaluateLegalPolicy, LP_META, type LegalPolicyOutcome } from '../services/legalPolicyGate';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 const INSPEKTOR_DIRECT = 'https://inspektor.datalaft.com:2121/api';
@@ -131,6 +132,14 @@ function getJEPMSItems(data: unknown): InspektorJEPMSItem[] {
   const d = Array.isArray(data) ? data : (data as { data?: unknown })?.data;
   if (Array.isArray(d)) return d.filter((i): i is InspektorJEPMSItem => typeof i === 'object' && i !== null);
   return [];
+}
+
+// Capa 0 — Legal Policy Gate desde una respuesta de Inspektor.
+function gateFromResult(res: InspektorResult | undefined, numeroDni: string): LegalPolicyOutcome | undefined {
+  if (!res) return undefined;
+  const listItems = [...(res.listas ?? []), ...(res.listas_propias ?? [])];
+  const jepmsIds = getJEPMSItems(res.ramaJudicialJEPMS).map(j => j.identificationNumberResult ?? '');
+  return evaluateLegalPolicy(listItems, jepmsIds, numeroDni);
 }
 
 // ─── API ──────────────────────────────────────────────────────────────────────
@@ -330,6 +339,7 @@ interface MasivoRow {
   status: 'pending' | 'processing' | 'done' | 'error' | 'skipped';
   result?: InspektorResult;
   classification?: Classification;
+  legalPolicy?: LegalPolicyOutcome;   // Capa 0 — Legal Policy Gate (informativo)
   resultado?: Resultado;    // SIN_HALLAZGOS / REVISAR / ALERTA / ERROR_*
   error?: string;
   validationError?: string; // si está → ERROR_VALIDACION (no se consulta)
@@ -345,6 +355,7 @@ export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, da
   const [loading, setLoading]     = useState(false);
   const [error, setError]         = useState('');
   const [result, setResult]       = useState<InspektorResult | null>(null);
+  const [indGate, setIndGate]     = useState<LegalPolicyOutcome | undefined>(undefined);
   const resultRef = useRef<HTMLDivElement>(null);
 
   // ── Masivo state ─────────────────────────────────────────────────────────────
@@ -384,10 +395,11 @@ export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, da
       setError('Nombre completo y número de documento son obligatorios.');
       return;
     }
-    setLoading(true); setError(''); setResult(null);
+    setLoading(true); setError(''); setResult(null); setIndGate(undefined);
     try {
       const r = await consultarInspektor(nombre.trim(), documento.trim(), tipoDoc);
       setResult(r);
+      setIndGate(gateFromResult(r, normalizeDni(documento.trim())));
       setTimeout(() => resultRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -588,8 +600,9 @@ export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, da
           }
 
           const cls = classify(r);
+          const legalPolicy = gateFromResult(r, row.documento);
           if (cls.resultado === 'ALERTA') alerts++; else if (cls.resultado === 'REVISAR') revisar++;
-          applyToGroup(key, { status: 'done', result: r, classification: cls, resultado: cls.resultado });
+          applyToGroup(key, { status: 'done', result: r, classification: cls, legalPolicy, resultado: cls.resultado });
           addLog(cls.resultado === 'ALERTA' ? 'err' : 'ok',
             `${cls.resultado === 'ALERTA' ? '⚠' : '✓'} ${label} — ${cls.resultado} · ${cls.totalCoincidencias} coincidencia(s)${cls.prioridadMaxima ? ` · P${cls.prioridadMaxima}` : ''}${r === undefined ? '' : ''}`);
         } catch (e) {
@@ -630,9 +643,13 @@ export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, da
       const resultado = r.resultado
         ?? (r.status === 'done' ? (cls?.resultado ?? 'SIN_HALLAZGOS')
           : r.status === 'error' ? 'ERROR_CONSULTA' : 'NO_CONSULTADO');
+      const lp = r.legalPolicy;
       return {
         ...idOf(r),
         resultado,
+        politica_legal: lp?.result ? LP_META[lp.result].short : '',
+        politica_legal_regla: lp?.ruleId ?? '',
+        politica_legal_detalle: lp ? `crítica:${lp.counts.REVIEW_CRITICAL} warning:${lp.counts.REVIEW_WARNING} release:${lp.counts.RELEASE} manual:${lp.counts.MANUAL_REVIEW}` : '',
         total_coincidencias: cls ? cls.totalCoincidencias : '',
         prioridad_maxima: cls?.prioridadMaxima ?? '',
         listas: cls ? cls.listas.join('; ') : '',
@@ -954,6 +971,13 @@ export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, da
                             {r.classification.prioridadMaxima ? ` · P${r.classification.prioridadMaxima}` : ''}
                           </span>
                         )}
+                        {r.status === 'done' && r.legalPolicy?.result && (
+                          <span className="text-xs font-bold px-2 py-0.5 rounded-full flex-shrink-0"
+                            title={`Política legal: ${r.legalPolicy.ruleId}`}
+                            style={{ color: LP_META[r.legalPolicy.result].hex, backgroundColor: `${LP_META[r.legalPolicy.result].hex}22` }}>
+                            {LP_META[r.legalPolicy.result].emoji} {LP_META[r.legalPolicy.result].short}
+                          </span>
+                        )}
                         {r.status === 'error' && (
                           <span className={`text-xs ${r.validationError ? (dark ? 'text-amber-400' : 'text-amber-600') : (dark ? 'text-red-400' : 'text-red-600')} truncate max-w-[240px]`}>
                             {r.resultado ?? 'ERROR'} · {r.validationError ?? r.error}
@@ -1091,6 +1115,30 @@ export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, da
                   dark ? 'bg-red-950/40 border-red-800/50 text-red-300' : 'bg-red-50 border-red-300 text-red-700'
                 }`}>
                   ⚠ <strong>{cant} coincidencia{cant !== 1 ? 's' : ''} detectada{cant !== 1 ? 's' : ''}</strong> — revisa el detalle de cada sección
+                </div>
+              )}
+
+              {/* Capa 0 — Legal Policy Gate (informativo) */}
+              {indGate?.result && (
+                <div className={`mt-4 border rounded-xl px-4 py-3 ${dark ? 'border-slate-700 bg-slate-900/40' : 'border-slate-200 bg-slate-50'}`}>
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className={`text-[9px] font-bold uppercase tracking-widest ${dark ? 'text-slate-500' : 'text-slate-400'}`}>Política legal (Capa 0)</span>
+                    <span className="text-xs font-black px-2 py-0.5 rounded-lg" style={{ color: LP_META[indGate.result].hex, backgroundColor: `${LP_META[indGate.result].hex}22` }}>
+                      {LP_META[indGate.result].emoji} {LP_META[indGate.result].label}
+                    </span>
+                    <span className={`text-[10px] font-mono ${dark ? 'text-slate-500' : 'text-slate-400'}`}>{indGate.ruleId}</span>
+                  </div>
+                  <div className="space-y-0.5">
+                    {indGate.hits.filter(h => h.result !== 'RELEASE').slice(0, 12).map((h, i) => (
+                      <div key={i} className="text-[11px] flex items-start gap-1.5" style={{ color: LP_META[h.result].hex }}>
+                        <span>{LP_META[h.result].emoji}</span>
+                        <span><span className="font-bold">{LP_META[h.result].short}</span><span className={dark ? 'text-slate-400' : 'text-slate-500'}> · {h.prioridad ? `P${h.prioridad} · ` : ''}{h.grupo || '—'}{h.nombre ? ` · ${h.nombre}` : ''}</span></span>
+                      </div>
+                    ))}
+                    <p className={`text-[10px] mt-1 ${dark ? 'text-slate-500' : 'text-slate-400'}`}>
+                      Crítica {indGate.counts.REVIEW_CRITICAL} · Warning {indGate.counts.REVIEW_WARNING} · Release {indGate.counts.RELEASE} · Manual {indGate.counts.MANUAL_REVIEW}. Informativo, no bloquea.
+                    </p>
+                  </div>
                 </div>
               )}
             </div>
