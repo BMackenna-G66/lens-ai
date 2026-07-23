@@ -12,6 +12,8 @@ import {
 } from '../types/lens360';
 import { evaluateValidationRules } from './validationRules';
 import { triggerSiiViaProxy, siiProxyDisponible } from './regcheqSii';
+import { evaluateLegalPolicy } from './legalPolicyGate';
+import { analyzeCriminalProfile, type RawResult as CriminalInput } from './colombiaCriminalModel';
 
 // ─── Config (mismas fuentes que RegcheqTool / InspektorColombia) ────────────────
 const REGCHEQ_BASE = 'https://external-api.regcheq.com';
@@ -265,14 +267,23 @@ async function fetchInspektor(nombre: string, identificacion: string, tipoDocume
     }),
   });
   if (!resp.ok) throw new Error(`Consulta Inspektor ${resp.status}`);
-  const data = (await resp.json()) as { cantCoincidencias?: number; listas?: Record<string, unknown>[]; listas_propias?: Record<string, unknown>[] };
+  const data = (await resp.json()) as Record<string, unknown> & { cantCoincidencias?: number; listas?: Record<string, unknown>[]; listas_propias?: Record<string, unknown>[]; ramaJudicialJEPMS?: unknown };
 
   const lists = [...(data.listas ?? []), ...(data.listas_propias ?? [])];
   const hits: Lens360InspektorHit[] = lists.map(item => ({
     grupo: String(item['nombreGrupoLista'] ?? item['grupoLista'] ?? item['grupo'] ?? item['categoria'] ?? item['tipoLista'] ?? '—'),
     detalle: String(item['nombreCompleto'] ?? item['name'] ?? item['nombre'] ?? ''),
   }));
-  return { coincidencias: data.cantCoincidencias ?? hits.length, hits };
+
+  // Perfil Criminal (Capas 1–6, shadow): corre el motor sobre la respuesta completa.
+  const dniN = identificacion.replace(/[.\s-]/g, '').toUpperCase();
+  const jepmsRaw = (data.ramaJudicialJEPMS as { data?: unknown[] } | unknown[] | undefined);
+  const jepmsArr = Array.isArray(jepmsRaw) ? jepmsRaw : Array.isArray((jepmsRaw as { data?: unknown[] })?.data) ? (jepmsRaw as { data: unknown[] }).data : [];
+  const jepmsIds = jepmsArr.map(j => String((j as Record<string, unknown>)?.['identificationNumberResult'] ?? ''));
+  const gate = evaluateLegalPolicy(lists, jepmsIds, dniN);
+  const criminal = analyzeCriminalProfile(data as unknown as CriminalInput, { nombre, documento: identificacion }, gate.result ?? undefined);
+
+  return { coincidencias: data.cantCoincidencias ?? hits.length, hits, criminal };
 }
 
 // ─── Consolidación del veredicto ────────────────────────────────────────────────
