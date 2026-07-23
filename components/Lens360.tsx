@@ -5,6 +5,7 @@ import { search360, hasRegcheqKey } from '../services/lens360Service';
 import { generateLens360Pdf, generateLens360Blob } from '../services/pdfGenerator';
 import { Lens360Result, Lens360Verdict, Lens360PersonType, Lens360RelatedPerson } from '../types/lens360';
 import { SEVERITY_META } from '../services/validationRules';
+import { CRIMINAL_RISK_META } from '../services/colombiaCriminalModel';
 import { PersonProfile } from '../types/criminalTypes';
 import { ProfileDetails } from './CriminalProfiler/ProfileDetails';
 
@@ -412,6 +413,36 @@ const ResultView: React.FC<{ result: Lens360Result }> = ({ result }) => {
               ))}
             </ul>
           )}
+
+          {/* Perfil Criminal (Capas 1–6, shadow) */}
+          {result.inspektor?.criminal && result.inspektor.criminal.records.length > 0 && (() => {
+            const cr = result.inspektor!.criminal!;
+            return (
+              <div className="mt-3 pt-3 border-t border-slate-100 dark:border-slate-800">
+                <div className="flex items-center gap-2 flex-wrap mb-1.5">
+                  <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Perfil Criminal (Capas 1–6 · shadow)</span>
+                  <span className="text-xs font-black px-2 py-0.5 rounded-lg" style={{ color: CRIMINAL_RISK_META[cr.criminal_risk].hex, backgroundColor: `${CRIMINAL_RISK_META[cr.criminal_risk].hex}22` }}>
+                    {CRIMINAL_RISK_META[cr.criminal_risk].emoji} Riesgo {CRIMINAL_RISK_META[cr.criminal_risk].label}
+                  </span>
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">{cr.recommendation}</span>
+                </div>
+                <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                  <div>Severidad máx.: <strong>{cr.provider_severity_max}</strong></div>
+                  <div>Grupo criminal: <strong>{cr.serious_criminal_group ? 'Sí' : 'No'}</strong></div>
+                  <div>Eventos distintos: <strong>{cr.distinct_event_count}</strong></div>
+                  <div>Identidad: <strong>{cr.identity_summary.CONFIRMED}C·{cr.identity_summary.PROBABLE}P·{cr.identity_summary.UNRESOLVED}U·{cr.identity_summary.EXCLUDED}X</strong></div>
+                </div>
+                {cr.risk_reason_codes.length > 0 && (
+                  <div className="flex flex-wrap gap-1 mt-1.5">
+                    {cr.risk_reason_codes.map((c, i) => (
+                      <span key={i} className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400">{c}</span>
+                    ))}
+                  </div>
+                )}
+                <p className="text-[10px] text-slate-400 mt-1.5">Shadow: complementa la política legal, no la reemplaza.</p>
+              </div>
+            );
+          })()}
         </Card>
       )}
 
@@ -556,6 +587,10 @@ const Lens360Masivo: React.FC = () => {
       'SII situaciones irregulares': r.tributaria?.situacionesIrregulares.join('; ') ?? '',
       'Alertas severidad máx.': (r.alerts?.length ? SEVERITY_META[r.alerts[0].severity].label : ''),
       'Alertas validación': (r.alerts ?? []).map(a => `[${SEVERITY_META[a.severity].label}] ${a.title}`).join(' · '),
+      'CO Riesgo criminal': r.inspektor?.criminal?.records.length ? r.inspektor.criminal.criminal_risk : '',
+      'CO Recomendación': r.inspektor?.criminal?.records.length ? r.inspektor.criminal.recommendation : '',
+      'CO Severidad máx.': r.inspektor?.criminal?.records.length ? r.inspektor.criminal.provider_severity_max : '',
+      'CO Grupo criminal': r.inspektor?.criminal?.records.length ? (r.inspektor.criminal.serious_criminal_group ? 'SÍ' : 'NO') : '',
       Motivos: r.verdictReasons.join(' | '),
     }));
     const wb = XLSX.utils.book_new();

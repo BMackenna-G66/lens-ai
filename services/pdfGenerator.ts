@@ -2201,6 +2201,23 @@ async function buildLens360Doc(r: Lens360Result): Promise<jsPDF> {
         bodyStyles: { fontSize: 8, textColor: DARK_TEXT }, margin: { left: margin, right: margin },
         didDrawPage: d => addPageFooter(doc, d.pageNumber, 0, date),
       });
+      y = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 6;
+
+      // Perfil Criminal (Capas 1–6 · shadow)
+      const cr = r.inspektor.criminal;
+      if (cr && cr.records.length) {
+        if (y > 250) { doc.addPage(); y = 20; }
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(...NAVY);
+        doc.text('Perfil Criminal (Capas 1–6 · shadow)', margin, y); y += 5;
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...DARK_TEXT);
+        const linea = `Riesgo criminal: ${cr.criminal_risk} · Recomendación: ${cr.recommendation} · Severidad máx.: ${cr.provider_severity_max} · Grupo criminal: ${cr.serious_criminal_group ? 'Sí' : 'No'} · Eventos distintos: ${cr.distinct_event_count} · Identidad: ${cr.identity_summary.CONFIRMED}C/${cr.identity_summary.PROBABLE}P/${cr.identity_summary.UNRESOLVED}U/${cr.identity_summary.EXCLUDED}X`;
+        const lns = doc.splitTextToSize(linea, pageWidth - margin * 2);
+        doc.text(lns, margin, y); y += lns.length * 4.3;
+        if (cr.risk_reason_codes.length) {
+          const rc = doc.splitTextToSize(`Reason codes: ${cr.risk_reason_codes.join(', ')}`, pageWidth - margin * 2);
+          doc.setTextColor(120, 120, 120); doc.text(rc, margin, y); y += rc.length * 4.3; doc.setTextColor(...DARK_TEXT);
+        }
+      }
     }
   }
 

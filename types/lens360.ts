@@ -38,6 +38,8 @@ export interface Lens360InspektorHit {
 export interface Lens360Inspektor {
   coincidencias: number;
   hits: Lens360InspektorHit[];
+  // Perfil Criminal (Capas 1–6, shadow) computado sobre la respuesta completa.
+  criminal?: import('../services/colombiaCriminalModel').CriminalProfileOutcome;
   error?: string;        // si la consulta falló (p.ej. CORS)
 }
 
