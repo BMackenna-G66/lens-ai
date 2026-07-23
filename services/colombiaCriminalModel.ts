@@ -17,7 +17,10 @@ export const CRIMINAL_MODEL_VERSION = 'criminal-decision-co-v1';
 export const GRUPO_OBJETIVO_CRIMINAL =
   'LISTAS ASOCIADAS A LA/FT/FPADM, CORRUPCIÓN U OTROS DELITOS (PENAL) Y EXTINCIÓN DE DOMINIO';
 
-export const CRIMINAL_CONFIG = {
+// Configuración por defecto ("matriz"). Es editable/persistible por el analista
+// (ver getCriminalConfig/saveCriminalConfig); los cambios aplican a los PRÓXIMOS
+// masivos/consultas (no recalcula Excel ya exportados).
+export const CRIMINAL_CONFIG_DEFAULT = {
   // Capa 1 — Identidad (§5, valores propuestos, calibrar B05)
   identity: {
     docExact: 70, nameHigh: 30, nameMed: 20, nameLow: 10, docDifferent: -80,
@@ -25,19 +28,56 @@ export const CRIMINAL_CONFIG = {
     confHigh: 80, confMedium: 40, // score→confianza
     probableNameMin: 90,          // PROBABLE requiere nombre ≥ esto + doc MISSING + corroboración
   },
-  // Capa 3 — Severidad por prioridad (§3, fijo)
+  // Capa 3 — Severidad por prioridad (§3)
   severityByPriority: { 1: 'CRITICAL', 2: 'HIGH', 3: 'MEDIUM', 4: 'LOW' } as Record<number, ProviderSeverity>,
   // Capa 5 — Pesos de riesgo (§9, propuestos, calibrar B15)
   risk: {
-    identity: { CONFIRMED: 20, PROBABLE: 8, UNRESOLVED: 0, EXCLUDED: 0 },
-    evidence: { VERY_HIGH: 25, HIGH: 18, MEDIUM: 10, LOW: 3, UNKNOWN: 0 },
-    severity: { CRITICAL: 30, HIGH: 22, MEDIUM: 12, LOW: 4, UNKNOWN: 8 },
+    identity: { CONFIRMED: 20, PROBABLE: 8, UNRESOLVED: 0, EXCLUDED: 0 } as Record<string, number>,
+    evidence: { VERY_HIGH: 25, HIGH: 18, MEDIUM: 10, LOW: 3, UNKNOWN: 0 } as Record<string, number>,
+    severity: { CRITICAL: 30, HIGH: 22, MEDIUM: 12, LOW: 4, UNKNOWN: 8 } as Record<string, number>,
     status: { CONVICTED: 20, EXECUTING_SENTENCE: 20, SANCTIONED: 18, CHARGED: 10, ACTIVE_PROCEEDING: 8, INVESTIGATED: 5, CLOSED: 2, UNKNOWN: 2, ACQUITTED: -15, DISMISSED: -15 } as Record<string, number>,
     recency: { '<2y': 10, '2-5y': 7, '5-10y': 3, '>10y': 0, UNKNOWN: 2 } as Record<string, number>,
     recurrenceDistinct: 8,
     bands: { low: 24, medium: 49, high: 74 }, // 0-24 LOW, 25-49 MED, 50-74 HIGH, 75+ CRITICAL
   },
 };
+
+export type CriminalConfig = typeof CRIMINAL_CONFIG_DEFAULT;
+const CRIMINAL_CONFIG_KEY = 'colombia_criminal_config';
+
+// Lee la config activa (localStorage sobre el default). Merge de 2 niveles para
+// tolerar configs guardadas parciales.
+export function getCriminalConfig(): CriminalConfig {
+  try {
+    const raw = localStorage.getItem(CRIMINAL_CONFIG_KEY);
+    if (!raw) return CRIMINAL_CONFIG_DEFAULT;
+    const s = JSON.parse(raw) as Partial<CriminalConfig>;
+    const d = CRIMINAL_CONFIG_DEFAULT;
+    return {
+      identity: { ...d.identity, ...(s.identity ?? {}) },
+      severityByPriority: { ...d.severityByPriority, ...(s.severityByPriority ?? {}) },
+      risk: {
+        ...d.risk, ...(s.risk ?? {}),
+        identity: { ...d.risk.identity, ...(s.risk?.identity ?? {}) },
+        evidence: { ...d.risk.evidence, ...(s.risk?.evidence ?? {}) },
+        severity: { ...d.risk.severity, ...(s.risk?.severity ?? {}) },
+        status: { ...d.risk.status, ...(s.risk?.status ?? {}) },
+        recency: { ...d.risk.recency, ...(s.risk?.recency ?? {}) },
+        bands: { ...d.risk.bands, ...(s.risk?.bands ?? {}) },
+      },
+    };
+  } catch { return CRIMINAL_CONFIG_DEFAULT; }
+}
+export function saveCriminalConfig(cfg: CriminalConfig): void {
+  try { localStorage.setItem(CRIMINAL_CONFIG_KEY, JSON.stringify(cfg)); } catch { /* ignore */ }
+}
+export function resetCriminalConfig(): void {
+  try { localStorage.removeItem(CRIMINAL_CONFIG_KEY); } catch { /* ignore */ }
+}
+
+// Config activa usada por el motor durante una evaluación (se refresca al inicio
+// de analyzeCriminalProfile).
+let ACTIVE_CONFIG: CriminalConfig = CRIMINAL_CONFIG_DEFAULT;
 
 // ─── Tipos ──────────────────────────────────────────────────────────────────────
 export type SourceType = 'LIST' | 'INTERNAL_LIST' | 'PROCURADURIA' | 'RAMA_JUDICIAL' | 'JEPMS';
@@ -143,7 +183,7 @@ function resolveIdentity(recDoc: string, recName: string, qDni: string, qName: s
   document_match: DocumentMatch; name_similarity: number; identity_score: number;
   identity_confidence: IdentityConfidence; identity_resolution: IdentityResolution; data_quality_flags: string[];
 } {
-  const c = CRIMINAL_CONFIG.identity;
+  const c = ACTIVE_CONFIG.identity;
   const flags: string[] = [];
   const dn = normDoc(recDoc);
   let document_match: DocumentMatch;
@@ -180,7 +220,7 @@ function providerSeverity(prioridadRaw: unknown): { provider_priority: string; p
   const m = S(prioridadRaw).match(/[1-4]/);
   if (!m) return { provider_priority: 'UNKNOWN', provider_severity: 'UNKNOWN', flag: 'PRIORITY_MISSING' };
   const p = Number(m[0]);
-  return { provider_priority: `P${p}`, provider_severity: CRIMINAL_CONFIG.severityByPriority[p] ?? 'UNKNOWN' };
+  return { provider_priority: `P${p}`, provider_severity: ACTIVE_CONFIG.severityByPriority[p] ?? 'UNKNOWN' };
 }
 
 // ─── Capa 4 — Contexto temporal ──────────────────────────────────────────────────
@@ -319,7 +359,7 @@ function dedupAndCorroborate(records: EvidenceRecord[]): { distinct_event_count:
 
 // ─── Capa 5 — Risk Aggregation V1 (explicable, config-driven) ────────────────────
 function scoreRecord(r: EvidenceRecord): number {
-  const c = CRIMINAL_CONFIG.risk;
+  const c = ACTIVE_CONFIG.risk;
   let s = 0;
   s += c.identity[r.identity_resolution] ?? 0;
   s += c.evidence[r.evidence_strength] ?? 0;
@@ -332,7 +372,7 @@ function scoreRecord(r: EvidenceRecord): number {
 function aggregateRisk(records: EvidenceRecord[], distinctEvents: number): {
   criminal_risk: CriminalRisk; risk_score: number; risk_factors: string[]; risk_reason_codes: string[];
 } {
-  const c = CRIMINAL_CONFIG.risk;
+  const c = ACTIVE_CONFIG.risk;
   const usable = records.filter(r => r.identity_resolution === 'CONFIRMED' || r.identity_resolution === 'PROBABLE');
   const factors: string[] = []; const codes: string[] = [];
   if (!usable.length) {
@@ -376,6 +416,7 @@ export function analyzeCriminalProfile(
   query: { nombre: string; documento: string },
   legalPolicyResult?: string,
 ): CriminalProfileOutcome {
+  ACTIVE_CONFIG = getCriminalConfig();   // config activa (editable, aplica a esta corrida)
   const records = buildEvidenceRecords(result, query.nombre, query.documento);
   const { distinct_event_count, repeat_pattern } = dedupAndCorroborate(records);
   const { criminal_risk, risk_score, risk_factors, risk_reason_codes } = aggregateRisk(records, distinct_event_count);
