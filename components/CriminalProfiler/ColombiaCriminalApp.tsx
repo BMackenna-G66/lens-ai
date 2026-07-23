@@ -5,7 +5,11 @@ import { AnalysisAction } from '../../types/criminalTypes';
 import { parseColombiaMasivo, buildTimeline, ColombiaProfile } from '../../services/colombiaCriminalParser';
 import { generateColombiaProfilePdf } from '../../services/pdfGenerator';
 
-type SortKey = 'nombre' | 'numeroDni' | 'resultado' | 'totalCoincidencias' | 'ramaJudicial' | 'accion' | 'estado';
+type SortKey = 'nombre' | 'numeroDni' | 'resultado' | 'totalCoincidencias' | 'ramaJudicial' | 'accion' | 'estado' | 'criminalRisk' | 'politicaLegal';
+
+// Orden de severidad para ordenar/filtrar los valores nuevos.
+const RISK_RANK: Record<string, number> = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1, UNKNOWN: 0 };
+const LP_RANK: Record<string, number> = { REVIEW_CRITICAL: 4, REVIEW_WARNING: 3, MANUAL_REVIEW: 2, RELEASE: 1 };
 type SortOrder = 'asc' | 'desc' | null;
 
 interface Props { onBack: () => void; darkMode: boolean; onToggleDarkMode: () => void; }
@@ -54,6 +58,8 @@ export const ColombiaCriminalApp: React.FC<Props> = ({ onBack, darkMode, onToggl
   const [search, setSearch] = useState('');
   const [filterAccion, setFilterAccion] = useState('All');
   const [filterPrioridad, setFilterPrioridad] = useState('All');
+  const [filterRisk, setFilterRisk] = useState('All');
+  const [filterPolitica, setFilterPolitica] = useState('All');
   const [selected, setSelected] = useState<string | null>(null);
   const [sort, setSort] = useState<{ key: SortKey; order: SortOrder }>({ key: 'nombre', order: null });
   const [checked, setChecked] = useState<Set<string>>(new Set());
@@ -85,18 +91,23 @@ export const ColombiaCriminalApp: React.FC<Props> = ({ onBack, darkMode, onToggl
       if (q && !(`${p.nombre} ${p.numeroDni}`.toLowerCase().includes(q))) return false;
       if (filterAccion !== 'All' && p.accion !== filterAccion) return false;
       if (filterPrioridad !== 'All' && (p.prioridadMaxima || 'sin') !== filterPrioridad) return false;
+      if (filterRisk !== 'All' && (p.criminalRisk || 'sin') !== filterRisk) return false;
+      if (filterPolitica !== 'All' && (p.politicaLegal || 'sin') !== filterPolitica) return false;
       return true;
     });
     if (!sort.order) return list;
     const dir = sort.order === 'asc' ? 1 : -1;
     const val = (p: ColombiaProfile): string | number =>
-      sort.key === 'ramaJudicial' ? p.ramaJudicial.length : (p[sort.key] ?? '');
+      sort.key === 'ramaJudicial' ? p.ramaJudicial.length
+      : sort.key === 'criminalRisk' ? (RISK_RANK[p.criminalRisk ?? ''] ?? -1)
+      : sort.key === 'politicaLegal' ? (LP_RANK[p.politicaLegal ?? ''] ?? -1)
+      : (p[sort.key] ?? '');
     return [...list].sort((a, b) => {
       const av = val(a), bv = val(b);
       if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * dir;
       return String(av).localeCompare(String(bv), 'es') * dir;
     });
-  }, [profiles, search, filterAccion, filterPrioridad, sort]);
+  }, [profiles, search, filterAccion, filterPrioridad, filterRisk, filterPolitica, sort]);
 
   const selectedProfile = profiles.find(p => p.numeroDni === selected) ?? null;
   const revisados = profiles.filter(p => p.estado === 'Revisado').length;
@@ -208,6 +219,25 @@ export const ColombiaCriminalApp: React.FC<Props> = ({ onBack, darkMode, onToggl
                 <option value="3">Prioridad 3</option>
                 <option value="sin">Sin prioridad</option>
               </select>
+              <select value={filterRisk} onChange={e => setFilterRisk(e.target.value)}
+                className="px-3 py-2.5 rounded-xl text-sm bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-100">
+                <option value="All">Todo riesgo criminal</option>
+                <option value="CRITICAL">CRITICAL</option>
+                <option value="HIGH">HIGH</option>
+                <option value="MEDIUM">MEDIUM</option>
+                <option value="LOW">LOW</option>
+                <option value="UNKNOWN">UNKNOWN</option>
+                <option value="sin">Sin dato</option>
+              </select>
+              <select value={filterPolitica} onChange={e => setFilterPolitica(e.target.value)}
+                className="px-3 py-2.5 rounded-xl text-sm bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-100">
+                <option value="All">Toda política legal</option>
+                <option value="REVIEW_CRITICAL">REVIEW_CRITICAL</option>
+                <option value="REVIEW_WARNING">REVIEW_WARNING</option>
+                <option value="MANUAL_REVIEW">MANUAL_REVIEW</option>
+                <option value="RELEASE">RELEASE</option>
+                <option value="sin">Sin dato</option>
+              </select>
               <span className="text-xs font-semibold text-slate-500 dark:text-slate-400">{revisados}/{profiles.length} revisados</span>
             </div>
 
@@ -235,7 +265,7 @@ export const ColombiaCriminalApp: React.FC<Props> = ({ onBack, darkMode, onToggl
                       <SortTh label="Nombre" k="nombre" sort={sort} onSort={toggleSort} />
                       <SortTh label="Documento" k="numeroDni" sort={sort} onSort={toggleSort} />
                       <SortTh label="Inspektor" k="resultado" sort={sort} onSort={toggleSort} />
-                      <th className="px-4 py-3 font-bold">Perfil Criminal</th>
+                      <SortTh label="Perfil Criminal" k="criminalRisk" sort={sort} onSort={toggleSort} />
                       <SortTh label="Coinc." k="totalCoincidencias" sort={sort} onSort={toggleSort} center />
                       <SortTh label="Rama Jud." k="ramaJudicial" sort={sort} onSort={toggleSort} center />
                       <SortTh label="Acción manual" k="accion" sort={sort} onSort={toggleSort} />
