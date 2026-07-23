@@ -23,6 +23,14 @@ export interface JepmsItem {
   exito: string; fechaConsulta: string; link: string;
 }
 
+// Evidencia del motor Capas 1–6 (hoja "Perfil_Criminal" del Excel actualizado).
+export interface PerfilCriminalRecord {
+  sourceType: string; evidenceType: string; evidenceStrength: string; evidenceStatus: string;
+  seriousGroup: string; providerPriority: string; providerSeverity: string;
+  providerGroup: string; rawOffense: string; identityResolution: string;
+  documentMatch: string; legalStatus: string; recencyBand: string; detailRequired: string;
+}
+
 export interface ColombiaProfile {
   numeroDni: string; nombre: string; tipoDni: string;
   resultado: string;            // resultado original de Inspektor (ALERTA/REVISAR/…)
@@ -33,6 +41,17 @@ export interface ColombiaProfile {
   procuraduria: ProcRecord[];
   ramaJudicial: RamaProceso[];
   jepms: JepmsItem[];
+  // Extracción actualizada (Capa 0 + Capas 1–6), leída del Excel del masivo si existe.
+  politicaLegal?: string;         // REVIEW_CRITICAL / REVIEW_WARNING / RELEASE / MANUAL / ''
+  politicaLegalRegla?: string;
+  criminalRisk?: string;          // LOW / MEDIUM / HIGH / CRITICAL / UNKNOWN / ''
+  criminalRecomendacion?: string;
+  criminalSeveridad?: string;
+  criminalGrupo?: string;         // SÍ / NO / ''
+  criminalEventos?: string;
+  criminalIdentidad?: string;     // "C:.. P:.. U:.. X:.."
+  criminalReasonCodes?: string;
+  perfilCriminal?: PerfilCriminalRecord[];
   // Revisión manual (sin catálogo)
   accion: AnalysisAction;
   estado: 'Pendiente' | 'Revisado';
@@ -120,6 +139,15 @@ export async function parseColombiaMasivo(file: File): Promise<ColombiaProfile[]
     ciudad: S(r['ciudad']), nombreResultado: S(r['nombre_resultado']), identificacionResultado: S(r['identificacion_resultado']),
     exito: S(r['exito']), fechaConsulta: S(r['fecha_consulta']), link: S(r['link']),
   }));
+  // Hoja "Perfil_Criminal" (Capas 1–6) — solo existe en Excel exportado con la extracción actualizada.
+  const perfilByDni = groupBy<PerfilCriminalRecord>(sheetRows(wb, /perfil.?criminal/), r => ({
+    sourceType: S(r['source_type']), evidenceType: S(r['evidence_type']), evidenceStrength: S(r['evidence_strength']),
+    evidenceStatus: S(r['evidence_status']), seriousGroup: S(r['serious_criminal_group']),
+    providerPriority: S(r['provider_priority']), providerSeverity: S(r['provider_severity']),
+    providerGroup: S(r['provider_group']), rawOffense: S(r['raw_offense']), identityResolution: S(r['identity_resolution']),
+    documentMatch: S(r['document_match']), legalStatus: S(r['legal_status']), recencyBand: S(r['recency_band']),
+    detailRequired: S(r['detail_required']),
+  }));
 
   return resumen.map((r): ColombiaProfile => {
     const dni = dniOf(r);
@@ -143,6 +171,17 @@ export async function parseColombiaMasivo(file: File): Promise<ColombiaProfile[]
       procuraduria: procByDni.get(dni) ?? [],
       ramaJudicial: ramaByDni.get(dni) ?? [],
       jepms,
+      // Extracción actualizada (si el Excel la trae).
+      politicaLegal: S(r['politica_legal']),
+      politicaLegalRegla: S(r['politica_legal_regla']),
+      criminalRisk: S(r['criminal_risk']),
+      criminalRecomendacion: S(r['criminal_recomendacion']),
+      criminalSeveridad: S(r['criminal_severidad_max']),
+      criminalGrupo: S(r['criminal_grupo_objetivo']),
+      criminalEventos: S(r['criminal_eventos_distintos']),
+      criminalIdentidad: S(r['criminal_identidad']),
+      criminalReasonCodes: S(r['criminal_reason_codes']),
+      perfilCriminal: perfilByDni.get(dni) ?? [],
       accion: '',
       estado: 'Pendiente',
       notas: '',
