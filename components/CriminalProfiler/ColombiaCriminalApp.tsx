@@ -1,9 +1,10 @@
 import React, { useState, useMemo, useRef } from 'react';
 import * as XLSX from 'xlsx';
-import { ArrowLeft, Sun, Moon, FileSpreadsheet, Download, Search, X, ChevronRight, ChevronLeft, ChevronUp, ChevronDown, ArrowUpDown, Clock, List } from 'lucide-react';
+import { ArrowLeft, Sun, Moon, FileSpreadsheet, Download, Search, X, ChevronRight, ChevronLeft, ChevronUp, ChevronDown, ArrowUpDown, Clock, List, Settings2 } from 'lucide-react';
 import { AnalysisAction } from '../../types/criminalTypes';
 import { parseColombiaMasivo, buildTimeline, ColombiaProfile } from '../../services/colombiaCriminalParser';
 import { generateColombiaProfilePdf } from '../../services/pdfGenerator';
+import { ColombiaConfigModal } from './ColombiaConfigModal';
 
 type SortKey = 'nombre' | 'numeroDni' | 'resultado' | 'totalCoincidencias' | 'ramaJudicial' | 'accion' | 'estado' | 'criminalRisk' | 'politicaLegal';
 
@@ -63,6 +64,7 @@ export const ColombiaCriminalApp: React.FC<Props> = ({ onBack, darkMode, onToggl
   const [selected, setSelected] = useState<string | null>(null);
   const [sort, setSort] = useState<{ key: SortKey; order: SortOrder }>({ key: 'nombre', order: null });
   const [checked, setChecked] = useState<Set<string>>(new Set());
+  const [showConfig, setShowConfig] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const toggleSort = (key: SortKey) => setSort(s =>
@@ -164,12 +166,18 @@ export const ColombiaCriminalApp: React.FC<Props> = ({ onBack, darkMode, onToggl
                 <Download size={16} /> Exportar
               </button>
             )}
+            <button onClick={() => setShowConfig(true)} title="Configuración de la matriz"
+              className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest bg-slate-100 dark:bg-indigo-900/50 border border-slate-200 dark:border-indigo-800 text-slate-600 dark:text-indigo-300 hover:bg-slate-200 dark:hover:bg-indigo-900">
+              <Settings2 size={16} /> Configuración
+            </button>
             <button onClick={onToggleDarkMode} className="p-2.5 rounded-xl bg-slate-100 dark:bg-indigo-900/50 border border-slate-200 dark:border-indigo-800 text-slate-600 dark:text-indigo-300">
               {darkMode ? <Sun size={18} /> : <Moon size={18} />}
             </button>
           </div>
         </div>
       </header>
+
+      {showConfig && <ColombiaConfigModal dark={darkMode} onClose={() => setShowConfig(false)} />}
 
       <main className="flex-grow max-w-7xl mx-auto w-full px-6 py-8">
         {error && (
