@@ -23,6 +23,20 @@ const ACC_STYLE: Record<string, string> = {
   'Liberar + UCR': 'text-blue-700 dark:text-blue-400',
   'Fully Blocked': 'text-red-700 dark:text-red-400',
 };
+// Colores para la extracción actualizada (Capas 1–6 / Capa 0).
+const RISK_STYLE: Record<string, string> = {
+  CRITICAL: 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300',
+  HIGH: 'bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300',
+  MEDIUM: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
+  LOW: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300',
+  UNKNOWN: 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400',
+};
+const LP_STYLE: Record<string, string> = {
+  REVIEW_CRITICAL: 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300',
+  REVIEW_WARNING: 'bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300',
+  RELEASE: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300',
+  MANUAL_REVIEW: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
+};
 
 const SortTh: React.FC<{ label: string; k: SortKey; sort: { key: SortKey; order: SortOrder }; onSort: (k: SortKey) => void; center?: boolean }> = ({ label, k, sort, onSort, center }) => (
   <th onClick={() => onSort(k)} className={`px-4 py-3 font-bold cursor-pointer select-none hover:text-slate-700 dark:hover:text-slate-200 ${center ? 'text-center' : ''}`}>
@@ -107,6 +121,9 @@ export const ColombiaCriminalApp: React.FC<Props> = ({ onBack, darkMode, onToggl
       numero_dni: p.numeroDni, nombre: p.nombre, tipo_dni: p.tipoDni,
       resultado_inspektor: p.resultado, total_coincidencias: p.totalCoincidencias,
       prioridad_maxima: p.prioridadMaxima, listas: p.listas,
+      politica_legal: p.politicaLegal ?? '', criminal_risk: p.criminalRisk ?? '',
+      criminal_recomendacion: p.criminalRecomendacion ?? '', criminal_severidad_max: p.criminalSeveridad ?? '',
+      criminal_grupo: p.criminalGrupo ?? '', criminal_reason_codes: p.criminalReasonCodes ?? '',
       accion_manual: p.accion || 'Pendiente', estado: p.estado, notas: p.notas,
     }));
     const wb = XLSX.utils.book_new();
@@ -218,6 +235,7 @@ export const ColombiaCriminalApp: React.FC<Props> = ({ onBack, darkMode, onToggl
                       <SortTh label="Nombre" k="nombre" sort={sort} onSort={toggleSort} />
                       <SortTh label="Documento" k="numeroDni" sort={sort} onSort={toggleSort} />
                       <SortTh label="Inspektor" k="resultado" sort={sort} onSort={toggleSort} />
+                      <th className="px-4 py-3 font-bold">Perfil Criminal</th>
                       <SortTh label="Coinc." k="totalCoincidencias" sort={sort} onSort={toggleSort} center />
                       <SortTh label="Rama Jud." k="ramaJudicial" sort={sort} onSort={toggleSort} center />
                       <SortTh label="Acción manual" k="accion" sort={sort} onSort={toggleSort} />
@@ -235,6 +253,18 @@ export const ColombiaCriminalApp: React.FC<Props> = ({ onBack, darkMode, onToggl
                           <span className={`text-[10px] font-black px-2 py-1 rounded-full ${RES_STYLE[p.resultado] ?? 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400'}`}>
                             {p.resultado}{p.prioridadMaxima ? ` · P${p.prioridadMaxima}` : ''}
                           </span>
+                        </td>
+                        <td className="px-4 py-3">
+                          {p.criminalRisk || p.politicaLegal ? (
+                            <div className="flex flex-col gap-1 items-start">
+                              {p.criminalRisk && (
+                                <span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${RISK_STYLE[p.criminalRisk] ?? RISK_STYLE.UNKNOWN}`}>CR: {p.criminalRisk}</span>
+                              )}
+                              {p.politicaLegal && (
+                                <span className={`text-[9px] font-bold px-2 py-0.5 rounded-full ${LP_STYLE[p.politicaLegal] ?? 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400'}`}>{p.politicaLegal}</span>
+                              )}
+                            </div>
+                          ) : <span className="text-slate-300 dark:text-slate-600 text-xs">—</span>}
                         </td>
                         <td className="px-4 py-3 text-center text-slate-500 dark:text-slate-400">{p.totalCoincidencias}</td>
                         <td className="px-4 py-3 text-center">
@@ -290,7 +320,7 @@ const ProfileDetalleColombia: React.FC<{
   onPrev?: () => void;
   onNext?: () => void;
 }> = ({ profile: p, onClose, onUpdate, onPrev, onNext }) => {
-  const [tab, setTab] = useState<'listas' | 'procuraduria' | 'rama' | 'jepms' | 'timeline'>('listas');
+  const [tab, setTab] = useState<'listas' | 'procuraduria' | 'rama' | 'jepms' | 'timeline' | 'perfil'>('listas');
   const [pdfLoading, setPdfLoading] = useState(false);
   const timeline = useMemo(() => buildTimeline(p), [p]);
 
@@ -305,6 +335,7 @@ const ProfileDetalleColombia: React.FC<{
     { key: 'rama', label: 'Rama Judicial', count: p.ramaJudicial.length },
     { key: 'jepms', label: 'JEPMS', count: p.jepms.length },
     { key: 'timeline', label: 'Línea de tiempo', count: timeline.length },
+    ...((p.perfilCriminal?.length ?? 0) > 0 ? [{ key: 'perfil' as const, label: 'Perfil Criminal', count: p.perfilCriminal!.length }] : []),
   ];
 
   return (
@@ -341,6 +372,28 @@ const ProfileDetalleColombia: React.FC<{
             placeholder="Notas del analista…"
             className="flex-1 min-w-[200px] px-3 py-2 rounded-lg text-sm bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-100" />
         </div>
+
+        {/* Extracción actualizada — Capa 0 + Perfil Criminal (Capas 1–6, shadow) */}
+        {(p.criminalRisk || p.politicaLegal || (p.perfilCriminal?.length ?? 0) > 0) && (
+          <div className="px-8 py-3 border-b border-slate-100 dark:border-slate-800 shrink-0 bg-slate-50/60 dark:bg-slate-800/30">
+            <div className="flex items-center gap-2 flex-wrap mb-1.5">
+              <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Extracción actualizada</span>
+              {p.criminalRisk && <span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${RISK_STYLE[p.criminalRisk] ?? RISK_STYLE.UNKNOWN}`}>Riesgo criminal: {p.criminalRisk}</span>}
+              {p.politicaLegal && <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${LP_STYLE[p.politicaLegal] ?? 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400'}`}>Política legal: {p.politicaLegal}</span>}
+              {p.criminalRecomendacion && <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300">{p.criminalRecomendacion}</span>}
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+              {p.criminalSeveridad && <div>Severidad máx.: <strong>{p.criminalSeveridad}</strong></div>}
+              {p.criminalGrupo && <div>Grupo criminal: <strong>{p.criminalGrupo}</strong></div>}
+              {p.criminalEventos && <div>Eventos distintos: <strong>{p.criminalEventos}</strong></div>}
+              {p.criminalIdentidad && <div>Identidad: <strong>{p.criminalIdentidad}</strong></div>}
+            </div>
+            {p.criminalReasonCodes && (
+              <p className="text-[10px] text-slate-400 mt-1"><span className="font-mono">{p.criminalReasonCodes}</span></p>
+            )}
+            <p className="text-[10px] text-slate-400 mt-1 italic">Shadow: informativo, no reemplaza la decisión de política legal ni la revisión manual.</p>
+          </div>
+        )}
 
         {/* Tabs */}
         <div className="px-8 pt-3 flex gap-2 flex-wrap shrink-0 border-b border-slate-100 dark:border-slate-800">
@@ -421,6 +474,28 @@ const ProfileDetalleColombia: React.FC<{
                 </li>
               ))}
             </ol>
+          )}
+
+          {tab === 'perfil' && (
+            !(p.perfilCriminal?.length) ? <Empty msg="Sin evidencia del motor criminal (Excel sin la hoja Perfil_Criminal)." /> :
+            <div className="space-y-2">
+              {p.perfilCriminal!.map((e, i) => (
+                <div key={i} className="border border-slate-100 dark:border-slate-800 rounded-xl p-3">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-500">{e.sourceType}</span>
+                    <span className="font-semibold text-slate-800 dark:text-slate-200">{e.evidenceType}</span>
+                    {e.providerSeverity && <span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${RISK_STYLE[e.providerSeverity] ?? RISK_STYLE.UNKNOWN}`}>{e.providerSeverity}</span>}
+                    {e.providerPriority && <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-500">{e.providerPriority}</span>}
+                    {e.identityResolution && <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-indigo-50 dark:bg-indigo-950/40 text-indigo-600 dark:text-indigo-300">id: {e.identityResolution}</span>}
+                    {e.seriousGroup === 'SÍ' && <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-50 dark:bg-red-950/40 text-red-600 dark:text-red-300">grupo criminal</span>}
+                    {e.detailRequired === 'SÍ' && <span className="text-[10px] text-amber-600 dark:text-amber-400">⚠ detalle requerido</span>}
+                  </div>
+                  <p className="text-[11px] text-slate-400 mt-1">
+                    {[e.rawOffense, e.legalStatus && `estado: ${e.legalStatus}`, e.recencyBand && `recencia: ${e.recencyBand}`, e.evidenceStatus, e.providerGroup].filter(Boolean).join(' · ')}
+                  </p>
+                </div>
+              ))}
+            </div>
           )}
         </div>
       </div>
