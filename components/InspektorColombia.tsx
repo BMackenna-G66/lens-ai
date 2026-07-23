@@ -341,6 +341,7 @@ interface MasivoRow {
   result?: InspektorResult;
   classification?: Classification;
   legalPolicy?: LegalPolicyOutcome;   // Capa 0 — Legal Policy Gate (informativo)
+  criminal?: CriminalProfileOutcome;  // Capas 1–6 — Perfil Criminal (shadow)
   resultado?: Resultado;    // SIN_HALLAZGOS / REVISAR / ALERTA / ERROR_*
   error?: string;
   validationError?: string; // si está → ERROR_VALIDACION (no se consulta)
@@ -606,8 +607,9 @@ export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, da
 
           const cls = classify(r);
           const legalPolicy = gateFromResult(r, row.documento);
+          const criminal = analyzeCriminalProfile(r as unknown as CriminalInput, { nombre: row.nombre, documento: row.documento }, legalPolicy?.result ?? undefined);
           if (cls.resultado === 'ALERTA') alerts++; else if (cls.resultado === 'REVISAR') revisar++;
-          applyToGroup(key, { status: 'done', result: r, classification: cls, legalPolicy, resultado: cls.resultado });
+          applyToGroup(key, { status: 'done', result: r, classification: cls, legalPolicy, criminal, resultado: cls.resultado });
           addLog(cls.resultado === 'ALERTA' ? 'err' : 'ok',
             `${cls.resultado === 'ALERTA' ? '⚠' : '✓'} ${label} — ${cls.resultado} · ${cls.totalCoincidencias} coincidencia(s)${cls.prioridadMaxima ? ` · P${cls.prioridadMaxima}` : ''}${r === undefined ? '' : ''}`);
         } catch (e) {
@@ -649,12 +651,20 @@ export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, da
         ?? (r.status === 'done' ? (cls?.resultado ?? 'SIN_HALLAZGOS')
           : r.status === 'error' ? 'ERROR_CONSULTA' : 'NO_CONSULTADO');
       const lp = r.legalPolicy;
+      const cr = r.criminal;
       return {
         ...idOf(r),
         resultado,
         politica_legal: lp?.result ? LP_META[lp.result].short : '',
         politica_legal_regla: lp?.ruleId ?? '',
         politica_legal_detalle: lp ? `crítica:${lp.counts.REVIEW_CRITICAL} warning:${lp.counts.REVIEW_WARNING} release:${lp.counts.RELEASE} manual:${lp.counts.MANUAL_REVIEW}` : '',
+        criminal_risk: cr?.records.length ? cr.criminal_risk : '',
+        criminal_recomendacion: cr?.records.length ? cr.recommendation : '',
+        criminal_severidad_max: cr?.records.length ? cr.provider_severity_max : '',
+        criminal_grupo_objetivo: cr?.records.length ? (cr.serious_criminal_group ? 'SÍ' : 'NO') : '',
+        criminal_eventos_distintos: cr?.records.length ? String(cr.distinct_event_count) : '',
+        criminal_identidad: cr?.records.length ? `C:${cr.identity_summary.CONFIRMED} P:${cr.identity_summary.PROBABLE} U:${cr.identity_summary.UNRESOLVED} X:${cr.identity_summary.EXCLUDED}` : '',
+        criminal_reason_codes: cr?.risk_reason_codes.join('; ') ?? '',
         total_coincidencias: cls ? cls.totalCoincidencias : '',
         prioridad_maxima: cls?.prioridadMaxima ?? '',
         listas: cls ? cls.listas.join('; ') : '',
@@ -735,12 +745,42 @@ export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, da
       }
     }
 
+    // Hoja "Perfil_Criminal": una fila por EvidenceRecord (Capas 1–6, shadow).
+    const perfilCriminal: Record<string, unknown>[] = [];
+    for (const r of masivoRows) {
+      for (const rec of (r.criminal?.records ?? [])) {
+        perfilCriminal.push({
+          ...idOf(r),
+          criminal_risk: r.criminal?.criminal_risk ?? '',
+          recomendacion: r.criminal?.recommendation ?? '',
+          source_type: rec.source_type,
+          evidence_type: rec.evidence_type,
+          evidence_strength: rec.evidence_strength,
+          evidence_status: rec.evidence_status,
+          serious_criminal_group: rec.serious_criminal_group ? 'SÍ' : 'NO',
+          provider_priority: rec.provider_priority,
+          provider_severity: rec.provider_severity,
+          provider_group: rec.provider_group,
+          provider_category: rec.provider_category,
+          raw_offense: rec.raw_offense,
+          identity_resolution: rec.identity_resolution,
+          document_match: rec.document_match,
+          name_similarity: rec.name_similarity,
+          legal_status: rec.legal_status,
+          recency_band: rec.recency_band,
+          detail_required: rec.detail_required ? 'SÍ' : 'NO',
+          source_record_id: rec.source_record_id,
+        });
+      }
+    }
+
     const wb = buildMasivoWorkbook([
       { name: 'Resumen', rows: summary },
       { name: 'Detalle_Listas', rows: detalleListas },
       { name: 'Procuraduria', rows: procuraduria },
       { name: 'Rama_Judicial', rows: ramaJudicial },
       { name: 'JEPMS', rows: jepms },
+      { name: 'Perfil_Criminal', rows: perfilCriminal },
     ]);
     XLSX.writeFile(wb, `inspektor_masivo_${ts}.xlsx`);
   }
@@ -981,6 +1021,13 @@ export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, da
                             title={`Política legal: ${r.legalPolicy.ruleId}`}
                             style={{ color: LP_META[r.legalPolicy.result].hex, backgroundColor: `${LP_META[r.legalPolicy.result].hex}22` }}>
                             {LP_META[r.legalPolicy.result].emoji} {LP_META[r.legalPolicy.result].short}
+                          </span>
+                        )}
+                        {r.status === 'done' && r.criminal && r.criminal.records.length > 0 && (
+                          <span className="text-xs font-bold px-2 py-0.5 rounded-full flex-shrink-0"
+                            title={`Perfil criminal (shadow): ${r.criminal.recommendation}`}
+                            style={{ color: CRIMINAL_RISK_META[r.criminal.criminal_risk].hex, backgroundColor: `${CRIMINAL_RISK_META[r.criminal.criminal_risk].hex}22` }}>
+                            {CRIMINAL_RISK_META[r.criminal.criminal_risk].emoji} CR:{CRIMINAL_RISK_META[r.criminal.criminal_risk].label}
                           </span>
                         )}
                         {r.status === 'error' && (
