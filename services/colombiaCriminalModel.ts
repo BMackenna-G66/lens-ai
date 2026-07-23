@@ -194,7 +194,7 @@ function recencyBand(dateStr: string): { days: number | null; years: number | nu
 }
 
 // ─── Construcción de EvidenceRecords (Capa 2 + 3 + 1 + 4 por registro) ───────────
-interface RawResult {
+export interface RawResult {
   listas?: Record<string, unknown>[]; listas_propias?: Record<string, unknown>[];
   procuraduria?: unknown; ramaJudicial?: unknown; ramaJudicialJEPMS?: unknown;
 }

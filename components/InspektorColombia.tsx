@@ -6,6 +6,7 @@ import {
   type Resultado, type Classification,
 } from '../services/inspektorMasivoService';
 import { evaluateLegalPolicy, LP_META, type LegalPolicyOutcome } from '../services/legalPolicyGate';
+import { analyzeCriminalProfile, CRIMINAL_RISK_META, type CriminalProfileOutcome, type RawResult as CriminalInput } from '../services/colombiaCriminalModel';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 const INSPEKTOR_DIRECT = 'https://inspektor.datalaft.com:2121/api';
@@ -356,6 +357,7 @@ export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, da
   const [error, setError]         = useState('');
   const [result, setResult]       = useState<InspektorResult | null>(null);
   const [indGate, setIndGate]     = useState<LegalPolicyOutcome | undefined>(undefined);
+  const [indCriminal, setIndCriminal] = useState<CriminalProfileOutcome | undefined>(undefined);
   const resultRef = useRef<HTMLDivElement>(null);
 
   // ── Masivo state ─────────────────────────────────────────────────────────────
@@ -395,11 +397,14 @@ export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, da
       setError('Nombre completo y número de documento son obligatorios.');
       return;
     }
-    setLoading(true); setError(''); setResult(null); setIndGate(undefined);
+    setLoading(true); setError(''); setResult(null); setIndGate(undefined); setIndCriminal(undefined);
     try {
       const r = await consultarInspektor(nombre.trim(), documento.trim(), tipoDoc);
       setResult(r);
-      setIndGate(gateFromResult(r, normalizeDni(documento.trim())));
+      const gate = gateFromResult(r, normalizeDni(documento.trim()));
+      setIndGate(gate);
+      // Capas 1–6 (shadow): perfil criminal, informativo, sin alterar la Capa 0.
+      setIndCriminal(analyzeCriminalProfile(r as unknown as CriminalInput, { nombre: nombre.trim(), documento: documento.trim() }, gate?.result ?? undefined));
       setTimeout(() => resultRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -1139,6 +1144,45 @@ export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, da
                       Crítica {indGate.counts.REVIEW_CRITICAL} · Warning {indGate.counts.REVIEW_WARNING} · Release {indGate.counts.RELEASE} · Manual {indGate.counts.MANUAL_REVIEW}. Informativo, no bloquea.
                     </p>
                   </div>
+                </div>
+              )}
+
+              {/* Perfil Criminal — Capas 1–6 (shadow, informativo) */}
+              {indCriminal && indCriminal.records.length > 0 && (
+                <div className={`mt-4 border rounded-xl px-4 py-3 ${dark ? 'border-slate-700 bg-slate-900/40' : 'border-slate-200 bg-slate-50'}`}>
+                  <div className="flex items-center gap-2 mb-2 flex-wrap">
+                    <span className={`text-[9px] font-bold uppercase tracking-widest ${dark ? 'text-slate-500' : 'text-slate-400'}`}>Perfil Criminal (Capas 1–6 · shadow)</span>
+                    <span className="text-xs font-black px-2 py-0.5 rounded-lg" style={{ color: CRIMINAL_RISK_META[indCriminal.criminal_risk].hex, backgroundColor: `${CRIMINAL_RISK_META[indCriminal.criminal_risk].hex}22` }}>
+                      {CRIMINAL_RISK_META[indCriminal.criminal_risk].emoji} Riesgo {CRIMINAL_RISK_META[indCriminal.criminal_risk].label}
+                    </span>
+                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded-lg ${dark ? 'bg-slate-800 text-slate-300' : 'bg-slate-200 text-slate-700'}`}>{indCriminal.recommendation}</span>
+                  </div>
+                  <div className={`grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] mb-2 ${dark ? 'text-slate-400' : 'text-slate-600'}`}>
+                    <div>Severidad máx.: <strong>{indCriminal.provider_severity_max}</strong></div>
+                    <div>Grupo criminal: <strong>{indCriminal.serious_criminal_group ? 'Sí' : 'No'}</strong></div>
+                    <div>Eventos distintos: <strong>{indCriminal.distinct_event_count}</strong></div>
+                    <div>Identidad: <strong>{indCriminal.identity_summary.CONFIRMED}C·{indCriminal.identity_summary.PROBABLE}P·{indCriminal.identity_summary.UNRESOLVED}U·{indCriminal.identity_summary.EXCLUDED}X</strong></div>
+                  </div>
+                  {/* Evidencia relevante (no excluida) */}
+                  <div className="space-y-0.5">
+                    {indCriminal.records.filter(r => r.identity_resolution !== 'EXCLUDED').slice(0, 10).map((r, i) => (
+                      <div key={i} className={`text-[11px] ${dark ? 'text-slate-400' : 'text-slate-500'}`}>
+                        <span className="font-mono">{r.source_type}</span> · {r.evidence_type} · sev {r.provider_severity} · id {r.identity_resolution}
+                        {r.raw_offense ? ` · ${r.raw_offense}` : (r.raw_description ? ` · ${r.raw_description}` : '')}
+                        {r.detail_required ? ' · ⚠ detalle requerido' : ''}
+                      </div>
+                    ))}
+                  </div>
+                  {indCriminal.risk_reason_codes.length > 0 && (
+                    <div className="flex flex-wrap gap-1 mt-2">
+                      {indCriminal.risk_reason_codes.map((c, i) => (
+                        <span key={i} className={`text-[9px] font-mono px-1.5 py-0.5 rounded ${dark ? 'bg-slate-800 text-slate-400' : 'bg-slate-200 text-slate-600'}`}>{c}</span>
+                      ))}
+                    </div>
+                  )}
+                  <p className={`text-[10px] mt-2 ${dark ? 'text-slate-500' : 'text-slate-400'}`}>
+                    Shadow: complementa la Capa 0, no la reemplaza. {indCriminal.identity_summary.EXCLUDED > 0 ? `${indCriminal.identity_summary.EXCLUDED} hit(s) EXCLUIDO(s) por documento distinto (no participan del riesgo).` : ''}
+                  </p>
                 </div>
               )}
             </div>
