@@ -2,6 +2,14 @@
 import * as XLSX from 'xlsx';
 import { PersonProfile, Crime, CatalogData, CatalogItem, DecisionRule } from '../types/criminalTypes';
 
+// Normaliza el texto de un delito para el match contra el catálogo Chile:
+// minúscula, sin tildes, y solo alfanumérico + espacios (colapsados). El catálogo
+// (Catalogo_delitos_2207) ya viene normalizado así; se aplica lo mismo al delito
+// entrante para maximizar la coincidencia.
+export const normalizeDelito = (s: unknown): string =>
+  String(s ?? '').toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+
 const isHighRisk = (risk: string): boolean => {
   const r = String(risk || '').toLowerCase().trim();
   return r === 'high' || r === 'critical' || r === 'alto' || r === 'crítico' || r === 'critico';
@@ -275,10 +283,10 @@ export const processCatalogFile = async (file: File): Promise<CatalogData> => {
 
 export const applyEvaluationToProfile = (profile: PersonProfile, catalog: CatalogData) => {
   let scoreTotal = 0;
-  const catalogMap = new Map(catalog.items.map(i => [i.nombre.toLowerCase(), i]));
-  
+  const catalogMap = new Map(catalog.items.map(i => [normalizeDelito(i.nombre), i]));
+
   profile.crimes.forEach(crime => {
-    const match = catalogMap.get(crime.tipo.toLowerCase());
+    const match = catalogMap.get(normalizeDelito(crime.tipo));
     if (match) {
       crime.catalogValue = match.valor;
       crime.catalogType = match.tipo;
