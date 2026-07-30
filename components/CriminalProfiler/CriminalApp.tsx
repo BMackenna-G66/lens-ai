@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { processExcelFile, processRegcheqFile, detectCriminalFileFormat, exportToExcel, processCatalogFile, applyEvaluationToProfile } from '../../services/criminalDataProcessor';
+import { processExcelFile, processRegcheqFile, detectCriminalFileFormat, exportToExcel, processCatalogFile } from '../../services/criminalDataProcessor';
 import { PersonProfile, CriminalAppState, AnalysisAction, CatalogData } from '../../types/criminalTypes';
 import { DEFAULT_CATALOG } from '../../services/defaultCatalogData';
 import { CriminalDashboard } from './CriminalDashboard';
@@ -45,33 +45,17 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
   const emergencyFileRef = useRef<HTMLInputElement>(null);
   const masivoFileRef = useRef<HTMLInputElement>(null);
 
-  // Load catalog: localStorage override > default built-in catalog
+  // Catálogo MAESTRO fijo para todos: siempre el built-in (DEFAULT_CATALOG).
+  // Se purga cualquier override viejo por usuario en localStorage para que nadie
+  // quede con un catálogo divergente. No hay override editable.
   useEffect(() => {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        setState(prev => ({ ...prev, catalog: parsed }));
-        return;
-      } catch {}
-    }
-    // Fall back to built-in default catalog
+    localStorage.removeItem(STORAGE_KEY);
     setState(prev => ({ ...prev, catalog: DEFAULT_CATALOG }));
   }, []);
 
-  const handleUpdateCatalog = (newCatalog: CatalogData) => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(newCatalog));
-    const updatedProfiles = state.profiles.map(p => { const np = { ...p }; applyEvaluationToProfile(np, newCatalog); return np; });
-    setState(prev => ({ ...prev, catalog: newCatalog, profiles: updatedProfiles }));
-  };
-
-  const handleResetCatalog = () => {
-    if (confirm('¿Restaurar el catálogo al predeterminado de fábrica?')) {
-      localStorage.removeItem(STORAGE_KEY);
-      const updatedProfiles = state.profiles.map(p => { const np = { ...p }; applyEvaluationToProfile(np, DEFAULT_CATALOG); return np; });
-      setState(prev => ({ ...prev, catalog: DEFAULT_CATALOG, profiles: updatedProfiles }));
-    }
-  };
+  // Solo lectura: el catálogo no se edita ni se persiste desde la app.
+  const handleUpdateCatalog = (_newCatalog: CatalogData) => { /* no-op: catálogo maestro fijo */ };
+  const handleResetCatalog = undefined;
 
   const handleProfileLoad = async (file: File, hintFlow: 'emergency' | 'masivo') => {
     setState(prev => ({ ...prev, loading: true, error: null }));
@@ -126,9 +110,10 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
     reader.onload = (e) => {
       try {
         const data = JSON.parse(e.target?.result as string);
-        if (data.profiles && data.catalog) {
-          setState(prev => ({ ...prev, profiles: data.profiles, catalog: data.catalog }));
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(data.catalog));
+        if (data.profiles) {
+          // Se importan los perfiles, pero el catálogo sigue siendo el MAESTRO fijo
+          // (no se toma el catálogo embebido en la sesión ni se persiste).
+          setState(prev => ({ ...prev, profiles: data.profiles, catalog: DEFAULT_CATALOG }));
           setSelectedRuts(new Set());
         }
       } catch { alert("Archivo de sesión inválido."); }
@@ -344,7 +329,7 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
       <main className={`flex-1 max-w-7xl mx-auto w-full p-4 md:p-8 space-y-8 ${state.view === 'comparison' || state.view === 'triage' ? 'hidden' : ''}`}>
         {state.view === 'catalog' ? (
           state.catalog ? (
-            <CatalogManager catalog={state.catalog} onUpdate={handleUpdateCatalog} onReset={handleResetCatalog} />
+            <CatalogManager catalog={state.catalog} onUpdate={handleUpdateCatalog} onReset={handleResetCatalog} readOnly />
           ) : (
             <div className="flex flex-col items-center justify-center py-24 px-4 text-center bg-white dark:bg-slate-900 rounded-[2.5rem] border border-slate-200 dark:border-slate-800 border-dashed">
               <div className="w-20 h-20 bg-slate-100 dark:bg-indigo-950 rounded-full flex items-center justify-center mb-6"><BookOpen className="text-indigo-500 dark:text-indigo-400" size={32} /></div>
