@@ -3,6 +3,7 @@ import * as XLSX from 'xlsx';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { DEFAULT_CATALOG } from '../services/defaultCatalogData';
+import { normalizeDelito } from '../services/criminalDataProcessor';
 import { InspektorColombia } from './InspektorColombia';
 import { evaluateValidationRules, ValidationAlert, SEVERITY_META } from '../services/validationRules';
 import { Lens360Tributaria } from '../types/lens360';
@@ -218,7 +219,9 @@ function computeDecisionFromCrimes(additionalData: Record<string,unknown>[]): De
   const catalog = DEFAULT_CATALOG;
   if (!catalog.items.length || !catalog.decisionTable.length) return undefined;
 
-  const catalogMap = new Map(catalog.items.map(i => [i.nombre.toLowerCase(), i]));
+  // Match normalizado (misma normalización que el catálogo Chile: minúscula, sin
+  // tildes, solo alfanumérico + espacios) para maximizar la coincidencia.
+  const catalogMap = new Map(catalog.items.map(i => [normalizeDelito(i.nombre), i]));
   // Agrupar por RUC (misma lógica que el Criminal Profiler): una causa por RUC.
   // Distintos delitos/filas con el mismo RUC = la misma causa → se cuenta una vez
   // (se conserva la primera). Las filas sin RUC no se agrupan (cuentan individual).
@@ -230,7 +233,7 @@ function computeDecisionFromCrimes(additionalData: Record<string,unknown>[]): De
     const key = ruc || `__fila_${i}`;   // sin RUC → no se agrupa
     if (seen.has(key)) return;           // mismo RUC ya contado → se omite
     seen.add(key);
-    const nombre = String(crime['crimen'] ?? crime['Crimen'] ?? crime['delito'] ?? '').toLowerCase().trim();
+    const nombre = normalizeDelito(crime['crimen'] ?? crime['Crimen'] ?? crime['delito'] ?? '');
     if (!nombre) return;
     const match = catalogMap.get(nombre);
     if (match) { scoreTotal += match.valor; causasConsideradas++; }
