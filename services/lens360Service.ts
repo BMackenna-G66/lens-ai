@@ -243,8 +243,8 @@ async function fetchRegcheq(rut: string, nombre: string, personType: Lens360Pers
   return {
     nombre: perfilNombre,
     personType: String(perfil.personType ?? ''),
-    regcheqRisk: (perfil.effectiveRisk ?? perfil.calculatedRisk ?? '') as string,
-    pepLevel: (perfil.pepLevel ?? '') as string,
+    regcheqRisk: s(perfil.effectiveRisk ?? perfil.calculatedRisk),
+    pepLevel: s(perfil.pepLevel),
     amlHits, crimes, criminalDecision, criminalProfile, related, tributaria,
   };
 }

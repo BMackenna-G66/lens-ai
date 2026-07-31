@@ -39,7 +39,8 @@ const PENALES = new Set(['Causas Penales Chile']);
 // Etiquetas que son PEP.
 const PEP_LISTAS = new Set(['PEP Chile']);
 
-const norm = (s: string) => (s ?? '').trim();
+// Robusto ante cualquier tipo: Regcheq a veces devuelve riesgo/PEP como número.
+const norm = (s: unknown) => (s === null || s === undefined ? '' : String(s)).trim();
 
 // ¿El pepLevel indica que ES PEP? (descarta vacío / "none" / "no" / "0").
 function esPep(pepLevel?: string): boolean {
