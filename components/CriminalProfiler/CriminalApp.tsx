@@ -58,6 +58,18 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
       setSfMsg('No se pudo contactar el helper local. Iniciá "helper_local.py" en tu máquina (localhost:8765).');
     }
   };
+
+  // Fuerza una ingesta on-demand (sin esperar el cron de 30 min) vía el helper local.
+  const colaRun = async () => {
+    setSfMsg('Actualizando la cola (Salesforce → Regcheq)… puede tardar un momento.');
+    try {
+      const res = await fetch(`${SF_HELPER_URL}/cola/run`, { method: 'POST' });
+      const data = await res.json();
+      setSfMsg(data.ok ? 'Ingesta lanzada. La cola se actualiza en vivo al terminar.' : `Error: ${data.error || 'no se pudo'}`);
+    } catch {
+      setSfMsg('No se pudo contactar el helper local. Iniciá "helper_local.py" en tu máquina (localhost:8765).');
+    }
+  };
   const sessionFileInputRef = useRef<HTMLInputElement>(null);
   const emergencyFileRef = useRef<HTMLInputElement>(null);
   const masivoFileRef = useRef<HTMLInputElement>(null);
@@ -359,6 +371,13 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
               className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest border transition-all bg-slate-100 dark:bg-indigo-800 text-slate-700 dark:text-indigo-100 border-slate-200 dark:border-indigo-700 hover:bg-slate-200 dark:hover:bg-indigo-700"
             >
               <LogIn size={16} /> Sesión Salesforce
+            </button>
+            <button
+              onClick={colaRun}
+              title="Forzar una actualización de la cola ahora (sin esperar el cron)"
+              className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest border transition-all bg-slate-100 dark:bg-indigo-800 text-slate-700 dark:text-indigo-100 border-slate-200 dark:border-indigo-700 hover:bg-slate-200 dark:hover:bg-indigo-700"
+            >
+              <RotateCcw size={16} /> Actualizar cola
             </button>
             {/* Hidden file inputs */}
             <input type="file" accept=".xlsx,.xls,.csv" ref={emergencyFileRef} onChange={handleEmergencyUpload} className="hidden" />
