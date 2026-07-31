@@ -13,7 +13,7 @@ import {
   FileSpreadsheet, Search, Filter, ChevronRight, ShieldAlert, AlertCircle,
   Download, CheckCircle, ChevronUp, ChevronDown, ArrowUpDown, CheckSquare,
   Square, BookOpen, Database, RotateCcw, LayoutDashboard, Share2, FolderInput,
-  Layers, Upload, Settings, ArrowLeft, Sun, Moon, Zap, GitCompare, Shield, RadioTower
+  Layers, Upload, Settings, ArrowLeft, Sun, Moon, Zap, GitCompare, Shield, RadioTower, LogIn
 } from 'lucide-react';
 
 type SortKey = 'rut' | 'nombre' | 'totalCrimes' | 'totalHighRiskCrimes' | 'highestRisk' | 'status';
@@ -44,6 +44,32 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
   const [country, setCountry] = useState<'CL' | 'CO' | null>(null);
   const [queueMode, setQueueMode] = useState(false);   // cola de trabajo en vivo (Firestore)
   const queueUnsubRef = useRef<null | (() => void)>(null);
+  const [sfMsg, setSfMsg] = useState<string | null>(null);   // mensaje del helper de Salesforce
+
+  // Lanza el login de Salesforce vía el helper local (crear_sesion_salesforce.py).
+  const SF_HELPER_URL = 'http://localhost:8765';
+  const sfLogin = async () => {
+    setSfMsg('Abriendo Salesforce… completá el login y el MFA en la ventana que se abre.');
+    try {
+      const res = await fetch(`${SF_HELPER_URL}/sf/login`, { method: 'POST' });
+      const data = await res.json();
+      setSfMsg(data.ok ? data.message : `Error: ${data.error || 'no se pudo iniciar sesión'}`);
+    } catch {
+      setSfMsg('No se pudo contactar el helper local. Iniciá "helper_local.py" en tu máquina (localhost:8765).');
+    }
+  };
+
+  // Fuerza una ingesta on-demand (sin esperar el cron de 30 min) vía el helper local.
+  const colaRun = async () => {
+    setSfMsg('Actualizando la cola (Salesforce → Regcheq)… puede tardar un momento.');
+    try {
+      const res = await fetch(`${SF_HELPER_URL}/cola/run`, { method: 'POST' });
+      const data = await res.json();
+      setSfMsg(data.ok ? 'Ingesta lanzada. La cola se actualiza en vivo al terminar.' : `Error: ${data.error || 'no se pudo'}`);
+    } catch {
+      setSfMsg('No se pudo contactar el helper local. Iniciá "helper_local.py" en tu máquina (localhost:8765).');
+    }
+  };
   const sessionFileInputRef = useRef<HTMLInputElement>(null);
   const emergencyFileRef = useRef<HTMLInputElement>(null);
   const masivoFileRef = useRef<HTMLInputElement>(null);
@@ -339,6 +365,20 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
             >
               <RadioTower size={16} /> {queueMode ? 'Cola en vivo ●' : 'Cola de trabajo'}
             </button>
+            <button
+              onClick={sfLogin}
+              title="Abrir el navegador de Salesforce para login + MFA (helper local)"
+              className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest border transition-all bg-slate-100 dark:bg-indigo-800 text-slate-700 dark:text-indigo-100 border-slate-200 dark:border-indigo-700 hover:bg-slate-200 dark:hover:bg-indigo-700"
+            >
+              <LogIn size={16} /> Sesión Salesforce
+            </button>
+            <button
+              onClick={colaRun}
+              title="Forzar una actualización de la cola ahora (sin esperar el cron)"
+              className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest border transition-all bg-slate-100 dark:bg-indigo-800 text-slate-700 dark:text-indigo-100 border-slate-200 dark:border-indigo-700 hover:bg-slate-200 dark:hover:bg-indigo-700"
+            >
+              <RotateCcw size={16} /> Actualizar cola
+            </button>
             {/* Hidden file inputs */}
             <input type="file" accept=".xlsx,.xls,.csv" ref={emergencyFileRef} onChange={handleEmergencyUpload} className="hidden" />
             <input type="file" accept=".xlsx,.xls,.csv" ref={masivoFileRef} onChange={handleMasivoUpload} className="hidden" />
@@ -401,6 +441,12 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
             {state.error && (
               <div className="bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 text-red-600 dark:text-red-400 px-6 py-4 rounded-2xl flex items-start gap-3">
                 <AlertCircle className="shrink-0 mt-0.5" /><p className="font-bold text-sm">{state.error}</p>
+              </div>
+            )}
+            {sfMsg && (
+              <div className="bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800 text-indigo-700 dark:text-indigo-300 px-6 py-4 rounded-2xl flex items-start gap-3">
+                <LogIn className="shrink-0 mt-0.5" size={18} /><p className="font-bold text-sm flex-1">{sfMsg}</p>
+                <button onClick={() => setSfMsg(null)} className="text-indigo-400 hover:text-indigo-600">✕</button>
               </div>
             )}
             {state.loading ? (
