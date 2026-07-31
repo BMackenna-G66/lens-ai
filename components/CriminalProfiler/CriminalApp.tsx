@@ -8,11 +8,12 @@ import { CatalogManager } from './CatalogManager';
 import { ComparisonView } from './ComparisonView';
 import { TriageView } from './TriageView';
 import { ColombiaCriminalApp } from './ColombiaCriminalApp';
+import { subscribeCriminalQueue, updateQueueReview, isQueueAvailable } from '../../services/criminalQueueService';
 import {
   FileSpreadsheet, Search, Filter, ChevronRight, ShieldAlert, AlertCircle,
   Download, CheckCircle, ChevronUp, ChevronDown, ArrowUpDown, CheckSquare,
   Square, BookOpen, Database, RotateCcw, LayoutDashboard, Share2, FolderInput,
-  Layers, Upload, Settings, ArrowLeft, Sun, Moon, Zap, GitCompare, Shield
+  Layers, Upload, Settings, ArrowLeft, Sun, Moon, Zap, GitCompare, Shield, RadioTower
 } from 'lucide-react';
 
 type SortKey = 'rut' | 'nombre' | 'totalCrimes' | 'totalHighRiskCrimes' | 'highestRisk' | 'status';
@@ -41,6 +42,8 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
   const [flowType, setFlowType] = useState<'emergency' | 'masivo'>('emergency');
   const [pepTab, setPepTab] = useState<'sanciones' | 'peps' | 'sin-antecedentes'>('sanciones');
   const [country, setCountry] = useState<'CL' | 'CO' | null>(null);
+  const [queueMode, setQueueMode] = useState(false);   // cola de trabajo en vivo (Firestore)
+  const queueUnsubRef = useRef<null | (() => void)>(null);
   const sessionFileInputRef = useRef<HTMLInputElement>(null);
   const emergencyFileRef = useRef<HTMLInputElement>(null);
   const masivoFileRef = useRef<HTMLInputElement>(null);
@@ -123,16 +126,56 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
   };
 
   const handleUpdateProfile = (rut: string, updates: Partial<PersonProfile>) => {
-    setState(prev => ({ ...prev, profiles: prev.profiles.map(p => p.rut === rut ? { ...p, ...updates } : p) }));
+    setState(prev => {
+      const profiles = prev.profiles.map(p => p.rut === rut ? { ...p, ...updates } : p);
+      // En modo cola en vivo, persistir la revisión a Firestore (por caseNumber = customerId).
+      if (queueMode && (updates.selectedAction !== undefined || updates.status !== undefined || updates.notes !== undefined)) {
+        const p = profiles.find(x => x.rut === rut);
+        if (p?.customerId) {
+          updateQueueReview(p.customerId, {
+            estado: p.status, accion: p.selectedAction, notas: p.notes,
+          });
+        }
+      }
+      return { ...prev, profiles };
+    });
   };
+
+  // Alterna la cola de trabajo EN VIVO (Firestore). Al activarla, se suscribe y
+  // reemplaza los perfiles cargados por los de la cola; al desactivar, corta.
+  const toggleQueueMode = () => {
+    if (queueMode) {
+      queueUnsubRef.current?.(); queueUnsubRef.current = null;
+      setQueueMode(false);
+      setState(prev => ({ ...prev, profiles: [], error: null }));
+      return;
+    }
+    if (!isQueueAvailable()) { setState(prev => ({ ...prev, error: 'La cola en vivo requiere Firebase configurado.' })); return; }
+    setQueueMode(true);
+    setSelectedRuts(new Set());
+    setState(prev => ({ ...prev, loading: true, error: null }));
+    queueUnsubRef.current = subscribeCriminalQueue(
+      profiles => setState(prev => ({ ...prev, profiles, loading: false })),
+      msg => setState(prev => ({ ...prev, loading: false, error: `Cola en vivo: ${msg}` })),
+    );
+  };
+
+  useEffect(() => () => { queueUnsubRef.current?.(); }, []);
 
   const handleBulkAction = (action: AnalysisAction | 'Pendiente') => {
     if (selectedRuts.size === 0) return;
-    setState(prev => ({ ...prev, profiles: prev.profiles.map(p => {
-      if (!selectedRuts.has(p.rut)) return p;
-      if (action === 'Pendiente') return { ...p, status: 'Pendiente' as const, selectedAction: '' as AnalysisAction };
-      return { ...p, selectedAction: action as AnalysisAction, status: 'Revisado' as const };
-    })}));
+    setState(prev => {
+      const profiles = prev.profiles.map(p => {
+        if (!selectedRuts.has(p.rut)) return p;
+        if (action === 'Pendiente') return { ...p, status: 'Pendiente' as const, selectedAction: '' as AnalysisAction };
+        return { ...p, selectedAction: action as AnalysisAction, status: 'Revisado' as const };
+      });
+      if (queueMode) {
+        profiles.filter(p => selectedRuts.has(p.rut) && p.customerId).forEach(p =>
+          updateQueueReview(p.customerId, { estado: p.status, accion: p.selectedAction, notas: p.notes }));
+      }
+      return { ...prev, profiles };
+    });
     setSelectedRuts(new Set());
   };
 
@@ -288,6 +331,13 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
               className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest border transition-all ${state.view === 'catalog' ? 'bg-indigo-600 text-white border-indigo-600 shadow-xl' : 'bg-slate-100 dark:bg-indigo-800 text-slate-700 dark:text-indigo-100 border-slate-200 dark:border-indigo-700 hover:bg-slate-200 dark:hover:bg-indigo-700'}`}
             >
               {state.view === 'catalog' ? <><LayoutDashboard size={16} /> Dashboard</> : <><BookOpen size={16} /> Catálogo</>}
+            </button>
+            <button
+              onClick={toggleQueueMode}
+              title="Cargar la cola de trabajo en vivo (Salesforce → Regcheq)"
+              className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest border transition-all ${queueMode ? 'bg-emerald-600 text-white border-emerald-600 shadow-xl' : 'bg-slate-100 dark:bg-indigo-800 text-slate-700 dark:text-indigo-100 border-slate-200 dark:border-indigo-700 hover:bg-slate-200 dark:hover:bg-indigo-700'}`}
+            >
+              <RadioTower size={16} /> {queueMode ? 'Cola en vivo ●' : 'Cola de trabajo'}
             </button>
             {/* Hidden file inputs */}
             <input type="file" accept=".xlsx,.xls,.csv" ref={emergencyFileRef} onChange={handleEmergencyUpload} className="hidden" />
