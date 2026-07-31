@@ -26,3 +26,9 @@ dist-ssr
 
 # Regcheq backend — credenciales locales
 regcheq/config.py
+
+# Proxy EmpresaDocs — lockfile generado por wrangler (se regenera con npm install)
+cloudflare/empresadocs-proxy/package-lock.json
+
+# Documentación técnica local (no versionada)
+REGCHEQ_MODULE_DOC.md
