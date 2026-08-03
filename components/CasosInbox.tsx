@@ -1,26 +1,31 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { subscribeCasos, isCasosAvailable, CasoSF } from '../services/casosService';
 import {
-  sendCaseUpdate, sfUpdateDisponible, PRODUCT_OPTIONS, SFCaseUpdate, SFUpdateResult,
+  sendCaseUpdate, sfUpdateDisponible, SFCaseUpdate, SFUpdateResult,
 } from '../services/salesforceCaseService';
+import { SF_CASE_FIELDS } from '../services/salesforceCaseFields';
 
-// Valores por defecto del formulario de respuesta, a partir del caso seleccionado.
-function defaultForm(c: CasoSF | null): SFCaseUpdate {
-  return {
-    CaseNumber: c?.numeroCaso ?? '',
-    C_Review__c: '',
-    Senales_de_Alerta__c: '',
-    C_Status__c: 'Approved',
-    CAT_CMPL__c: '',
-    Comments: '',
-    Country__c: c?.pais ?? '',
-    Product__c: PRODUCT_OPTIONS[0],
-    Sleep__c: null,
-    Tipo_de_Caso_Compliance__c: '',
-    Type: 'Compliance',
-    PEP__c: false,
-    'Customer ID': '',
-  };
+type FormState = Record<string, string | boolean>;
+
+// Formulario por defecto: todo vacío salvo el número de caso (prefijado) y PEP.
+function defaultForm(c: CasoSF | null): FormState {
+  const f: FormState = {};
+  for (const field of SF_CASE_FIELDS) f[field.apiName] = field.type === 'checkbox' ? false : '';
+  f.CaseNumber = c?.numeroCaso ?? '';
+  return f;
+}
+
+// Arma el payload final: CaseNumber + solo los campos con valor (omite vacíos),
+// más los checkboxes como booleanos. Así el analista cambia solo lo que quiere.
+function buildPayload(form: FormState): SFCaseUpdate {
+  const payload: SFCaseUpdate = { CaseNumber: String(form.CaseNumber ?? '').trim() };
+  for (const field of SF_CASE_FIELDS) {
+    if (field.apiName === 'CaseNumber') continue;
+    const v = form[field.apiName];
+    if (field.type === 'checkbox') payload[field.apiName] = !!v;
+    else if (typeof v === 'string' && v.trim() !== '') payload[field.apiName] = v;
+  }
+  return payload;
 }
 
 interface CasosInboxProps {
@@ -66,7 +71,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
 
   // ── Responder en Salesforce ────────────────────────────────────────────────
   const [showResponder, setShowResponder] = useState(false);
-  const [form, setForm] = useState<SFCaseUpdate>(defaultForm(null));
+  const [form, setForm] = useState<FormState>(defaultForm(null));
   const [sending, setSending] = useState(false);
   const [sfResult, setSfResult] = useState<SFUpdateResult | null>(null);
 
@@ -76,14 +81,14 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     setSfResult(null);
   }, [sel?.id]);
 
-  const setField = <K extends keyof SFCaseUpdate>(k: K, v: SFCaseUpdate[K]) =>
+  const setField = (k: string, v: string | boolean) =>
     setForm(f => ({ ...f, [k]: v }));
 
   const enviarRespuesta = async () => {
     setSending(true);
     setSfResult(null);
     try {
-      const res = await sendCaseUpdate(form);
+      const res = await sendCaseUpdate(buildPayload(form));
       setSfResult(res);
     } catch (e) {
       setSfResult({ ok: false, status: 0, errors: [(e as Error).message], raw: null });
@@ -215,66 +220,46 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                         </p>
                       )}
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        {([
-                          ['CaseNumber', 'Número del caso'],
-                          ['C_Review__c', 'C_Review__c'],
-                          ['Senales_de_Alerta__c', 'Señales de alerta'],
-                          ['C_Status__c', 'Estado (C_Status__c)'],
-                          ['CAT_CMPL__c', 'CAT_CMPL__c'],
-                          ['Country__c', 'País'],
-                          ['Tipo_de_Caso_Compliance__c', 'Tipo de caso compliance'],
-                          ['Type', 'Type'],
-                          ['Customer ID', 'Customer ID'],
-                          ['Sleep__c', 'Sleep__c'],
-                        ] as [keyof SFCaseUpdate, string][]).map(([key, label]) => (
-                          <label key={String(key)} className="text-xs">
-                            <span className="block font-semibold text-slate-500 dark:text-slate-400 mb-1">{label}</span>
-                            <input
-                              value={(form[key] as string) ?? ''}
-                              onChange={e => setField(key, e.target.value)}
-                              className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1.5 text-sm outline-none focus:border-sky-400"
-                            />
-                          </label>
-                        ))}
-
-                        {/* Product__c — picklist (labels válidos de Salesforce) */}
-                        <label className="text-xs">
-                          <span className="block font-semibold text-slate-500 dark:text-slate-400 mb-1">Producto (Product__c)</span>
-                          <select
-                            value={form.Product__c ?? ''}
-                            onChange={e => setField('Product__c', e.target.value)}
-                            className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1.5 text-sm outline-none focus:border-sky-400"
-                          >
-                            {PRODUCT_OPTIONS.map(p => <option key={p} value={p}>{p}</option>)}
-                          </select>
-                        </label>
-
-                        {/* PEP__c — checkbox */}
-                        <label className="text-xs flex items-end gap-2 pb-1.5">
-                          <input
-                            type="checkbox"
-                            checked={!!form.PEP__c}
-                            onChange={e => setField('PEP__c', e.target.checked)}
-                            className="w-4 h-4"
-                          />
-                          <span className="font-semibold text-slate-500 dark:text-slate-400">PEP__c (Persona Expuesta)</span>
-                        </label>
+                        {SF_CASE_FIELDS.filter(f => f.type !== 'textarea').map(field => {
+                          const val = form[field.apiName];
+                          const inputCls = 'w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1.5 text-sm outline-none focus:border-sky-400';
+                          return (
+                            <label key={field.apiName} className="text-xs">
+                              <span className="block font-semibold text-slate-500 dark:text-slate-400 mb-1">{field.label}</span>
+                              {field.type === 'picklist' ? (
+                                <select value={String(val ?? '')} onChange={e => setField(field.apiName, e.target.value)} className={inputCls}>
+                                  <option value="">— (sin cambio) —</option>
+                                  {field.options!.map(o => <option key={o} value={o}>{o}</option>)}
+                                </select>
+                              ) : field.type === 'checkbox' ? (
+                                <span className="flex items-center gap-2 h-[34px]">
+                                  <input type="checkbox" checked={!!val} onChange={e => setField(field.apiName, e.target.checked)} className="w-4 h-4" />
+                                  <span className="text-slate-500 dark:text-slate-400">Sí</span>
+                                </span>
+                              ) : (
+                                <input value={String(val ?? '')} onChange={e => setField(field.apiName, e.target.value)} className={inputCls} />
+                              )}
+                            </label>
+                          );
+                        })}
                       </div>
 
-                      {/* Comments — textarea ancho completo */}
-                      <label className="text-xs block mt-3">
-                        <span className="block font-semibold text-slate-500 dark:text-slate-400 mb-1">Comentarios</span>
-                        <textarea
-                          value={form.Comments ?? ''}
-                          onChange={e => setField('Comments', e.target.value)}
-                          rows={2}
-                          className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1.5 text-sm outline-none focus:border-sky-400"
-                        />
-                      </label>
+                      {/* Campos textarea a ancho completo */}
+                      {SF_CASE_FIELDS.filter(f => f.type === 'textarea').map(field => (
+                        <label key={field.apiName} className="text-xs block mt-3">
+                          <span className="block font-semibold text-slate-500 dark:text-slate-400 mb-1">{field.label}</span>
+                          <textarea
+                            value={String(form[field.apiName] ?? '')}
+                            onChange={e => setField(field.apiName, e.target.value)}
+                            rows={2}
+                            className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1.5 text-sm outline-none focus:border-sky-400"
+                          />
+                        </label>
+                      ))}
 
                       <button
                         onClick={enviarRespuesta}
-                        disabled={sending || !sfUpdateDisponible() || !form.CaseNumber?.trim()}
+                        disabled={sending || !sfUpdateDisponible() || !String(form.CaseNumber ?? '').trim()}
                         className="mt-4 px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 disabled:opacity-50 text-white text-sm font-bold"
                       >
                         {sending ? 'Enviando…' : 'Enviar a Salesforce'}

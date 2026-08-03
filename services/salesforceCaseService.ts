@@ -7,33 +7,11 @@ const PROXY = (process.env.EMPRESADOCS_PROXY_URL || '').replace(/\/$/, '');
 
 export const sfUpdateDisponible = (): boolean => !!PROXY;
 
-// Valores válidos del picklist Product__c (los devolvió Salesforce). Ojo: emoji real.
-export const PRODUCT_OPTIONS = [
-  '👤 Cuenta Perfil',
-  '💰 Cuenta Global',
-  '💵  Exchange',
-  '💸 Transferencias',
-  '👥 Pagos',
-  '💳 Tarjeta Digital',
-  '💳 Tarjeta Física',
-  '❌ S/ Producto',
-];
-
-export interface SFCaseUpdate {
+// Los campos y sus valores válidos viven en el MANTENEDOR: salesforceCaseFields.ts
+export type SFCaseUpdate = {
   CaseNumber: string;
-  C_Review__c?: string;
-  Senales_de_Alerta__c?: string;
-  C_Status__c?: string;
-  CAT_CMPL__c?: string;
-  Comments?: string;
-  Country__c?: string;
-  Product__c?: string;
-  Sleep__c?: string | null;
-  Tipo_de_Caso_Compliance__c?: string;
-  Type?: string;
   PEP__c?: boolean;
-  'Customer ID'?: string;
-}
+} & Record<string, string | boolean | null | undefined>;
 
 export interface SFUpdateResult {
   ok: boolean;                 // success de Salesforce (o 2xx sin errores)
