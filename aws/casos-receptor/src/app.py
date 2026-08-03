@@ -155,9 +155,10 @@ def procesar_caso(caso: dict) -> bool:
 
 # ── Handler ───────────────────────────────────────────────────────────────────
 def lambda_handler(event, context):
-    headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
-    secret = _api_secret()
-    if not secret or headers.get("x-api-secret") != secret:
+    headers = {k.lower().strip(): v for k, v in (event.get("headers") or {}).items()}
+    secret = (_api_secret() or "").strip()
+    recibido = (headers.get("x-api-secret") or "").strip()
+    if not secret or recibido != secret:
         return _respuesta(401, {"error": "No autorizado"})
 
     try:
