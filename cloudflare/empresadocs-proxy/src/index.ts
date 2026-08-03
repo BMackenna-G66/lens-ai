@@ -19,6 +19,10 @@
 
 interface Env {
   REGCHEQ_SESSION_TOKEN?: string;
+  // Salesforce (case-update): OAuth client_credentials + PATCH Apex REST.
+  SF_CLIENT_ID?: string;
+  SF_CLIENT_SECRET?: string;
+  SF_INSTANCE_URL?: string; // opcional; default abajo
 }
 
 const ALLOWED_ORIGINS = [
@@ -30,6 +34,8 @@ const ALLOWED_ORIGINS = [
 const ALLOWED_HOST_SUFFIXES = ['.amazonaws.com']; // anti-SSRF para /relay
 const INSPEKTOR_BASE = 'https://inspektor.datalaft.com:2121/api';
 const REGCHEQ_INTERNAL_BASE = 'https://api.regcheq.com';
+const SF_INSTANCE_DEFAULT = 'https://global66--katherine.sandbox.my.salesforce.com';
+const SF_CASE_UPDATE_PATH = '/services/apexrest/compliance/case-update/v1/';
 
 // Decodifica el payload de un JWT (base64url) sin validar la firma — solo para
 // leer companyId y exp del token de sesión.
@@ -110,6 +116,62 @@ export default {
       headers.set('Content-Type', 'application/json');
       headers.set('Cache-Control', 'no-store');
       return new Response(text, { status: upstream.status, headers });
+    }
+
+    // ── Salesforce case-update: POST /salesforce/case-update ────────────────────
+    //   Body = payload del PATCH (JSON con CaseNumber + campos). El Worker hace
+    //   OAuth client_credentials (secrets SF_CLIENT_ID/SF_CLIENT_SECRET) y luego
+    //   el PATCH al Apex REST. Devuelve la respuesta de Salesforce.
+    if (url.pathname === '/salesforce/case-update') {
+      if (request.method !== 'POST') return jsonError('Método no permitido', 405, cors);
+      const clientId = env.SF_CLIENT_ID;
+      const clientSecret = env.SF_CLIENT_SECRET;
+      if (!clientId || !clientSecret) return jsonError('Faltan secrets SF_CLIENT_ID/SF_CLIENT_SECRET en el Worker', 500, cors);
+      const instance = (env.SF_INSTANCE_URL || SF_INSTANCE_DEFAULT).replace(/\/$/, '');
+
+      let payload: Record<string, unknown>;
+      try { payload = await request.json(); } catch { return jsonError('Body JSON inválido', 400, cors); }
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return jsonError('Se espera un objeto JSON', 400, cors);
+      if (!payload['CaseNumber']) return jsonError('Falta CaseNumber en el body', 400, cors);
+
+      // 1) OAuth client_credentials → access_token (+ instance_url).
+      let token = '';
+      let patchInstance = instance;
+      try {
+        const form = new URLSearchParams({ grant_type: 'client_credentials', client_id: clientId, client_secret: clientSecret });
+        const tokRes = await fetchTimeout(`${instance}/services/oauth2/token`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: form.toString(),
+        }, 20000);
+        const tokText = await tokRes.text();
+        if (!tokRes.ok) {
+          return new Response(JSON.stringify({ error: 'OAuth de Salesforce falló', status: tokRes.status, detalle: tokText.slice(0, 500) }),
+            { status: 502, headers: { ...cors, 'Content-Type': 'application/json' } });
+        }
+        const tok = JSON.parse(tokText) as { access_token?: string; instance_url?: string };
+        token = tok.access_token || '';
+        if (tok.instance_url) patchInstance = tok.instance_url.replace(/\/$/, '');
+        if (!token) return jsonError('Salesforce no devolvió access_token', 502, cors);
+      } catch (e) {
+        return jsonError(`No se pudo obtener token de Salesforce: ${e instanceof Error ? e.message : String(e)}`, 502, cors);
+      }
+
+      // 2) PATCH al Apex REST con el payload.
+      try {
+        const patchRes = await fetchTimeout(`${patchInstance}${SF_CASE_UPDATE_PATH}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'Authorization': `Bearer ${token}` },
+          body: JSON.stringify(payload),
+        }, 30000);
+        const text = await patchRes.text();
+        const headers = new Headers(cors);
+        headers.set('Content-Type', 'application/json');
+        headers.set('Cache-Control', 'no-store');
+        return new Response(text || JSON.stringify({ ok: patchRes.ok, status: patchRes.status }), { status: patchRes.status, headers });
+      } catch (e) {
+        return jsonError(`PATCH a Salesforce falló: ${e instanceof Error ? e.message : String(e)}`, 502, cors);
+      }
     }
 
     // ── Relay Inspektor: /inspektor/<path> → INSPEKTOR_BASE/<path> ──────────────
