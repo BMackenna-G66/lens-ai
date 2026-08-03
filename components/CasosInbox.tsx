@@ -86,10 +86,10 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     if (/DETIENE\s+TX/i.test(a)) return 'remesa';
     return 'otros';
   };
-  // Extrae "TX <n>" del asunto para la columna "remesa".
+  // Extrae SOLO el número de la TX del asunto para la columna "remesa".
   const extraerRemesa = (asunto: string): string => {
-    const m = (asunto || '').match(/TX\s*\d+/i);
-    return m ? m[0].replace(/\s+/g, ' ').toUpperCase() : '';
+    const m = (asunto || '').match(/TX\s*(\d+)/i);
+    return m ? m[1] : '';
   };
 
   // Agrupa en colas y ordena cada una por fecha de llegada (asc = FIFO).
