@@ -1,5 +1,27 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { subscribeCasos, isCasosAvailable, CasoSF } from '../services/casosService';
+import {
+  sendCaseUpdate, sfUpdateDisponible, PRODUCT_OPTIONS, SFCaseUpdate, SFUpdateResult,
+} from '../services/salesforceCaseService';
+
+// Valores por defecto del formulario de respuesta, a partir del caso seleccionado.
+function defaultForm(c: CasoSF | null): SFCaseUpdate {
+  return {
+    CaseNumber: c?.numeroCaso ?? '',
+    C_Review__c: '',
+    Senales_de_Alerta__c: '',
+    C_Status__c: 'Approved',
+    CAT_CMPL__c: '',
+    Comments: '',
+    Country__c: c?.pais ?? '',
+    Product__c: PRODUCT_OPTIONS[0],
+    Sleep__c: null,
+    Tipo_de_Caso_Compliance__c: '',
+    Type: 'Compliance',
+    PEP__c: false,
+    'Customer ID': '',
+  };
+}
 
 interface CasosInboxProps {
   onBack: () => void;
@@ -41,6 +63,34 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   }, [casos, filtro]);
 
   const sel = useMemo(() => casos.find(c => c.id === selId) ?? filtrados[0] ?? null, [casos, filtrados, selId]);
+
+  // ── Responder en Salesforce ────────────────────────────────────────────────
+  const [showResponder, setShowResponder] = useState(false);
+  const [form, setForm] = useState<SFCaseUpdate>(defaultForm(null));
+  const [sending, setSending] = useState(false);
+  const [sfResult, setSfResult] = useState<SFUpdateResult | null>(null);
+
+  // Al cambiar de caso, reinicia el formulario con los datos de ese caso.
+  useEffect(() => {
+    setForm(defaultForm(sel));
+    setSfResult(null);
+  }, [sel?.id]);
+
+  const setField = <K extends keyof SFCaseUpdate>(k: K, v: SFCaseUpdate[K]) =>
+    setForm(f => ({ ...f, [k]: v }));
+
+  const enviarRespuesta = async () => {
+    setSending(true);
+    setSfResult(null);
+    try {
+      const res = await sendCaseUpdate(form);
+      setSfResult(res);
+    } catch (e) {
+      setSfResult({ ok: false, status: 0, errors: [(e as Error).message], raw: null });
+    } finally {
+      setSending(false);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-900 text-slate-800 dark:text-slate-100 p-4 md:p-8">
@@ -147,6 +197,114 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                     ))}
                   </tbody>
                 </table>
+
+                {/* ── Responder en Salesforce ─────────────────────────────── */}
+                <div className="mt-6 border-t border-slate-200 dark:border-slate-700 pt-4">
+                  <button
+                    onClick={() => setShowResponder(s => !s)}
+                    className="flex items-center gap-2 text-sm font-bold text-sky-700 dark:text-sky-400"
+                  >
+                    <span>{showResponder ? '▾' : '▸'}</span> Responder en Salesforce
+                  </button>
+
+                  {showResponder && (
+                    <div className="mt-4">
+                      {!sfUpdateDisponible() && (
+                        <p className="text-xs text-amber-600 dark:text-amber-400 mb-3">
+                          Proxy no configurado en esta instancia (EMPRESADOCS_PROXY_URL).
+                        </p>
+                      )}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        {([
+                          ['CaseNumber', 'Número del caso'],
+                          ['C_Review__c', 'C_Review__c'],
+                          ['Senales_de_Alerta__c', 'Señales de alerta'],
+                          ['C_Status__c', 'Estado (C_Status__c)'],
+                          ['CAT_CMPL__c', 'CAT_CMPL__c'],
+                          ['Country__c', 'País'],
+                          ['Tipo_de_Caso_Compliance__c', 'Tipo de caso compliance'],
+                          ['Type', 'Type'],
+                          ['Customer ID', 'Customer ID'],
+                          ['Sleep__c', 'Sleep__c'],
+                        ] as [keyof SFCaseUpdate, string][]).map(([key, label]) => (
+                          <label key={String(key)} className="text-xs">
+                            <span className="block font-semibold text-slate-500 dark:text-slate-400 mb-1">{label}</span>
+                            <input
+                              value={(form[key] as string) ?? ''}
+                              onChange={e => setField(key, e.target.value)}
+                              className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1.5 text-sm outline-none focus:border-sky-400"
+                            />
+                          </label>
+                        ))}
+
+                        {/* Product__c — picklist (labels válidos de Salesforce) */}
+                        <label className="text-xs">
+                          <span className="block font-semibold text-slate-500 dark:text-slate-400 mb-1">Producto (Product__c)</span>
+                          <select
+                            value={form.Product__c ?? ''}
+                            onChange={e => setField('Product__c', e.target.value)}
+                            className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1.5 text-sm outline-none focus:border-sky-400"
+                          >
+                            {PRODUCT_OPTIONS.map(p => <option key={p} value={p}>{p}</option>)}
+                          </select>
+                        </label>
+
+                        {/* PEP__c — checkbox */}
+                        <label className="text-xs flex items-end gap-2 pb-1.5">
+                          <input
+                            type="checkbox"
+                            checked={!!form.PEP__c}
+                            onChange={e => setField('PEP__c', e.target.checked)}
+                            className="w-4 h-4"
+                          />
+                          <span className="font-semibold text-slate-500 dark:text-slate-400">PEP__c (Persona Expuesta)</span>
+                        </label>
+                      </div>
+
+                      {/* Comments — textarea ancho completo */}
+                      <label className="text-xs block mt-3">
+                        <span className="block font-semibold text-slate-500 dark:text-slate-400 mb-1">Comentarios</span>
+                        <textarea
+                          value={form.Comments ?? ''}
+                          onChange={e => setField('Comments', e.target.value)}
+                          rows={2}
+                          className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1.5 text-sm outline-none focus:border-sky-400"
+                        />
+                      </label>
+
+                      <button
+                        onClick={enviarRespuesta}
+                        disabled={sending || !sfUpdateDisponible() || !form.CaseNumber?.trim()}
+                        className="mt-4 px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 disabled:opacity-50 text-white text-sm font-bold"
+                      >
+                        {sending ? 'Enviando…' : 'Enviar a Salesforce'}
+                      </button>
+
+                      {/* Resultado */}
+                      {sfResult && (
+                        <div className={`mt-4 rounded-xl px-4 py-3 text-sm border ${sfResult.ok
+                          ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-800/50 text-emerald-800 dark:text-emerald-300'
+                          : 'bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-800/50 text-red-800 dark:text-red-300'}`}>
+                          <p className="font-bold">
+                            {sfResult.ok ? '✅ Caso actualizado en Salesforce' : `❌ No se pudo actualizar (HTTP ${sfResult.status})`}
+                          </p>
+                          {sfResult.errors?.length ? (
+                            <ul className="list-disc ml-5 mt-1">{sfResult.errors.map((e, i) => <li key={i}>{e}</li>)}</ul>
+                          ) : null}
+                          {sfResult.warnings?.length ? (
+                            <p className="mt-1 text-amber-700 dark:text-amber-400">⚠️ {sfResult.warnings.join('; ')}</p>
+                          ) : null}
+                          {sfResult.updatedFields?.length ? (
+                            <p className="mt-1 text-xs opacity-80">Campos actualizados: {sfResult.updatedFields.join(', ')}</p>
+                          ) : null}
+                          {sfResult.closed !== undefined && (
+                            <p className="mt-1 text-xs opacity-80">Caso cerrado: {sfResult.closed ? 'sí' : 'no'}{sfResult.caseId ? ` · ${sfResult.caseId}` : ''}</p>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
               </>
             ) : (
               <p className="text-sm text-slate-400 py-12 text-center">Seleccioná un caso.</p>
