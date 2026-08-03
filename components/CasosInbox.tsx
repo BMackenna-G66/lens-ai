@@ -7,6 +7,15 @@ import { SF_CASE_FIELDS } from '../services/salesforceCaseFields';
 
 type FormState = Record<string, string | boolean>;
 
+// Colas de trabajo (clasificación de casos entrantes por asunto).
+type QueueKey = 'ofac' | 'remesa' | 'otros';
+type QueuedCaso = CasoSF & { remesa: string };
+const QUEUES: { key: QueueKey; label: string }[] = [
+  { key: 'ofac', label: 'Coincidencia OFAC' },
+  { key: 'remesa', label: 'Remesa' },
+  { key: 'otros', label: 'Otros' },
+];
+
 // Formulario por defecto: todo vacío salvo el número de caso (prefijado) y PEP.
 function defaultForm(c: CasoSF | null): FormState {
   const f: FormState = {};
@@ -40,12 +49,20 @@ const fmtFecha = (iso: string): string => {
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString('es-CL', { dateStyle: 'short', timeStyle: 'short' });
 };
 
+// Texto plano de un valor del payload para una celda de tabla.
+const cellText = (v: unknown): string => {
+  if (v === null || v === undefined || v === '') return '—';
+  if (typeof v === 'object') return JSON.stringify(v);
+  return String(v);
+};
+
 export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onToggleDarkMode }) => {
   const [casos, setCasos] = useState<CasoSF[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [selId, setSelId] = useState<string | null>(null);
   const [filtro, setFiltro] = useState('');
+  const [activeQueue, setActiveQueue] = useState<QueueKey>('ofac');
 
   useEffect(() => {
     if (!isCasosAvailable()) {
@@ -60,14 +77,50 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     return () => unsub();
   }, []);
 
+  // ── Clasificación en colas por asunto ──────────────────────────────────────
+  // OFAC: asunto = "Coincidencia OFAC" (exacto). Remesa: asunto del bot que
+  // detiene una TX ("...DETIENE TX <n>..."). Resto → "Otros" (no se pierde nada).
+  const clasificar = (c: QueuedCaso): QueueKey => {
+    const a = (c.asunto || '').trim();
+    if (a.toLowerCase() === 'coincidencia ofac') return 'ofac';
+    if (/DETIENE\s+TX/i.test(a)) return 'remesa';
+    return 'otros';
+  };
+  // Extrae "TX <n>" del asunto para la columna "remesa".
+  const extraerRemesa = (asunto: string): string => {
+    const m = (asunto || '').match(/TX\s*\d+/i);
+    return m ? m[0].replace(/\s+/g, ' ').toUpperCase() : '';
+  };
+
+  // Agrupa en colas y ordena cada una por fecha de llegada (asc = FIFO).
+  const colas = useMemo(() => {
+    const g: Record<QueueKey, QueuedCaso[]> = { ofac: [], remesa: [], otros: [] };
+    for (const c of casos) {
+      const qc: QueuedCaso = { ...c, remesa: extraerRemesa(c.asunto) };
+      g[clasificar(qc)].push(qc);
+    }
+    (Object.keys(g) as QueueKey[]).forEach(k =>
+      g[k].sort((a, b) => (a.recibidoEn || '').localeCompare(b.recibidoEn || '')));
+    return g;
+  }, [casos]);
+
+  // Filtro aplicado dentro de la cola activa.
   const filtrados = useMemo(() => {
     const q = filtro.trim().toLowerCase();
-    if (!q) return casos;
-    return casos.filter(c =>
-      [c.numeroCaso, c.asunto, c.nombreCuenta, c.pais].some(v => (v || '').toLowerCase().includes(q)));
-  }, [casos, filtro]);
+    const base = colas[activeQueue];
+    if (!q) return base;
+    return base.filter(c =>
+      [c.numeroCaso, c.asunto, c.nombreCuenta, c.pais, c.remesa].some(v => (v || '').toLowerCase().includes(q)));
+  }, [colas, activeQueue, filtro]);
 
-  const sel = useMemo(() => casos.find(c => c.id === selId) ?? filtrados[0] ?? null, [casos, filtrados, selId]);
+  // Columnas dinámicas = unión de TODOS los campos recibidos en la cola activa.
+  const columnas = useMemo(() => {
+    const keys: string[] = [];
+    for (const c of filtrados) for (const k of Object.keys(c.datos || {})) if (!keys.includes(k)) keys.push(k);
+    return keys;
+  }, [filtrados]);
+
+  const sel = useMemo(() => filtrados.find(c => c.id === selId) ?? null, [filtrados, selId]);
 
   // ── Responder en Salesforce ────────────────────────────────────────────────
   const [showResponder, setShowResponder] = useState(false);
@@ -120,21 +173,46 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
         </button>
       </header>
 
-      {/* Barra de estado / filtro */}
-      <div className="flex items-center gap-3 mb-4">
-        <input
-          value={filtro}
-          onChange={e => setFiltro(e.target.value)}
-          placeholder="Filtrar por número, asunto, cuenta o país…"
-          className="flex-1 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-2 text-sm outline-none focus:border-indigo-400"
-        />
-        <span className="text-xs font-semibold text-slate-500 dark:text-slate-400 whitespace-nowrap">
-          {filtrados.length} / {casos.length} casos
-        </span>
-        <span className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-emerald-600 dark:text-emerald-400">
-          <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" /> en vivo
-        </span>
-      </div>
+      {/* Tabs de colas */}
+      {!loading && !error && casos.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 mb-4">
+          {QUEUES.filter(q => q.key !== 'otros' || colas.otros.length > 0).map(q => {
+            const activa = activeQueue === q.key;
+            return (
+              <button
+                key={q.key}
+                onClick={() => { setActiveQueue(q.key); setSelId(null); }}
+                className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold transition-colors border ${activa
+                  ? 'bg-sky-600 text-white border-sky-600'
+                  : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:border-sky-300'}`}
+              >
+                {q.label}
+                <span className={`text-[11px] px-1.5 py-0.5 rounded-full ${activa ? 'bg-white/20' : 'bg-slate-100 dark:bg-slate-700'}`}>
+                  {colas[q.key].length}
+                </span>
+              </button>
+            );
+          })}
+          <span className="ml-auto flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-emerald-600 dark:text-emerald-400">
+            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" /> en vivo
+          </span>
+        </div>
+      )}
+
+      {/* Filtro */}
+      {!loading && !error && casos.length > 0 && (
+        <div className="flex items-center gap-3 mb-4">
+          <input
+            value={filtro}
+            onChange={e => setFiltro(e.target.value)}
+            placeholder="Filtrar en esta cola por número, asunto, cuenta, país o remesa…"
+            className="flex-1 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-2 text-sm outline-none focus:border-indigo-400"
+          />
+          <span className="text-xs font-semibold text-slate-500 dark:text-slate-400 whitespace-nowrap">
+            {filtrados.length} caso(s) en la cola
+          </span>
+        </div>
+      )}
 
       {loading && <p className="text-sm text-slate-500 dark:text-slate-400 py-12 text-center">Cargando bandeja…</p>}
       {error && (
@@ -150,35 +228,49 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       )}
 
       {!loading && !error && casos.length > 0 && (
-        <div className="grid grid-cols-1 lg:grid-cols-[380px_1fr] gap-4">
-          {/* Lista */}
-          <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl overflow-hidden max-h-[70vh] overflow-y-auto">
-            {filtrados.map(c => {
-              const activo = sel?.id === c.id;
-              return (
-                <button
-                  key={c.id}
-                  onClick={() => setSelId(c.id)}
-                  className={`w-full text-left px-4 py-3 border-b border-slate-100 dark:border-slate-700/50 transition-colors ${activo ? 'bg-indigo-50 dark:bg-indigo-950/40' : 'hover:bg-slate-50 dark:hover:bg-slate-700/30'}`}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-bold text-sm text-slate-900 dark:text-white truncate">{c.numeroCaso || '(sin número)'}</span>
-                    {c.pais && <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">{c.pais}</span>}
-                  </div>
-                  <p className="text-xs text-slate-600 dark:text-slate-400 truncate mt-0.5">{c.asunto || '—'}</p>
-                  <div className="flex items-center justify-between mt-1">
-                    <span className="text-[11px] text-slate-500 dark:text-slate-500 truncate">{c.nombreCuenta}</span>
-                    <span className="text-[10px] text-slate-400 dark:text-slate-500 whitespace-nowrap">{fmtFecha(c.recibidoEn)}</span>
-                  </div>
-                </button>
-              );
-            })}
+        <>
+          {/* Tabla de la cola de trabajo (ordenada por fecha de llegada) */}
+          <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl overflow-x-auto max-h-[55vh] overflow-y-auto">
+            <table className="w-full text-xs">
+              <thead className="sticky top-0 z-10 bg-slate-50 dark:bg-slate-800">
+                <tr className="text-left text-slate-500 dark:text-slate-400">
+                  <th className="px-3 py-2 font-bold whitespace-nowrap">Fecha llegada ↑</th>
+                  {activeQueue === 'remesa' && <th className="px-3 py-2 font-bold whitespace-nowrap">remesa</th>}
+                  {columnas.map(k => <th key={k} className="px-3 py-2 font-bold whitespace-nowrap">{k}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {filtrados.length === 0 && (
+                  <tr>
+                    <td colSpan={columnas.length + (activeQueue === 'remesa' ? 2 : 1)} className="py-8 text-center text-slate-400">
+                      Sin casos en esta cola.
+                    </td>
+                  </tr>
+                )}
+                {filtrados.map(c => {
+                  const activo = sel?.id === c.id;
+                  return (
+                    <tr
+                      key={c.id}
+                      onClick={() => setSelId(c.id)}
+                      className={`cursor-pointer border-b border-slate-100 dark:border-slate-700/50 ${activo ? 'bg-sky-50 dark:bg-sky-950/40' : 'hover:bg-slate-50 dark:hover:bg-slate-700/30'}`}
+                    >
+                      <td className="px-3 py-2 whitespace-nowrap text-slate-500 dark:text-slate-400">{fmtFecha(c.recibidoEn)}</td>
+                      {activeQueue === 'remesa' && <td className="px-3 py-2 whitespace-nowrap font-bold text-sky-700 dark:text-sky-400">{c.remesa || '—'}</td>}
+                      {columnas.map(k => {
+                        const t = cellText(c.datos[k]);
+                        return <td key={k} title={t} className="px-3 py-2 max-w-[220px] truncate text-slate-700 dark:text-slate-200">{t}</td>;
+                      })}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
 
-          {/* Detalle */}
-          <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl p-5 max-h-[70vh] overflow-y-auto">
-            {sel ? (
-              <>
+          {/* Detalle + responder (al seleccionar una fila) */}
+          {sel && (
+            <div className="mt-4 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl p-5">
                 <div className="flex items-center justify-between mb-4">
                   <div>
                     <h2 className="text-lg font-black text-slate-900 dark:text-white">{sel.numeroCaso || '(sin número)'}</h2>
@@ -290,12 +382,9 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                     </div>
                   )}
                 </div>
-              </>
-            ) : (
-              <p className="text-sm text-slate-400 py-12 text-center">Seleccioná un caso.</p>
-            )}
-          </div>
-        </div>
+            </div>
+          )}
+        </>
       )}
     </div>
   );
