@@ -1,0 +1,5 @@
+# Dependencias del receptor. Todas son wheels puros (sin compilación nativa),
+# así `sam build` funciona en cualquier OS sin Docker.
+# boto3 ya viene en el runtime de Lambda → no se incluye.
+google-auth>=2.28,<3
+requests>=2.31,<3

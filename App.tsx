@@ -12,12 +12,13 @@ import { AdminModule } from './components/AdminModule';
 import { RegcheqTool } from './components/RegcheqTool';
 import { Lens360 } from './components/Lens360';
 import { BatchAnalyzer } from './components/BatchAnalyzer';
+import { CasosInbox } from './components/CasosInbox';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { IconFiles, IconAlertTriangle, IconWallet, IconScale } from './components/IconComponents';
 import { trackModuleVisit, ModuleKey } from './services/analyticsService';
 
 type TabKey = 'dashboard' | 'analyzer' | 'batch' | 'tools' | 'crypto' | 'compliance';
-type Suite = 'compliance' | 'criminal' | 'admin' | 'general-dashboard' | 'regcheq' | 'lens360' | null;
+type Suite = 'compliance' | 'criminal' | 'admin' | 'general-dashboard' | 'regcheq' | 'lens360' | 'casos' | null;
 
 const AppContent: React.FC = () => {
   const { user, isLoading: authLoading, firebaseReady, profileLoading, role, userProfile } = useAuth();
@@ -105,6 +106,11 @@ const AppContent: React.FC = () => {
   } else if (activeSuite === 'criminal') {
     mainContent = (userProfile?.modules?.criminal ?? true)
       ? <CriminalApp onBack={() => setActiveSuite(null)} darkMode={darkMode} onToggleDarkMode={() => setDarkMode(d => !d)} />
+      : <AccessDenied msg="Módulo desactivado por tu administrador" />;
+
+  } else if (activeSuite === 'casos') {
+    mainContent = (userProfile?.modules?.casos ?? true)
+      ? <CasosInbox onBack={() => setActiveSuite(null)} darkMode={darkMode} onToggleDarkMode={() => setDarkMode(d => !d)} />
       : <AccessDenied msg="Módulo desactivado por tu administrador" />;
 
   } else {

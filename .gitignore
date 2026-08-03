@@ -26,3 +26,10 @@ dist-ssr
 
 # Regcheq backend — credenciales locales
 regcheq/config.py
+
+# AWS SAM build artifacts
+aws/**/.aws-sam/
+
+# Python
+__pycache__/
+*.pyc

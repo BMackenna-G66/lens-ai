@@ -29,6 +29,7 @@ export interface ModulePermissions {
   generalDashboard: boolean;
   regcheq: boolean;
   lens360: boolean;
+  casos?: boolean;   // Bandeja de Casos (opcional; default habilitado)
 }
 
 export interface UserProfile {

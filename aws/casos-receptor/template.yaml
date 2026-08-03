@@ -1,0 +1,65 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Receptor de casos OFAC/PEP + Transacciones Bot. Salesforce hace POST /casos y
+  la Lambda persiste cada caso en Firestore (lens-ai-9da63), que Lens lee en vivo.
+
+Parameters:
+  ApiSecretValue:
+    Type: String
+    NoEcho: true
+    Description: Secreto del header x-api-secret (se guarda como env var de la Lambda).
+  FirebaseSaB64:
+    Type: String
+    NoEcho: true
+    Description: Service account de Firebase (JSON) codificado en base64.
+  FirestoreProject:
+    Type: String
+    Default: lens-ai-9da63
+  FirestoreCollection:
+    Type: String
+    Default: casos_sf
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 10
+    MemorySize: 256
+    Architectures: [arm64]
+
+Resources:
+  CasosReceptorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: ofac-pep-trx-bot-receptor
+      Handler: app.lambda_handler
+      CodeUri: src/
+      Description: Recibe casos de compliance desde Salesforce y los guarda en Firestore.
+      Environment:
+        Variables:
+          # Modo env-var (SSM no disponible por permisos). app.py usa estos si
+          # SSM_*_PARAM está vacío. Migrable a SSM cuando se habiliten permisos.
+          API_SECRET: !Ref ApiSecretValue
+          FIREBASE_SA_JSON: !Ref FirebaseSaB64
+          FIRESTORE_PROJECT: !Ref FirestoreProject
+          FIRESTORE_COLLECTION: !Ref FirestoreCollection
+      # Endpoint HTTPS nativo de la Lambda (sin API Gateway, que el rol no puede
+      # crear). Auth NONE a nivel infra: la protección es el header x-api-secret
+      # que valida el handler. Salesforce hace POST a esta URL (path libre).
+      FunctionUrlConfig:
+        AuthType: NONE
+        Cors:
+          AllowOrigins: ['*']
+          AllowMethods: [POST]
+          AllowHeaders: [content-type, x-api-secret]
+
+Outputs:
+  EndpointUrl:
+    Description: URL del endpoint (Function URL). Salesforce hace POST acá.
+    Value: !GetAtt CasosReceptorFunctionUrl.FunctionUrl
+  FunctionName:
+    Description: Nombre de la función Lambda
+    Value: !Ref CasosReceptorFunction
+  LogGroup:
+    Description: CloudWatch Log Group
+    Value: !Sub '/aws/lambda/${CasosReceptorFunction}'
