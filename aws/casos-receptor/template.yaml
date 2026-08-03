@@ -1,0 +1,73 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Receptor de casos OFAC/PEP + Transacciones Bot. Salesforce hace POST /casos y
+  la Lambda persiste cada caso en Firestore (lens-ai-9da63), que Lens lee en vivo.
+
+Parameters:
+  ApiSecretParam:
+    Type: String
+    Default: /casos-receptor/api-secret
+    Description: Nombre del parámetro SSM (SecureString) con el API secret (header x-api-secret).
+  FirebaseSaParam:
+    Type: String
+    Default: /casos-receptor/firebase-sa
+    Description: Nombre del parámetro SSM (SecureString) con el JSON del service account de Firebase.
+  FirestoreProject:
+    Type: String
+    Default: lens-ai-9da63
+  FirestoreCollection:
+    Type: String
+    Default: casos_sf
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 10
+    MemorySize: 256
+    Architectures: [arm64]
+
+Resources:
+  CasosReceptorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: ofac-pep-trx-bot-receptor
+      Handler: app.lambda_handler
+      CodeUri: src/
+      Description: Recibe casos de compliance desde Salesforce y los guarda en Firestore.
+      Environment:
+        Variables:
+          SSM_API_SECRET_PARAM: !Ref ApiSecretParam
+          SSM_FIREBASE_SA_PARAM: !Ref FirebaseSaParam
+          FIRESTORE_PROJECT: !Ref FirestoreProject
+          FIRESTORE_COLLECTION: !Ref FirestoreCollection
+      Policies:
+        - Statement:
+            - Sid: LeerSecretosSSM
+              Effect: Allow
+              Action: ssm:GetParameter
+              Resource:
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ApiSecretParam}
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${FirebaseSaParam}
+            - Sid: DescifrarSSM
+              Effect: Allow
+              Action: kms:Decrypt
+              # Clave por defecto de SSM. Si usan una CMK propia, acotar a su ARN.
+              Resource: !Sub arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/ssm
+      Events:
+        PostCasos:
+          Type: HttpApi
+          Properties:
+            Path: /casos
+            Method: POST
+
+Outputs:
+  EndpointUrl:
+    Description: URL base del HTTP API. El endpoint es esta URL + /casos
+    Value: !Sub 'https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com/casos'
+  FunctionName:
+    Description: Nombre de la función Lambda
+    Value: !Ref CasosReceptorFunction
+  LogGroup:
+    Description: CloudWatch Log Group
+    Value: !Sub '/aws/lambda/${CasosReceptorFunction}'
