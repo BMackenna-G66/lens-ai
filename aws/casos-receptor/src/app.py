@@ -62,6 +62,13 @@ def _api_secret() -> str:
 def _service_account_info() -> dict:
     if "sa_info" not in _cache:
         raw = _ssm_value(SSM_FIREBASE_SA_PARAM) if SSM_FIREBASE_SA_PARAM else os.environ.get("FIREBASE_SA_JSON", "")
+        raw = (raw or "").strip()
+        # Acepta el JSON directo o codificado en base64 (evita problemas de
+        # escapado al pasarlo como variable de entorno / parámetro CFN).
+        if raw and not raw.startswith("{"):
+            import base64
+
+            raw = base64.b64decode(raw).decode("utf-8")
         _cache["sa_info"] = json.loads(raw)
     return _cache["sa_info"]
 

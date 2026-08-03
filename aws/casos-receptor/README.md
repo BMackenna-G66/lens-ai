@@ -7,17 +7,30 @@ colección `casos_sf`). El módulo **"Bandeja de Casos"** de Lens lee esa colecc
 en vivo.
 
 ```
-Salesforce  ──POST /casos (x-api-secret)──▶  API Gateway HTTP API
-                                                   │
-                                                   ▼
-                                             Lambda (python3.12)
-                                                   │  (PATCH REST, upsert por Nº de caso)
-                                                   ▼
-                                     Firestore  lens-ai-9da63 / casos_sf
-                                                   │  (onSnapshot, auth-gated)
-                                                   ▼
-                                       Lens · módulo "Bandeja de Casos"
+Salesforce  ──POST (x-api-secret)──▶  Lambda Function URL (HTTPS nativo)
+                                             │
+                                             ▼
+                                       Lambda (python3.12)
+                                             │  (PATCH REST, upsert por Nº de caso)
+                                             ▼
+                               Firestore  lens-ai-9da63 / casos_sf
+                                             │  (onSnapshot, auth-gated)
+                                             ▼
+                                 Lens · módulo "Bandeja de Casos"
 ```
+
+## Estado del despliegue (us-east-1, cuenta 561521480266)
+- **Stack**: `casos-receptor-fnurl` (CloudFormation/SAM) — **desplegado**.
+- **Endpoint**: `https://tppahdkhw5w4u5r5fbze2ebpn40hhwoz.lambda-url.us-east-1.on.aws/`
+- **Exposición**: **Lambda Function URL** (NO API Gateway; el rol `compliance-admin`
+  no tiene `apigateway:POST`). Auth de infra `NONE`; la protección real es el header
+  `x-api-secret` que valida el handler.
+- **Secretos**: variables de entorno de la Lambda (`API_SECRET`, `FIREBASE_SA_JSON`
+  en base64). SSM quedó descartado porque el rol no tiene `ssm:PutParameter`.
+  `app.py` ya soporta SSM para migrar cuando se habiliten permisos.
+- **Nota de limpieza**: existe un stack vacío `casos-receptor` en `ROLLBACK_COMPLETE`
+  (primer intento con API Gateway). Borrarlo requiere `cloudformation:DeleteStack`,
+  que `compliance-admin` no tiene → lo limpia alguien con más permisos. No molesta.
 
 ## Estructura
 ```
@@ -27,7 +40,7 @@ aws/casos-receptor/
 ├── src/
 │   ├── app.py           # handler + persistencia Firestore (REST)
 │   └── requirements.txt # google-auth, requests (wheels puros)
-└── tests/test_app.py    # 11 tests unitarios (no tocan red)
+└── tests/test_app.py    # tests unitarios (no tocan red)
 ```
 
 ## Requisitos
@@ -35,34 +48,32 @@ aws/casos-receptor/
 - Sesión AWS SSO activa: `aws sso login --profile compliance-admin`
 - Un JSON de service account de Firebase del proyecto `lens-ai-9da63`
 
-## 1) Cargar los secretos en SSM Parameter Store (SecureString)
-Se hace **una sola vez** (no van en el código ni en git):
+## Deploy (modo env-var, como está desplegado hoy)
+Los secretos van como variables de entorno de la Lambda vía parámetros `NoEcho`
+(no van en el código ni en git). El service account se pasa en **base64** para
+evitar problemas de escapado.
 
-```bash
-# API secret (header x-api-secret). Generar uno nuevo con:
-#   python3 -c "import secrets; print(secrets.token_urlsafe(40))"
-aws ssm put-parameter --profile compliance-admin --region us-east-1 \
-  --name /casos-receptor/api-secret --type SecureString \
-  --value "PEGAR_EL_API_SECRET"
-
-# Service account de Firebase (el JSON completo)
-aws ssm put-parameter --profile compliance-admin --region us-east-1 \
-  --name /casos-receptor/firebase-sa --type SecureString \
-  --value "file://firebase_sa.json"
-```
-
-## 2) Build + deploy
 ```bash
 cd aws/casos-receptor
 sam build
-sam deploy            # usa samconfig.toml; pide confirmación del changeset
-```
-Al terminar, `sam deploy` imprime el output **`EndpointUrl`** — esa es la URL final
-(`https://xxxx.execute-api.us-east-1.amazonaws.com/casos`).
 
-## 3) Probar
+SA_B64=$(base64 < /ruta/a/firebase_sa.json | tr -d '\n')
+sam deploy \
+  --profile compliance-admin --region us-east-1 \
+  --stack-name casos-receptor-fnurl \
+  --resolve-s3 --capabilities CAPABILITY_IAM \
+  --no-confirm-changeset --no-fail-on-empty-changeset \
+  --parameter-overrides "ApiSecretValue=EL_API_SECRET" "FirebaseSaB64=$SA_B64"
+```
+Al terminar imprime el output **`EndpointUrl`** (la Function URL). Esa es la URL que
+se configura en Salesforce.
+
+> Generar un API secret nuevo: `python3 -c "import secrets; print(secrets.token_urlsafe(40))"`
+> y rotar con un redeploy cambiando `ApiSecretValue`.
+
+## Probar
 ```bash
-curl -s -X POST "$ENDPOINT_URL" \
+curl -s -X POST "https://tppahdkhw5w4u5r5fbze2ebpn40hhwoz.lambda-url.us-east-1.on.aws/" \
   -H "x-api-secret: EL_API_SECRET" \
   -H "Content-Type: application/json" \
   -d '[{"Número del caso":"00123456","Asunto":"Prueba","Nombre":"Juan","País":"Chile"}]'
@@ -70,8 +81,14 @@ curl -s -X POST "$ENDPOINT_URL" \
 ```
 El caso aparece en Lens → **Bandeja de Casos** en vivo.
 
+## Migrar a SSM (cuando se habiliten permisos)
+`app.py` ya lo soporta: cargar `/casos-receptor/api-secret` y `/casos-receptor/firebase-sa`
+como SecureString, y desplegar seteando las env `SSM_API_SECRET_PARAM` /
+`SSM_FIREBASE_SA_PARAM` con esos nombres (y quitando `API_SECRET`/`FIREBASE_SA_JSON`).
+Requiere `ssm:PutParameter` + `ssm:GetParameter` + `kms:Decrypt`.
+
 ## Contrato del endpoint
-- **Auth**: header `x-api-secret` == parámetro SSM. Falta/incorrecto → `401`.
+- **Auth**: header `x-api-secret` == valor configurado. Falta/incorrecto → `401`.
 - **Body**: JSON, objeto único o array. Inválido → `400`; array vacío → `400`;
   elemento no-objeto → `422`.
 - **Campos**: todos opcionales; se aceptan campos extra. Se promueven a nivel
@@ -81,12 +98,12 @@ El caso aparece en Lens → **Bandeja de Casos** en vivo.
 - **Privacidad**: nunca se loguea el body (trae DNI); solo número y asunto.
 
 ## Configuración (parámetros del template)
-| Parámetro | Default | Qué es |
+| Parámetro | Tipo | Qué es |
 |---|---|---|
-| `ApiSecretParam` | `/casos-receptor/api-secret` | nombre del param SSM del secreto |
-| `FirebaseSaParam` | `/casos-receptor/firebase-sa` | nombre del param SSM del SA |
-| `FirestoreProject` | `lens-ai-9da63` | proyecto Firestore destino |
-| `FirestoreCollection` | `casos_sf` | colección destino |
+| `ApiSecretValue` | NoEcho | secreto del header `x-api-secret` |
+| `FirebaseSaB64` | NoEcho | service account de Firebase (JSON) en base64 |
+| `FirestoreProject` | String (`lens-ai-9da63`) | proyecto Firestore destino |
+| `FirestoreCollection` | String (`casos_sf`) | colección destino |
 
 ## Tests
 ```bash
@@ -94,9 +111,10 @@ cd aws/casos-receptor && python3 -m pytest -q
 ```
 
 ## Rotar el API secret
+Redeploy cambiando el parámetro (la Lambda toma el nuevo valor al actualizarse):
 ```bash
-aws ssm put-parameter --profile compliance-admin --region us-east-1 \
-  --name /casos-receptor/api-secret --type SecureString --overwrite \
-  --value "NUEVO_SECRETO"
+sam deploy --profile compliance-admin --region us-east-1 \
+  --stack-name casos-receptor-fnurl --resolve-s3 --capabilities CAPABILITY_IAM \
+  --no-confirm-changeset \
+  --parameter-overrides "ApiSecretValue=NUEVO_SECRETO" "FirebaseSaB64=$(base64 < /ruta/firebase_sa.json | tr -d '\n')"
 ```
-La Lambda lo toma en el próximo cold start (o forzar con un redeploy).

@@ -117,3 +117,20 @@ def test_doc_id_usa_numero_de_caso():
     assert app._doc_id({"Número del caso": "00123456"}) == "00123456"
     assert app._doc_id({"Número del caso": "a/b"}) == "a-b"
     assert app._doc_id({}).startswith("auto-")
+
+
+def test_service_account_acepta_json_directo(monkeypatch):
+    monkeypatch.setattr(app, "SSM_FIREBASE_SA_PARAM", "")
+    monkeypatch.setenv("FIREBASE_SA_JSON", '{"project_id": "x", "type": "service_account"}')
+    app._cache.pop("sa_info", None)
+    assert app._service_account_info()["project_id"] == "x"
+
+
+def test_service_account_acepta_base64(monkeypatch):
+    import base64
+
+    raw = '{"project_id": "y", "type": "service_account"}'
+    monkeypatch.setattr(app, "SSM_FIREBASE_SA_PARAM", "")
+    monkeypatch.setenv("FIREBASE_SA_JSON", base64.b64encode(raw.encode()).decode())
+    app._cache.pop("sa_info", None)
+    assert app._service_account_info()["project_id"] == "y"

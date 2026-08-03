@@ -5,14 +5,14 @@ Description: >
   la Lambda persiste cada caso en Firestore (lens-ai-9da63), que Lens lee en vivo.
 
 Parameters:
-  ApiSecretParam:
+  ApiSecretValue:
     Type: String
-    Default: /casos-receptor/api-secret
-    Description: Nombre del parámetro SSM (SecureString) con el API secret (header x-api-secret).
-  FirebaseSaParam:
+    NoEcho: true
+    Description: Secreto del header x-api-secret (se guarda como env var de la Lambda).
+  FirebaseSaB64:
     Type: String
-    Default: /casos-receptor/firebase-sa
-    Description: Nombre del parámetro SSM (SecureString) con el JSON del service account de Firebase.
+    NoEcho: true
+    Description: Service account de Firebase (JSON) codificado en base64.
   FirestoreProject:
     Type: String
     Default: lens-ai-9da63
@@ -37,34 +37,26 @@ Resources:
       Description: Recibe casos de compliance desde Salesforce y los guarda en Firestore.
       Environment:
         Variables:
-          SSM_API_SECRET_PARAM: !Ref ApiSecretParam
-          SSM_FIREBASE_SA_PARAM: !Ref FirebaseSaParam
+          # Modo env-var (SSM no disponible por permisos). app.py usa estos si
+          # SSM_*_PARAM está vacío. Migrable a SSM cuando se habiliten permisos.
+          API_SECRET: !Ref ApiSecretValue
+          FIREBASE_SA_JSON: !Ref FirebaseSaB64
           FIRESTORE_PROJECT: !Ref FirestoreProject
           FIRESTORE_COLLECTION: !Ref FirestoreCollection
-      Policies:
-        - Statement:
-            - Sid: LeerSecretosSSM
-              Effect: Allow
-              Action: ssm:GetParameter
-              Resource:
-                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ApiSecretParam}
-                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${FirebaseSaParam}
-            - Sid: DescifrarSSM
-              Effect: Allow
-              Action: kms:Decrypt
-              # Clave por defecto de SSM. Si usan una CMK propia, acotar a su ARN.
-              Resource: !Sub arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/ssm
-      Events:
-        PostCasos:
-          Type: HttpApi
-          Properties:
-            Path: /casos
-            Method: POST
+      # Endpoint HTTPS nativo de la Lambda (sin API Gateway, que el rol no puede
+      # crear). Auth NONE a nivel infra: la protección es el header x-api-secret
+      # que valida el handler. Salesforce hace POST a esta URL (path libre).
+      FunctionUrlConfig:
+        AuthType: NONE
+        Cors:
+          AllowOrigins: ['*']
+          AllowMethods: [POST]
+          AllowHeaders: [content-type, x-api-secret]
 
 Outputs:
   EndpointUrl:
-    Description: URL base del HTTP API. El endpoint es esta URL + /casos
-    Value: !Sub 'https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com/casos'
+    Description: URL del endpoint (Function URL). Salesforce hace POST acá.
+    Value: !GetAtt CasosReceptorFunctionUrl.FunctionUrl
   FunctionName:
     Description: Nombre de la función Lambda
     Value: !Ref CasosReceptorFunction

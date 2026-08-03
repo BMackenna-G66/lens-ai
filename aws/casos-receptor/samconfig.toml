@@ -1,11 +1,13 @@
 version = 0.1
 
 [default.deploy.parameters]
-stack_name = "casos-receptor"
+stack_name = "casos-receptor-fnurl"
 resolve_s3 = true
 s3_prefix = "casos-receptor"
 region = "us-east-1"
 capabilities = "CAPABILITY_IAM"
 confirm_changeset = true
-# Perfil AWS SSO de compliance (cuenta 561521480266). Sobrescribible con --profile.
+# Perfil AWS SSO de compliance (cuenta 561521480266). Único con CloudFormation.
 profile = "compliance-admin"
+# NOTA: los secretos NO se guardan acá. Se pasan en cada deploy con
+# --parameter-overrides "ApiSecretValue=... FirebaseSaB64=$(base64 firebase_sa.json)".
