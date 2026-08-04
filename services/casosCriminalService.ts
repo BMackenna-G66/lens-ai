@@ -15,14 +15,29 @@ const INSPEKTOR_USER = ((import.meta as unknown) as { env: Record<string, string
 const INSPEKTOR_PASS = ((import.meta as unknown) as { env: Record<string, string> }).env.VITE_INSPEKTOR_PASS ?? 'Risk5397#0ft';
 
 export type ScreeningEstado = 'ok' | 'sin_causas' | 'error' | 'na';
+
+// Coincidencia / delito detectado (forma unificada Chile + Colombia).
+export interface Coincidencia {
+  tipo: string;       // delito / tipo de evidencia
+  detalle: string;    // descripción / RUC
+  estado?: string;
+  fecha?: string;
+  fuente?: string;    // tribunal (Chile) / provider (Colombia)
+  riesgo?: string;
+}
+
 export interface CasoScreening {
   estado: ScreeningEstado;
   fuente: 'Regcheq' | 'Inspektor' | '—';
   delitosUnicos: number;
   decision: string;   // conclusión
   razon: string;
+  coincidencias: Coincidencia[];
   mensaje?: string;
 }
+
+// ¿El valor parece un email? (los payloads a veces traen el correo en "Apellido").
+const pareceEmail = (v: string): boolean => /@/.test(v);
 
 interface CasoMin { datos?: Record<string, unknown>; pais?: string }
 
@@ -77,12 +92,22 @@ async function screenColombia(nombre: string, dni: string, tipoDocumento: number
   const gate = evaluateLegalPolicy(listItems, jepmsIds, dniN);
   const outcome = analyzeCriminalProfile(data as unknown as CriminalInput, { nombre, documento: dni }, gate.result ?? undefined);
 
+  const coincidencias: Coincidencia[] = (outcome.records ?? []).map(r => ({
+    tipo: r.evidence_type || 'Coincidencia',
+    detalle: r.raw_offense || r.raw_description || r.provider_category || '—',
+    estado: r.legal_status || r.evidence_status || undefined,
+    fecha: r.event_date || undefined,
+    fuente: r.provider_source || undefined,
+    riesgo: r.provider_severity || undefined,
+  }));
+
   return {
     estado: outcome.distinct_event_count > 0 ? 'ok' : 'sin_causas',
     fuente: 'Inspektor',
     delitosUnicos: outcome.distinct_event_count,
     decision: RECO_LABEL[outcome.recommendation] ?? outcome.recommendation,
     razon: (outcome.risk_factors ?? []).join('; '),
+    coincidencias,
   };
 }
 
@@ -90,20 +115,30 @@ async function screenColombia(nombre: string, dni: string, tipoDocumento: number
 export async function screenCaso(caso: CasoMin): Promise<CasoScreening> {
   const pais = paisDe(caso);
   const dni = String(caso.datos?.['Número de DNI'] ?? '');
-  const nombre = `${caso.datos?.['Nombre'] ?? ''} ${caso.datos?.['Apellido'] ?? ''}`.trim();
+  // Nombre: descarta correos (a veces vienen en "Apellido") para no ensuciar Inspektor.
+  const rawNombre = `${caso.datos?.['Nombre'] ?? ''} ${caso.datos?.['Apellido'] ?? ''}`.trim();
+  const nombre = pareceEmail(rawNombre) ? '' : rawNombre;
   try {
     if (esChile(pais)) {
       const r = await screenChileCriminal(dni, nombre);
-      return { estado: r.estado, fuente: 'Regcheq', delitosUnicos: r.delitosUnicos, decision: r.decision, razon: r.razon, mensaje: r.mensaje };
+      const coincidencias: Coincidencia[] = (r.crimes ?? []).map(c => ({
+        tipo: c.crimen || 'Causa penal',
+        detalle: c.ruc ? `RUC ${c.ruc}` : (c.crimen || '—'),
+        estado: c.estado || undefined,
+        fecha: c.fecha || undefined,
+        fuente: c.tribunal || undefined,
+        riesgo: undefined,
+      }));
+      return { estado: r.estado, fuente: 'Regcheq', delitosUnicos: r.delitosUnicos, decision: r.decision, razon: r.razon, coincidencias, mensaje: r.mensaje };
     }
     if (esColombia(pais)) {
       const tipo = String(caso.datos?.['Tipo de DNI'] ?? '');
       const tipoDocumento = /NIT/i.test(tipo) ? 3 : 1; // 3 = NIT (jurídica); 1 = cédula
       return await screenColombia(nombre, dni, tipoDocumento);
     }
-    return { estado: 'na', fuente: '—', delitosUnicos: 0, decision: '', razon: '' };
+    return { estado: 'na', fuente: '—', delitosUnicos: 0, decision: '', razon: '', coincidencias: [] };
   } catch (e) {
-    return { estado: 'error', fuente: esChile(pais) ? 'Regcheq' : 'Inspektor', delitosUnicos: 0, decision: '', razon: '', mensaje: e instanceof Error ? e.message : String(e) };
+    return { estado: 'error', fuente: esChile(pais) ? 'Regcheq' : 'Inspektor', delitosUnicos: 0, decision: '', razon: '', coincidencias: [], mensaje: e instanceof Error ? e.message : String(e) };
   }
 }
 

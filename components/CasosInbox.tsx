@@ -5,7 +5,7 @@ import {
 } from '../services/salesforceCaseService';
 import { SF_CASE_FIELDS } from '../services/salesforceCaseFields';
 import { buscarRemesa, buscarRemesas, RemesaResult, RemesaRow } from '../services/remesasService';
-import { screenCaso, esScreenable, runPool } from '../services/casosCriminalService';
+import { screenCaso, esScreenable, runPool, Coincidencia } from '../services/casosCriminalService';
 
 // Estado del screening criminal por caso (cola OFAC/PEP).
 interface ScreeningState {
@@ -14,6 +14,7 @@ interface ScreeningState {
   delitosUnicos?: number;
   decision?: string;
   razon?: string;
+  coincidencias?: Coincidencia[];
 }
 
 type FormState = Record<string, string | boolean>;
@@ -74,6 +75,10 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   const [selId, setSelId] = useState<string | null>(null);
   const [filtro, setFiltro] = useState('');
   const [activeQueue, setActiveQueue] = useState<QueueKey>('ofac');
+  const [sortCol, setSortCol] = useState<string>('fecha');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
+  const toggleSort = (col: string) =>
+    sortCol === col ? setSortDir(d => (d === 'asc' ? 'desc' : 'asc')) : (setSortCol(col), setSortDir('asc'));
 
   useEffect(() => {
     if (!isCasosAvailable()) {
@@ -206,7 +211,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       if (cancelado) return;
       const r = await screenCaso(c);
       if (cancelado) return;
-      setScreenMap(prev => ({ ...prev, [c.id]: { estado: r.estado, fuente: r.fuente, delitosUnicos: r.delitosUnicos, decision: r.decision, razon: r.razon } }));
+      setScreenMap(prev => ({ ...prev, [c.id]: { estado: r.estado, fuente: r.fuente, delitosUnicos: r.delitosUnicos, decision: r.decision, razon: r.razon, coincidencias: r.coincidencias } }));
     }, 4);
     return () => { cancelado = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -220,6 +225,37 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     if (/LIBER|APROB|OK|SIN CAUSAS/.test(s)) return 'text-emerald-600 dark:text-emerald-400';
     return 'text-slate-600 dark:text-slate-300';
   };
+
+  // Orden por columna (asc/desc). Cada columna tiene una clave; el valor se obtiene
+  // del caso o de los mapas (remesa/screening) según corresponda.
+  const ordenados = useMemo(() => {
+    const val = (c: QueuedCaso): string | number => {
+      switch (sortCol) {
+        case 'fecha': return c.recibidoEn || '';
+        case 'remesa': return c.remesa || '';
+        case 'benef': return remesaMap[c.remesa]?.beneficiary_name || '';
+        case 'dni': return remesaMap[c.remesa]?.beneficiary_dni || '';
+        case 'tipoenvio': return remesaMap[c.remesa]?.tipo_envio || '';
+        case 'delitos': return screenMap[c.id]?.delitosUnicos ?? -1;
+        case 'conclusion': return screenMap[c.id]?.decision || '';
+        default: return String(c.datos?.[sortCol] ?? '');
+      }
+    };
+    const cmp = (a: QueuedCaso, b: QueuedCaso) => {
+      const va = val(a), vb = val(b);
+      if (typeof va === 'number' && typeof vb === 'number') return va - vb;
+      return String(va).localeCompare(String(vb), 'es', { numeric: true });
+    };
+    return [...filtrados].sort((a, b) => (sortDir === 'asc' ? cmp(a, b) : -cmp(a, b)));
+  }, [filtrados, sortCol, sortDir, remesaMap, screenMap]);
+
+  // Encabezado clickeable para ordenar por esa columna.
+  const Th = (col: string, label: string, extra = '') => (
+    <th key={col} onClick={() => toggleSort(col)}
+      className={`px-3 py-2 font-bold whitespace-nowrap cursor-pointer select-none hover:text-sky-600 dark:hover:text-sky-400 ${extra}`}>
+      {label}{sortCol === col ? (sortDir === 'asc' ? ' ↑' : ' ↓') : ' ↕'}
+    </th>
+  );
 
   const enviarRespuesta = async () => {
     setSending(true);
@@ -318,33 +354,33 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
             <table className="w-full text-xs">
               <thead className="sticky top-0 z-10 bg-slate-50 dark:bg-slate-800">
                 <tr className="text-left text-slate-500 dark:text-slate-400">
-                  <th className="px-3 py-2 font-bold whitespace-nowrap">Fecha llegada ↑</th>
+                  {Th('fecha', 'Fecha llegada')}
                   {activeQueue === 'remesa' && (
                     <>
-                      <th className="px-3 py-2 font-bold whitespace-nowrap">remesa</th>
-                      <th className="px-3 py-2 font-bold whitespace-nowrap">Beneficiario</th>
-                      <th className="px-3 py-2 font-bold whitespace-nowrap">DNI</th>
-                      <th className="px-3 py-2 font-bold whitespace-nowrap">Tipo de envío</th>
+                      {Th('remesa', 'remesa')}
+                      {Th('benef', 'Beneficiario')}
+                      {Th('dni', 'DNI')}
+                      {Th('tipoenvio', 'Tipo de envío')}
                     </>
                   )}
                   {activeQueue === 'ofac' && (
                     <>
-                      <th className="px-3 py-2 font-bold whitespace-nowrap text-center">Delitos únicos</th>
-                      <th className="px-3 py-2 font-bold whitespace-nowrap">Conclusión</th>
+                      {Th('delitos', 'Delitos únicos', 'text-center')}
+                      {Th('conclusion', 'Conclusión')}
                     </>
                   )}
-                  {columnas.map(k => <th key={k} className="px-3 py-2 font-bold whitespace-nowrap">{k}</th>)}
+                  {columnas.map(k => Th(k, k))}
                 </tr>
               </thead>
               <tbody>
-                {filtrados.length === 0 && (
+                {ordenados.length === 0 && (
                   <tr>
                     <td colSpan={columnas.length + (activeQueue === 'remesa' ? 4 : activeQueue === 'ofac' ? 3 : 1)} className="py-8 text-center text-slate-400">
                       Sin casos en esta cola.
                     </td>
                   </tr>
                 )}
-                {filtrados.map(c => {
+                {ordenados.map(c => {
                   const activo = sel?.id === c.id;
                   const r = c.remesa ? remesaMap[c.remesa] : undefined;
                   const rCell = (v: string | undefined) => r ? (v || '—') : (remesaMapLoading ? '…' : '—');
@@ -441,6 +477,61 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                     {!remesaLoading && remesaData?.estado === 'error' && (
                       <p className="text-xs text-red-600 dark:text-red-400">Error: {remesaData.mensaje}</p>
                     )}
+                  </div>
+                )}
+
+                {/* Perfil criminal / coincidencias detectadas (cola OFAC) */}
+                {activeQueue === 'ofac' && screenMap[sel.id] && (
+                  <div className="mb-5 rounded-xl border border-indigo-200 dark:border-indigo-800/50 bg-indigo-50/60 dark:bg-indigo-950/30 p-4">
+                    <div className="flex items-center justify-between mb-3">
+                      <h3 className="text-sm font-black text-indigo-800 dark:text-indigo-300">
+                        ⚖️ Perfil criminal{screenMap[sel.id]?.fuente && screenMap[sel.id]?.fuente !== '—' ? ` · ${screenMap[sel.id]?.fuente}` : ''}
+                      </h3>
+                      <span className={`text-xs font-bold ${decisionColor(screenMap[sel.id]?.decision)}`}>
+                        {screenMap[sel.id]?.estado === 'loading' ? 'consultando…'
+                          : screenMap[sel.id]?.estado === 'na' ? 'No aplica'
+                          : (screenMap[sel.id]?.decision || '—')}
+                      </span>
+                    </div>
+                    {(() => {
+                      const sc = screenMap[sel.id];
+                      if (!sc || sc.estado === 'loading') return <p className="text-xs text-slate-500 dark:text-slate-400 animate-pulse">Consultando lista…</p>;
+                      if (sc.estado === 'na') return <p className="text-xs text-slate-500 dark:text-slate-400">País sin lista configurada (ni Chile ni Colombia).</p>;
+                      if (sc.estado === 'error') return <p className="text-xs text-red-600 dark:text-red-400">Error en la consulta.</p>;
+                      const co = sc.coincidencias ?? [];
+                      if (co.length === 0) return <p className="text-xs text-emerald-600 dark:text-emerald-400">Sin coincidencias / causas penales.</p>;
+                      return (
+                        <>
+                          <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">{sc.delitosUnicos} delito(s) único(s) · {co.length} coincidencia(s)</p>
+                          <div className="overflow-x-auto">
+                            <table className="w-full text-xs">
+                              <thead>
+                                <tr className="text-left text-slate-500 dark:text-slate-400">
+                                  <th className="py-1 pr-4 font-bold">Delito / Tipo</th>
+                                  <th className="py-1 pr-4 font-bold">Detalle</th>
+                                  <th className="py-1 pr-4 font-bold">Estado</th>
+                                  <th className="py-1 pr-4 font-bold">Fecha</th>
+                                  <th className="py-1 pr-4 font-bold">Fuente</th>
+                                  <th className="py-1 pr-4 font-bold">Riesgo</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {co.map((x, i) => (
+                                  <tr key={i} className="border-t border-slate-100 dark:border-slate-700/50">
+                                    <td className="py-1 pr-4 text-slate-800 dark:text-slate-200">{x.tipo}</td>
+                                    <td className="py-1 pr-4 text-slate-700 dark:text-slate-300 break-words max-w-[280px]">{x.detalle}</td>
+                                    <td className="py-1 pr-4">{x.estado || '—'}</td>
+                                    <td className="py-1 pr-4 whitespace-nowrap">{x.fecha || '—'}</td>
+                                    <td className="py-1 pr-4">{x.fuente || '—'}</td>
+                                    <td className="py-1 pr-4">{x.riesgo || '—'}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </>
+                      );
+                    })()}
                   </div>
                 )}
 
