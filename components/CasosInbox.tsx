@@ -4,6 +4,7 @@ import {
   sendCaseUpdate, sfUpdateDisponible, SFCaseUpdate, SFUpdateResult,
 } from '../services/salesforceCaseService';
 import { SF_CASE_FIELDS } from '../services/salesforceCaseFields';
+import { buscarRemesa, RemesaResult } from '../services/remesasService';
 
 type FormState = Record<string, string | boolean>;
 
@@ -136,6 +137,23 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
 
   const setField = (k: string, v: string | boolean) =>
     setForm(f => ({ ...f, [k]: v }));
+
+  // ── Consulta de remesa en Redshift (cola Remesa) ────────────────────────────
+  const [remesaData, setRemesaData] = useState<RemesaResult | null>(null);
+  const [remesaLoading, setRemesaLoading] = useState(false);
+
+  // Al seleccionar un caso de la cola Remesa, consulta la TX en Redshift.
+  useEffect(() => {
+    setRemesaData(null);
+    if (activeQueue !== 'remesa' || !sel?.remesa) return;
+    let cancelado = false;
+    setRemesaLoading(true);
+    buscarRemesa(sel.remesa)
+      .then(r => { if (!cancelado) setRemesaData(r); })
+      .catch(e => { if (!cancelado) setRemesaData({ estado: 'error', notFound: [], mensaje: (e as Error).message }); })
+      .finally(() => { if (!cancelado) setRemesaLoading(false); });
+    return () => { cancelado = true; };
+  }, [sel?.id, sel?.remesa, activeQueue]);
 
   const enviarRespuesta = async () => {
     setSending(true);
@@ -277,6 +295,52 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                     <p className="text-xs text-slate-500 dark:text-slate-400">Recibido {fmtFecha(sel.recibidoEn)} · origen {sel.origen}</p>
                   </div>
                 </div>
+
+                {/* Datos de la remesa desde Redshift (solo cola Remesa) */}
+                {activeQueue === 'remesa' && (
+                  <div className="mb-5 rounded-xl border border-sky-200 dark:border-sky-800/50 bg-sky-50/60 dark:bg-sky-950/30 p-4">
+                    <div className="flex items-center justify-between mb-3">
+                      <h3 className="text-sm font-black text-sky-800 dark:text-sky-300">
+                        💸 Remesa {sel.remesa || '—'} · datos de Redshift
+                      </h3>
+                      {remesaLoading && <span className="text-xs text-slate-500 dark:text-slate-400 animate-pulse">Consultando… (~3-8s)</span>}
+                    </div>
+
+                    {!sel.remesa && <p className="text-xs text-amber-600 dark:text-amber-400">No se pudo extraer el nº de TX del asunto.</p>}
+
+                    {!remesaLoading && remesaData?.estado === 'ok' && remesaData.row && (
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-2 text-xs">
+                        {([
+                          ['Beneficiario', remesaData.row.beneficiary_name],
+                          ['DNI', `${remesaData.row.beneficiary_dni_type} ${remesaData.row.beneficiary_dni}`],
+                          ['Customer ID', remesaData.row.customer_id],
+                          ['Email', remesaData.row.beneficiary_email],
+                          ['Tipo de envío', remesaData.row.tipo_envio],
+                          ['Origen → Destino', `${remesaData.row.origin_country} → ${remesaData.row.destiny_country}`],
+                          ['Monto USD', remesaData.row.destiny_amount_usd],
+                          ['Estado TX', remesaData.row.tx_status],
+                          ['Fecha TX', remesaData.row.start_date],
+                        ] as [string, string | number][]).map(([k, v]) => (
+                          <div key={k}>
+                            <p className="font-semibold text-slate-500 dark:text-slate-400">{k}</p>
+                            <p className="text-slate-800 dark:text-slate-200 break-words">{v === '' || v == null ? '—' : String(v)}</p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {!remesaLoading && remesaData?.estado === 'not_found' && (
+                      <p className="text-xs text-slate-500 dark:text-slate-400">La transacción <b>{sel.remesa}</b> no existe en la base.</p>
+                    )}
+                    {!remesaLoading && remesaData?.estado === 'cluster_unavailable' && (
+                      <p className="text-xs text-amber-600 dark:text-amber-400">Redshift no disponible: {remesaData.mensaje}</p>
+                    )}
+                    {!remesaLoading && remesaData?.estado === 'error' && (
+                      <p className="text-xs text-red-600 dark:text-red-400">Error: {remesaData.mensaje}</p>
+                    )}
+                  </div>
+                )}
+
                 <table className="w-full text-sm">
                   <tbody>
                     {Object.entries(sel.datos).length === 0 && (
