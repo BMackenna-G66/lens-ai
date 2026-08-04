@@ -68,3 +68,26 @@ export async function buscarRemesa(remesa: string | number): Promise<RemesaResul
   if (rows.length === 0) return { estado: 'not_found', notFound, mensaje: 'La transacción no existe en la base.' };
   return { estado: 'ok', row: rows[0], notFound };
 }
+
+// Consulta VARIAS remesas (para poblar la tabla). El endpoint acepta hasta 50
+// transaction_ids por llamada; acá se parte en lotes. Devuelve un mapa
+// txId(string) → RemesaRow con las encontradas (las no halladas simplemente no
+// aparecen en el mapa). No lanza: los lotes que fallen se omiten.
+export async function buscarRemesas(remesas: (string | number)[]): Promise<Record<string, RemesaRow>> {
+  const ids = [...new Set(remesas.map(aTxId).filter(n => n > 0))];
+  const out: Record<string, RemesaRow> = {};
+  for (let i = 0; i < ids.length; i += 50) {
+    const chunk = ids.slice(i, i + 50);
+    try {
+      const res = await fetch(REMESAS_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transaction_ids: chunk }),
+      });
+      const data = await res.json() as { rows?: RemesaRow[]; error?: string };
+      if (data.error) continue; // cluster_unavailable u otro → se omite el lote
+      for (const row of data.rows ?? []) out[String(row.transaction_id)] = row;
+    } catch { /* lote omitido */ }
+  }
+  return out;
+}

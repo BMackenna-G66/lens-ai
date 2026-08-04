@@ -4,7 +4,7 @@ import {
   sendCaseUpdate, sfUpdateDisponible, SFCaseUpdate, SFUpdateResult,
 } from '../services/salesforceCaseService';
 import { SF_CASE_FIELDS } from '../services/salesforceCaseFields';
-import { buscarRemesa, RemesaResult } from '../services/remesasService';
+import { buscarRemesa, buscarRemesas, RemesaResult, RemesaRow } from '../services/remesasService';
 
 type FormState = Record<string, string | boolean>;
 
@@ -155,6 +155,23 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     return () => { cancelado = true; };
   }, [sel?.id, sel?.remesa, activeQueue]);
 
+  // Consulta en LOTE de todas las remesas de la cola (para columnas de la tabla).
+  const [remesaMap, setRemesaMap] = useState<Record<string, RemesaRow>>({});
+  const [remesaMapLoading, setRemesaMapLoading] = useState(false);
+  const remesaIdsKey = colas.remesa.map(c => c.remesa).filter(Boolean).join(',');
+  useEffect(() => {
+    if (activeQueue !== 'remesa') return;
+    const faltantes = colas.remesa.map(c => c.remesa).filter(id => id && !(id in remesaMap));
+    if (faltantes.length === 0) return;
+    let cancelado = false;
+    setRemesaMapLoading(true);
+    buscarRemesas(faltantes)
+      .then(m => { if (!cancelado) setRemesaMap(prev => ({ ...prev, ...m })); })
+      .finally(() => { if (!cancelado) setRemesaMapLoading(false); });
+    return () => { cancelado = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeQueue, remesaIdsKey]);
+
   const enviarRespuesta = async () => {
     setSending(true);
     setSfResult(null);
@@ -253,20 +270,29 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
               <thead className="sticky top-0 z-10 bg-slate-50 dark:bg-slate-800">
                 <tr className="text-left text-slate-500 dark:text-slate-400">
                   <th className="px-3 py-2 font-bold whitespace-nowrap">Fecha llegada ↑</th>
-                  {activeQueue === 'remesa' && <th className="px-3 py-2 font-bold whitespace-nowrap">remesa</th>}
+                  {activeQueue === 'remesa' && (
+                    <>
+                      <th className="px-3 py-2 font-bold whitespace-nowrap">remesa</th>
+                      <th className="px-3 py-2 font-bold whitespace-nowrap">Beneficiario</th>
+                      <th className="px-3 py-2 font-bold whitespace-nowrap">DNI</th>
+                      <th className="px-3 py-2 font-bold whitespace-nowrap">Tipo de envío</th>
+                    </>
+                  )}
                   {columnas.map(k => <th key={k} className="px-3 py-2 font-bold whitespace-nowrap">{k}</th>)}
                 </tr>
               </thead>
               <tbody>
                 {filtrados.length === 0 && (
                   <tr>
-                    <td colSpan={columnas.length + (activeQueue === 'remesa' ? 2 : 1)} className="py-8 text-center text-slate-400">
+                    <td colSpan={columnas.length + (activeQueue === 'remesa' ? 4 : 1)} className="py-8 text-center text-slate-400">
                       Sin casos en esta cola.
                     </td>
                   </tr>
                 )}
                 {filtrados.map(c => {
                   const activo = sel?.id === c.id;
+                  const r = c.remesa ? remesaMap[c.remesa] : undefined;
+                  const rCell = (v: string | undefined) => r ? (v || '—') : (remesaMapLoading ? '…' : '—');
                   return (
                     <tr
                       key={c.id}
@@ -274,7 +300,14 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                       className={`cursor-pointer border-b border-slate-100 dark:border-slate-700/50 ${activo ? 'bg-sky-50 dark:bg-sky-950/40' : 'hover:bg-slate-50 dark:hover:bg-slate-700/30'}`}
                     >
                       <td className="px-3 py-2 whitespace-nowrap text-slate-500 dark:text-slate-400">{fmtFecha(c.recibidoEn)}</td>
-                      {activeQueue === 'remesa' && <td className="px-3 py-2 whitespace-nowrap font-bold text-sky-700 dark:text-sky-400">{c.remesa || '—'}</td>}
+                      {activeQueue === 'remesa' && (
+                        <>
+                          <td className="px-3 py-2 whitespace-nowrap font-bold text-sky-700 dark:text-sky-400">{c.remesa || '—'}</td>
+                          <td className="px-3 py-2 max-w-[220px] truncate text-slate-700 dark:text-slate-200" title={r?.beneficiary_name}>{rCell(r?.beneficiary_name)}</td>
+                          <td className="px-3 py-2 whitespace-nowrap text-slate-700 dark:text-slate-200">{r ? `${r.beneficiary_dni_type} ${r.beneficiary_dni}` : (remesaMapLoading ? '…' : '—')}</td>
+                          <td className="px-3 py-2 whitespace-nowrap text-slate-700 dark:text-slate-200">{rCell(r?.tipo_envio)}</td>
+                        </>
+                      )}
                       {columnas.map(k => {
                         const t = cellText(c.datos[k]);
                         return <td key={k} title={t} className="px-3 py-2 max-w-[220px] truncate text-slate-700 dark:text-slate-200">{t}</td>;
