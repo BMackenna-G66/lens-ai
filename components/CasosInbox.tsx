@@ -5,18 +5,16 @@ import {
 } from '../services/salesforceCaseService';
 import { SF_CASE_FIELDS } from '../services/salesforceCaseFields';
 import { buscarRemesa, buscarRemesas, RemesaResult, RemesaRow } from '../services/remesasService';
-import { screenChileCriminal } from '../services/lens360Service';
+import { screenCaso, esScreenable, runPool } from '../services/casosCriminalService';
 
 // Estado del screening criminal por caso (cola OFAC/PEP).
 interface ScreeningState {
-  estado: 'loading' | 'ok' | 'sin_causas' | 'error' | 'na';  // na = no aplica (no es Chile)
+  estado: 'loading' | 'ok' | 'sin_causas' | 'error' | 'na';  // na = país sin screening (ni Chile ni Colombia)
+  fuente?: string;
   delitosUnicos?: number;
   decision?: string;
   razon?: string;
 }
-
-const paisOrigenChile = (c: QueuedCaso): boolean =>
-  /chile|^cl$/i.test(String(c.datos?.['País Origen'] ?? '').trim());
 
 type FormState = Record<string, string | boolean>;
 
@@ -195,24 +193,21 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     if (pendientes.length === 0) return;
     let cancelado = false;
 
-    // Estado inicial: loading para Chile, 'na' para el resto (Inspektor pendiente).
+    // Estado inicial: loading para los screeneables (Chile/Colombia), 'na' para el resto.
     setScreenMap(prev => {
       const next = { ...prev };
-      for (const c of pendientes) next[c.id] = { estado: paisOrigenChile(c) ? 'loading' : 'na' };
+      for (const c of pendientes) next[c.id] = { estado: esScreenable(c) ? 'loading' : 'na' };
       return next;
     });
 
-    // Procesa los de Chile (Regcheq). Concurrencia natural; cada uno actualiza al terminar.
-    for (const c of pendientes.filter(paisOrigenChile)) {
-      const dni = String(c.datos?.['Número de DNI'] ?? '');
-      const nombre = `${c.datos?.['Nombre'] ?? ''} ${c.datos?.['Apellido'] ?? ''}`.trim();
-      screenChileCriminal(dni, nombre)
-        .then(r => {
-          if (cancelado) return;
-          setScreenMap(prev => ({ ...prev, [c.id]: { estado: r.estado, delitosUnicos: r.delitosUnicos, decision: r.decision, razon: r.razon } }));
-        })
-        .catch(() => { if (!cancelado) setScreenMap(prev => ({ ...prev, [c.id]: { estado: 'error' } })); });
-    }
+    // Procesa por País (Chile→Regcheq, Colombia→Inspektor) con concurrencia limitada.
+    const aProcesar = pendientes.filter(esScreenable);
+    runPool(aProcesar, async c => {
+      if (cancelado) return;
+      const r = await screenCaso(c);
+      if (cancelado) return;
+      setScreenMap(prev => ({ ...prev, [c.id]: { estado: r.estado, fuente: r.fuente, delitosUnicos: r.delitosUnicos, decision: r.decision, razon: r.razon } }));
+    }, 4);
     return () => { cancelado = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeQueue, ofacIdsKey]);
@@ -220,7 +215,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   // Color de la conclusión según la decisión del motor.
   const decisionColor = (d?: string): string => {
     const s = (d || '').toUpperCase();
-    if (/BLOCK|BLOQ|FORZAR|RECHAZ/.test(s)) return 'text-red-600 dark:text-red-400';
+    if (/BLOCK|BLOQ|FORZAR|RECHAZ|PRIORITARIA|CRITIC/.test(s)) return 'text-red-600 dark:text-red-400';
     if (/REVIS|UCR|COMPLIANCE|MANUAL/.test(s)) return 'text-amber-600 dark:text-amber-400';
     if (/LIBER|APROB|OK|SIN CAUSAS/.test(s)) return 'text-emerald-600 dark:text-emerald-400';
     return 'text-slate-600 dark:text-slate-300';
@@ -376,8 +371,9 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                           </td>
                           <td className={`px-3 py-2 whitespace-nowrap font-semibold ${decisionColor(s?.decision)}`} title={s?.razon}>
                             {!s || s.estado === 'loading' ? 'consultando…'
-                              : s.estado === 'na' ? 'Pendiente (Inspektor)'
+                              : s.estado === 'na' ? 'No aplica'
                               : s.estado === 'error' ? 'Error'
+                              : s.estado === 'sin_causas' ? 'Sin causas'
                               : (s.decision || '—')}
                           </td>
                         </>
