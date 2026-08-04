@@ -4,10 +4,22 @@
 // POST /casos. Este servicio solo LEE (onSnapshot); la app no escribe acá.
 // Ver aws/casos-receptor/ para el productor.
 
-import { collection, onSnapshot, query, Firestore } from 'firebase/firestore';
+import { collection, onSnapshot, query, doc, updateDoc, Firestore } from 'firebase/firestore';
 import { getDb } from './firebaseService';
 
 export const CASOS_COLLECTION = 'casos_sf';
+
+// Resultado del screening (Regcheq/Inspektor) que se persiste en el caso para no
+// re-consultar la lista al recargar. Se guarda desde el navegador (updateDoc).
+export interface StoredScreening {
+  estado?: string;
+  fuente?: string;
+  delitosUnicos?: number;
+  decision?: string;
+  razon?: string;
+  coincidencias?: unknown[];
+  screenedAt?: string;   // ISO — cuándo se consultó
+}
 
 export interface CasoSF {
   id: string;
@@ -18,6 +30,7 @@ export interface CasoSF {
   recibidoEn: string;         // ISO
   origen: string;
   datos: Record<string, unknown>;  // payload completo tal cual llegó
+  screening?: StoredScreening;     // screening cacheado (si ya se consultó)
 }
 
 export const isCasosAvailable = (): boolean => !!getDb();
@@ -34,7 +47,17 @@ function docToCaso(id: string, data: Record<string, unknown>): CasoSF {
     recibidoEn: s(data.recibidoEn),
     origen: s(data.origen) || 'salesforce',
     datos,
+    screening: (data.screening && typeof data.screening === 'object') ? data.screening as StoredScreening : undefined,
   };
+}
+
+// Persiste el screening del caso en Firestore (compartido entre analistas).
+export async function guardarScreening(caseId: string, screening: StoredScreening): Promise<void> {
+  const db = getDb() as Firestore | null;
+  if (!db) return;
+  // Firestore no acepta `undefined`: el round-trip por JSON descarta esas claves.
+  const limpio = JSON.parse(JSON.stringify({ ...screening, screenedAt: new Date().toISOString() }));
+  await updateDoc(doc(db, CASOS_COLLECTION, caseId), { screening: limpio });
 }
 
 // Suscripción en vivo. Devuelve unsubscribe. Ordena por recibidoEn desc en cliente
