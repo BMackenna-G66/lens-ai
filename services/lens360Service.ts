@@ -341,6 +341,63 @@ function computeVerdict(r: Lens360Result): void {
 }
 
 // ─── Orquestador público ────────────────────────────────────────────────────────
+// ─── Screening criminal Chile EN VIVO por RUT (para la cola de casos) ───────────
+// Reutiliza el fetch a Regcheq + el motor de decisión (evaluateCriminal), pero sin
+// SII ni personas relacionadas: solo necesita el DNI. Devuelve la cantidad de
+// delitos únicos y la conclusión del perfil criminal.
+export interface CasoScreeningChile {
+  estado: 'ok' | 'sin_causas' | 'error';
+  delitosUnicos: number;
+  decision: string;   // conclusión (motor de decisión del Criminal Profiler)
+  razon: string;
+  crimes: Lens360Crime[];
+  profile?: PersonProfile;
+  mensaje?: string;
+}
+
+export async function screenChileCriminal(rut: string, nombre = ''): Promise<CasoScreeningChile> {
+  const vacio = (estado: CasoScreeningChile['estado'], mensaje?: string): CasoScreeningChile =>
+    ({ estado, delitosUnicos: 0, decision: estado === 'sin_causas' ? 'Sin causas penales' : '—', razon: '', crimes: [], mensaje });
+
+  if (!REGCHEQ_KEY) return vacio('error', 'Falta la key de Regcheq');
+  const rutN = rut.replace(/[.\s-]/g, '').toUpperCase();
+  if (!rutN) return vacio('error', 'DNI vacío');
+
+  const GET = `${REGCHEQ_BASE}/record/${rutN}/${REGCHEQ_KEY}`;
+  let resp: Response;
+  try {
+    resp = await fetch(GET);
+    if (resp.status === 404) {
+      // No existe la ficha → crearla (dispara el screening) y reintentar.
+      await createRegcheqRecord(rutN, nombre, 'natural');
+      await sleep(1500); resp = await fetch(GET);
+      if (resp.status === 404) { await sleep(2500); resp = await fetch(GET); }
+    }
+  } catch (e) { return vacio('error', e instanceof Error ? e.message : String(e)); }
+  if (!resp.ok) return vacio('error', `Regcheq ${resp.status}`);
+
+  const perfil = await resp.json();
+  const listasRaw = (perfil.listas ?? {}) as Record<string, Record<string, unknown>>;
+  const causas = listasRaw['causasPenalesRegcheq'];
+  const nombreEff = (perfil.name ?? perfil.socialReason ?? nombre ?? '') as string;
+
+  if (!causas?.coincidence || !causas.data) return vacio('sin_causas');
+
+  const raw = causas.data as Record<string, unknown>;
+  const additionalData = Array.isArray(raw['additionalData']) ? (raw['additionalData'] as Record<string, unknown>[]) : [];
+  const ev = evaluateCriminal(rutN, nombreEff, additionalData);
+  // Delitos únicos: causas distintas (dedupe por RUC; fallback al tipo de delito).
+  const delitosUnicos = new Set(ev.crimes.map(c => (c.ruc || '').trim() || (c.crimen || '').trim()).filter(Boolean)).size;
+  return {
+    estado: 'ok',
+    delitosUnicos,
+    decision: ev.decision?.decision ?? 'Con causas',
+    razon: ev.decision?.razon ?? '',
+    crimes: ev.crimes,
+    profile: ev.profile,
+  };
+}
+
 export async function search360(params: {
   rut: string; nombre?: string; country: string; personType: Lens360PersonType;
 }): Promise<Lens360Result> {

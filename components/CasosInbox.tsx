@@ -5,6 +5,18 @@ import {
 } from '../services/salesforceCaseService';
 import { SF_CASE_FIELDS } from '../services/salesforceCaseFields';
 import { buscarRemesa, buscarRemesas, RemesaResult, RemesaRow } from '../services/remesasService';
+import { screenChileCriminal } from '../services/lens360Service';
+
+// Estado del screening criminal por caso (cola OFAC/PEP).
+interface ScreeningState {
+  estado: 'loading' | 'ok' | 'sin_causas' | 'error' | 'na';  // na = no aplica (no es Chile)
+  delitosUnicos?: number;
+  decision?: string;
+  razon?: string;
+}
+
+const paisOrigenChile = (c: QueuedCaso): boolean =>
+  /chile|^cl$/i.test(String(c.datos?.['País Origen'] ?? '').trim());
 
 type FormState = Record<string, string | boolean>;
 
@@ -172,6 +184,48 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeQueue, remesaIdsKey]);
 
+  // ── Screening criminal EN VIVO de la cola OFAC/PEP ──────────────────────────
+  // Chile → Regcheq (solo DNI) + motor de decisión. Colombia queda pendiente
+  // (Inspektor). Se procesa cada caso apenas cae, incrementalmente.
+  const [screenMap, setScreenMap] = useState<Record<string, ScreeningState>>({});
+  const ofacIdsKey = colas.ofac.map(c => c.id).join(',');
+  useEffect(() => {
+    if (activeQueue !== 'ofac') return;
+    const pendientes = colas.ofac.filter(c => !(c.id in screenMap));
+    if (pendientes.length === 0) return;
+    let cancelado = false;
+
+    // Estado inicial: loading para Chile, 'na' para el resto (Inspektor pendiente).
+    setScreenMap(prev => {
+      const next = { ...prev };
+      for (const c of pendientes) next[c.id] = { estado: paisOrigenChile(c) ? 'loading' : 'na' };
+      return next;
+    });
+
+    // Procesa los de Chile (Regcheq). Concurrencia natural; cada uno actualiza al terminar.
+    for (const c of pendientes.filter(paisOrigenChile)) {
+      const dni = String(c.datos?.['Número de DNI'] ?? '');
+      const nombre = `${c.datos?.['Nombre'] ?? ''} ${c.datos?.['Apellido'] ?? ''}`.trim();
+      screenChileCriminal(dni, nombre)
+        .then(r => {
+          if (cancelado) return;
+          setScreenMap(prev => ({ ...prev, [c.id]: { estado: r.estado, delitosUnicos: r.delitosUnicos, decision: r.decision, razon: r.razon } }));
+        })
+        .catch(() => { if (!cancelado) setScreenMap(prev => ({ ...prev, [c.id]: { estado: 'error' } })); });
+    }
+    return () => { cancelado = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeQueue, ofacIdsKey]);
+
+  // Color de la conclusión según la decisión del motor.
+  const decisionColor = (d?: string): string => {
+    const s = (d || '').toUpperCase();
+    if (/BLOCK|BLOQ|FORZAR|RECHAZ/.test(s)) return 'text-red-600 dark:text-red-400';
+    if (/REVIS|UCR|COMPLIANCE|MANUAL/.test(s)) return 'text-amber-600 dark:text-amber-400';
+    if (/LIBER|APROB|OK|SIN CAUSAS/.test(s)) return 'text-emerald-600 dark:text-emerald-400';
+    return 'text-slate-600 dark:text-slate-300';
+  };
+
   const enviarRespuesta = async () => {
     setSending(true);
     setSfResult(null);
@@ -278,13 +332,19 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                       <th className="px-3 py-2 font-bold whitespace-nowrap">Tipo de envío</th>
                     </>
                   )}
+                  {activeQueue === 'ofac' && (
+                    <>
+                      <th className="px-3 py-2 font-bold whitespace-nowrap text-center">Delitos únicos</th>
+                      <th className="px-3 py-2 font-bold whitespace-nowrap">Conclusión</th>
+                    </>
+                  )}
                   {columnas.map(k => <th key={k} className="px-3 py-2 font-bold whitespace-nowrap">{k}</th>)}
                 </tr>
               </thead>
               <tbody>
                 {filtrados.length === 0 && (
                   <tr>
-                    <td colSpan={columnas.length + (activeQueue === 'remesa' ? 4 : 1)} className="py-8 text-center text-slate-400">
+                    <td colSpan={columnas.length + (activeQueue === 'remesa' ? 4 : activeQueue === 'ofac' ? 3 : 1)} className="py-8 text-center text-slate-400">
                       Sin casos en esta cola.
                     </td>
                   </tr>
@@ -293,6 +353,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                   const activo = sel?.id === c.id;
                   const r = c.remesa ? remesaMap[c.remesa] : undefined;
                   const rCell = (v: string | undefined) => r ? (v || '—') : (remesaMapLoading ? '…' : '—');
+                  const s = screenMap[c.id];
                   return (
                     <tr
                       key={c.id}
@@ -306,6 +367,19 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                           <td className="px-3 py-2 max-w-[220px] truncate text-slate-700 dark:text-slate-200" title={r?.beneficiary_name}>{rCell(r?.beneficiary_name)}</td>
                           <td className="px-3 py-2 whitespace-nowrap text-slate-700 dark:text-slate-200">{r ? `${r.beneficiary_dni_type} ${r.beneficiary_dni}` : (remesaMapLoading ? '…' : '—')}</td>
                           <td className="px-3 py-2 whitespace-nowrap text-slate-700 dark:text-slate-200">{rCell(r?.tipo_envio)}</td>
+                        </>
+                      )}
+                      {activeQueue === 'ofac' && (
+                        <>
+                          <td className="px-3 py-2 whitespace-nowrap text-center font-bold text-slate-800 dark:text-slate-200">
+                            {!s || s.estado === 'loading' ? '…' : s.estado === 'na' ? '—' : s.estado === 'error' ? '⚠️' : (s.delitosUnicos ?? 0)}
+                          </td>
+                          <td className={`px-3 py-2 whitespace-nowrap font-semibold ${decisionColor(s?.decision)}`} title={s?.razon}>
+                            {!s || s.estado === 'loading' ? 'consultando…'
+                              : s.estado === 'na' ? 'Pendiente (Inspektor)'
+                              : s.estado === 'error' ? 'Error'
+                              : (s.decision || '—')}
+                          </td>
                         </>
                       )}
                       {columnas.map(k => {
