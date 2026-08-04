@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { subscribeCasos, isCasosAvailable, CasoSF } from '../services/casosService';
+import { subscribeCasos, isCasosAvailable, guardarScreening, CasoSF } from '../services/casosService';
 import {
   sendCaseUpdate, sfUpdateDisponible, SFCaseUpdate, SFUpdateResult,
 } from '../services/salesforceCaseService';
@@ -191,6 +191,32 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   // Chile → Regcheq (solo DNI) + motor de decisión. Colombia queda pendiente
   // (Inspektor). Se procesa cada caso apenas cae, incrementalmente.
   const [screenMap, setScreenMap] = useState<Record<string, ScreeningState>>({});
+
+  // Aplica un resultado al estado y lo PERSISTE en Firestore (salvo errores, que se
+  // reintentan la próxima vez). Compartido entre analistas y sobrevive recargas.
+  const aplicarScreening = (id: string, r: { estado: ScreeningState['estado']; fuente?: string; delitosUnicos?: number; decision?: string; razon?: string; coincidencias?: Coincidencia[] }) => {
+    setScreenMap(prev => ({ ...prev, [id]: { estado: r.estado, fuente: r.fuente, delitosUnicos: r.delitosUnicos, decision: r.decision, razon: r.razon, coincidencias: r.coincidencias } }));
+    if (r.estado !== 'error' && r.estado !== 'loading') {
+      guardarScreening(id, { estado: r.estado, fuente: r.fuente, delitosUnicos: r.delitosUnicos, decision: r.decision, razon: r.razon, coincidencias: r.coincidencias }).catch(() => {});
+    }
+  };
+
+  // Semilla desde el screening ya guardado (evita re-consultar las listas al recargar).
+  useEffect(() => {
+    setScreenMap(prev => {
+      let changed = false;
+      const next = { ...prev };
+      for (const c of casos) {
+        if (c.screening && !(c.id in next)) {
+          const sc = c.screening;
+          next[c.id] = { estado: (sc.estado as ScreeningState['estado']) ?? 'ok', fuente: sc.fuente, delitosUnicos: sc.delitosUnicos, decision: sc.decision, razon: sc.razon, coincidencias: sc.coincidencias as Coincidencia[] | undefined };
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [casos]);
+
   const ofacIdsKey = colas.ofac.map(c => c.id).join(',');
   useEffect(() => {
     if (activeQueue !== 'ofac') return;
@@ -211,11 +237,18 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       if (cancelado) return;
       const r = await screenCaso(c);
       if (cancelado) return;
-      setScreenMap(prev => ({ ...prev, [c.id]: { estado: r.estado, fuente: r.fuente, delitosUnicos: r.delitosUnicos, decision: r.decision, razon: r.razon, coincidencias: r.coincidencias } }));
+      aplicarScreening(c.id, r);
     }, 4);
     return () => { cancelado = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeQueue, ofacIdsKey]);
+
+  // Reconsulta manual de un caso (fuerza volver a pegarle a la lista).
+  const reconsultar = async (c: QueuedCaso) => {
+    setScreenMap(prev => ({ ...prev, [c.id]: { estado: 'loading' } }));
+    const r = await screenCaso(c);
+    aplicarScreening(c.id, r);
+  };
 
   // Color de la conclusión según la decisión del motor.
   const decisionColor = (d?: string): string => {
@@ -487,11 +520,23 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                       <h3 className="text-sm font-black text-indigo-800 dark:text-indigo-300">
                         ⚖️ Perfil criminal{screenMap[sel.id]?.fuente && screenMap[sel.id]?.fuente !== '—' ? ` · ${screenMap[sel.id]?.fuente}` : ''}
                       </h3>
-                      <span className={`text-xs font-bold ${decisionColor(screenMap[sel.id]?.decision)}`}>
-                        {screenMap[sel.id]?.estado === 'loading' ? 'consultando…'
-                          : screenMap[sel.id]?.estado === 'na' ? 'No aplica'
-                          : (screenMap[sel.id]?.decision || '—')}
-                      </span>
+                      <div className="flex items-center gap-3">
+                        <span className={`text-xs font-bold ${decisionColor(screenMap[sel.id]?.decision)}`}>
+                          {screenMap[sel.id]?.estado === 'loading' ? 'consultando…'
+                            : screenMap[sel.id]?.estado === 'na' ? 'No aplica'
+                            : (screenMap[sel.id]?.decision || '—')}
+                        </span>
+                        {esScreenable(sel) && (
+                          <button
+                            onClick={() => reconsultar(sel)}
+                            disabled={screenMap[sel.id]?.estado === 'loading'}
+                            title="Volver a consultar la lista (Regcheq/Inspektor)"
+                            className="text-[11px] font-bold text-slate-500 dark:text-slate-400 hover:text-sky-600 dark:hover:text-sky-400 disabled:opacity-40"
+                          >
+                            ↻ Reconsultar
+                          </button>
+                        )}
+                      </div>
                     </div>
                     {(() => {
                       const sc = screenMap[sel.id];
