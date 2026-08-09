@@ -116,8 +116,26 @@ def _doc_id(caso: dict) -> str:
     return f"auto-{uuid.uuid4().hex}"
 
 
+# Campos que ESCRIBE la ingesta. El resto del documento (screening, investigacion,
+# decisionCompliance, asignacion, sla, respuestaSalesforce, versionCaso y la
+# subcolección de auditoría) lo maneja Lens y NO debe tocarse al reingestar.
+_CAMPOS_INGESTA = ["numeroCaso", "asunto", "nombreCuenta", "pais", "recibidoEn", "origen", "datos"]
+
+
+def _build_patch_url(doc_id: str, campos: list) -> str:
+    """URL de PATCH con updateMask: Firestore escribe SOLO `campos` y preserva el resto.
+    Así una reingesta de Salesforce no pisa el trabajo del analista (screening, etc.)."""
+    base = (
+        f"https://firestore.googleapis.com/v1/projects/{FIRESTORE_PROJECT}"
+        f"/databases/(default)/documents/{FIRESTORE_COLLECTION}/{urllib.request.quote(doc_id)}"
+    )
+    mask = "&".join(f"updateMask.fieldPaths={c}" for c in campos)
+    return f"{base}?{mask}"
+
+
 def _guardar_en_firestore(caso: dict) -> None:
-    """UPSERT del caso en Firestore vía PATCH (crea o actualiza por número de caso)."""
+    """UPSERT del caso en Firestore vía PATCH con updateMask (crea o actualiza por
+    número de caso, preservando el estado operacional agregado por Lens)."""
     doc_id = _doc_id(caso)
     fields = {
         "numeroCaso": str(caso.get(_CAMPO_NUMERO, "") or ""),
@@ -129,10 +147,7 @@ def _guardar_en_firestore(caso: dict) -> None:
         "datos": caso,  # payload completo, tal cual llegó
     }
     body = json.dumps({"fields": {k: _to_fs_value(v) for k, v in fields.items()}}).encode("utf-8")
-    url = (
-        f"https://firestore.googleapis.com/v1/projects/{FIRESTORE_PROJECT}"
-        f"/databases/(default)/documents/{FIRESTORE_COLLECTION}/{urllib.request.quote(doc_id)}"
-    )
+    url = _build_patch_url(doc_id, list(fields.keys()))
     req = urllib.request.Request(url, data=body, method="PATCH")
     req.add_header("Authorization", f"Bearer {_access_token()}")
     req.add_header("Content-Type", "application/json")
