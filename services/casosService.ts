@@ -12,13 +12,15 @@ export const CASOS_COLLECTION = 'casos_sf';
 // Resultado del screening (Regcheq/Inspektor) que se persiste en el caso para no
 // re-consultar la lista al recargar. Se guarda desde el navegador (updateDoc).
 export interface StoredScreening {
+  schemaVersion?: number;   // 2 = shape extendido (con alertas). Ausente = v1 (legacy).
   estado?: string;
   fuente?: string;
   delitosUnicos?: number;
   decision?: string;
   razon?: string;
-  coincidencias?: unknown[];
-  screenedAt?: string;   // ISO — cuándo se consultó
+  coincidencias?: unknown[]; // legacy, se mantiene por compatibilidad de la UI
+  alertas?: unknown[];       // v2: alertas normalizadas con dedupKey
+  screenedAt?: string;       // ISO — cuándo se consultó
 }
 
 export interface CasoSF {
