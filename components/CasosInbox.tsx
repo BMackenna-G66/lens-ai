@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { subscribeCasos, isCasosAvailable, guardarScreening, eliminarCasos, CasoSF } from '../services/casosService';
 import {
-  sendCaseUpdate, sfUpdateDisponible, SFCaseUpdate, SFUpdateResult,
+  sfUpdateDisponible, SFCaseUpdate, SFUpdateResult,
 } from '../services/salesforceCaseService';
 import { SF_CASE_FIELDS } from '../services/salesforceCaseFields';
 import { buscarRemesa, buscarRemesas, RemesaResult, RemesaRow } from '../services/remesasService';
@@ -15,6 +15,7 @@ import { calcularPrioridadPreliminar } from '../services/casePriority';
 import { cambiarEstado, tomarCaso, liberarCaso } from '../services/caseWorkflowService';
 import { guardarInvestigacion } from '../services/caseInvestigationService';
 import { registrarDecision, resolverAprobacion, requiereAprobacion } from '../services/caseDecisionService';
+import { enviarResolucion, conclusionAStatus } from '../services/caseResolutionService';
 import type { InvestigacionCaso, DecisionCompliance, TipoDecision } from '../services/casosComplianceTypes';
 import { useAuth } from '../context/AuthContext';
 
@@ -81,6 +82,7 @@ const cellText = (v: unknown): string => {
 
 export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onToggleDarkMode }) => {
   const { user } = useAuth();
+  const actor = user ? { uid: user.uid, nombre: user.displayName || user.email || user.uid } : null;
   const [casos, setCasos] = useState<CasoSF[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -170,9 +172,13 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   const [sending, setSending] = useState(false);
   const [sfResult, setSfResult] = useState<SFUpdateResult | null>(null);
 
-  // Al cambiar de caso, reinicia el formulario con los datos de ese caso.
+  // Al cambiar de caso, reinicia el formulario. Pre-llena C_Status__c según la
+  // conclusión del motor (Fase 7); el analista completa el resto.
   useEffect(() => {
-    setForm(defaultForm(sel));
+    const base = defaultForm(sel);
+    const sug = conclusionAStatus(sel?.screening?.decision);
+    if (sug) base['C_Status__c'] = sug;
+    setForm(base);
     setSfResult(null);
   }, [sel?.id]);
 
@@ -294,8 +300,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     return 'text-slate-600 dark:text-slate-300';
   };
 
-  // ── Workflow (Fase 4b): usuario actual, vista operacional y acciones ─────────
-  const actor = user ? { uid: user.uid, nombre: user.displayName || user.email || user.uid } : null;
+  // ── Workflow (Fase 4b): vista operacional y acciones (actor definido arriba) ──
   const [accionEnCurso, setAccionEnCurso] = useState(false);
   const [accionMsg, setAccionMsg] = useState<string | null>(null);
 
@@ -448,11 +453,14 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   );
 
   const enviarRespuesta = async () => {
+    if (!sel) return;
     setSending(true);
     setSfResult(null);
     try {
-      const res = await sendCaseUpdate(buildPayload(form));
-      setSfResult(res);
+      // Fase 7: idempotente + persiste respuestaSalesforce + auditoría.
+      const { sf, yaEnviada, mensaje } = await enviarResolucion(sel.id, buildPayload(form), actor ?? undefined);
+      if (yaEnviada) setSfResult({ ok: true, status: 200, raw: null, warnings: [mensaje ?? 'Ya enviada'] } as SFUpdateResult);
+      else if (sf) setSfResult(sf);
     } catch (e) {
       setSfResult({ ok: false, status: 0, errors: [(e as Error).message], raw: null });
     } finally {
