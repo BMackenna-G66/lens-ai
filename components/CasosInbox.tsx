@@ -8,7 +8,12 @@ import { buscarRemesa, buscarRemesas, RemesaResult, RemesaRow } from '../service
 import { screenCaso, esScreenable, runPool, Coincidencia, CasoScreening } from '../services/casosCriminalService';
 import { normalizarScreening } from '../services/screeningNormalizer';
 import { mergeAlertas } from '../services/alertDeduplication';
-import type { AlertaScreening } from '../services/casosComplianceTypes';
+import type { AlertaScreening, EstadoCaso, PrioridadCaso, TipoCasoCompliance } from '../services/casosComplianceTypes';
+import { TRANSICIONES_CASO } from '../services/casosComplianceTypes';
+import { inferirTipoCaso } from '../services/casosComplianceMapper';
+import { calcularPrioridadPreliminar } from '../services/casePriority';
+import { cambiarEstado, tomarCaso, liberarCaso } from '../services/caseWorkflowService';
+import { useAuth } from '../context/AuthContext';
 
 // Estado del screening criminal por caso (cola OFAC/PEP).
 interface ScreeningState {
@@ -72,6 +77,7 @@ const cellText = (v: unknown): string => {
 };
 
 export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onToggleDarkMode }) => {
+  const { user } = useAuth();
   const [casos, setCasos] = useState<CasoSF[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -285,6 +291,40 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     return 'text-slate-600 dark:text-slate-300';
   };
 
+  // ── Workflow (Fase 4b): usuario actual, vista operacional y acciones ─────────
+  const actor = user ? { uid: user.uid, nombre: user.displayName || user.email || user.uid } : null;
+  const [accionEnCurso, setAccionEnCurso] = useState(false);
+  const [accionMsg, setAccionMsg] = useState<string | null>(null);
+
+  // Vista operacional derivada del caso (con defaults; prioridad preliminar si no
+  // está guardada). Lee los bloques que escribe el workflow, sin romper CasoSF.
+  const vistaOp = (c: QueuedCaso) => {
+    const raw = c as unknown as Record<string, unknown>;
+    const tipo = (raw.tipoCasoCompliance as TipoCasoCompliance) ?? inferirTipoCaso(c);
+    const estado = (raw.estadoCaso as EstadoCaso) ?? 'NUEVO';
+    const asignado = (raw.asignacion as { analistaNombre?: string } | undefined)?.analistaNombre ?? '';
+    const tieneCoinc = (screenMap[c.id]?.delitosUnicos ?? 0) > 0;
+    const prioridad = (raw.prioridad as PrioridadCaso) ?? calcularPrioridadPreliminar(tipo, tieneCoinc);
+    const versionCaso = (raw.versionCaso as number) ?? 1;
+    return { tipo, estado, prioridad, asignado, versionCaso };
+  };
+
+  const prioColor = (p: PrioridadCaso): string =>
+    p === 'CRITICA' ? 'text-red-600 dark:text-red-400'
+      : p === 'ALTA' ? 'text-orange-600 dark:text-orange-400'
+        : p === 'MEDIA' ? 'text-amber-600 dark:text-amber-400'
+          : 'text-slate-500 dark:text-slate-400';
+
+  const conAccion = async (fn: () => Promise<void>) => {
+    if (!actor) { setAccionMsg('Sesión no disponible.'); return; }
+    setAccionEnCurso(true); setAccionMsg(null);
+    try { await fn(); } catch (e) { setAccionMsg((e as Error).message); }
+    finally { setAccionEnCurso(false); }
+  };
+  const doTomar = (c: QueuedCaso) => conAccion(() => tomarCaso({ id: c.id, estadoCaso: vistaOp(c).estado, versionCaso: vistaOp(c).versionCaso }, actor!));
+  const doLiberar = (c: QueuedCaso) => conAccion(() => liberarCaso({ id: c.id, estadoCaso: vistaOp(c).estado, versionCaso: vistaOp(c).versionCaso }, actor!));
+  const doEstado = (c: QueuedCaso, nuevo: EstadoCaso) => conAccion(() => cambiarEstado({ id: c.id, estadoCaso: vistaOp(c).estado, versionCaso: vistaOp(c).versionCaso }, nuevo, actor!));
+
   // Orden por columna (asc/desc). Cada columna tiene una clave; el valor se obtiene
   // del caso o de los mapas (remesa/screening) según corresponda.
   const ordenados = useMemo(() => {
@@ -297,6 +337,10 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
         case 'tipoenvio': return remesaMap[c.remesa]?.tipo_envio || '';
         case 'delitos': return screenMap[c.id]?.delitosUnicos ?? -1;
         case 'conclusion': return screenMap[c.id]?.decision || '';
+        case 'tipo': return vistaOp(c).tipo;
+        case 'estado': return vistaOp(c).estado;
+        case 'prioridad': return vistaOp(c).prioridad;
+        case 'asignado': return vistaOp(c).asignado;
         default: return String(c.datos?.[sortCol] ?? '');
       }
     };
@@ -455,6 +499,10 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                   )}
                   {activeQueue === 'ofac' && (
                     <>
+                      {Th('tipo', 'Tipo')}
+                      {Th('estado', 'Estado')}
+                      {Th('prioridad', 'Prioridad')}
+                      {Th('asignado', 'Asignado')}
                       {Th('delitos', 'Delitos únicos', 'text-center')}
                       {Th('conclusion', 'Conclusión')}
                     </>
@@ -465,7 +513,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
               <tbody>
                 {ordenados.length === 0 && (
                   <tr>
-                    <td colSpan={columnas.length + (activeQueue === 'remesa' ? 4 : activeQueue === 'ofac' ? 3 : 1) + 1} className="py-8 text-center text-slate-400">
+                    <td colSpan={columnas.length + (activeQueue === 'remesa' ? 4 : activeQueue === 'ofac' ? 7 : 1) + 1} className="py-8 text-center text-slate-400">
                       Sin casos en esta cola.
                     </td>
                   </tr>
@@ -475,6 +523,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                   const r = c.remesa ? remesaMap[c.remesa] : undefined;
                   const rCell = (v: string | undefined) => r ? (v || '—') : (remesaMapLoading ? '…' : '—');
                   const s = screenMap[c.id];
+                  const op = activeQueue === 'ofac' ? vistaOp(c) : null;
                   return (
                     <tr
                       key={c.id}
@@ -493,8 +542,12 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                           <td className="px-3 py-2 whitespace-nowrap text-slate-700 dark:text-slate-200">{rCell(r?.tipo_envio)}</td>
                         </>
                       )}
-                      {activeQueue === 'ofac' && (
+                      {activeQueue === 'ofac' && op && (
                         <>
+                          <td className="px-3 py-2 whitespace-nowrap text-slate-700 dark:text-slate-200">{op.tipo}</td>
+                          <td className="px-3 py-2 whitespace-nowrap text-slate-600 dark:text-slate-300">{op.estado}</td>
+                          <td className={`px-3 py-2 whitespace-nowrap font-bold ${prioColor(op.prioridad)}`}>{op.prioridad}</td>
+                          <td className="px-3 py-2 whitespace-nowrap text-slate-600 dark:text-slate-300 max-w-[160px] truncate" title={op.asignado}>{op.asignado || '—'}</td>
                           <td className="px-3 py-2 whitespace-nowrap text-center font-bold text-slate-800 dark:text-slate-200">
                             {!s || s.estado === 'loading' ? '…' : s.estado === 'na' ? '—' : s.estado === 'error' ? '⚠️' : (s.delitosUnicos ?? 0)}
                           </td>
@@ -572,6 +625,40 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                     )}
                   </div>
                 )}
+
+                {/* Estado y asignación del caso */}
+                {(() => {
+                  const op = vistaOp(sel);
+                  const esMio = !!actor && op.asignado === actor.nombre;
+                  const selectCls = 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1 text-sm outline-none focus:border-sky-400';
+                  return (
+                    <div className="mb-5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/60 dark:bg-slate-900/40 p-4">
+                      <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm">
+                        <span className="text-slate-500 dark:text-slate-400">Tipo: <b className="text-slate-800 dark:text-slate-200">{op.tipo}</b></span>
+                        <span className="text-slate-500 dark:text-slate-400">Prioridad: <b className={prioColor(op.prioridad)}>{op.prioridad}</b></span>
+                        <label className="flex items-center gap-1 text-slate-500 dark:text-slate-400">
+                          Estado:
+                          <select
+                            value={op.estado}
+                            disabled={accionEnCurso}
+                            onChange={e => e.target.value !== op.estado && doEstado(sel, e.target.value as EstadoCaso)}
+                            className={selectCls}
+                          >
+                            <option value={op.estado}>{op.estado}</option>
+                            {TRANSICIONES_CASO[op.estado].map(s => <option key={s} value={s}>{s}</option>)}
+                          </select>
+                        </label>
+                        <span className="text-slate-500 dark:text-slate-400">Asignado: <b className="text-slate-800 dark:text-slate-200">{op.asignado || '—'}</b></span>
+                        {esMio ? (
+                          <button onClick={() => doLiberar(sel)} disabled={accionEnCurso} className="px-3 py-1 rounded-lg border border-slate-300 dark:border-slate-600 text-sm font-semibold disabled:opacity-50">Liberar</button>
+                        ) : (
+                          <button onClick={() => doTomar(sel)} disabled={accionEnCurso} className="px-3 py-1 rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-sm font-bold disabled:opacity-50">Tomar caso</button>
+                        )}
+                        {accionMsg && <span className="text-xs text-red-600 dark:text-red-400">{accionMsg}</span>}
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 {/* Perfil criminal / coincidencias detectadas (cola OFAC) */}
                 {activeQueue === 'ofac' && screenMap[sel.id] && (
