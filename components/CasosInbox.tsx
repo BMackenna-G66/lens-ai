@@ -14,7 +14,8 @@ import { inferirTipoCaso } from '../services/casosComplianceMapper';
 import { calcularPrioridadPreliminar } from '../services/casePriority';
 import { cambiarEstado, tomarCaso, liberarCaso } from '../services/caseWorkflowService';
 import { guardarInvestigacion } from '../services/caseInvestigationService';
-import type { InvestigacionCaso } from '../services/casosComplianceTypes';
+import { registrarDecision, resolverAprobacion, requiereAprobacion } from '../services/caseDecisionService';
+import type { InvestigacionCaso, DecisionCompliance, TipoDecision } from '../services/casosComplianceTypes';
 import { useAuth } from '../context/AuthContext';
 
 // Estado del screening criminal por caso (cola OFAC/PEP).
@@ -366,6 +367,40 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       setInvMsg('Guardado ✓');
     } catch (e) { setInvMsg((e as Error).message); }
     finally { setInvSaving(false); }
+  };
+
+  // ── Decisión de Compliance (Fase 6) ─────────────────────────────────────────
+  const TIPOS_DECISION: { v: TipoDecision; label: string }[] = [
+    { v: 'FALSO_POSITIVO', label: 'Falso positivo' },
+    { v: 'PEP_CONFIRMADO', label: 'PEP confirmado' },
+    { v: 'OFAC_CONFIRMADO', label: 'OFAC confirmado' },
+    { v: 'INCONCLUSO', label: 'Inconcluso' },
+    { v: 'DUPLICADO', label: 'Duplicado' },
+    { v: 'ESCALAR', label: 'Escalar' },
+  ];
+  const [decForm, setDecForm] = useState<{ tipo: TipoDecision; reasonCode: string; justificacion: string }>({ tipo: 'FALSO_POSITIVO', reasonCode: '', justificacion: '' });
+  const [decSaving, setDecSaving] = useState(false);
+  const [decMsg, setDecMsg] = useState<string | null>(null);
+  const decActual = ((sel as unknown as Record<string, unknown> | null)?.decisionCompliance) as DecisionCompliance | undefined;
+  useEffect(() => {
+    setDecForm({ tipo: (decActual?.tipo as TipoDecision) ?? 'FALSO_POSITIVO', reasonCode: decActual?.reasonCode ?? '', justificacion: decActual?.justificacion ?? '' });
+    setDecMsg(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sel?.id]);
+
+  const doRegistrarDecision = async () => {
+    if (!actor || !sel) { setDecMsg('Sesión no disponible.'); return; }
+    setDecSaving(true); setDecMsg(null);
+    try { await registrarDecision(sel.id, decForm, actor); setDecMsg('Decisión registrada ✓'); }
+    catch (e) { setDecMsg((e as Error).message); }
+    finally { setDecSaving(false); }
+  };
+  const doAprobar = async (aprobar: boolean) => {
+    if (!actor || !sel) { setDecMsg('Sesión no disponible.'); return; }
+    setDecSaving(true); setDecMsg(null);
+    try { await resolverAprobacion(sel.id, aprobar, actor); setDecMsg(aprobar ? 'Aprobada ✓' : 'Rechazada'); }
+    catch (e) { setDecMsg((e as Error).message); }
+    finally { setDecSaving(false); }
   };
 
   // Orden por columna (asc/desc). Cada columna tiene una clave; el valor se obtiene
@@ -805,6 +840,71 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                           {invMsg && <span className={`text-xs ${invMsg.includes('✓') ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}`}>{invMsg}</span>}
                         </div>
                       </>
+                    );
+                  })()}
+                </div>
+
+                {/* Decisión de Compliance (Fase 6) */}
+                <div className="mb-5 rounded-xl border border-slate-200 dark:border-slate-700 p-4">
+                  <h3 className="text-sm font-black text-slate-800 dark:text-slate-200 mb-3">⚖️ Decisión de Compliance</h3>
+                  {(() => {
+                    const inp = 'w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1.5 text-sm outline-none focus:border-sky-400';
+                    const d = decActual;
+                    const esMaker = !!d && !!actor && d.decididoPor === actor.uid;
+                    const Msg = () => decMsg ? <span className={`text-xs ${decMsg.includes('✓') ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}`}>{decMsg}</span> : null;
+
+                    if (d && (d.estado === 'APROBADA' || d.estado === 'RECHAZADA')) {
+                      return (
+                        <div className="text-sm space-y-1">
+                          <p><b className={d.estado === 'APROBADA' ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}>{d.estado}</b> · {TIPOS_DECISION.find(t => t.v === d.tipo)?.label ?? d.tipo}</p>
+                          {d.reasonCode && <p className="text-xs text-slate-500 dark:text-slate-400">Reason code: {d.reasonCode}</p>}
+                          <p className="text-xs text-slate-600 dark:text-slate-300">{d.justificacion}</p>
+                          <p className="text-[11px] text-slate-400">Decidió: {d.decididoPor}{d.aprobadoPor ? ` · Aprobó: ${d.aprobadoPor}` : ''}</p>
+                        </div>
+                      );
+                    }
+
+                    if (d && d.estado === 'PENDIENTE_APROBACION') {
+                      return (
+                        <div className="text-sm space-y-2">
+                          <p><b className="text-amber-600 dark:text-amber-400">PENDIENTE DE APROBACIÓN</b> · {TIPOS_DECISION.find(t => t.v === d.tipo)?.label ?? d.tipo}</p>
+                          <p className="text-xs text-slate-600 dark:text-slate-300">{d.justificacion}</p>
+                          {esMaker ? (
+                            <p className="text-xs text-slate-500 dark:text-slate-400">Registrada por vos — requiere aprobación de <b>otro</b> analista (maker-checker).</p>
+                          ) : (
+                            <div className="flex items-center gap-2">
+                              <button onClick={() => doAprobar(true)} disabled={decSaving} className="px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-bold disabled:opacity-50">Aprobar</button>
+                              <button onClick={() => doAprobar(false)} disabled={decSaving} className="px-3 py-1 rounded-lg border border-red-300 dark:border-red-700 text-red-600 dark:text-red-400 text-sm font-bold disabled:opacity-50">Rechazar</button>
+                            </div>
+                          )}
+                          <Msg />
+                        </div>
+                      );
+                    }
+
+                    return (
+                      <div className="space-y-2">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                          <label className="text-xs"><span className="block font-semibold text-slate-500 dark:text-slate-400 mb-1">Decisión</span>
+                            <select value={decForm.tipo} onChange={e => setDecForm(f => ({ ...f, tipo: e.target.value as TipoDecision }))} className={inp}>
+                              {TIPOS_DECISION.map(t => <option key={t.v} value={t.v}>{t.label}</option>)}
+                            </select>
+                          </label>
+                          <label className="text-xs"><span className="block font-semibold text-slate-500 dark:text-slate-400 mb-1">Reason code <span className="text-slate-400">(catálogo pendiente)</span></span>
+                            <input value={decForm.reasonCode} onChange={e => setDecForm(f => ({ ...f, reasonCode: e.target.value }))} className={inp} />
+                          </label>
+                        </div>
+                        <label className="text-xs block"><span className="block font-semibold text-slate-500 dark:text-slate-400 mb-1">Justificación (obligatoria)</span>
+                          <textarea value={decForm.justificacion} onChange={e => setDecForm(f => ({ ...f, justificacion: e.target.value }))} rows={2} className={inp} />
+                        </label>
+                        {requiereAprobacion(decForm.tipo) && <p className="text-[11px] text-amber-600 dark:text-amber-400">Esta decisión requerirá aprobación de otro analista (maker-checker).</p>}
+                        <div className="flex items-center gap-3">
+                          <button onClick={doRegistrarDecision} disabled={decSaving} className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-sm font-bold">
+                            {decSaving ? 'Registrando…' : 'Registrar decisión'}
+                          </button>
+                          <Msg />
+                        </div>
+                      </div>
                     );
                   })()}
                 </div>
