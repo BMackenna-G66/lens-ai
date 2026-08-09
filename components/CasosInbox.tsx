@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { subscribeCasos, isCasosAvailable, guardarScreening, eliminarCasos, CasoSF } from '../services/casosService';
 import {
   sfUpdateDisponible, SFCaseUpdate, SFUpdateResult,
@@ -80,6 +80,51 @@ const cellText = (v: unknown): string => {
   return String(v);
 };
 
+// Filtro tipo Excel: desplegable con buscador, para elegir un valor de una columna.
+const FiltroCombo: React.FC<{ label: string; value: string; options: string[]; onChange: (v: string) => void }> = ({ label, value, options, onChange }) => {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState('');
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const h = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, []);
+  const filtradas = options.filter(o => o.toLowerCase().includes(q.toLowerCase()));
+  const activo = !!value;
+  return (
+    <div ref={ref} className="relative">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className={`flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-semibold border ${activo
+          ? 'bg-sky-50 dark:bg-sky-950/40 border-sky-300 dark:border-sky-700 text-sky-700 dark:text-sky-300'
+          : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300'}`}
+      >
+        {label}{activo ? `: ${value}` : ''} <span className="opacity-60">▾</span>
+      </button>
+      {open && (
+        <div className="absolute z-30 mt-1 w-60 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-xl p-2">
+          <input autoFocus value={q} onChange={e => setQ(e.target.value)} placeholder="Buscar…"
+            className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1 text-xs outline-none focus:border-sky-400 mb-1" />
+          <div className="max-h-52 overflow-y-auto">
+            <button onClick={() => { onChange(''); setOpen(false); setQ(''); }}
+              className={`w-full text-left px-2 py-1 rounded text-xs ${!value ? 'font-bold text-sky-600' : 'text-slate-500 dark:text-slate-400'} hover:bg-slate-100 dark:hover:bg-slate-700/50`}>
+              Todos
+            </button>
+            {filtradas.map(o => (
+              <button key={o} onClick={() => { onChange(o); setOpen(false); setQ(''); }}
+                className={`w-full text-left px-2 py-1 rounded text-xs truncate ${value === o ? 'font-bold text-sky-600' : 'text-slate-700 dark:text-slate-200'} hover:bg-slate-100 dark:hover:bg-slate-700/50`} title={o}>
+                {o}
+              </button>
+            ))}
+            {filtradas.length === 0 && <p className="px-2 py-1 text-xs text-slate-400">Sin coincidencias</p>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onToggleDarkMode }) => {
   const { user } = useAuth();
   const actor = user ? { uid: user.uid, nombre: user.displayName || user.email || user.uid } : null;
@@ -89,6 +134,9 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   const [selId, setSelId] = useState<string | null>(null);
   const [filtro, setFiltro] = useState('');
   const [activeQueue, setActiveQueue] = useState<QueueKey>('ofac');
+  const filtrosVacios = { pais: '', estado: '', prioridad: '', conclusion: '', numeroCaso: '', dni: '' };
+  const [filtros, setFiltros] = useState<Record<string, string>>(filtrosVacios);
+  const setFiltroCol = (k: string, v: string) => setFiltros(f => ({ ...f, [k]: v }));
   const [sortCol, setSortCol] = useState<string>('fecha');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
   const toggleSort = (col: string) =>
@@ -408,6 +456,30 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     finally { setDecSaving(false); }
   };
 
+  // Valores distintos por columna (para los desplegables de filtro), tomados de la cola.
+  const opcionesFiltro = useMemo(() => {
+    const base = colas[activeQueue];
+    const uniq = (arr: string[]) => [...new Set(arr.filter(Boolean))].sort((a, b) => a.localeCompare(b, 'es'));
+    return {
+      pais: uniq(base.map(c => c.pais)),
+      estado: uniq(base.map(c => vistaOp(c).estado)),
+      prioridad: uniq(base.map(c => vistaOp(c).prioridad)),
+      conclusion: uniq(base.map(c => screenMap[c.id]?.decision || '')),
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [colas, activeQueue, screenMap]);
+
+  // Filtros por columna (tipo Excel): se combinan en AND con el buscador global.
+  const cumpleFiltros = (c: QueuedCaso): boolean => {
+    if (filtros.pais && (c.pais || '') !== filtros.pais) return false;
+    if (filtros.estado && vistaOp(c).estado !== filtros.estado) return false;
+    if (filtros.prioridad && vistaOp(c).prioridad !== filtros.prioridad) return false;
+    if (filtros.conclusion && (screenMap[c.id]?.decision || '') !== filtros.conclusion) return false;
+    if (filtros.numeroCaso && !(c.numeroCaso || '').toLowerCase().includes(filtros.numeroCaso.toLowerCase())) return false;
+    if (filtros.dni && !String(c.datos?.['Número de DNI'] ?? '').toLowerCase().includes(filtros.dni.toLowerCase())) return false;
+    return true;
+  };
+
   // Orden por columna (asc/desc). Cada columna tiene una clave; el valor se obtiene
   // del caso o de los mapas (remesa/screening) según corresponda.
   const ordenados = useMemo(() => {
@@ -432,8 +504,9 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       if (typeof va === 'number' && typeof vb === 'number') return va - vb;
       return String(va).localeCompare(String(vb), 'es', { numeric: true });
     };
-    return [...filtrados].sort((a, b) => (sortDir === 'asc' ? cmp(a, b) : -cmp(a, b)));
-  }, [filtrados, sortCol, sortDir, remesaMap, screenMap]);
+    return filtrados.filter(cumpleFiltros).sort((a, b) => (sortDir === 'asc' ? cmp(a, b) : -cmp(a, b)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filtrados, sortCol, sortDir, remesaMap, screenMap, filtros]);
 
   // Selección "todos" sobre la vista actual (cola + filtro + orden).
   const allSel = ordenados.length > 0 && ordenados.every(c => seleccion.has(c.id));
@@ -499,7 +572,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
             return (
               <button
                 key={q.key}
-                onClick={() => { setActiveQueue(q.key); setSelId(null); limpiarSeleccion(); }}
+                onClick={() => { setActiveQueue(q.key); setSelId(null); limpiarSeleccion(); setFiltros(filtrosVacios); }}
                 className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold transition-colors border ${activa
                   ? 'bg-sky-600 text-white border-sky-600'
                   : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:border-sky-300'}`}
@@ -517,20 +590,39 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
         </div>
       )}
 
-      {/* Filtro */}
-      {!loading && !error && casos.length > 0 && (
-        <div className="flex items-center gap-3 mb-4">
-          <input
-            value={filtro}
-            onChange={e => setFiltro(e.target.value)}
-            placeholder="Filtrar en esta cola por número, asunto, cuenta, país o remesa…"
-            className="flex-1 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-2 text-sm outline-none focus:border-indigo-400"
-          />
-          <span className="text-xs font-semibold text-slate-500 dark:text-slate-400 whitespace-nowrap">
-            {filtrados.length} caso(s) en la cola
-          </span>
-        </div>
-      )}
+      {/* Buscador global + filtros por columna (tipo Excel) */}
+      {!loading && !error && casos.length > 0 && (() => {
+        const hayFiltros = Object.values(filtros).some(Boolean);
+        const inp = 'bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1.5 text-xs outline-none focus:border-sky-400 w-32';
+        return (
+          <div className="mb-4 space-y-2">
+            <div className="flex items-center gap-3">
+              <input
+                value={filtro}
+                onChange={e => setFiltro(e.target.value)}
+                placeholder="Buscador global (número, asunto, cuenta, país, remesa…)"
+                className="flex-1 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-2 text-sm outline-none focus:border-indigo-400"
+              />
+              <span className="text-xs font-semibold text-slate-500 dark:text-slate-400 whitespace-nowrap">
+                {ordenados.length} caso(s)
+              </span>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <FiltroCombo label="País" value={filtros.pais} options={opcionesFiltro.pais} onChange={v => setFiltroCol('pais', v)} />
+              {activeQueue === 'ofac' && <FiltroCombo label="Estado" value={filtros.estado} options={opcionesFiltro.estado} onChange={v => setFiltroCol('estado', v)} />}
+              {activeQueue === 'ofac' && <FiltroCombo label="Prioridad" value={filtros.prioridad} options={opcionesFiltro.prioridad} onChange={v => setFiltroCol('prioridad', v)} />}
+              {activeQueue === 'ofac' && <FiltroCombo label="Conclusión" value={filtros.conclusion} options={opcionesFiltro.conclusion} onChange={v => setFiltroCol('conclusion', v)} />}
+              <input value={filtros.numeroCaso} onChange={e => setFiltroCol('numeroCaso', e.target.value)} placeholder="Nº caso" className={inp} />
+              <input value={filtros.dni} onChange={e => setFiltroCol('dni', e.target.value)} placeholder="DNI" className={inp} />
+              {hayFiltros && (
+                <button onClick={() => setFiltros(filtrosVacios)} className="text-xs text-slate-500 dark:text-slate-400 hover:text-sky-600 underline">
+                  Limpiar filtros
+                </button>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {loading && <p className="text-sm text-slate-500 dark:text-slate-400 py-12 text-center">Cargando bandeja…</p>}
       {error && (
