@@ -126,3 +126,33 @@ export interface RespuestaSalesforce {
   codigoError: string | null;
   referencia: string | null;
 }
+
+// ─── Auditoría operacional (§22) ─────────────────────────────────────────────────
+export type TipoEventoAuditoria =
+  | 'CASO_RECIBIDO'
+  | 'SCREENING_INICIADO'
+  | 'SCREENING_COMPLETADO'
+  | 'SCREENING_ERROR'
+  | 'CASO_ASIGNADO'
+  | 'CASO_LIBERADO'
+  | 'ESTADO_CAMBIADO'
+  | 'INVESTIGACION_ACTUALIZADA'
+  | 'DECISION_REGISTRADA'
+  | 'DECISION_APROBADA'
+  | 'RESPUESTA_SF_INICIADA'
+  | 'RESPUESTA_SF_COMPLETADA'
+  | 'RESPUESTA_SF_ERROR'
+  | 'CASO_RECONSULTADO';
+
+export interface EventoAuditoriaCaso {
+  eventId: string;
+  numeroCaso: string;
+  tipo: TipoEventoAuditoria;
+  actorId: string;
+  actorTipo: 'USER' | 'SYSTEM';
+  timestamp: string;
+  correlationId: string;
+  versionCaso: number;
+  cambios?: Record<string, { anterior: unknown; nuevo: unknown }>;
+  metadata?: Record<string, unknown>;
+}
