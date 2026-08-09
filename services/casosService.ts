@@ -4,7 +4,7 @@
 // POST /casos. Este servicio solo LEE (onSnapshot); la app no escribe acá.
 // Ver aws/casos-receptor/ para el productor.
 
-import { collection, onSnapshot, query, doc, updateDoc, Firestore } from 'firebase/firestore';
+import { collection, onSnapshot, query, doc, updateDoc, writeBatch, Firestore } from 'firebase/firestore';
 import { getDb } from './firebaseService';
 
 export const CASOS_COLLECTION = 'casos_sf';
@@ -49,6 +49,18 @@ function docToCaso(id: string, data: Record<string, unknown>): CasoSF {
     datos,
     screening: (data.screening && typeof data.screening === 'object') ? data.screening as StoredScreening : undefined,
   };
+}
+
+// Borra casos de la cola (limpieza; los casos se resuelven/cierran en Salesforce).
+// Irreversible. Usa writeBatch en tandas (límite 500 por batch de Firestore).
+export async function eliminarCasos(ids: string[]): Promise<void> {
+  const db = getDb() as Firestore | null;
+  if (!db || ids.length === 0) return;
+  for (let i = 0; i < ids.length; i += 450) {
+    const batch = writeBatch(db);
+    ids.slice(i, i + 450).forEach(id => batch.delete(doc(db, CASOS_COLLECTION, id)));
+    await batch.commit();
+  }
 }
 
 // Persiste el screening del caso en Firestore (compartido entre analistas).

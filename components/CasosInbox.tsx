@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { subscribeCasos, isCasosAvailable, guardarScreening, CasoSF } from '../services/casosService';
+import { subscribeCasos, isCasosAvailable, guardarScreening, eliminarCasos, CasoSF } from '../services/casosService';
 import {
   sendCaseUpdate, sfUpdateDisponible, SFCaseUpdate, SFUpdateResult,
 } from '../services/salesforceCaseService';
@@ -79,6 +79,20 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
   const toggleSort = (col: string) =>
     sortCol === col ? setSortDir(d => (d === 'asc' ? 'desc' : 'asc')) : (setSortCol(col), setSortDir('asc'));
+
+  // Selección para borrado masivo.
+  const [seleccion, setSeleccion] = useState<Set<string>>(new Set());
+  const [confirmarBorrado, setConfirmarBorrado] = useState(false);
+  const [borrando, setBorrando] = useState(false);
+  const toggleSel = (id: string) => setSeleccion(prev => {
+    const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n;
+  });
+  const limpiarSeleccion = () => { setSeleccion(new Set()); setConfirmarBorrado(false); };
+  const borrarSeleccionados = async () => {
+    setBorrando(true);
+    try { await eliminarCasos([...seleccion]); limpiarSeleccion(); }
+    finally { setBorrando(false); }
+  };
 
   useEffect(() => {
     if (!isCasosAvailable()) {
@@ -282,6 +296,15 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     return [...filtrados].sort((a, b) => (sortDir === 'asc' ? cmp(a, b) : -cmp(a, b)));
   }, [filtrados, sortCol, sortDir, remesaMap, screenMap]);
 
+  // Selección "todos" sobre la vista actual (cola + filtro + orden).
+  const allSel = ordenados.length > 0 && ordenados.every(c => seleccion.has(c.id));
+  const toggleAll = () => setSeleccion(prev => {
+    const todos = ordenados.length > 0 && ordenados.every(c => prev.has(c.id));
+    const n = new Set(prev);
+    ordenados.forEach(c => (todos ? n.delete(c.id) : n.add(c.id)));
+    return n;
+  });
+
   // Encabezado clickeable para ordenar por esa columna.
   const Th = (col: string, label: string, extra = '') => (
     <th key={col} onClick={() => toggleSort(col)}
@@ -334,7 +357,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
             return (
               <button
                 key={q.key}
-                onClick={() => { setActiveQueue(q.key); setSelId(null); }}
+                onClick={() => { setActiveQueue(q.key); setSelId(null); limpiarSeleccion(); }}
                 className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold transition-colors border ${activa
                   ? 'bg-sky-600 text-white border-sky-600'
                   : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:border-sky-300'}`}
@@ -382,11 +405,33 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
 
       {!loading && !error && casos.length > 0 && (
         <>
+          {/* Barra de borrado masivo (aparece al seleccionar) */}
+          {seleccion.size > 0 && (
+            <div className="flex items-center gap-3 mb-3 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800/50 rounded-xl px-4 py-2 text-sm">
+              <span className="font-semibold text-red-700 dark:text-red-300">{seleccion.size} seleccionado(s)</span>
+              {!confirmarBorrado ? (
+                <button onClick={() => setConfirmarBorrado(true)} className="font-bold text-red-600 dark:text-red-400 hover:underline">🗑 Borrar</button>
+              ) : (
+                <span className="flex items-center gap-2">
+                  <span className="text-red-700 dark:text-red-300">¿Borrar {seleccion.size} caso(s)? No se puede deshacer.</span>
+                  <button onClick={borrarSeleccionados} disabled={borrando} className="px-3 py-1 rounded-lg bg-red-600 hover:bg-red-700 text-white font-bold disabled:opacity-50">
+                    {borrando ? 'Borrando…' : 'Sí, borrar'}
+                  </button>
+                  <button onClick={() => setConfirmarBorrado(false)} className="px-3 py-1 rounded-lg border border-slate-300 dark:border-slate-600">Cancelar</button>
+                </span>
+              )}
+              <button onClick={limpiarSeleccion} className="ml-auto text-xs text-slate-500 dark:text-slate-400 hover:underline">Limpiar selección</button>
+            </div>
+          )}
+
           {/* Tabla de la cola de trabajo (ordenada por fecha de llegada) */}
           <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl overflow-x-auto max-h-[55vh] overflow-y-auto">
             <table className="w-full text-xs">
               <thead className="sticky top-0 z-10 bg-slate-50 dark:bg-slate-800">
                 <tr className="text-left text-slate-500 dark:text-slate-400">
+                  <th className="px-3 py-2 w-8">
+                    <input type="checkbox" checked={allSel} onChange={toggleAll} className="w-4 h-4 cursor-pointer align-middle" title="Seleccionar todo" />
+                  </th>
                   {Th('fecha', 'Fecha llegada')}
                   {activeQueue === 'remesa' && (
                     <>
@@ -408,7 +453,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
               <tbody>
                 {ordenados.length === 0 && (
                   <tr>
-                    <td colSpan={columnas.length + (activeQueue === 'remesa' ? 4 : activeQueue === 'ofac' ? 3 : 1)} className="py-8 text-center text-slate-400">
+                    <td colSpan={columnas.length + (activeQueue === 'remesa' ? 4 : activeQueue === 'ofac' ? 3 : 1) + 1} className="py-8 text-center text-slate-400">
                       Sin casos en esta cola.
                     </td>
                   </tr>
@@ -422,8 +467,11 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                     <tr
                       key={c.id}
                       onClick={() => setSelId(c.id)}
-                      className={`cursor-pointer border-b border-slate-100 dark:border-slate-700/50 ${activo ? 'bg-sky-50 dark:bg-sky-950/40' : 'hover:bg-slate-50 dark:hover:bg-slate-700/30'}`}
+                      className={`cursor-pointer border-b border-slate-100 dark:border-slate-700/50 ${activo ? 'bg-sky-50 dark:bg-sky-950/40' : seleccion.has(c.id) ? 'bg-red-50/60 dark:bg-red-950/20' : 'hover:bg-slate-50 dark:hover:bg-slate-700/30'}`}
                     >
+                      <td className="px-3 py-2" onClick={e => e.stopPropagation()}>
+                        <input type="checkbox" checked={seleccion.has(c.id)} onChange={() => toggleSel(c.id)} className="w-4 h-4 cursor-pointer align-middle" />
+                      </td>
                       <td className="px-3 py-2 whitespace-nowrap text-slate-500 dark:text-slate-400">{fmtFecha(c.recibidoEn)}</td>
                       {activeQueue === 'remesa' && (
                         <>
