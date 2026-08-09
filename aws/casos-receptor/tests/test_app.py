@@ -126,6 +126,45 @@ def test_service_account_acepta_json_directo(monkeypatch):
     assert app._service_account_info()["project_id"] == "x"
 
 
+# ── Reingesta: la escritura usa updateMask y NO pisa el estado operacional ──────
+def test_build_patch_url_incluye_updatemask():
+    url = app._build_patch_url("02188334", ["numeroCaso", "datos"])
+    assert "updateMask.fieldPaths=numeroCaso" in url
+    assert "updateMask.fieldPaths=datos" in url
+    assert f"/{app.FIRESTORE_COLLECTION}/02188334?" in url
+
+
+def test_guardar_solo_escribe_campos_de_ingesta(monkeypatch):
+    """Al reingestar, PATCH+updateMask solo toca los campos de ingesta → screening,
+    investigacion, decisionCompliance, etc. quedan intactos en el documento."""
+    capt = {}
+    monkeypatch.setattr(app, "_access_token", lambda: "tkn")
+
+    class _Resp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b"{}"
+
+    def _fake_urlopen(req, timeout=8):
+        capt["url"] = req.full_url
+        capt["data"] = req.data
+        capt["method"] = req.get_method()
+        return _Resp()
+
+    monkeypatch.setattr(app.urllib.request, "urlopen", _fake_urlopen)
+    app._guardar_en_firestore({"Número del caso": "02188334", "Asunto": "Coincidencia OFAC", "Nombre": "Juan"})
+
+    # updateMask limita la escritura a los campos de ingesta.
+    for c in app._CAMPOS_INGESTA:
+        assert f"updateMask.fieldPaths={c}" in capt["url"]
+    # Los bloques del analista NO se incluyen → se preservan al reingestar.
+    for protegido in ["screening", "investigacion", "decisionCompliance", "asignacion", "respuestaSalesforce"]:
+        assert protegido not in capt["url"]
+    body = json.loads(capt["data"].decode("utf-8"))
+    assert set(body["fields"].keys()) == set(app._CAMPOS_INGESTA)
+    assert capt["method"] == "PATCH"
+
+
 def test_service_account_acepta_base64(monkeypatch):
     import base64
 
