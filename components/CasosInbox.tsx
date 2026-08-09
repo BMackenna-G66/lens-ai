@@ -5,7 +5,10 @@ import {
 } from '../services/salesforceCaseService';
 import { SF_CASE_FIELDS } from '../services/salesforceCaseFields';
 import { buscarRemesa, buscarRemesas, RemesaResult, RemesaRow } from '../services/remesasService';
-import { screenCaso, esScreenable, runPool, Coincidencia } from '../services/casosCriminalService';
+import { screenCaso, esScreenable, runPool, Coincidencia, CasoScreening } from '../services/casosCriminalService';
+import { normalizarScreening } from '../services/screeningNormalizer';
+import { mergeAlertas } from '../services/alertDeduplication';
+import type { AlertaScreening } from '../services/casosComplianceTypes';
 
 // Estado del screening criminal por caso (cola OFAC/PEP).
 interface ScreeningState {
@@ -208,10 +211,19 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
 
   // Aplica un resultado al estado y lo PERSISTE en Firestore (salvo errores, que se
   // reintentan la próxima vez). Compartido entre analistas y sobrevive recargas.
-  const aplicarScreening = (id: string, r: { estado: ScreeningState['estado']; fuente?: string; delitosUnicos?: number; decision?: string; razon?: string; coincidencias?: Coincidencia[] }) => {
-    setScreenMap(prev => ({ ...prev, [id]: { estado: r.estado, fuente: r.fuente, delitosUnicos: r.delitosUnicos, decision: r.decision, razon: r.razon, coincidencias: r.coincidencias } }));
-    if (r.estado !== 'error' && r.estado !== 'loading') {
-      guardarScreening(id, { estado: r.estado, fuente: r.fuente, delitosUnicos: r.delitosUnicos, decision: r.decision, razon: r.razon, coincidencias: r.coincidencias }).catch(() => {});
+  const aplicarScreening = (caso: QueuedCaso, r: CasoScreening) => {
+    setScreenMap(prev => ({ ...prev, [caso.id]: { estado: r.estado, fuente: r.fuente, delitosUnicos: r.delitosUnicos, decision: r.decision, razon: r.razon, coincidencias: r.coincidencias } }));
+    if (r.estado !== 'error') {
+      // Persiste v2: alertas normalizadas + dedupeadas (merge con las previas para
+      // conservar `creadaEn`); mantiene los campos legacy para la UI actual.
+      const screenedAt = new Date().toISOString();
+      const norm = normalizarScreening(r, caso, screenedAt);
+      const alertas = mergeAlertas((caso.screening?.alertas as AlertaScreening[]) ?? [], norm.alertas);
+      guardarScreening(caso.id, {
+        schemaVersion: 2,
+        estado: r.estado, fuente: r.fuente, delitosUnicos: r.delitosUnicos,
+        decision: r.decision, razon: r.razon, coincidencias: r.coincidencias, alertas,
+      }).catch(() => {});
     }
   };
 
@@ -251,7 +263,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       if (cancelado) return;
       const r = await screenCaso(c);
       if (cancelado) return;
-      aplicarScreening(c.id, r);
+      aplicarScreening(c, r);
     }, 4);
     return () => { cancelado = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -261,7 +273,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   const reconsultar = async (c: QueuedCaso) => {
     setScreenMap(prev => ({ ...prev, [c.id]: { estado: 'loading' } }));
     const r = await screenCaso(c);
-    aplicarScreening(c.id, r);
+    aplicarScreening(c, r);
   };
 
   // Color de la conclusión según la decisión del motor.
