@@ -13,6 +13,8 @@ import { TRANSICIONES_CASO } from '../services/casosComplianceTypes';
 import { inferirTipoCaso } from '../services/casosComplianceMapper';
 import { calcularPrioridadPreliminar } from '../services/casePriority';
 import { cambiarEstado, tomarCaso, liberarCaso } from '../services/caseWorkflowService';
+import { guardarInvestigacion } from '../services/caseInvestigationService';
+import type { InvestigacionCaso } from '../services/casosComplianceTypes';
 import { useAuth } from '../context/AuthContext';
 
 // Estado del screening criminal por caso (cola OFAC/PEP).
@@ -324,6 +326,47 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   const doTomar = (c: QueuedCaso) => conAccion(() => tomarCaso({ id: c.id, estadoCaso: vistaOp(c).estado, versionCaso: vistaOp(c).versionCaso }, actor!));
   const doLiberar = (c: QueuedCaso) => conAccion(() => liberarCaso({ id: c.id, estadoCaso: vistaOp(c).estado, versionCaso: vistaOp(c).versionCaso }, actor!));
   const doEstado = (c: QueuedCaso, nuevo: EstadoCaso) => conAccion(() => cambiarEstado({ id: c.id, estadoCaso: vistaOp(c).estado, versionCaso: vistaOp(c).versionCaso }, nuevo, actor!));
+
+  // ── Investigación (Fase 5): edición con versionado / concurrencia ────────────
+  const [invForm, setInvForm] = useState({ resumen: '', hallazgos: '', recomendacion: '', completa: false });
+  const [invVersion, setInvVersion] = useState(0);
+  const [invSaving, setInvSaving] = useState(false);
+  const [invMsg, setInvMsg] = useState<string | null>(null);
+  const invActual = ((sel as unknown as Record<string, unknown> | null)?.investigacion) as InvestigacionCaso | undefined;
+
+  // Carga el form SOLO al cambiar de caso (no al cambiar el contenido en vivo, para
+  // no pisar lo que el analista está escribiendo). El conflicto se detecta al guardar.
+  useEffect(() => {
+    const inv = ((sel as unknown as Record<string, unknown> | null)?.investigacion) as InvestigacionCaso | undefined;
+    setInvForm({
+      resumen: inv?.resumen ?? '',
+      hallazgos: (inv?.hallazgos as string[] | undefined ?? []).join('\n'),
+      recomendacion: inv?.recomendacion ?? '',
+      completa: inv?.estado === 'COMPLETA',
+    });
+    setInvVersion(inv?.version ?? 0);
+    setInvMsg(null);
+  }, [sel?.id]);
+
+  const guardarInv = async () => {
+    if (!actor || !sel) { setInvMsg('Sesión no disponible.'); return; }
+    if (invForm.completa && !invForm.resumen.trim()) {
+      setInvMsg('El resumen es obligatorio para marcar la investigación como completa.');
+      return;
+    }
+    setInvSaving(true); setInvMsg(null);
+    try {
+      const nueva = await guardarInvestigacion(sel.id, {
+        resumen: invForm.resumen.trim(),
+        hallazgos: invForm.hallazgos.split('\n').map(s => s.trim()).filter(Boolean),
+        recomendacion: invForm.recomendacion.trim(),
+        completa: invForm.completa,
+      }, invVersion, actor);
+      setInvVersion(nueva.version);
+      setInvMsg('Guardado ✓');
+    } catch (e) { setInvMsg((e as Error).message); }
+    finally { setInvSaving(false); }
+  };
 
   // Orden por columna (asc/desc). Cada columna tiene una clave; el valor se obtiene
   // del caso o de los mapas (remesa/screening) según corresponda.
@@ -726,6 +769,45 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                     })()}
                   </div>
                 )}
+
+                {/* Investigación del analista (Fase 5) */}
+                <div className="mb-5 rounded-xl border border-slate-200 dark:border-slate-700 p-4">
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="text-sm font-black text-slate-800 dark:text-slate-200">📝 Investigación</h3>
+                    <span className="text-[11px] text-slate-400 dark:text-slate-500">
+                      {invVersion > 0 ? `v${invVersion}${invActual?.actualizadaEn ? ' · ' + fmtFecha(invActual.actualizadaEn) : ''}` : 'sin iniciar'}
+                    </span>
+                  </div>
+                  {(() => {
+                    const ta = 'w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1.5 text-sm outline-none focus:border-sky-400';
+                    return (
+                      <>
+                        <label className="text-xs block mb-2">
+                          <span className="block font-semibold text-slate-500 dark:text-slate-400 mb-1">Resumen</span>
+                          <textarea value={invForm.resumen} onChange={e => setInvForm(f => ({ ...f, resumen: e.target.value }))} rows={2} className={ta} />
+                        </label>
+                        <label className="text-xs block mb-2">
+                          <span className="block font-semibold text-slate-500 dark:text-slate-400 mb-1">Hallazgos (uno por línea)</span>
+                          <textarea value={invForm.hallazgos} onChange={e => setInvForm(f => ({ ...f, hallazgos: e.target.value }))} rows={3} className={ta} />
+                        </label>
+                        <label className="text-xs block mb-2">
+                          <span className="block font-semibold text-slate-500 dark:text-slate-400 mb-1">Recomendación</span>
+                          <textarea value={invForm.recomendacion} onChange={e => setInvForm(f => ({ ...f, recomendacion: e.target.value }))} rows={2} className={ta} />
+                        </label>
+                        <label className="text-xs flex items-center gap-2 mb-3 text-slate-600 dark:text-slate-300">
+                          <input type="checkbox" checked={invForm.completa} onChange={e => setInvForm(f => ({ ...f, completa: e.target.checked }))} className="w-4 h-4" />
+                          Marcar investigación como completa
+                        </label>
+                        <div className="flex items-center gap-3">
+                          <button onClick={guardarInv} disabled={invSaving} className="px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 disabled:opacity-50 text-white text-sm font-bold">
+                            {invSaving ? 'Guardando…' : 'Guardar investigación'}
+                          </button>
+                          {invMsg && <span className={`text-xs ${invMsg.includes('✓') ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}`}>{invMsg}</span>}
+                        </div>
+                      </>
+                    );
+                  })()}
+                </div>
 
                 <table className="w-full text-sm">
                   <tbody>
