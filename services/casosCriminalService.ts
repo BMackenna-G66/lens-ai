@@ -33,6 +33,7 @@ export interface CasoScreening {
   decision: string;   // conclusión
   razon: string;
   coincidencias: Coincidencia[];
+  pep?: boolean;      // ¿PEP? (hoy desde Regcheq/Chile)
   mensaje?: string;
 }
 
@@ -129,7 +130,7 @@ export async function screenCaso(caso: CasoMin): Promise<CasoScreening> {
         fuente: c.tribunal || undefined,
         riesgo: undefined,
       }));
-      return { estado: r.estado, fuente: 'Regcheq', delitosUnicos: r.delitosUnicos, decision: r.decision, razon: r.razon, coincidencias, mensaje: r.mensaje };
+      return { estado: r.estado, fuente: 'Regcheq', delitosUnicos: r.delitosUnicos, decision: r.decision, razon: r.razon, coincidencias, pep: r.pep, mensaje: r.mensaje };
     }
     if (esColombia(pais)) {
       const tipo = String(caso.datos?.['Tipo de DNI'] ?? '');
