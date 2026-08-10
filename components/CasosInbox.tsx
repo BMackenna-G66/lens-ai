@@ -16,6 +16,7 @@ import { cambiarEstado, tomarCaso, liberarCaso } from '../services/caseWorkflowS
 import { guardarInvestigacion } from '../services/caseInvestigationService';
 import { registrarDecision, resolverAprobacion, requiereAprobacion } from '../services/caseDecisionService';
 import { enviarResolucion, conclusionAStatus } from '../services/caseResolutionService';
+import { TIPOS_CIERRE } from '../services/cierreTipos';
 import type { InvestigacionCaso, DecisionCompliance, TipoDecision } from '../services/casosComplianceTypes';
 import { useAuth } from '../context/AuthContext';
 
@@ -135,7 +136,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   const [selId, setSelId] = useState<string | null>(null);
   const [filtro, setFiltro] = useState('');
   const [activeQueue, setActiveQueue] = useState<QueueKey>('ofac');
-  const filtrosVacios = { pais: '', estado: '', prioridad: '', conclusion: '', numeroCaso: '', dni: '' };
+  const filtrosVacios = { pais: '', estado: '', prioridad: '', conclusion: '', pep: '', numeroCaso: '', dni: '' };
   const [filtros, setFiltros] = useState<Record<string, string>>(filtrosVacios);
   const setFiltroCol = (k: string, v: string) => setFiltros(f => ({ ...f, [k]: v }));
   const [sortCol, setSortCol] = useState<string>('fecha');
@@ -155,6 +156,30 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     setBorrando(true);
     try { await eliminarCasos([...seleccion]); limpiarSeleccion(); }
     finally { setBorrando(false); }
+  };
+
+  // Cierre masivo: aplica la tipificación de un tipo de cierre a los seleccionados
+  // y los envía a Salesforce (idempotente, reusa enviarResolucion).
+  const [cierreTipo, setCierreTipo] = useState('');
+  const [cerrando, setCerrando] = useState(false);
+  const [cierreConfirm, setCierreConfirm] = useState(false);
+  const [cierreResult, setCierreResult] = useState<string | null>(null);
+  const cerrarMasivo = async () => {
+    const tipo = TIPOS_CIERRE.find(t => t.id === cierreTipo);
+    if (!tipo || seleccion.size === 0) return;
+    setCerrando(true); setCierreResult(null);
+    const seleccionados = [...seleccion].map(id => casos.find(c => c.id === id)).filter((c): c is CasoSF => !!c);
+    let ok = 0, err = 0;
+    await runPool(seleccionados, async (c) => {
+      try {
+        const payload = { CaseNumber: c.numeroCaso, ...tipo.campos } as SFCaseUpdate;
+        const r = await enviarResolucion(c.id, payload, actor ?? undefined);
+        if (r.yaEnviada || r.sf?.ok) ok++; else err++;
+      } catch { err++; }
+    }, 3);
+    setCerrando(false); setCierreConfirm(false);
+    setCierreResult(`${ok} enviado(s)${err ? `, ${err} con error` : ''}`);
+    if (err === 0) limpiarSeleccion();
   };
 
   useEffect(() => {
@@ -476,6 +501,11 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     if (filtros.estado && vistaOp(c).estado !== filtros.estado) return false;
     if (filtros.prioridad && vistaOp(c).prioridad !== filtros.prioridad) return false;
     if (filtros.conclusion && (screenMap[c.id]?.decision || '') !== filtros.conclusion) return false;
+    if (filtros.pep) {
+      const p = screenMap[c.id]?.pep;
+      if (filtros.pep === 'Sí' && p !== true) return false;
+      if (filtros.pep === 'No' && p !== false) return false;
+    }
     if (filtros.numeroCaso && !(c.numeroCaso || '').toLowerCase().includes(filtros.numeroCaso.toLowerCase())) return false;
     if (filtros.dni && !String(c.datos?.['Número de DNI'] ?? '').toLowerCase().includes(filtros.dni.toLowerCase())) return false;
     return true;
@@ -614,6 +644,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
               {activeQueue === 'ofac' && <FiltroCombo label="Estado" value={filtros.estado} options={opcionesFiltro.estado} onChange={v => setFiltroCol('estado', v)} />}
               {activeQueue === 'ofac' && <FiltroCombo label="Prioridad" value={filtros.prioridad} options={opcionesFiltro.prioridad} onChange={v => setFiltroCol('prioridad', v)} />}
               {activeQueue === 'ofac' && <FiltroCombo label="Conclusión" value={filtros.conclusion} options={opcionesFiltro.conclusion} onChange={v => setFiltroCol('conclusion', v)} />}
+              {activeQueue === 'ofac' && <FiltroCombo label="PEP" value={filtros.pep} options={['Sí', 'No']} onChange={v => setFiltroCol('pep', v)} />}
               <input value={filtros.numeroCaso} onChange={e => setFiltroCol('numeroCaso', e.target.value)} placeholder="Nº caso" className={inp} />
               <input value={filtros.dni} onChange={e => setFiltroCol('dni', e.target.value)} placeholder="DNI" className={inp} />
               {hayFiltros && (
@@ -657,6 +688,41 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                 </span>
               )}
               <button onClick={limpiarSeleccion} className="ml-auto text-xs text-slate-500 dark:text-slate-400 hover:underline">Limpiar selección</button>
+            </div>
+          )}
+
+          {/* Barra de cierre masivo en Salesforce (solo cola OFAC/PEP) */}
+          {seleccion.size > 0 && activeQueue === 'ofac' && sfUpdateDisponible() && (
+            <div className="flex flex-wrap items-center gap-3 mb-3 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/50 rounded-xl px-4 py-2 text-sm">
+              <span className="font-semibold text-emerald-700 dark:text-emerald-300">Cerrar en Salesforce</span>
+              <select
+                value={cierreTipo}
+                onChange={e => { setCierreTipo(e.target.value); setCierreConfirm(false); setCierreResult(null); }}
+                className="px-2 py-1 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800"
+              >
+                <option value="">Tipo de cierre…</option>
+                {TIPOS_CIERRE.map(t => (
+                  <option key={t.id} value={t.id}>{t.label}{t.completo ? '' : ' (tipificación preliminar)'}</option>
+                ))}
+              </select>
+              {cierreTipo && !cierreConfirm && (
+                <button onClick={() => setCierreConfirm(true)} disabled={cerrando} className="font-bold text-emerald-700 dark:text-emerald-400 hover:underline disabled:opacity-50">
+                  Aplicar a {seleccion.size} caso(s)
+                </button>
+              )}
+              {cierreTipo && cierreConfirm && (
+                <span className="flex items-center gap-2">
+                  <span className="text-emerald-800 dark:text-emerald-200">
+                    ¿Enviar «{TIPOS_CIERRE.find(t => t.id === cierreTipo)?.label}» a {seleccion.size} caso(s)?
+                    {!TIPOS_CIERRE.find(t => t.id === cierreTipo)?.completo && ' Tipificación preliminar.'}
+                  </span>
+                  <button onClick={cerrarMasivo} disabled={cerrando} className="px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold disabled:opacity-50">
+                    {cerrando ? 'Enviando…' : 'Sí, enviar'}
+                  </button>
+                  <button onClick={() => setCierreConfirm(false)} disabled={cerrando} className="px-3 py-1 rounded-lg border border-slate-300 dark:border-slate-600">Cancelar</button>
+                </span>
+              )}
+              {cierreResult && <span className="text-emerald-800 dark:text-emerald-200 font-medium">{cierreResult}</span>}
             </div>
           )}
 
