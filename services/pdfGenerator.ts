@@ -2358,3 +2358,168 @@ export const generateColombiaProfilePdf = async (p: ColombiaProfile): Promise<vo
   for (let i = 1; i <= totalPages; i++) { doc.setPage(i); addPageFooter(doc, i, totalPages, date); }
   doc.save(`perfil_colombia_${p.numeroDni.replace(/[^a-z0-9_-]/gi, '_')}.pdf`);
 };
+
+// ---------------------------------------------------------------------------
+// FICHA DE CASO (Bandeja de Casos) — reporte de la ficha 1-a-1
+// ---------------------------------------------------------------------------
+
+export interface CasoPdfCoincidencia {
+  tipo: string; detalle: string; estado?: string; fecha?: string; fuente?: string; riesgo?: string;
+}
+
+export interface CasoPdfData {
+  numeroCaso: string;
+  recibidoEn: string;
+  origen: string;
+  tipo: string;
+  prioridad: string;
+  estado: string;
+  asignado: string;
+  pais: string;
+  screening?: {
+    fuente?: string; decision?: string; delitosUnicos?: number; pep?: boolean;
+    coincidencias?: CasoPdfCoincidencia[];
+  };
+  investigacion?: { resumen?: string | null; hallazgos?: string | null; recomendacion?: string | null; completa?: boolean; version?: number };
+  decision?: { estado?: string | null; tipo?: string | null; justificacion?: string | null; reasonCode?: string | null; decididoPor?: string | null; aprobadoPor?: string | null };
+  respuestaSF?: { estado?: string; completadoEn?: string | null };
+  payload: [string, string][];
+}
+
+export const generateCasoPdf = async (data: CasoPdfData): Promise<void> => {
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const margin = 14;
+  const generationDate = new Date().toLocaleString('es-CL');
+  let y = 76;
+
+  const ensure = (need: number) => { if (y > pageHeight - need) { doc.addPage(); y = 20; } };
+  const sectionTitle = (title: string, underline = 40) => {
+    ensure(24);
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.setTextColor(...NAVY);
+    doc.text(title, margin, y);
+    doc.setDrawColor(...INDIGO); doc.setLineWidth(0.5); doc.line(margin, y + 1.5, margin + underline, y + 1.5);
+    y += 7;
+  };
+  const kv = (label: string, value: string) => {
+    ensure(16);
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(...DARK_TEXT);
+    doc.text(`${label}:`, margin + 2, y);
+    doc.setFont('helvetica', 'normal');
+    const lines = doc.splitTextToSize(value || '—', pageWidth - margin * 2 - 46);
+    doc.text(lines, margin + 46, y);
+    y += Math.max(5.5, lines.length * 4.6 + 1);
+  };
+
+  // --- HEADER ---
+  doc.setFillColor(...NAVY); doc.rect(0, 0, pageWidth, 38, 'F');
+  doc.setFillColor(...INDIGO); doc.rect(0, 38, pageWidth, 2, 'F');
+  const logoData = await loadLogoBase64();
+  if (logoData) { try { doc.addImage(logoData, 'JPEG', pageWidth - 58, 8, 44, 13); } catch { /* sin logo */ } }
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(16); doc.setTextColor(...WHITE);
+  doc.text('FICHA DE CASO — COMPLIANCE', margin, 16);
+  doc.setFontSize(9); doc.setFont('helvetica', 'normal'); doc.setTextColor(196, 210, 230);
+  doc.text('Bandeja de Casos · LENS AI', margin, 23);
+
+  // --- INFO BOX ---
+  doc.setFillColor(...LIGHT_GRAY); doc.setDrawColor(220, 228, 240);
+  doc.roundedRect(margin, 46, pageWidth - margin * 2, 22, 2, 2, 'FD');
+  doc.setFontSize(8); doc.setFont('helvetica', 'bold'); doc.setTextColor(...MID_GRAY);
+  doc.text('N° DE CASO', margin + 4, 53);
+  doc.text('FECHA DE GENERACIÓN', pageWidth / 2, 53);
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.setTextColor(...DARK_TEXT);
+  doc.text(data.numeroCaso || '(sin número)', margin + 4, 61);
+  doc.text(generationDate, pageWidth / 2, 61);
+
+  // --- INFO DEL CASO ---
+  sectionTitle('Info del caso', 30);
+  kv('Recibido', data.recibidoEn);
+  kv('Origen', data.origen);
+  kv('País', data.pais);
+  kv('Tipo', data.tipo);
+  kv('Prioridad', data.prioridad);
+  kv('Estado', data.estado);
+  kv('Asignado', data.asignado || '—');
+  y += 2;
+
+  // --- PERFIL CRIMINAL ---
+  if (data.screening) {
+    const sc = data.screening;
+    sectionTitle('Perfil criminal', 38);
+    kv('Fuente', sc.fuente || '—');
+    kv('Conclusión', sc.decision || '—');
+    kv('Delitos únicos', String(sc.delitosUnicos ?? 0));
+    kv('PEP', sc.pep === true ? 'Sí' : sc.pep === false ? 'No' : '—');
+    const co = sc.coincidencias ?? [];
+    if (co.length) {
+      y += 1;
+      autoTable(doc, {
+        startY: y,
+        head: [['Delito / Tipo', 'Detalle (RUC)', 'Estado', 'Fecha', 'Fuente']],
+        body: co.map(c => [c.tipo || '—', c.detalle || '—', c.estado || '—', c.fecha || '—', c.fuente || '—']),
+        theme: 'grid',
+        headStyles: { fillColor: NAVY, textColor: WHITE, fontSize: 8, fontStyle: 'bold', cellPadding: 2.5 },
+        bodyStyles: { fontSize: 7.5, cellPadding: 2, textColor: DARK_TEXT, lineColor: [220, 228, 240] },
+        alternateRowStyles: { fillColor: [245, 247, 252] },
+        columnStyles: { 0: { cellWidth: 48 }, 1: { cellWidth: 34 }, 4: { cellWidth: 'auto' } },
+        margin: { left: margin, right: margin },
+        didDrawPage: (d) => addPageFooter(doc, d.pageNumber, 0, generationDate),
+      });
+      y = (doc as any).lastAutoTable.finalY + 8;
+    }
+  }
+
+  // --- INVESTIGACIÓN + DECISIÓN ---
+  if (data.investigacion && (data.investigacion.resumen || data.investigacion.hallazgos || data.investigacion.recomendacion)) {
+    const inv = data.investigacion;
+    sectionTitle(`Investigación${inv.version ? ` (v${inv.version})` : ''}`, 40);
+    if (inv.resumen) kv('Resumen', inv.resumen);
+    if (inv.hallazgos) kv('Hallazgos', inv.hallazgos);
+    if (inv.recomendacion) kv('Recomendación', inv.recomendacion);
+    kv('Completa', inv.completa ? 'Sí' : 'No');
+    y += 2;
+  }
+
+  if (data.decision && (data.decision.estado || data.decision.tipo)) {
+    const d = data.decision;
+    sectionTitle('Decisión de Compliance', 56);
+    kv('Estado', d.estado || '—');
+    kv('Tipo', d.tipo || '—');
+    if (d.reasonCode) kv('Reason code', d.reasonCode);
+    if (d.justificacion) kv('Justificación', d.justificacion);
+    kv('Decidió', d.decididoPor || '—');
+    if (d.aprobadoPor) kv('Aprobó', d.aprobadoPor);
+    y += 2;
+  }
+
+  // --- RESPUESTA A SALESFORCE ---
+  if (data.respuestaSF && data.respuestaSF.estado) {
+    sectionTitle('Respuesta a Salesforce', 54);
+    kv('Estado', data.respuestaSF.estado);
+    if (data.respuestaSF.completadoEn) kv('Completado', String(data.respuestaSF.completadoEn));
+    y += 2;
+  }
+
+  // --- DATOS DEL PAYLOAD ---
+  if (data.payload.length) {
+    sectionTitle('Datos del payload', 40);
+    autoTable(doc, {
+      startY: y,
+      head: [['Campo', 'Valor']],
+      body: data.payload.map(([k, v]) => [k, v]),
+      theme: 'grid',
+      headStyles: { fillColor: NAVY, textColor: WHITE, fontSize: 8.5, fontStyle: 'bold', cellPadding: 3 },
+      bodyStyles: { fontSize: 8, cellPadding: 2.5, textColor: DARK_TEXT, lineColor: [220, 228, 240] },
+      alternateRowStyles: { fillColor: [245, 247, 252] },
+      columnStyles: { 0: { cellWidth: 60, fontStyle: 'bold', textColor: NAVY }, 1: { cellWidth: 'auto' } },
+      margin: { left: margin, right: margin },
+      didDrawPage: (d) => addPageFooter(doc, d.pageNumber, 0, generationDate),
+    });
+    y = (doc as any).lastAutoTable.finalY + 8;
+  }
+
+  const totalPages = (doc as any).internal.getNumberOfPages();
+  for (let i = 1; i <= totalPages; i++) { doc.setPage(i); addPageFooter(doc, i, totalPages, generationDate); }
+  doc.save(`caso_${(data.numeroCaso || 'sin_numero').replace(/[^a-z0-9_-]/gi, '_')}.pdf`);
+};

@@ -6,6 +6,7 @@ import {
 import { SF_CASE_FIELDS } from '../services/salesforceCaseFields';
 import { buscarRemesa, buscarRemesas, RemesaResult, RemesaRow } from '../services/remesasService';
 import { screenCaso, esScreenable, runPool, Coincidencia, CasoScreening } from '../services/casosCriminalService';
+import { generateCasoPdf, CasoPdfCoincidencia } from '../services/pdfGenerator';
 import { normalizarScreening } from '../services/screeningNormalizer';
 import { mergeAlertas } from '../services/alertDeduplication';
 import type { AlertaScreening, EstadoCaso, PrioridadCaso, TipoCasoCompliance } from '../services/casosComplianceTypes';
@@ -685,6 +686,42 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     return n;
   });
 
+  // Navegación prev/next dentro de la cola visible (misma vista de la tabla).
+  const idxEnCola = useMemo(() => ordenados.findIndex(c => c.id === selId), [ordenados, selId]);
+  const navegar = (delta: number) => {
+    const n = idxEnCola + delta;
+    if (n >= 0 && n < ordenados.length) setSelId(ordenados[n].id);
+  };
+
+  // Descarga la ficha del caso como PDF (Info + Perfil + Investigación + Decisión + payload).
+  const [pdfGen, setPdfGen] = useState(false);
+  const descargarPdf = async () => {
+    if (!sel) return;
+    setPdfGen(true);
+    try {
+      const op = vistaOp(sel);
+      const sc = screenMap[sel.id];
+      const d = decActual;
+      await generateCasoPdf({
+        numeroCaso: sel.numeroCaso,
+        recibidoEn: fmtFecha(sel.recibidoEn),
+        origen: sel.origen,
+        pais: sel.pais,
+        tipo: op.tipo,
+        prioridad: op.prioridad,
+        estado: op.estado,
+        asignado: op.asignado,
+        screening: sc && sc.estado !== 'loading' && sc.estado !== 'na'
+          ? { fuente: sc.fuente, decision: sc.decision, delitosUnicos: sc.delitosUnicos, pep: sc.pep, coincidencias: (sc.coincidencias ?? []) as CasoPdfCoincidencia[] }
+          : undefined,
+        investigacion: { resumen: invForm.resumen, hallazgos: invForm.hallazgos, recomendacion: invForm.recomendacion, completa: invForm.completa, version: invVersion },
+        decision: d ? { estado: d.estado, tipo: TIPOS_DECISION.find(t => t.v === d.tipo)?.label ?? d.tipo, justificacion: d.justificacion, reasonCode: d.reasonCode, decididoPor: d.decididoPor, aprobadoPor: d.aprobadoPor } : undefined,
+        respuestaSF: sfResult ? { estado: sfResult.ok ? 'ENVIADA' : `ERROR (HTTP ${sfResult.status})`, completadoEn: null } : undefined,
+        payload: Object.entries(sel.datos).map(([k, v]) => [k, typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v)]),
+      });
+    } finally { setPdfGen(false); }
+  };
+
   // Encabezado clickeable para ordenar por esa columna.
   const Th = (col: string, label: string, extra = '') => (
     <th key={col} onClick={() => toggleSort(col)}
@@ -969,22 +1006,55 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
               aria-modal="true"
             >
               <div
-                className="relative w-full max-w-4xl max-h-[92vh] flex flex-col bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl shadow-2xl"
+                className="relative w-full max-w-[112rem] max-h-[92vh] flex flex-col bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl shadow-2xl"
                 onClick={e => e.stopPropagation()}
               >
                 {/* Header fijo */}
                 <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-slate-200 dark:border-slate-700">
-                  <div>
+                  <div className="min-w-0">
                     <h2 className="text-lg font-black text-slate-900 dark:text-white">{sel.numeroCaso || '(sin número)'}</h2>
                     <p className="text-xs text-slate-500 dark:text-slate-400">Recibido {fmtFecha(sel.recibidoEn)} · origen {sel.origen}</p>
                   </div>
-                  <button
-                    onClick={cerrarFicha}
-                    aria-label="Cerrar ficha"
-                    className="shrink-0 w-8 h-8 flex items-center justify-center rounded-lg text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700 hover:text-slate-800 dark:hover:text-white text-lg"
-                  >
-                    ✕
-                  </button>
+                  <div className="shrink-0 flex items-center gap-2">
+                    {/* Navegación dentro de la cola */}
+                    <div className="flex items-center gap-1 mr-1">
+                      <button
+                        onClick={() => navegar(-1)}
+                        disabled={idxEnCola <= 0}
+                        title="Caso anterior"
+                        className="w-8 h-8 flex items-center justify-center rounded-lg border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        ◀
+                      </button>
+                      <span className="text-xs text-slate-500 dark:text-slate-400 tabular-nums whitespace-nowrap px-1">
+                        {idxEnCola >= 0 ? idxEnCola + 1 : '—'} / {ordenados.length}
+                      </span>
+                      <button
+                        onClick={() => navegar(1)}
+                        disabled={idxEnCola < 0 || idxEnCola >= ordenados.length - 1}
+                        title="Caso siguiente"
+                        className="w-8 h-8 flex items-center justify-center rounded-lg border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        ▶
+                      </button>
+                    </div>
+                    {/* Descargar PDF */}
+                    <button
+                      onClick={descargarPdf}
+                      disabled={pdfGen}
+                      title="Descargar ficha en PDF"
+                      className="flex items-center gap-1.5 px-3 h-8 rounded-lg bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 text-xs font-bold disabled:opacity-50"
+                    >
+                      {pdfGen ? 'Generando…' : '⬇ PDF'}
+                    </button>
+                    <button
+                      onClick={cerrarFicha}
+                      aria-label="Cerrar ficha"
+                      className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700 hover:text-slate-800 dark:hover:text-white text-lg"
+                    >
+                      ✕
+                    </button>
+                  </div>
                 </div>
 
                 {/* Cuerpo con scroll */}
