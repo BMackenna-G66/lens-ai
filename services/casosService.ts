@@ -20,6 +20,7 @@ export interface StoredScreening {
   razon?: string;
   coincidencias?: unknown[]; // legacy, se mantiene por compatibilidad de la UI
   alertas?: unknown[];       // v2: alertas normalizadas con dedupKey
+  pep?: boolean;             // ¿PEP? (Regcheq/Chile)
   screenedAt?: string;       // ISO — cuándo se consultó
 }
 

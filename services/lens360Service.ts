@@ -351,13 +351,22 @@ export interface CasoScreeningChile {
   decision: string;   // conclusión (motor de decisión del Criminal Profiler)
   razon: string;
   crimes: Lens360Crime[];
+  pep: boolean;       // ¿es PEP? (nivel PEP o coincidencia en lista PEP Chile)
   profile?: PersonProfile;
   mensaje?: string;
 }
 
+// ¿El perfil de Regcheq indica PEP? (nivel PEP distinto de vacío/none o lista PEP Chile).
+function esPepRegcheq(perfil: Record<string, unknown>, listasRaw: Record<string, Record<string, unknown>>): boolean {
+  const nivel = String(perfil.pepLevel ?? '').trim().toLowerCase();
+  const porNivel = !!nivel && !['none', 'no', '0', 'n/a', '—', 'sin pep', 'no pep'].includes(nivel);
+  const porLista = Boolean(listasRaw['pepChile']?.coincidence);
+  return porNivel || porLista;
+}
+
 export async function screenChileCriminal(rut: string, nombre = ''): Promise<CasoScreeningChile> {
   const vacio = (estado: CasoScreeningChile['estado'], mensaje?: string): CasoScreeningChile =>
-    ({ estado, delitosUnicos: 0, decision: estado === 'sin_causas' ? 'Sin causas penales' : '—', razon: '', crimes: [], mensaje });
+    ({ estado, delitosUnicos: 0, decision: estado === 'sin_causas' ? 'Sin causas penales' : '—', razon: '', crimes: [], pep: false, mensaje });
 
   if (!REGCHEQ_KEY) return vacio('error', 'Falta la key de Regcheq');
   const rutN = rut.replace(/[.\s-]/g, '').toUpperCase();
@@ -380,8 +389,10 @@ export async function screenChileCriminal(rut: string, nombre = ''): Promise<Cas
   const listasRaw = (perfil.listas ?? {}) as Record<string, Record<string, unknown>>;
   const causas = listasRaw['causasPenalesRegcheq'];
   const nombreEff = (perfil.name ?? perfil.socialReason ?? nombre ?? '') as string;
+  const pep = esPepRegcheq(perfil, listasRaw);
 
-  if (!causas?.coincidence || !causas.data) return vacio('sin_causas');
+  // Sin causas penales: igual reportamos el flag PEP (un PEP puede no tener causas).
+  if (!causas?.coincidence || !causas.data) return { estado: 'sin_causas', delitosUnicos: 0, decision: 'Sin causas penales', razon: '', crimes: [], pep };
 
   const raw = causas.data as Record<string, unknown>;
   const additionalData = Array.isArray(raw['additionalData']) ? (raw['additionalData'] as Record<string, unknown>[]) : [];
@@ -394,6 +405,7 @@ export async function screenChileCriminal(rut: string, nombre = ''): Promise<Cas
     decision: ev.decision?.decision ?? 'Con causas',
     razon: ev.decision?.razon ?? '',
     crimes: ev.crimes,
+    pep,
     profile: ev.profile,
   };
 }

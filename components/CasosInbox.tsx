@@ -27,6 +27,7 @@ interface ScreeningState {
   decision?: string;
   razon?: string;
   coincidencias?: Coincidencia[];
+  pep?: boolean;
 }
 
 type FormState = Record<string, string | boolean>;
@@ -275,7 +276,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   // Aplica un resultado al estado y lo PERSISTE en Firestore (salvo errores, que se
   // reintentan la próxima vez). Compartido entre analistas y sobrevive recargas.
   const aplicarScreening = (caso: QueuedCaso, r: CasoScreening) => {
-    setScreenMap(prev => ({ ...prev, [caso.id]: { estado: r.estado, fuente: r.fuente, delitosUnicos: r.delitosUnicos, decision: r.decision, razon: r.razon, coincidencias: r.coincidencias } }));
+    setScreenMap(prev => ({ ...prev, [caso.id]: { estado: r.estado, fuente: r.fuente, delitosUnicos: r.delitosUnicos, decision: r.decision, razon: r.razon, coincidencias: r.coincidencias, pep: r.pep } }));
     if (r.estado !== 'error') {
       // Persiste v2: alertas normalizadas + dedupeadas (merge con las previas para
       // conservar `creadaEn`); mantiene los campos legacy para la UI actual.
@@ -285,7 +286,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       guardarScreening(caso.id, {
         schemaVersion: 2,
         estado: r.estado, fuente: r.fuente, delitosUnicos: r.delitosUnicos,
-        decision: r.decision, razon: r.razon, coincidencias: r.coincidencias, alertas,
+        decision: r.decision, razon: r.razon, coincidencias: r.coincidencias, pep: r.pep, alertas,
       }).catch(() => {});
     }
   };
@@ -298,7 +299,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       for (const c of casos) {
         if (c.screening && !(c.id in next)) {
           const sc = c.screening;
-          next[c.id] = { estado: (sc.estado as ScreeningState['estado']) ?? 'ok', fuente: sc.fuente, delitosUnicos: sc.delitosUnicos, decision: sc.decision, razon: sc.razon, coincidencias: sc.coincidencias as Coincidencia[] | undefined };
+          next[c.id] = { estado: (sc.estado as ScreeningState['estado']) ?? 'ok', fuente: sc.fuente, delitosUnicos: sc.delitosUnicos, decision: sc.decision, razon: sc.razon, coincidencias: sc.coincidencias as Coincidencia[] | undefined, pep: sc.pep };
           changed = true;
         }
       }
@@ -492,6 +493,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
         case 'tipoenvio': return remesaMap[c.remesa]?.tipo_envio || '';
         case 'delitos': return screenMap[c.id]?.delitosUnicos ?? -1;
         case 'conclusion': return screenMap[c.id]?.decision || '';
+        case 'pep': return screenMap[c.id]?.pep ? 1 : 0;
         case 'tipo': return vistaOp(c).tipo;
         case 'estado': return vistaOp(c).estado;
         case 'prioridad': return vistaOp(c).prioridad;
@@ -683,6 +685,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                       {Th('asignado', 'Asignado')}
                       {Th('delitos', 'Delitos únicos', 'text-center')}
                       {Th('conclusion', 'Conclusión')}
+                      {Th('pep', 'PEP', 'text-center')}
                     </>
                   )}
                   {columnas.map(k => Th(k, k))}
@@ -691,7 +694,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
               <tbody>
                 {ordenados.length === 0 && (
                   <tr>
-                    <td colSpan={columnas.length + (activeQueue === 'remesa' ? 4 : activeQueue === 'ofac' ? 7 : 1) + 1} className="py-8 text-center text-slate-400">
+                    <td colSpan={columnas.length + (activeQueue === 'remesa' ? 4 : activeQueue === 'ofac' ? 8 : 1) + 1} className="py-8 text-center text-slate-400">
                       Sin casos en esta cola.
                     </td>
                   </tr>
@@ -735,6 +738,12 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                               : s.estado === 'error' ? 'Error'
                               : s.estado === 'sin_causas' ? 'Sin causas'
                               : (s.decision || '—')}
+                          </td>
+                          <td className="px-3 py-2 whitespace-nowrap text-center">
+                            {!s || s.estado === 'loading' ? '…'
+                              : s.fuente !== 'Regcheq' ? '—'
+                              : s.pep ? <span className="font-bold text-red-600 dark:text-red-400">Sí</span>
+                              : <span className="text-slate-500 dark:text-slate-400">No</span>}
                           </td>
                         </>
                       )}
