@@ -127,6 +127,108 @@ const FiltroCombo: React.FC<{ label: string; value: string; options: string[]; o
   );
 };
 
+// Fecha a milisegundos para ordenar. Regcheq entrega DD/MM/YYYY.
+const parseFechaMs = (f?: string): number => {
+  if (!f) return 0;
+  const m = f.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (m) return new Date(+m[3], +m[2] - 1, +m[1]).getTime();
+  const t = Date.parse(f);
+  return Number.isNaN(t) ? 0 : t;
+};
+
+// Extrae el RUC del campo detalle ("RUC 2010012536-7" → "2010012536-7").
+const rucDeDetalle = (d?: string): string => {
+  const m = (d || '').match(/RUC\s*(\S+)/i);
+  return m ? m[1] : '';
+};
+
+// Tabla de coincidencias AGRUPADA por RUC: cada RUC muestra su causa más
+// reciente y colapsa el resto en un desplegable (evita el ruido de RUCs
+// repetidos). Los grupos se ordenan por su causa más reciente.
+const CoincidenciasAgrupadas: React.FC<{ co: Coincidencia[] }> = ({ co }) => {
+  const grupos = useMemo(() => {
+    const map = new Map<string, Coincidencia[]>();
+    for (const x of co) {
+      const key = rucDeDetalle(x.detalle) || x.detalle || x.tipo || '—';
+      if (!map.has(key)) map.set(key, []);
+      map.get(key)!.push(x);
+    }
+    const arr = [...map.entries()].map(([ruc, filas]) => {
+      const ordenadas = [...filas].sort((a, b) => parseFechaMs(b.fecha) - parseFechaMs(a.fecha));
+      return { ruc, filas: ordenadas, reciente: parseFechaMs(ordenadas[0]?.fecha) };
+    });
+    arr.sort((a, b) => b.reciente - a.reciente);
+    return arr;
+  }, [co]);
+
+  const [abiertos, setAbiertos] = useState<Set<string>>(new Set());
+  const toggle = (ruc: string) => setAbiertos(s => {
+    const n = new Set(s);
+    if (n.has(ruc)) n.delete(ruc); else n.add(ruc);
+    return n;
+  });
+
+  const celda = 'py-1 pr-4';
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="text-left text-slate-500 dark:text-slate-400">
+            <th className="py-1 pr-2 font-bold w-6"></th>
+            <th className={`${celda} font-bold`}>Delito / Tipo</th>
+            <th className={`${celda} font-bold`}>Detalle (RUC)</th>
+            <th className={`${celda} font-bold`}>Estado</th>
+            <th className={`${celda} font-bold`}>Fecha</th>
+            <th className={`${celda} font-bold`}>Fuente</th>
+            <th className={`${celda} font-bold`}>Riesgo</th>
+          </tr>
+        </thead>
+        <tbody>
+          {grupos.map(g => {
+            const top = g.filas[0];
+            const extra = g.filas.length - 1;
+            const open = abiertos.has(g.ruc);
+            return (
+              <React.Fragment key={g.ruc}>
+                <tr
+                  className={`border-t border-slate-100 dark:border-slate-700/50 ${extra > 0 ? 'cursor-pointer hover:bg-indigo-100/40 dark:hover:bg-indigo-900/20' : ''}`}
+                  onClick={extra > 0 ? () => toggle(g.ruc) : undefined}
+                >
+                  <td className="py-1 pr-2 text-indigo-500 dark:text-indigo-400 font-bold">{extra > 0 ? (open ? '▾' : '▸') : ''}</td>
+                  <td className={`${celda} text-slate-800 dark:text-slate-200 font-medium`}>{top?.tipo}</td>
+                  <td className={`${celda} text-slate-700 dark:text-slate-300 break-words max-w-[280px]`}>
+                    {top?.detalle || '—'}
+                    {extra > 0 && (
+                      <span className="ml-2 inline-block px-1.5 py-0.5 rounded-full bg-indigo-200/70 dark:bg-indigo-800/50 text-indigo-800 dark:text-indigo-200 font-bold text-[10px] whitespace-nowrap">
+                        +{extra} causa(s)
+                      </span>
+                    )}
+                  </td>
+                  <td className={celda}>{top?.estado || '—'}</td>
+                  <td className={`${celda} whitespace-nowrap`}>{top?.fecha || '—'}</td>
+                  <td className={celda}>{top?.fuente || '—'}</td>
+                  <td className={celda}>{top?.riesgo || '—'}</td>
+                </tr>
+                {open && g.filas.slice(1).map((x, i) => (
+                  <tr key={i} className="bg-indigo-50/40 dark:bg-indigo-950/20 text-slate-600 dark:text-slate-400">
+                    <td className="py-1 pr-2"></td>
+                    <td className={`${celda} pl-2`}>{x.tipo}</td>
+                    <td className={`${celda} break-words max-w-[280px]`}>{x.detalle || '—'}</td>
+                    <td className={celda}>{x.estado || '—'}</td>
+                    <td className={`${celda} whitespace-nowrap`}>{x.fecha || '—'}</td>
+                    <td className={celda}>{x.fuente || '—'}</td>
+                    <td className={celda}>{x.riesgo || '—'}</td>
+                  </tr>
+                ))}
+              </React.Fragment>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+};
+
 export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onToggleDarkMode }) => {
   const { user } = useAuth();
   const actor = user ? { uid: user.uid, nombre: user.displayName || user.email || user.uid } : null;
@@ -962,33 +1064,8 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                       if (co.length === 0) return <p className="text-xs text-emerald-600 dark:text-emerald-400">Sin coincidencias / causas penales.</p>;
                       return (
                         <>
-                          <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">{sc.delitosUnicos} delito(s) único(s) · {co.length} coincidencia(s)</p>
-                          <div className="overflow-x-auto">
-                            <table className="w-full text-xs">
-                              <thead>
-                                <tr className="text-left text-slate-500 dark:text-slate-400">
-                                  <th className="py-1 pr-4 font-bold">Delito / Tipo</th>
-                                  <th className="py-1 pr-4 font-bold">Detalle</th>
-                                  <th className="py-1 pr-4 font-bold">Estado</th>
-                                  <th className="py-1 pr-4 font-bold">Fecha</th>
-                                  <th className="py-1 pr-4 font-bold">Fuente</th>
-                                  <th className="py-1 pr-4 font-bold">Riesgo</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {co.map((x, i) => (
-                                  <tr key={i} className="border-t border-slate-100 dark:border-slate-700/50">
-                                    <td className="py-1 pr-4 text-slate-800 dark:text-slate-200">{x.tipo}</td>
-                                    <td className="py-1 pr-4 text-slate-700 dark:text-slate-300 break-words max-w-[280px]">{x.detalle}</td>
-                                    <td className="py-1 pr-4">{x.estado || '—'}</td>
-                                    <td className="py-1 pr-4 whitespace-nowrap">{x.fecha || '—'}</td>
-                                    <td className="py-1 pr-4">{x.fuente || '—'}</td>
-                                    <td className="py-1 pr-4">{x.riesgo || '—'}</td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
+                          <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">{sc.delitosUnicos} delito(s) único(s) · {co.length} coincidencia(s) · agrupadas por RUC</p>
+                          <CoincidenciasAgrupadas co={co} />
                         </>
                       );
                     })()}
