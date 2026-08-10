@@ -229,6 +229,14 @@ const CoincidenciasAgrupadas: React.FC<{ co: Coincidencia[] }> = ({ co }) => {
   );
 };
 
+// Encabezado de sección dentro de la ficha flotante del caso.
+const Seccion: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <div className="flex items-center gap-3 mt-2 mb-3">
+    <span className="text-[11px] font-black uppercase tracking-wider text-slate-400 dark:text-slate-500 whitespace-nowrap">{children}</span>
+    <div className="flex-1 h-px bg-slate-200 dark:bg-slate-700" />
+  </div>
+);
+
 export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onToggleDarkMode }) => {
   const { user } = useAuth();
   const actor = user ? { uid: user.uid, nombre: user.displayName || user.email || user.uid } : null;
@@ -341,6 +349,17 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   }, [filtrados]);
 
   const sel = useMemo(() => filtrados.find(c => c.id === selId) ?? null, [filtrados, selId]);
+  const cerrarFicha = () => setSelId(null);
+
+  // Ficha flotante: cerrar con Escape y bloquear el scroll de fondo.
+  useEffect(() => {
+    if (!selId) return;
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') setSelId(null); };
+    document.addEventListener('keydown', h);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.removeEventListener('keydown', h); document.body.style.overflow = prev; };
+  }, [selId]);
 
   // ── Responder en Salesforce ────────────────────────────────────────────────
   const [showResponder, setShowResponder] = useState(false);
@@ -941,15 +960,36 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
             </table>
           </div>
 
-          {/* Detalle + responder (al seleccionar una fila) */}
+          {/* Ficha flotante del caso (al seleccionar una fila) */}
           {sel && (
-            <div className="mt-4 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl p-5">
-                <div className="flex items-center justify-between mb-4">
+            <div
+              className="fixed inset-0 z-50 flex items-start sm:items-center justify-center p-3 sm:p-6 bg-slate-900/50 dark:bg-black/60 backdrop-blur-sm"
+              onClick={cerrarFicha}
+              role="dialog"
+              aria-modal="true"
+            >
+              <div
+                className="relative w-full max-w-4xl max-h-[92vh] flex flex-col bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl shadow-2xl"
+                onClick={e => e.stopPropagation()}
+              >
+                {/* Header fijo */}
+                <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-slate-200 dark:border-slate-700">
                   <div>
                     <h2 className="text-lg font-black text-slate-900 dark:text-white">{sel.numeroCaso || '(sin número)'}</h2>
                     <p className="text-xs text-slate-500 dark:text-slate-400">Recibido {fmtFecha(sel.recibidoEn)} · origen {sel.origen}</p>
                   </div>
+                  <button
+                    onClick={cerrarFicha}
+                    aria-label="Cerrar ficha"
+                    className="shrink-0 w-8 h-8 flex items-center justify-center rounded-lg text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700 hover:text-slate-800 dark:hover:text-white text-lg"
+                  >
+                    ✕
+                  </button>
                 </div>
+
+                {/* Cuerpo con scroll */}
+                <div className="overflow-y-auto p-5">
+                <Seccion>📁 Info del caso</Seccion>
 
                 {/* Datos de la remesa desde Redshift (solo cola Remesa) */}
                 {activeQueue === 'remesa' && (
@@ -1072,6 +1112,30 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                   </div>
                 )}
 
+                {/* Datos del payload recibido (parte de "Info del caso") */}
+                <div className="mb-5 rounded-xl border border-slate-200 dark:border-slate-700 p-4">
+                  <h3 className="text-sm font-black text-slate-800 dark:text-slate-200 mb-2">🗂 Datos del payload</h3>
+                  <table className="w-full text-sm">
+                    <tbody>
+                      {Object.entries(sel.datos).length === 0 && (
+                        <tr><td className="py-2 text-slate-400">Sin datos en el payload.</td></tr>
+                      )}
+                      {Object.entries(sel.datos).map(([k, v]) => (
+                        <tr key={k} className="border-b border-slate-100 dark:border-slate-700/50">
+                          <td className="py-2 pr-4 font-semibold text-slate-500 dark:text-slate-400 align-top whitespace-nowrap">{k}</td>
+                          <td className="py-2 text-slate-800 dark:text-slate-200 break-words">
+                            {typeof v === 'object' && v !== null
+                              ? <pre className="text-xs whitespace-pre-wrap">{JSON.stringify(v, null, 2)}</pre>
+                              : String(v)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                <Seccion>🧭 Investigación + Decisión de Compliance</Seccion>
+
                 {/* Investigación del analista (Fase 5) */}
                 <div className="mb-5 rounded-xl border border-slate-200 dark:border-slate-700 p-4">
                   <div className="flex items-center justify-between mb-3">
@@ -1176,29 +1240,12 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                   })()}
                 </div>
 
-                <table className="w-full text-sm">
-                  <tbody>
-                    {Object.entries(sel.datos).length === 0 && (
-                      <tr><td className="py-2 text-slate-400">Sin datos en el payload.</td></tr>
-                    )}
-                    {Object.entries(sel.datos).map(([k, v]) => (
-                      <tr key={k} className="border-b border-slate-100 dark:border-slate-700/50">
-                        <td className="py-2 pr-4 font-semibold text-slate-500 dark:text-slate-400 align-top whitespace-nowrap">{k}</td>
-                        <td className="py-2 text-slate-800 dark:text-slate-200 break-words">
-                          {typeof v === 'object' && v !== null
-                            ? <pre className="text-xs whitespace-pre-wrap">{JSON.stringify(v, null, 2)}</pre>
-                            : String(v)}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-
-                {/* ── Responder en Salesforce ─────────────────────────────── */}
-                <div className="mt-6 border-t border-slate-200 dark:border-slate-700 pt-4">
+                {/* ── Sección: Responder en Salesforce (botón que despliega) ── */}
+                <Seccion>📨 Responder en Salesforce</Seccion>
+                <div>
                   <button
                     onClick={() => setShowResponder(s => !s)}
-                    className="flex items-center gap-2 text-sm font-bold text-sky-700 dark:text-sky-400"
+                    className="flex items-center gap-2 px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-sm font-bold"
                   >
                     <span>{showResponder ? '▾' : '▸'}</span> Responder en Salesforce
                   </button>
@@ -1298,6 +1345,8 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                     </div>
                   )}
                 </div>
+                </div>
+              </div>
             </div>
           )}
         </>
