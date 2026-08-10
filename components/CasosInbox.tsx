@@ -16,7 +16,7 @@ import { cambiarEstado, tomarCaso, liberarCaso } from '../services/caseWorkflowS
 import { guardarInvestigacion } from '../services/caseInvestigationService';
 import { registrarDecision, resolverAprobacion, requiereAprobacion } from '../services/caseDecisionService';
 import { enviarResolucion, conclusionAStatus } from '../services/caseResolutionService';
-import { TIPOS_CIERRE } from '../services/cierreTipos';
+import { TIPOS_CIERRE, camposDeCierre } from '../services/cierreTipos';
 import type { InvestigacionCaso, DecisionCompliance, TipoDecision } from '../services/casosComplianceTypes';
 import { useAuth } from '../context/AuthContext';
 
@@ -172,7 +172,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     let ok = 0, err = 0;
     await runPool(seleccionados, async (c) => {
       try {
-        const payload = { CaseNumber: c.numeroCaso, ...tipo.campos } as SFCaseUpdate;
+        const payload = { CaseNumber: c.numeroCaso, ...camposDeCierre(tipo, c.pais) } as SFCaseUpdate;
         const r = await enviarResolucion(c.id, payload, actor ?? undefined);
         if (r.yaEnviada || r.sf?.ok) ok++; else err++;
       } catch { err++; }
@@ -254,10 +254,25 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     if (sug) base['C_Status__c'] = sug;
     setForm(base);
     setSfResult(null);
+    setTipoCierreSel('');
   }, [sel?.id]);
 
   const setField = (k: string, v: string | boolean) =>
     setForm(f => ({ ...f, [k]: v }));
+
+  // Autocompleta el formulario con la tipificación de un tipo de cierre (mismo
+  // mantenedor que el cierre masivo). Parte de un form limpio del caso y aplica
+  // los campos del tipo (incluye Country__c según el país del caso).
+  const [tipoCierreSel, setTipoCierreSel] = useState('');
+  const aplicarTipoAlForm = (tipoId: string) => {
+    setTipoCierreSel(tipoId);
+    const tipo = TIPOS_CIERRE.find(t => t.id === tipoId);
+    if (!tipo || !sel) return;
+    const base = defaultForm(sel);
+    const campos = camposDeCierre(tipo, sel.pais);
+    for (const [k, v] of Object.entries(campos)) if (v !== undefined) base[k] = v as string | boolean;
+    setForm(base);
+  };
 
   // ── Consulta de remesa en Redshift (cola Remesa) ────────────────────────────
   const [remesaData, setRemesaData] = useState<RemesaResult | null>(null);
@@ -1118,6 +1133,23 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                           Proxy no configurado en esta instancia (EMPRESADOCS_PROXY_URL).
                         </p>
                       )}
+
+                      {/* Tipología de cierre: autocompleta los campos de abajo */}
+                      <div className="flex flex-wrap items-center gap-2 mb-3 bg-sky-50 dark:bg-sky-950/30 border border-sky-200 dark:border-sky-800/40 rounded-xl px-3 py-2">
+                        <span className="text-xs font-semibold text-sky-700 dark:text-sky-300">Tipología de cierre</span>
+                        <select
+                          value={tipoCierreSel}
+                          onChange={e => aplicarTipoAlForm(e.target.value)}
+                          className="px-2 py-1 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-sm"
+                        >
+                          <option value="">Elegir para autocompletar…</option>
+                          {TIPOS_CIERRE.map(t => (
+                            <option key={t.id} value={t.id}>{t.label}{t.completo ? '' : ' (preliminar)'}</option>
+                          ))}
+                        </select>
+                        {tipoCierreSel && <span className="text-xs text-slate-500 dark:text-slate-400">Campos autocompletados — revisa y envía.</span>}
+                      </div>
+
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         {SF_CASE_FIELDS.filter(f => f.type !== 'textarea').map(field => {
                           const val = form[field.apiName];

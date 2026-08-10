@@ -135,4 +135,5 @@ export const SF_CASE_FIELDS: SFFieldDef[] = [
   { apiName: 'PEP__c', label: 'PEP (Persona Expuesta)', type: 'checkbox' },
   { apiName: 'Customer ID', label: 'Customer ID', type: 'text' },
   { apiName: 'Comments', label: 'Comentarios internos', type: 'textarea' },
+  { apiName: 'razon_3_dias__c', label: '♻️ Razón/Justificación No Cierre', type: 'textarea' },
 ];
