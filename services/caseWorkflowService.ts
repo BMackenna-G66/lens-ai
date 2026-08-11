@@ -6,7 +6,7 @@ import { doc, updateDoc, Firestore } from 'firebase/firestore';
 import { getDb } from './firebaseService';
 import { CASOS_COLLECTION } from './casosService';
 import { esTransicionValida } from './casosComplianceTypes';
-import type { EstadoCaso } from './casosComplianceTypes';
+import type { EstadoCaso, PrioridadCaso } from './casosComplianceTypes';
 import { registrarAuditoria } from './caseAuditService';
 
 export interface Actor { uid: string; nombre: string; }
@@ -34,6 +34,26 @@ export async function cambiarEstado(caso: CasoRef, nuevo: EstadoCaso, actor: Act
     tipo: 'ESTADO_CAMBIADO', actorId: actor.uid, actorTipo: 'USER',
     correlationId: caso.id, versionCaso: caso.versionCaso ?? 1,
     cambios: { estadoCaso: { anterior: actual, nuevo } },
+  });
+}
+
+// Fija la prioridad manualmente (override del cálculo preliminar). Permite marcar
+// CRÍTICA, que el motor no asigna solo. Aditivo + auditoría.
+export async function cambiarPrioridad(
+  caso: { id: string; versionCaso?: number; prioridadActual?: PrioridadCaso },
+  nueva: PrioridadCaso,
+  actor: Actor,
+): Promise<void> {
+  const db = getDb() as Firestore | null;
+  if (!db) return;
+  await updateDoc(doc(db, CASOS_COLLECTION, caso.id), {
+    prioridad: nueva,
+    actualizadoEn: new Date().toISOString(),
+  });
+  await registrarAuditoria(caso.id, {
+    tipo: 'PRIORIDAD_CAMBIADA', actorId: actor.uid, actorTipo: 'USER',
+    correlationId: caso.id, versionCaso: caso.versionCaso ?? 1,
+    cambios: { prioridad: { anterior: caso.prioridadActual ?? null, nuevo: nueva } },
   });
 }
 

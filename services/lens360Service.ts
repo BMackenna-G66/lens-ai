@@ -73,7 +73,7 @@ function pick(obj: Record<string, unknown>, ...keys: string[]): string {
 function evaluateCriminal(rut: string, nombre: string, additionalData: Record<string, unknown>[]): {
   crimes: Lens360Crime[]; decision?: Lens360CriminalDecision; profile?: PersonProfile;
 } {
-  const engineCrimes: Crime[] = additionalData.map((c, idx) => ({
+  const engineCrimesRaw: Crime[] = additionalData.map((c, idx) => ({
     id:       pick(c, 'RUC', 'RIT') || `c${idx}`,
     tipo:     pick(c, 'Delito', 'delito', 'crimen', 'Crimen', 'crime'),
     estado:   pick(c, 'Estado', 'estado') || 'S/E',
@@ -83,6 +83,16 @@ function evaluateCriminal(rut: string, nombre: string, additionalData: Record<st
     ruc:      pick(c, 'RUC', 'ruc'),
     tribunal: pick(c, 'Tribunal', 'tribunal'),
   })).filter(c => c.tipo && c.tipo !== '0');
+
+  // Deduplica por RUC (id = RUC || RIT || índice), IGUAL que el Criminal Profiler
+  // (criminalDataProcessor): una causa por RUC. Antes la cola sumaba el valor de
+  // TODAS las filas → inflaba el score y disparaba Fully Blocked de más.
+  const vistos = new Set<string>();
+  const engineCrimes: Crime[] = engineCrimesRaw.filter(c => {
+    if (vistos.has(c.id)) return false;
+    vistos.add(c.id);
+    return true;
+  });
 
   const crimes: Lens360Crime[] = engineCrimes.map(c => ({
     crimen: c.tipo,

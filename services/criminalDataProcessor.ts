@@ -283,6 +283,8 @@ export const processCatalogFile = async (file: File): Promise<CatalogData> => {
 
 export const applyEvaluationToProfile = (profile: PersonProfile, catalog: CatalogData) => {
   let scoreTotal = 0;
+  let precedentes = 0;
+  let noPrecedentes = 0;
   const catalogMap = new Map(catalog.items.map(i => [normalizeDelito(i.nombre), i]));
 
   profile.crimes.forEach(crime => {
@@ -291,23 +293,41 @@ export const applyEvaluationToProfile = (profile: PersonProfile, catalog: Catalo
       crime.catalogValue = match.valor;
       crime.catalogType = match.tipo;
       scoreTotal += match.valor;
+      // Conteo precedentes / no precedentes (OJO: "NO PRECEDENTE" contiene "PRECEDENTE").
+      const t = (match.tipo || '').toUpperCase();
+      if (/NO[\s_]*PRECEDENTE/.test(t)) noPrecedentes += 1;
+      else if (t.includes('PRECEDENTE')) precedentes += 1;
     }
   });
+
+  // Regla dura por conteo (parameters del catálogo): supera al score. 4+ precedentes
+  // o 5+ no precedentes ⇒ Fully Blocked, aunque el score no llegue al umbral.
+  const params = catalog.parameters || {};
+  const hardPre = Number(params.HARD_FB_precedentes_count ?? 4);
+  const hardNoPre = Number(params.HARD_FB_noprecedentes_count ?? 5);
+  if (precedentes >= hardPre || noPrecedentes >= hardNoPre) {
+    profile.preEvaluation = {
+      decision: 'Fully Blocked',
+      razon: `Regla dura (conteo): ${precedentes} precedente(s) / ${noPrecedentes} no precedente(s)`,
+      scoreTotal,
+    };
+    return;
+  }
 
   const sortedRules = [...catalog.decisionTable].sort((a, b) => b.totalEquivalente - a.totalEquivalente);
   const match = sortedRules.find(rule => scoreTotal >= rule.totalEquivalente);
 
   if (match) {
-    profile.preEvaluation = { 
-      decision: match.decision, 
-      razon: match.razon, 
-      scoreTotal 
+    profile.preEvaluation = {
+      decision: match.decision,
+      razon: match.razon,
+      scoreTotal
     };
   } else {
-    profile.preEvaluation = { 
-      decision: 'Sin Riesgo Significativo', 
-      razon: 'El perfil no alcanza los umbrales mínimos de riesgo.', 
-      scoreTotal 
+    profile.preEvaluation = {
+      decision: 'Sin Riesgo Significativo',
+      razon: 'El perfil no alcanza los umbrales mínimos de riesgo.',
+      scoreTotal
     };
   }
 };

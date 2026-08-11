@@ -13,7 +13,7 @@ import type { AlertaScreening, EstadoCaso, PrioridadCaso, TipoCasoCompliance } f
 import { TRANSICIONES_CASO } from '../services/casosComplianceTypes';
 import { inferirTipoCaso } from '../services/casosComplianceMapper';
 import { calcularPrioridadPreliminar } from '../services/casePriority';
-import { cambiarEstado, tomarCaso, liberarCaso } from '../services/caseWorkflowService';
+import { cambiarEstado, tomarCaso, liberarCaso, cambiarPrioridad } from '../services/caseWorkflowService';
 import { guardarInvestigacion } from '../services/caseInvestigationService';
 import { registrarDecision, resolverAprobacion, requiereAprobacion } from '../services/caseDecisionService';
 import { enviarResolucion, conclusionAStatus } from '../services/caseResolutionService';
@@ -392,6 +392,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     setForm(base);
     setSfResult(null);
     setTipoCierreSel('');
+    setBorrarFichaConfirm(false);
   }, [sel?.id]);
 
   const setField = (k: string, v: string | boolean) =>
@@ -558,6 +559,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   const doTomar = (c: QueuedCaso) => conAccion(() => tomarCaso({ id: c.id, estadoCaso: vistaOp(c).estado, versionCaso: vistaOp(c).versionCaso }, actor!));
   const doLiberar = (c: QueuedCaso) => conAccion(() => liberarCaso({ id: c.id, estadoCaso: vistaOp(c).estado, versionCaso: vistaOp(c).versionCaso }, actor!));
   const doEstado = (c: QueuedCaso, nuevo: EstadoCaso) => conAccion(() => cambiarEstado({ id: c.id, estadoCaso: vistaOp(c).estado, versionCaso: vistaOp(c).versionCaso }, nuevo, actor!));
+  const doPrioridad = (c: QueuedCaso, nueva: PrioridadCaso) => conAccion(() => cambiarPrioridad({ id: c.id, prioridadActual: vistaOp(c).prioridad, versionCaso: vistaOp(c).versionCaso }, nueva, actor!));
 
   // ── Investigación (Fase 5): edición con versionado / concurrencia ────────────
   const [invForm, setInvForm] = useState({ resumen: '', hallazgos: '', recomendacion: '', completa: false });
@@ -710,6 +712,15 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   const navegar = (delta: number) => {
     const n = idxEnCola + delta;
     if (n >= 0 && n < ordenados.length) setSelId(ordenados[n].id);
+  };
+
+  // Borrado del caso desde la ficha (individual). Mismo efecto que el borrado masivo.
+  const [borrarFichaConfirm, setBorrarFichaConfirm] = useState(false);
+  const borrarFicha = async () => {
+    if (!sel) return;
+    setBorrando(true);
+    try { await eliminarCasos([sel.id]); setBorrarFichaConfirm(false); setSelId(null); }
+    finally { setBorrando(false); }
   };
 
   // Descarga la ficha del caso como PDF (Info + Perfil + Investigación + Decisión + payload).
@@ -1080,6 +1091,14 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                     >
                       {pdfGen ? 'Generando…' : '⬇ PDF'}
                     </button>
+                    {/* Borrar caso */}
+                    <button
+                      onClick={() => setBorrarFichaConfirm(true)}
+                      title="Borrar caso de la cola"
+                      className="w-8 h-8 flex items-center justify-center rounded-lg border border-red-200 dark:border-red-800/60 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40"
+                    >
+                      🗑
+                    </button>
                     <button
                       onClick={cerrarFicha}
                       aria-label="Cerrar ficha"
@@ -1089,6 +1108,17 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                     </button>
                   </div>
                 </div>
+
+                {/* Confirmación de borrado del caso */}
+                {borrarFichaConfirm && (
+                  <div className="flex flex-wrap items-center gap-3 px-5 py-2.5 bg-red-50 dark:bg-red-950/40 border-b border-red-200 dark:border-red-800/50 text-sm">
+                    <span className="text-red-700 dark:text-red-300 font-semibold">¿Borrar el caso {sel.numeroCaso || ''} de la cola? No se puede deshacer.</span>
+                    <button onClick={borrarFicha} disabled={borrando} className="px-3 py-1 rounded-lg bg-red-600 hover:bg-red-700 text-white font-bold disabled:opacity-50">
+                      {borrando ? 'Borrando…' : 'Sí, borrar'}
+                    </button>
+                    <button onClick={() => setBorrarFichaConfirm(false)} disabled={borrando} className="px-3 py-1 rounded-lg border border-slate-300 dark:border-slate-600">Cancelar</button>
+                  </div>
+                )}
 
                 {/* Cuerpo con scroll */}
                 <div className="overflow-y-auto p-5">
@@ -1148,7 +1178,18 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                     <div className="mb-5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/60 dark:bg-slate-900/40 p-4">
                       <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm">
                         <span className="text-slate-500 dark:text-slate-400">Tipo: <b className="text-slate-800 dark:text-slate-200">{op.tipo}</b></span>
-                        <span className="text-slate-500 dark:text-slate-400">Prioridad: <b className={prioColor(op.prioridad)}>{op.prioridad}</b></span>
+                        <label className="flex items-center gap-1 text-slate-500 dark:text-slate-400">
+                          Prioridad:
+                          <select
+                            value={op.prioridad}
+                            disabled={accionEnCurso}
+                            onChange={e => e.target.value !== op.prioridad && doPrioridad(sel, e.target.value as PrioridadCaso)}
+                            className={`${selectCls} font-bold ${prioColor(op.prioridad)}`}
+                            title="Editar prioridad manualmente (incluye CRÍTICA)"
+                          >
+                            {(['CRITICA', 'ALTA', 'MEDIA', 'BAJA'] as PrioridadCaso[]).map(p => <option key={p} value={p}>{p}</option>)}
+                          </select>
+                        </label>
                         <label className="flex items-center gap-1 text-slate-500 dark:text-slate-400">
                           Estado:
                           <select
