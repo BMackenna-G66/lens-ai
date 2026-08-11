@@ -83,6 +83,21 @@ const cellText = (v: unknown): string => {
   return String(v);
 };
 
+// Campos del payload que la cola OFAC "promueve" a columnas propias (con el orden
+// pedido); se excluyen del bloque de columnas dinámicas para no duplicarlas.
+const OFAC_PROMOVIDAS = ['Número del caso', 'Id interno del usuario', 'Nombre', 'Apellido', 'Nombre completo', 'País Origen', 'País'];
+
+// Nombre a mostrar: "Nombre completo" si viene; si no, Nombre + Apellido; si no, la cuenta.
+const nombreCompleto = (c: CasoSF): string => {
+  const d = c.datos || {};
+  const full = String(d['Nombre completo'] ?? '').trim();
+  if (full) return full;
+  const partes = [String(d['Nombre'] ?? '').trim(), String(d['Apellido'] ?? '').trim()].filter(Boolean);
+  return partes.join(' ') || c.nombreCuenta || '—';
+};
+const idInterno = (c: CasoSF): string => String(c.datos?.['Id interno del usuario'] ?? '').trim() || '—';
+const paisOrigen = (c: CasoSF): string => String(c.datos?.['País Origen'] ?? c.pais ?? '').trim() || '—';
+
 // Filtro tipo Excel: desplegable con buscador, para elegir un valor de una columna.
 const FiltroCombo: React.FC<{ label: string; value: string; options: string[]; onChange: (v: string) => void }> = ({ label, value, options, onChange }) => {
   const [open, setOpen] = useState(false);
@@ -661,6 +676,10 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
         case 'delitos': return screenMap[c.id]?.delitosUnicos ?? -1;
         case 'conclusion': return screenMap[c.id]?.decision || '';
         case 'pep': return screenMap[c.id]?.pep ? 1 : 0;
+        case 'numeroCaso': return c.numeroCaso || '';
+        case 'nombre': return nombreCompleto(c);
+        case 'idinterno': return idInterno(c);
+        case 'paisorigen': return paisOrigen(c);
         case 'tipo': return vistaOp(c).tipo;
         case 'estado': return vistaOp(c).estado;
         case 'prioridad': return vistaOp(c).prioridad;
@@ -907,7 +926,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                   <th className="px-3 py-2 w-8">
                     <input type="checkbox" checked={allSel} onChange={toggleAll} className="w-4 h-4 cursor-pointer align-middle" title="Seleccionar todo" />
                   </th>
-                  {Th('fecha', 'Fecha llegada')}
+                  {activeQueue !== 'ofac' && Th('fecha', 'Fecha llegada')}
                   {activeQueue === 'remesa' && (
                     <>
                       {Th('remesa', 'remesa')}
@@ -918,22 +937,29 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                   )}
                   {activeQueue === 'ofac' && (
                     <>
-                      {Th('tipo', 'Tipo')}
-                      {Th('estado', 'Estado')}
-                      {Th('prioridad', 'Prioridad')}
-                      {Th('asignado', 'Asignado')}
-                      {Th('delitos', 'Delitos únicos', 'text-center')}
+                      {/* Columnas clave, en el orden pedido */}
+                      {Th('numeroCaso', 'Nº caso')}
+                      {Th('nombre', 'Nombre')}
+                      {Th('idinterno', 'Id interno')}
+                      {Th('paisorigen', 'País origen')}
                       {Th('conclusion', 'Conclusión')}
+                      {Th('delitos', 'Delitos únicos', 'text-center')}
+                      {Th('prioridad', 'Prioridad')}
+                      {/* Resto de columnas útiles */}
+                      {Th('estado', 'Estado')}
+                      {Th('asignado', 'Asignado')}
                       {Th('pep', 'PEP', 'text-center')}
+                      {Th('tipo', 'Tipo')}
+                      {Th('fecha', 'Fecha llegada')}
                     </>
                   )}
-                  {columnas.map(k => Th(k, k))}
+                  {(activeQueue === 'ofac' ? columnas.filter(k => !OFAC_PROMOVIDAS.includes(k)) : columnas).map(k => Th(k, k))}
                 </tr>
               </thead>
               <tbody>
                 {ordenados.length === 0 && (
                   <tr>
-                    <td colSpan={columnas.length + (activeQueue === 'remesa' ? 4 : activeQueue === 'ofac' ? 8 : 1) + 1} className="py-8 text-center text-slate-400">
+                    <td colSpan={columnas.length + (activeQueue === 'remesa' ? 6 : activeQueue === 'ofac' ? 13 : 2)} className="py-8 text-center text-slate-400">
                       Sin casos en esta cola.
                     </td>
                   </tr>
@@ -953,7 +979,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                       <td className="px-3 py-2" onClick={e => e.stopPropagation()}>
                         <input type="checkbox" checked={seleccion.has(c.id)} onChange={() => toggleSel(c.id)} className="w-4 h-4 cursor-pointer align-middle" />
                       </td>
-                      <td className="px-3 py-2 whitespace-nowrap text-slate-500 dark:text-slate-400">{fmtFecha(c.recibidoEn)}</td>
+                      {activeQueue !== 'ofac' && <td className="px-3 py-2 whitespace-nowrap text-slate-500 dark:text-slate-400">{fmtFecha(c.recibidoEn)}</td>}
                       {activeQueue === 'remesa' && (
                         <>
                           <td className="px-3 py-2 whitespace-nowrap font-bold text-sky-700 dark:text-sky-400">{c.remesa || '—'}</td>
@@ -964,13 +990,11 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                       )}
                       {activeQueue === 'ofac' && op && (
                         <>
-                          <td className="px-3 py-2 whitespace-nowrap text-slate-700 dark:text-slate-200">{op.tipo}</td>
-                          <td className="px-3 py-2 whitespace-nowrap text-slate-600 dark:text-slate-300">{op.estado}</td>
-                          <td className={`px-3 py-2 whitespace-nowrap font-bold ${prioColor(op.prioridad)}`}>{op.prioridad}</td>
-                          <td className="px-3 py-2 whitespace-nowrap text-slate-600 dark:text-slate-300 max-w-[160px] truncate" title={op.asignado}>{op.asignado || '—'}</td>
-                          <td className="px-3 py-2 whitespace-nowrap text-center font-bold text-slate-800 dark:text-slate-200">
-                            {!s || s.estado === 'loading' ? '…' : s.estado === 'na' ? '—' : s.estado === 'error' ? '⚠️' : (s.delitosUnicos ?? 0)}
-                          </td>
+                          {/* Columnas clave, en el orden pedido */}
+                          <td className="px-3 py-2 whitespace-nowrap font-bold text-slate-800 dark:text-slate-100">{c.numeroCaso || '—'}</td>
+                          <td className="px-3 py-2 max-w-[200px] truncate text-slate-700 dark:text-slate-200" title={nombreCompleto(c)}>{nombreCompleto(c)}</td>
+                          <td className="px-3 py-2 whitespace-nowrap text-slate-600 dark:text-slate-300">{idInterno(c)}</td>
+                          <td className="px-3 py-2 whitespace-nowrap text-slate-700 dark:text-slate-200">{paisOrigen(c)}</td>
                           <td className={`px-3 py-2 whitespace-nowrap font-semibold ${decisionColor(s?.decision)}`} title={s?.razon}>
                             {!s || s.estado === 'loading' ? 'consultando…'
                               : s.estado === 'na' ? 'No aplica'
@@ -978,15 +1002,24 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                               : s.estado === 'sin_causas' ? 'Sin causas'
                               : (s.decision || '—')}
                           </td>
+                          <td className="px-3 py-2 whitespace-nowrap text-center font-bold text-slate-800 dark:text-slate-200">
+                            {!s || s.estado === 'loading' ? '…' : s.estado === 'na' ? '—' : s.estado === 'error' ? '⚠️' : (s.delitosUnicos ?? 0)}
+                          </td>
+                          <td className={`px-3 py-2 whitespace-nowrap font-bold ${prioColor(op.prioridad)}`}>{op.prioridad}</td>
+                          {/* Resto de columnas útiles */}
+                          <td className="px-3 py-2 whitespace-nowrap text-slate-600 dark:text-slate-300">{op.estado}</td>
+                          <td className="px-3 py-2 whitespace-nowrap text-slate-600 dark:text-slate-300 max-w-[160px] truncate" title={op.asignado}>{op.asignado || '—'}</td>
                           <td className="px-3 py-2 whitespace-nowrap text-center">
                             {!s || s.estado === 'loading' ? '…'
                               : s.fuente !== 'Regcheq' ? '—'
                               : s.pep ? <span className="font-bold text-red-600 dark:text-red-400">Sí</span>
                               : <span className="text-slate-500 dark:text-slate-400">No</span>}
                           </td>
+                          <td className="px-3 py-2 whitespace-nowrap text-slate-700 dark:text-slate-200">{op.tipo}</td>
+                          <td className="px-3 py-2 whitespace-nowrap text-slate-500 dark:text-slate-400">{fmtFecha(c.recibidoEn)}</td>
                         </>
                       )}
-                      {columnas.map(k => {
+                      {(activeQueue === 'ofac' ? columnas.filter(k => !OFAC_PROMOVIDAS.includes(k)) : columnas).map(k => {
                         const t = cellText(c.datos[k]);
                         return <td key={k} title={t} className="px-3 py-2 max-w-[220px] truncate text-slate-700 dark:text-slate-200">{t}</td>;
                       })}
