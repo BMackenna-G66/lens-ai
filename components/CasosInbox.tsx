@@ -18,7 +18,7 @@ import { guardarInvestigacion } from '../services/caseInvestigationService';
 import { registrarDecision, resolverAprobacion, requiereAprobacion } from '../services/caseDecisionService';
 import { enviarResolucion, conclusionAStatus } from '../services/caseResolutionService';
 import { TIPOS_CIERRE, camposDeCierre } from '../services/cierreTipos';
-import { TIPOS_CIERRE_ADMIN, OFAC_PROVIDERS, ADMIN_ASSIGNEE_DEFAULT } from '../services/cierreAdminTipos';
+import { TIPOS_CIERRE_ADMIN, OFAC_PROVIDERS, ADMIN_ASSIGNEE_DEFAULT, ADMIN_STATUS_OPTIONS, ADMIN_COMMENT_OPTIONS } from '../services/cierreAdminTipos';
 import { enviarCierreAdmin, adminCierreDisponible, AdminCierreResult } from '../services/adminCierreService';
 import { registrarAuditoria } from '../services/caseAuditService';
 import type { InvestigacionCaso, DecisionCompliance, TipoDecision } from '../services/casosComplianceTypes';
@@ -455,7 +455,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   };
 
   const enviarAdmin = async () => {
-    if (!sel || !adminTipoSel) return;
+    if (!sel || !adminForm.status || !adminForm.comment) return;
     const ids = adminForm.customerIds.split(',').map(s => s.trim()).filter(Boolean);
     if (!ids.length) { setAdminResult({ ok: false, results: [], error: 'Falta el customerId.' }); return; }
     setAdminSending(true); setAdminResult(null);
@@ -1581,10 +1581,20 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                           <option value="">Elegir…</option>
                           {TIPOS_CIERRE_ADMIN.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
                         </select>
-                        {tipoAdmin && <span className="text-[11px] text-slate-500 dark:text-slate-400">status <b>{adminForm.status}</b> · comment <b>{adminForm.comment}</b>{adminForm.pep ? ' · PEP ✓ (metadata)' : ''}</span>}
+                        {tipoAdmin && adminForm.pep && <span className="text-[11px] text-slate-500 dark:text-slate-400">PEP ✓ (metadata)</span>}
                       </div>
 
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <label className={lbl}><span className={cap}>Status</span>
+                          <select value={adminForm.status} onChange={e => setAdmin({ status: e.target.value })} className={inp}>
+                            <option value="">— elegir —</option>
+                            {ADMIN_STATUS_OPTIONS.map(s => <option key={s} value={s}>{s}</option>)}
+                          </select>
+                        </label>
+                        <label className={lbl}><span className={cap}>Comment</span>
+                          <input list="admin-comment-opts" value={adminForm.comment} onChange={e => setAdmin({ comment: e.target.value })} placeholder="ej: NO_COMMENTS" className={inp} />
+                          <datalist id="admin-comment-opts">{ADMIN_COMMENT_OPTIONS.map(c => <option key={c} value={c} />)}</datalist>
+                        </label>
                         <label className={lbl}><span className={cap}>Customer ID(s)</span>
                           <input value={adminForm.customerIds} onChange={e => setAdmin({ customerIds: e.target.value })} placeholder="ej: 2702355, 2702356" className={inp} />
                         </label>
@@ -1620,14 +1630,14 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                       </label>
 
                       {!adminConfirm ? (
-                        <button onClick={() => setAdminConfirm(true)} disabled={!adminTipoSel || !adminCierreDisponible()} className="mt-4 px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white text-sm font-bold">
+                        <button onClick={() => setAdminConfirm(true)} disabled={!adminForm.status || !adminForm.comment || !adminCierreDisponible()} className="mt-4 px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white text-sm font-bold">
                           Enviar a Admin…
                         </button>
                       ) : (
                         <div className="mt-4 rounded-xl border border-rose-300 dark:border-rose-700 bg-rose-50 dark:bg-rose-950/40 p-3 text-sm">
-                          <p className="font-bold text-rose-800 dark:text-rose-200">¿Aplicar «{tipoAdmin?.label}» en Admin?</p>
+                          <p className="font-bold text-rose-800 dark:text-rose-200">¿Aplicar «{tipoAdmin?.label ?? 'cierre manual'}» en Admin?</p>
                           <p className="text-xs text-rose-700 dark:text-rose-300 mt-1">
-                            Cliente(s): <b>{adminForm.customerIds || '—'}</b> · status <b>{adminForm.status}</b> · país {adminForm.countryCode}<br />
+                            Cliente(s): <b>{adminForm.customerIds || '—'}</b> · status <b>{adminForm.status}</b> · comment <b>{adminForm.comment}</b> · país {adminForm.countryCode}<br />
                             Pasos: OFAC (flag={adminForm.ofacFlag ? 'Sí' : 'No'}, {adminForm.ofacProvider}) → Compliance{habraLastStep ? ' → Last-step' : ''}. <b>Bloquea/desbloquea clientes reales.</b>
                           </p>
                           <div className="flex items-center gap-2 mt-2">
@@ -1646,9 +1656,22 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                           <p className="font-bold">{adminResult.ok ? '✅ Aplicado en Admin' : '❌ No se pudo aplicar en Admin'}</p>
                           {adminResult.error && <p className="mt-1">{adminResult.error}</p>}
                           {adminResult.results.map(r => (
-                            <p key={r.customerId} className="text-xs mt-1">
-                              Cliente {r.customerId}: {r.ok ? 'OK' : 'falló'} — {Object.entries(r.steps).map(([k, v]) => `${k} HTTP ${(v as { status?: number }).status}`).join(' · ') || 'sin pasos'}
-                            </p>
+                            <div key={r.customerId} className="text-xs mt-2">
+                              <p className="font-semibold">Cliente {r.customerId}: {r.ok ? 'OK' : 'falló'}</p>
+                              {Object.keys(r.steps).length === 0 && <p className="ml-2 opacity-80">sin pasos</p>}
+                              {Object.entries(r.steps).map(([k, v]) => {
+                                const step = v as { ok?: boolean; status?: number; data?: unknown };
+                                const detalle = step.data == null ? '' : (typeof step.data === 'string' ? step.data : JSON.stringify(step.data));
+                                return (
+                                  <div key={k} className="ml-2 mt-0.5">
+                                    <span>{step.ok ? '✅' : '❌'} {k} — HTTP {step.status}</span>
+                                    {!step.ok && detalle && (
+                                      <pre className="mt-0.5 whitespace-pre-wrap break-words opacity-80 text-[11px] max-h-40 overflow-auto">{detalle}</pre>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
                           ))}
                         </div>
                       )}

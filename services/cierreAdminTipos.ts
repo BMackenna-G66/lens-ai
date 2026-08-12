@@ -57,3 +57,8 @@ export const TIPOS_CIERRE_ADMIN: TipoCierreAdmin[] = [
 
 export const OFAC_PROVIDERS = ['REGCHECK', 'RISK_CONSULTING'] as const;
 export const ADMIN_ASSIGNEE_DEFAULT = 'compliance.masivo@global66.com';
+
+// Valores válidos de status/comment de la API de admin (editables en la ficha).
+// Si la API acepta otros, agregarlos acá.
+export const ADMIN_STATUS_OPTIONS = ['NORMAL', 'UNDER_COMPLIANCE_REVIEW', 'UNDER_COMPLIANCE_REVIEW_2', 'FULLY_BLOCKED'] as const;
+export const ADMIN_COMMENT_OPTIONS = ['NO_COMMENTS', 'UCR_CRIMINAL_RISK', 'COMPLIANCE_OFFICER_REQUEST'] as const;
