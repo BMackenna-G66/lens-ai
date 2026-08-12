@@ -38,12 +38,23 @@ export interface CasoSF {
 
 export const isCasosAvailable = (): boolean => !!getDb();
 
+// Salesforce numera los Case con ceros a la izquierda a ancho fijo (8 dígitos en
+// este org, ej. "02646256"). Si la integración de SF envía el número como valor
+// numérico, el cero inicial se pierde en la ingesta (2646256) y el case-update
+// falla con CASE_NOT_FOUND. Recuperamos el formato canónico rellenando con ceros
+// cuando el valor quedó puramente numérico y más corto que el ancho estándar.
+const SF_CASE_NUMBER_WIDTH = 8;
+export function normalizeCaseNumber(v: string): string {
+  const t = v.trim();
+  return /^\d+$/.test(t) && t.length < SF_CASE_NUMBER_WIDTH ? t.padStart(SF_CASE_NUMBER_WIDTH, '0') : t;
+}
+
 function docToCaso(id: string, data: Record<string, unknown>): CasoSF {
   const datos = (data.datos && typeof data.datos === 'object' ? data.datos : {}) as Record<string, unknown>;
   const s = (v: unknown) => (v === null || v === undefined ? '' : String(v));
   return {
     id,
-    numeroCaso: s(data.numeroCaso) || s(datos['Número del caso']),
+    numeroCaso: normalizeCaseNumber(s(data.numeroCaso) || s(datos['Número del caso'])),
     asunto: s(data.asunto) || s(datos['Asunto']),
     nombreCuenta: s(data.nombreCuenta) || s(datos['Nombre de la cuenta']),
     pais: s(data.pais) || s(datos['País']),
