@@ -100,6 +100,8 @@ const nombreCompleto = (c: CasoSF): string => {
 };
 const idInterno = (c: CasoSF): string => String(c.datos?.['Id interno del usuario'] ?? '').trim() || '—';
 const paisOrigen = (c: CasoSF): string => String(c.datos?.['País Origen'] ?? c.pais ?? '').trim() || '—';
+// País del caso → countryCode de admin para el last-step (CL por defecto).
+const paisCC = (p: string): string => (/colombia|^co$/i.test(p) ? 'CO' : 'CL');
 
 // Filtro tipo Excel: desplegable con buscador, para elegir un valor de una columna.
 const FiltroCombo: React.FC<{ label: string; value: string; options: string[]; onChange: (v: string) => void }> = ({ label, value, options, onChange }) => {
@@ -311,6 +313,45 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     if (err === 0) limpiarSeleccion();
   };
 
+  // Cierre masivo en Admin (bloqueo/desbloqueo): mismo patrón que el de SF, pero
+  // agrupando por país (el last-step usa countryCode por cliente). Usa el
+  // customerId = "Id interno del usuario" de cada caso. ALTO impacto → confirma.
+  const [adminMasivoTipo, setAdminMasivoTipo] = useState('');
+  const [adminMasivoConfirm, setAdminMasivoConfirm] = useState(false);
+  const [adminMasivoSending, setAdminMasivoSending] = useState(false);
+  const [adminMasivoResult, setAdminMasivoResult] = useState<string | null>(null);
+  const cerrarMasivoAdmin = async () => {
+    const tipo = TIPOS_CIERRE_ADMIN.find(t => t.id === adminMasivoTipo);
+    if (!tipo || seleccion.size === 0) return;
+    setAdminMasivoSending(true); setAdminMasivoResult(null);
+    const seleccionados = [...seleccion].map(id => casos.find(c => c.id === id)).filter((c): c is CasoSF => !!c);
+    // Agrupa customerIds por país (countryCode del last-step).
+    const porPais = new Map<string, string[]>();
+    let sinId = 0;
+    for (const c of seleccionados) {
+      const cid = String(c.datos?.['Id interno del usuario'] ?? '').trim();
+      if (!cid) { sinId++; continue; }
+      const cc = paisCC(c.pais);
+      if (!porPais.has(cc)) porPais.set(cc, []);
+      porPais.get(cc)!.push(cid);
+    }
+    let ok = 0, err = 0;
+    for (const [cc, ids] of porPais) {
+      try {
+        const r = await enviarCierreAdmin({
+          customerIds: ids, status: tipo.status, comment: tipo.comment, observation: tipo.observation,
+          agent: ADMIN_ASSIGNEE_DEFAULT, ofacFlag: false, ofacProvider: 'REGCHECK',
+          countryCode: cc, lastStep: tipo.lastStepDefault,
+        });
+        for (const res of r.results) { if (res.ok) ok++; else err++; }
+        if (r.error && !r.results.length) err += ids.length;
+      } catch { err += ids.length; }
+    }
+    setAdminMasivoSending(false); setAdminMasivoConfirm(false);
+    setAdminMasivoResult(`${ok} cliente(s) OK${err ? `, ${err} con error` : ''}${sinId ? `, ${sinId} sin Customer ID` : ''}`);
+    if (err === 0 && sinId === 0) limpiarSeleccion();
+  };
+
   useEffect(() => {
     if (!isCasosAvailable()) {
       setError('Firestore no está configurado en esta instancia.');
@@ -421,7 +462,6 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     countryCode: string; changeTicket: string; agent: string;
     status: string; comment: string; observation: string; pep: boolean;
   }
-  const paisCC = (p: string): string => (/colombia|^co$/i.test(p) ? 'CO' : 'CL');
   const adminFormInicial = (): AdminForm => ({
     customerIds: '', ofacFlag: false, ofacProvider: 'REGCHECK', lastStep: true,
     countryCode: 'CL', changeTicket: '', agent: ADMIN_ASSIGNEE_DEFAULT,
@@ -996,6 +1036,38 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                 </span>
               )}
               {cierreResult && <span className="text-emerald-800 dark:text-emerald-200 font-medium">{cierreResult}</span>}
+            </div>
+          )}
+
+          {/* Barra de cierre masivo en Admin — bloqueo/desbloqueo (solo cola OFAC) */}
+          {seleccion.size > 0 && activeQueue === 'ofac' && adminCierreDisponible() && (
+            <div className="flex flex-wrap items-center gap-3 mb-3 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800/50 rounded-xl px-4 py-2 text-sm">
+              <span className="font-semibold text-rose-700 dark:text-rose-300">Cerrar en Admin (bloqueo/desbloqueo)</span>
+              <select
+                value={adminMasivoTipo}
+                onChange={e => { setAdminMasivoTipo(e.target.value); setAdminMasivoConfirm(false); setAdminMasivoResult(null); }}
+                className="px-2 py-1 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800"
+              >
+                <option value="">Tipo de cierre…</option>
+                {TIPOS_CIERRE_ADMIN.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
+              </select>
+              {adminMasivoTipo && !adminMasivoConfirm && (
+                <button onClick={() => setAdminMasivoConfirm(true)} disabled={adminMasivoSending} className="font-bold text-rose-700 dark:text-rose-400 hover:underline disabled:opacity-50">
+                  Aplicar a {seleccion.size} cliente(s)
+                </button>
+              )}
+              {adminMasivoTipo && adminMasivoConfirm && (
+                <span className="flex items-center gap-2">
+                  <span className="text-rose-800 dark:text-rose-200">
+                    ¿Aplicar «{TIPOS_CIERRE_ADMIN.find(t => t.id === adminMasivoTipo)?.label}» a {seleccion.size} cliente(s) en Admin? OFAC=No · <b>bloquea/desbloquea clientes reales</b>.
+                  </span>
+                  <button onClick={cerrarMasivoAdmin} disabled={adminMasivoSending} className="px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold disabled:opacity-50">
+                    {adminMasivoSending ? 'Enviando…' : 'Sí, aplicar'}
+                  </button>
+                  <button onClick={() => setAdminMasivoConfirm(false)} disabled={adminMasivoSending} className="px-3 py-1 rounded-lg border border-slate-300 dark:border-slate-600">Cancelar</button>
+                </span>
+              )}
+              {adminMasivoResult && <span className="text-rose-800 dark:text-rose-200 font-medium">{adminMasivoResult}</span>}
             </div>
           )}
 
