@@ -20,6 +20,15 @@ export interface AdminCierrePayload {
   ofacProvider: string;    // REGCHECK | RISK_CONSULTING
   countryCode: string;     // CL | CO (para el last-step)
   lastStep: boolean;       // disparar el last-step si el status lo permite
+  // Paso PEP (PUT isPep) — opcional; se ejecuta solo si pepEnabled.
+  pepEnabled?: boolean;
+  pepValue?: boolean;      // isPep
+  pepProvider?: string;    // default PreLastStep
+  pepCountryCode?: string; // default = countryCode
+  pepPosition?: string | null;
+  // Paso Risk Level (PUT /customer) — opcional; se ejecuta solo si riskEnabled.
+  riskEnabled?: boolean;
+  riskLevel?: string;      // Bajo | Medio | Alto
 }
 
 export interface AdminStepResult { ok: boolean; status: number; data: unknown; }

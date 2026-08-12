@@ -196,6 +196,9 @@ export default {
         customerIds?: (number | string)[]; status?: string; comment?: string;
         observation?: string; agent?: string; ofacFlag?: boolean; ofacProvider?: string;
         countryCode?: string; lastStep?: boolean;
+        pepEnabled?: boolean; pepValue?: boolean; pepProvider?: string;
+        pepCountryCode?: string; pepPosition?: string | null;
+        riskEnabled?: boolean; riskLevel?: string;
       };
       try { body = await request.json(); } catch { return jsonError('Body JSON inválido', 400, cors); }
 
@@ -248,7 +251,30 @@ export default {
             { comment: body.comment || '', observation: body.observation || '', agent: body.agent || '' });
           steps.compliance = s2; if (!s2.ok) ok = false;
         }
-        // PASO 3 — last-step (solo si el status lo requiere y lastStep=true)
+        // PASO 3 — PEP (PUT isPep): busca el pepId del KYC principal y lo actualiza.
+        if (ok && body.pepEnabled) {
+          const info = await doStep('GET', `/customer/bo/customer-info/${encodeURIComponent(id)}`);
+          if (!info.ok) { steps.pep = info; ok = false; }
+          else {
+            const kycList = ((info.data as { customerKycList?: Array<{ isMain?: boolean; countryCode?: string; customerKycPep?: { id?: number | string } }> })?.customerKycList) || [];
+            const mainKyc = kycList.find(k => k?.isMain === true);
+            const pepId = mainKyc?.customerKycPep?.id;
+            if (!pepId) {
+              steps.pep = { ok: false, status: 0, data: { error: 'No se encontró customerKycPep.id en el KYC principal (isMain=true)' } };
+              ok = false;
+            } else {
+              const sp = await doStep('PUT', `/customer/bo/customer-info/${encodeURIComponent(id)}/pep/${encodeURIComponent(String(pepId))}`,
+                { isPep: !!body.pepValue, provider: body.pepProvider || 'PreLastStep', countryCode: body.pepCountryCode || countryCode, position: body.pepPosition ?? null });
+              steps.pep = sp; if (!sp.ok) ok = false;
+            }
+          }
+        }
+        // PASO 4 — Risk Level (PUT /customer): solo si riskEnabled y hay valor.
+        if (ok && body.riskEnabled && body.riskLevel) {
+          const sr = await doStep('PUT', `/customer/bo/customer-info/${encodeURIComponent(id)}/customer`, { riskLevel: body.riskLevel });
+          steps.risk = sr; if (!sr.ok) ok = false;
+        }
+        // PASO 5 — last-step (solo si el status lo requiere y lastStep=true)
         if (ok && body.lastStep && G66_STATUS_REQUIERE_LAST_STEP.has(status)) {
           const s3 = await doStep('GET', `/customer/bo/${encodeURIComponent(id)}/${encodeURIComponent(countryCode)}/last-step`);
           steps.lastStep = s3; if (!s3.ok) ok = false;

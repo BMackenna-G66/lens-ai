@@ -18,7 +18,7 @@ import { guardarInvestigacion } from '../services/caseInvestigationService';
 import { registrarDecision, resolverAprobacion, requiereAprobacion } from '../services/caseDecisionService';
 import { enviarResolucion, conclusionAStatus } from '../services/caseResolutionService';
 import { TIPOS_CIERRE, camposDeCierre } from '../services/cierreTipos';
-import { TIPOS_CIERRE_ADMIN, OFAC_PROVIDERS, ADMIN_ASSIGNEE_DEFAULT, ADMIN_STATUS_OPTIONS, ADMIN_COMMENT_OPTIONS } from '../services/cierreAdminTipos';
+import { TIPOS_CIERRE_ADMIN, OFAC_PROVIDERS, ADMIN_ASSIGNEE_DEFAULT, ADMIN_STATUS_OPTIONS, ADMIN_COMMENT_OPTIONS, RISK_LEVELS, PEP_PROVIDER_DEFAULT } from '../services/cierreAdminTipos';
 import { enviarCierreAdmin, adminCierreDisponible, AdminCierreResult } from '../services/adminCierreService';
 import { registrarAuditoria } from '../services/caseAuditService';
 import type { InvestigacionCaso, DecisionCompliance, TipoDecision } from '../services/casosComplianceTypes';
@@ -342,6 +342,11 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
           customerIds: ids, status: tipo.status, comment: tipo.comment, observation: tipo.observation,
           agent: ADMIN_ASSIGNEE_DEFAULT, ofacFlag: false, ofacProvider: 'REGCHECK',
           countryCode: cc, lastStep: tipo.lastStepDefault,
+          // Risk/PEP solo si la tipología los define explícitamente (hoy: ninguna) — el
+          // masivo no cambia PEP/riesgo de clientes reales sin revisión por ficha.
+          pepEnabled: tipo.pepValue !== undefined,
+          pepValue: !!tipo.pepValue, pepProvider: PEP_PROVIDER_DEFAULT, pepCountryCode: cc, pepPosition: null,
+          riskEnabled: !!tipo.riskLevel, riskLevel: tipo.riskLevel || undefined,
         });
         for (const res of r.results) { if (res.ok) ok++; else err++; }
         if (r.error && !r.results.length) err += ids.length;
@@ -460,12 +465,14 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   interface AdminForm {
     customerIds: string; ofacFlag: boolean; ofacProvider: string; lastStep: boolean;
     countryCode: string; changeTicket: string; agent: string;
-    status: string; comment: string; observation: string; pep: boolean;
+    status: string; comment: string; observation: string;
+    pepEnabled: boolean; pepValue: boolean; riskLevel: string;
   }
   const adminFormInicial = (): AdminForm => ({
     customerIds: '', ofacFlag: false, ofacProvider: 'REGCHECK', lastStep: true,
     countryCode: 'CL', changeTicket: '', agent: ADMIN_ASSIGNEE_DEFAULT,
-    status: '', comment: '', observation: '', pep: false,
+    status: '', comment: '', observation: '',
+    pepEnabled: false, pepValue: false, riskLevel: '',
   });
   const [adminTipoSel, setAdminTipoSel] = useState('');
   const [adminForm, setAdminForm] = useState<AdminForm>(adminFormInicial());
@@ -490,7 +497,10 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     const t = TIPOS_CIERRE_ADMIN.find(x => x.id === tipoId);
     setAdmin({
       status: t?.status ?? '', comment: t?.comment ?? '', observation: t?.observation ?? '',
-      pep: !!t?.pep, lastStep: t?.lastStepDefault ?? true,
+      // PEP se ejecuta solo si la tipología define isPep explícito (pepValue); el flag
+      // legacy `pep` es solo etiqueta ("requiere formulario PEP"), no dispara el PUT.
+      pepEnabled: t?.pepValue !== undefined, pepValue: !!t?.pepValue, riskLevel: t?.riskLevel ?? '',
+      lastStep: t?.lastStepDefault ?? true,
     });
   };
 
@@ -505,16 +515,20 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
         observation: adminForm.observation, agent: adminForm.agent,
         ofacFlag: adminForm.ofacFlag, ofacProvider: adminForm.ofacProvider,
         countryCode: adminForm.countryCode, lastStep: adminForm.lastStep,
+        pepEnabled: adminForm.pepEnabled, pepValue: adminForm.pepValue,
+        pepProvider: PEP_PROVIDER_DEFAULT, pepCountryCode: adminForm.countryCode, pepPosition: null,
+        riskEnabled: !!adminForm.riskLevel, riskLevel: adminForm.riskLevel || undefined,
       });
       setAdminResult(r);
-      // Auditoría — incluye metadata que NO va a la API (changeTicket, requestedBy, pep).
+      // Auditoría — incluye metadata que NO va a la API (changeTicket, requestedBy).
       registrarAuditoria(sel.id, {
         tipo: 'CIERRE_ADMIN', actorId: actor?.uid ?? 'system', actorTipo: actor ? 'USER' : 'SYSTEM',
         correlationId: sel.id, versionCaso: 1,
         metadata: {
           tipologia: adminTipoSel, status: adminForm.status, customerIds: ids, ok: r.ok,
           changeTicket: adminForm.changeTicket, requestedBy: actor?.nombre ?? '',
-          pep: adminForm.pep, ofacFlag: adminForm.ofacFlag, ofacProvider: adminForm.ofacProvider,
+          pepEnabled: adminForm.pepEnabled, pepValue: adminForm.pepValue, riskLevel: adminForm.riskLevel,
+          ofacFlag: adminForm.ofacFlag, ofacProvider: adminForm.ofacProvider,
         },
       }).catch(() => {});
     } catch (e) {
@@ -1653,7 +1667,6 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                           <option value="">Elegir…</option>
                           {TIPOS_CIERRE_ADMIN.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
                         </select>
-                        {tipoAdmin && adminForm.pep && <span className="text-[11px] text-slate-500 dark:text-slate-400">PEP ✓ (metadata)</span>}
                       </div>
 
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -1690,6 +1703,26 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                             <option value="si">Sí</option><option value="no">No</option>
                           </select>
                         </label>
+                        <label className={lbl}><span className={cap}>Risk level</span>
+                          <select value={adminForm.riskLevel} onChange={e => setAdmin({ riskLevel: e.target.value })} className={inp}>
+                            <option value="">— no tocar —</option>
+                            {RISK_LEVELS.map(r => <option key={r} value={r}>{r}</option>)}
+                          </select>
+                        </label>
+                        <label className={lbl}><span className={cap}>PEP (isPep)</span>
+                          <select
+                            value={!adminForm.pepEnabled ? 'off' : (adminForm.pepValue ? 'si' : 'no')}
+                            onChange={e => {
+                              const v = e.target.value;
+                              setAdmin(v === 'off' ? { pepEnabled: false } : { pepEnabled: true, pepValue: v === 'si' });
+                            }}
+                            className={inp}
+                          >
+                            <option value="off">— no tocar —</option>
+                            <option value="no">isPep = No</option>
+                            <option value="si">isPep = Sí</option>
+                          </select>
+                        </label>
                         <label className={lbl}><span className={cap}>Change ticket</span>
                           <input value={adminForm.changeTicket} onChange={e => setAdmin({ changeTicket: e.target.value })} placeholder="TICKET-1234" className={inp} />
                         </label>
@@ -1710,7 +1743,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                           <p className="font-bold text-rose-800 dark:text-rose-200">¿Aplicar «{tipoAdmin?.label ?? 'cierre manual'}» en Admin?</p>
                           <p className="text-xs text-rose-700 dark:text-rose-300 mt-1">
                             Cliente(s): <b>{adminForm.customerIds || '—'}</b> · status <b>{adminForm.status}</b> · comment <b>{adminForm.comment}</b> · país {adminForm.countryCode}<br />
-                            Pasos: OFAC (flag={adminForm.ofacFlag ? 'Sí' : 'No'}, {adminForm.ofacProvider}) → Compliance{habraLastStep ? ' → Last-step' : ''}. <b>Bloquea/desbloquea clientes reales.</b>
+                            Pasos: OFAC (flag={adminForm.ofacFlag ? 'Sí' : 'No'}, {adminForm.ofacProvider}) → Compliance{adminForm.pepEnabled ? ` → PEP (isPep=${adminForm.pepValue ? 'Sí' : 'No'})` : ''}{adminForm.riskLevel ? ` → Risk=${adminForm.riskLevel}` : ''}{habraLastStep ? ' → Last-step' : ''}. <b>Bloquea/desbloquea clientes reales.</b>
                           </p>
                           <div className="flex items-center gap-2 mt-2">
                             <button onClick={enviarAdmin} disabled={adminSending} className="px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold disabled:opacity-50">

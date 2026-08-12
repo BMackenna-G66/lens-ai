@@ -6,8 +6,9 @@
 // van a la API de admin) y el default de `lastStep`. Los campos de dos valores
 // (ofacFlag, provider) y el ticket los elige el analista en la ficha.
 //
-// ⚠️ `pep` es solo METADATA (el bot no tiene endpoint de PEP): se registra en la
-// auditoría, no se envía a la API.
+// PEP y Risk Level SÍ se envían a la API (pasos PUT en el Worker), replicando el
+// script de descarte masivo. Cada uno es opcional: si `pep`/`riskLevel` no está
+// definido en la tipología (o el analista lo deja en "no tocar"), ese paso se omite.
 
 export interface TipoCierreAdmin {
   id: string;
@@ -15,7 +16,9 @@ export interface TipoCierreAdmin {
   status: string;        // NORMAL | UNDER_COMPLIANCE_REVIEW | FULLY_BLOCKED
   comment: string;       // NO_COMMENTS | UCR_CRIMINAL_RISK | COMPLIANCE_OFFICER_REQUEST
   observation: string;
-  pep?: boolean;         // solo metadata (no va a la API)
+  pep?: boolean;         // etiqueta legacy ("requiere formulario PEP"); NO dispara el PUT
+  pepValue?: boolean;    // si está definido, ejecuta el paso PEP con este isPep
+  riskLevel?: string;    // si está definido, ejecuta Risk Level (Bajo | Medio | Alto)
   lastStepDefault: boolean; // default del switch last-step según el status
 }
 
@@ -62,3 +65,7 @@ export const ADMIN_ASSIGNEE_DEFAULT = 'compliance.masivo@global66.com';
 // Si la API acepta otros, agregarlos acá.
 export const ADMIN_STATUS_OPTIONS = ['NORMAL', 'UNDER_COMPLIANCE_REVIEW', 'UNDER_COMPLIANCE_REVIEW_2', 'FULLY_BLOCKED'] as const;
 export const ADMIN_COMMENT_OPTIONS = ['NO_COMMENTS', 'UCR_CRIMINAL_RISK', 'COMPLIANCE_OFFICER_REQUEST'] as const;
+
+// Risk Level (paso PUT /customer) y provider PEP por defecto (PUT isPep).
+export const RISK_LEVELS = ['Bajo', 'Medio', 'Alto'] as const;
+export const PEP_PROVIDER_DEFAULT = 'PreLastStep';
