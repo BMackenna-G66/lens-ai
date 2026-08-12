@@ -47,7 +47,11 @@ export async function sendCaseUpdate(payload: SFCaseUpdate): Promise<SFUpdateRes
     success: data['success'] as boolean | undefined,
     updatedFields: data['updatedFields'] as string[] | undefined,
     warnings: data['warnings'] as string[] | undefined,
-    errors: (data['errors'] as string[] | undefined) ?? (data['error'] ? [String(data['error'])] : undefined),
+    // Salesforce devuelve el detalle en `message` (ej. 404 CASE_NOT_FOUND); el Worker
+    // usa `error`. Los plegamos a `errors` para que la UI siempre muestre la causa.
+    errors: (data['errors'] as string[] | undefined)
+      ?? (data['error'] ? [String(data['error'])] : undefined)
+      ?? (data['message'] ? [String(data['message'])] : undefined),
     errorCode: data['errorCode'] as string | undefined,
     closed: data['closed'] as boolean | undefined,
     caseId: data['caseId'] as string | undefined,
