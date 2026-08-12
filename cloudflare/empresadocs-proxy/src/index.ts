@@ -23,6 +23,9 @@ interface Env {
   SF_CLIENT_ID?: string;
   SF_CLIENT_SECRET?: string;
   SF_INSTANCE_URL?: string; // opcional; default abajo
+  // Admin Global66 (bloqueo/desbloqueo de clientes): refresh-token de admin.
+  // Secret: `wrangler secret put G66_ADMIN_REFRESH_TOKEN`. NUNCA en el repo.
+  G66_ADMIN_REFRESH_TOKEN?: string;
 }
 
 const ALLOWED_ORIGINS = [
@@ -36,6 +39,10 @@ const INSPEKTOR_BASE = 'https://inspektor.datalaft.com:2121/api';
 const REGCHEQ_INTERNAL_BASE = 'https://api.regcheq.com';
 const SF_INSTANCE_DEFAULT = 'https://global66--katherine.sandbox.my.salesforce.com';
 const SF_CASE_UPDATE_PATH = '/services/apexrest/compliance/case-update/v1/';
+const G66_ADMIN_BASE = 'https://api.global66.com';
+// Estados de compliance que disparan el "last-step" (igual que el bot).
+const G66_STATUS_REQUIERE_LAST_STEP = new Set(['NORMAL', 'UNDER_COMPLIANCE_REVIEW', 'UNDER_COMPLIANCE_REVIEW_2']);
+const G66_STATUS_VALIDOS = ['NORMAL', 'UNDER_COMPLIANCE_REVIEW', 'UNDER_COMPLIANCE_REVIEW_2', 'FULLY_BLOCKED'];
 
 // Decodifica el payload de un JWT (base64url) sin validar la firma — solo para
 // leer companyId y exp del token de sesión.
@@ -172,6 +179,85 @@ export default {
       } catch (e) {
         return jsonError(`PATCH a Salesforce falló: ${e instanceof Error ? e.message : String(e)}`, 502, cors);
       }
+    }
+
+    // ── Admin Global66 (bloqueo/desbloqueo): POST /admin/customer-status ─────────
+    //   Replica el bot Flujo_emergencia_activo_B2C: refresh-token → idToken, y por
+    //   cada customerId: (1) blacklist/OFAC, (2) compliance/{status}, (3) last-step
+    //   (solo si aplica al status y lastStep=true). El REFRESH_TOKEN de admin vive
+    //   como secret (G66_ADMIN_REFRESH_TOKEN). Acción de ALTO impacto: bloquea/
+    //   desbloquea clientes reales — el frontend confirma antes de llamar.
+    if (url.pathname === '/admin/customer-status') {
+      if (request.method !== 'POST') return jsonError('Método no permitido', 405, cors);
+      const refresh = env.G66_ADMIN_REFRESH_TOKEN;
+      if (!refresh) return jsonError('Falta el secret G66_ADMIN_REFRESH_TOKEN en el Worker', 500, cors);
+
+      let body: {
+        customerIds?: (number | string)[]; status?: string; comment?: string;
+        observation?: string; agent?: string; ofacFlag?: boolean; ofacProvider?: string;
+        countryCode?: string; lastStep?: boolean;
+      };
+      try { body = await request.json(); } catch { return jsonError('Body JSON inválido', 400, cors); }
+
+      const ids = (body.customerIds || []).map(x => String(x).trim()).filter(Boolean);
+      const status = String(body.status || '').trim();
+      const countryCode = String(body.countryCode || '').trim().toUpperCase();
+      if (!ids.length) return jsonError('Faltan customerIds', 400, cors);
+      if (!G66_STATUS_VALIDOS.includes(status)) return jsonError(`status inválido: ${status}`, 400, cors);
+      if (!countryCode) return jsonError('Falta countryCode', 400, cors);
+
+      // 1) refresh-token → idToken (form-urlencoded, igual que el bot).
+      let idToken = '';
+      try {
+        const tokRes = await fetchTimeout(`${G66_ADMIN_BASE}/admin/refresh-token`, {
+          method: 'POST',
+          headers: { 'Accept': 'application/json, text/plain, */*', 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ refreshToken: refresh }).toString(),
+        }, 20000);
+        const tokText = await tokRes.text();
+        if (!tokRes.ok) return new Response(JSON.stringify({ error: 'refresh-token de admin falló', status: tokRes.status, detalle: tokText.slice(0, 400) }),
+          { status: 502, headers: { ...cors, 'Content-Type': 'application/json' } });
+        idToken = (JSON.parse(tokText) as { idToken?: string }).idToken || '';
+        if (!idToken) return jsonError('admin no devolvió idToken', 502, cors);
+      } catch (e) {
+        return jsonError(`No se pudo obtener idToken de admin: ${e instanceof Error ? e.message : String(e)}`, 502, cors);
+      }
+
+      const authH = { 'Accept': 'application/json, text/plain, */*', 'Content-Type': 'application/json', 'Authorization': idToken };
+      const doStep = async (method: string, path: string, payload?: unknown) => {
+        const res = await fetchTimeout(`${G66_ADMIN_BASE}${path}`, {
+          method, headers: authH,
+          body: payload === undefined ? undefined : JSON.stringify(payload),
+        }, 30000);
+        const t = await res.text();
+        let data: unknown; try { data = t ? JSON.parse(t) : {}; } catch { data = { raw: t }; }
+        return { ok: res.ok, status: res.status, data };
+      };
+
+      const results: { customerId: string; ok: boolean; steps: Record<string, unknown> }[] = [];
+      for (const id of ids) {
+        const steps: Record<string, unknown> = {};
+        let ok = true;
+        // PASO 1 — blacklist / OFAC
+        const s1 = await doStep('POST', `/customer/bo/customer-info/${encodeURIComponent(id)}/blacklist`,
+          { blacklistFlag: !!body.ofacFlag, blacklistProvider: body.ofacProvider || 'REGCHECK' });
+        steps.blacklist = s1; if (!s1.ok) ok = false;
+        // PASO 2 — compliance/{status}
+        if (ok) {
+          const s2 = await doStep('POST', `/customer/bo/customer-info/${encodeURIComponent(id)}/compliance/${encodeURIComponent(status)}`,
+            { comment: body.comment || '', observation: body.observation || '', agent: body.agent || '' });
+          steps.compliance = s2; if (!s2.ok) ok = false;
+        }
+        // PASO 3 — last-step (solo si el status lo requiere y lastStep=true)
+        if (ok && body.lastStep && G66_STATUS_REQUIERE_LAST_STEP.has(status)) {
+          const s3 = await doStep('GET', `/customer/bo/${encodeURIComponent(id)}/${encodeURIComponent(countryCode)}/last-step`);
+          steps.lastStep = s3; if (!s3.ok) ok = false;
+        }
+        results.push({ customerId: id, ok, steps });
+      }
+
+      return new Response(JSON.stringify({ ok: results.every(r => r.ok), results }),
+        { status: 200, headers: { ...cors, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
     }
 
     // ── Relay Inspektor: /inspektor/<path> → INSPEKTOR_BASE/<path> ──────────────

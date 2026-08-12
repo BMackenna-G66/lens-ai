@@ -18,6 +18,9 @@ import { guardarInvestigacion } from '../services/caseInvestigationService';
 import { registrarDecision, resolverAprobacion, requiereAprobacion } from '../services/caseDecisionService';
 import { enviarResolucion, conclusionAStatus } from '../services/caseResolutionService';
 import { TIPOS_CIERRE, camposDeCierre } from '../services/cierreTipos';
+import { TIPOS_CIERRE_ADMIN, OFAC_PROVIDERS, ADMIN_ASSIGNEE_DEFAULT } from '../services/cierreAdminTipos';
+import { enviarCierreAdmin, adminCierreDisponible, AdminCierreResult } from '../services/adminCierreService';
+import { registrarAuditoria } from '../services/caseAuditService';
 import type { InvestigacionCaso, DecisionCompliance, TipoDecision } from '../services/casosComplianceTypes';
 import { useAuth } from '../context/AuthContext';
 
@@ -410,6 +413,73 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     const campos = camposDeCierre(tipo, sel.pais);
     for (const [k, v] of Object.entries(campos)) if (v !== undefined) base[k] = v as string | boolean;
     setForm(base);
+  };
+
+  // ── Segundo cierre: Admin (bloqueo/desbloqueo del cliente en api.global66.com) ─
+  interface AdminForm {
+    customerIds: string; ofacFlag: boolean; ofacProvider: string; lastStep: boolean;
+    countryCode: string; changeTicket: string; agent: string;
+    status: string; comment: string; observation: string; pep: boolean;
+  }
+  const paisCC = (p: string): string => (/colombia|^co$/i.test(p) ? 'CO' : 'CL');
+  const adminFormInicial = (): AdminForm => ({
+    customerIds: '', ofacFlag: false, ofacProvider: 'REGCHECK', lastStep: true,
+    countryCode: 'CL', changeTicket: '', agent: ADMIN_ASSIGNEE_DEFAULT,
+    status: '', comment: '', observation: '', pep: false,
+  });
+  const [adminTipoSel, setAdminTipoSel] = useState('');
+  const [adminForm, setAdminForm] = useState<AdminForm>(adminFormInicial());
+  const [adminConfirm, setAdminConfirm] = useState(false);
+  const [adminSending, setAdminSending] = useState(false);
+  const [adminResult, setAdminResult] = useState<AdminCierreResult | null>(null);
+  const setAdmin = (patch: Partial<AdminForm>) => setAdminForm(f => ({ ...f, ...patch }));
+
+  // Reinicia + pre-llena (customerId ← "Id interno del usuario", país del caso) al cambiar de caso.
+  useEffect(() => {
+    setAdminTipoSel(''); setAdminConfirm(false); setAdminResult(null);
+    setAdminForm({
+      ...adminFormInicial(),
+      customerIds: sel ? String(sel.datos?.['Id interno del usuario'] ?? '').trim() : '',
+      countryCode: sel ? paisCC(sel.pais) : 'CL',
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sel?.id]);
+
+  const aplicarTipoAdmin = (tipoId: string) => {
+    setAdminTipoSel(tipoId); setAdminConfirm(false); setAdminResult(null);
+    const t = TIPOS_CIERRE_ADMIN.find(x => x.id === tipoId);
+    setAdmin({
+      status: t?.status ?? '', comment: t?.comment ?? '', observation: t?.observation ?? '',
+      pep: !!t?.pep, lastStep: t?.lastStepDefault ?? true,
+    });
+  };
+
+  const enviarAdmin = async () => {
+    if (!sel || !adminTipoSel) return;
+    const ids = adminForm.customerIds.split(',').map(s => s.trim()).filter(Boolean);
+    if (!ids.length) { setAdminResult({ ok: false, results: [], error: 'Falta el customerId.' }); return; }
+    setAdminSending(true); setAdminResult(null);
+    try {
+      const r = await enviarCierreAdmin({
+        customerIds: ids, status: adminForm.status, comment: adminForm.comment,
+        observation: adminForm.observation, agent: adminForm.agent,
+        ofacFlag: adminForm.ofacFlag, ofacProvider: adminForm.ofacProvider,
+        countryCode: adminForm.countryCode, lastStep: adminForm.lastStep,
+      });
+      setAdminResult(r);
+      // Auditoría — incluye metadata que NO va a la API (changeTicket, requestedBy, pep).
+      registrarAuditoria(sel.id, {
+        tipo: 'CIERRE_ADMIN', actorId: actor?.uid ?? 'system', actorTipo: actor ? 'USER' : 'SYSTEM',
+        correlationId: sel.id, versionCaso: 1,
+        metadata: {
+          tipologia: adminTipoSel, status: adminForm.status, customerIds: ids, ok: r.ok,
+          changeTicket: adminForm.changeTicket, requestedBy: actor?.nombre ?? '',
+          pep: adminForm.pep, ofacFlag: adminForm.ofacFlag, ofacProvider: adminForm.ofacProvider,
+        },
+      }).catch(() => {});
+    } catch (e) {
+      setAdminResult({ ok: false, results: [], error: e instanceof Error ? e.message : String(e) });
+    } finally { setAdminSending(false); setAdminConfirm(false); }
   };
 
   // ── Consulta de remesa en Redshift (cola Remesa) ────────────────────────────
@@ -1489,6 +1559,102 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                     </div>
                   )}
                 </div>
+
+                {/* ── Sección: Cierre en Admin (bloqueo/desbloqueo del cliente) ── */}
+                <Seccion>📛 Cierre en Admin (bloqueo/desbloqueo)</Seccion>
+                {(() => {
+                  const inp = 'w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1.5 text-sm outline-none focus:border-rose-400';
+                  const lbl = 'text-xs block';
+                  const cap = 'block font-semibold text-slate-500 dark:text-slate-400 mb-1';
+                  const tipoAdmin = TIPOS_CIERRE_ADMIN.find(t => t.id === adminTipoSel);
+                  const habraLastStep = adminForm.lastStep && ['NORMAL', 'UNDER_COMPLIANCE_REVIEW', 'UNDER_COMPLIANCE_REVIEW_2'].includes(adminForm.status);
+                  return (
+                    <div className="rounded-xl border border-rose-200 dark:border-rose-800/50 bg-rose-50/40 dark:bg-rose-950/20 p-4">
+                      <p className="text-[11px] text-rose-700 dark:text-rose-300 mb-3 font-semibold">⚠️ Cambia el estado del cliente en Admin (producción). Verifica el Customer ID antes de enviar.</p>
+                      {!adminCierreDisponible() && (
+                        <p className="text-xs text-amber-600 dark:text-amber-400 mb-3">Proxy no configurado (EMPRESADOCS_PROXY_URL).</p>
+                      )}
+
+                      <div className="flex flex-wrap items-center gap-2 mb-3">
+                        <span className="text-xs font-semibold text-slate-500 dark:text-slate-400">Tipología</span>
+                        <select value={adminTipoSel} onChange={e => aplicarTipoAdmin(e.target.value)} className="px-2 py-1 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-sm">
+                          <option value="">Elegir…</option>
+                          {TIPOS_CIERRE_ADMIN.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
+                        </select>
+                        {tipoAdmin && <span className="text-[11px] text-slate-500 dark:text-slate-400">status <b>{adminForm.status}</b> · comment <b>{adminForm.comment}</b>{adminForm.pep ? ' · PEP ✓ (metadata)' : ''}</span>}
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <label className={lbl}><span className={cap}>Customer ID(s)</span>
+                          <input value={adminForm.customerIds} onChange={e => setAdmin({ customerIds: e.target.value })} placeholder="ej: 2702355, 2702356" className={inp} />
+                        </label>
+                        <label className={lbl}><span className={cap}>País (last-step)</span>
+                          <select value={adminForm.countryCode} onChange={e => setAdmin({ countryCode: e.target.value })} className={inp}>
+                            <option value="CL">CL</option><option value="CO">CO</option>
+                          </select>
+                        </label>
+                        <label className={lbl}><span className={cap}>OFAC (blacklistFlag)</span>
+                          <select value={adminForm.ofacFlag ? 'si' : 'no'} onChange={e => setAdmin({ ofacFlag: e.target.value === 'si' })} className={inp}>
+                            <option value="no">No (false)</option><option value="si">Sí (true)</option>
+                          </select>
+                        </label>
+                        <label className={lbl}><span className={cap}>Provider</span>
+                          <select value={adminForm.ofacProvider} onChange={e => setAdmin({ ofacProvider: e.target.value })} className={inp}>
+                            {OFAC_PROVIDERS.map(p => <option key={p} value={p}>{p}</option>)}
+                          </select>
+                        </label>
+                        <label className={lbl}><span className={cap}>Last step</span>
+                          <select value={adminForm.lastStep ? 'si' : 'no'} onChange={e => setAdmin({ lastStep: e.target.value === 'si' })} className={inp}>
+                            <option value="si">Sí</option><option value="no">No</option>
+                          </select>
+                        </label>
+                        <label className={lbl}><span className={cap}>Change ticket</span>
+                          <input value={adminForm.changeTicket} onChange={e => setAdmin({ changeTicket: e.target.value })} placeholder="TICKET-1234" className={inp} />
+                        </label>
+                        <label className={lbl}><span className={cap}>Agent / assignee</span>
+                          <input value={adminForm.agent} onChange={e => setAdmin({ agent: e.target.value })} className={inp} />
+                        </label>
+                      </div>
+                      <label className={`${lbl} mt-3`}><span className={cap}>Observation</span>
+                        <textarea value={adminForm.observation} onChange={e => setAdmin({ observation: e.target.value })} rows={2} className={inp} />
+                      </label>
+
+                      {!adminConfirm ? (
+                        <button onClick={() => setAdminConfirm(true)} disabled={!adminTipoSel || !adminCierreDisponible()} className="mt-4 px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white text-sm font-bold">
+                          Enviar a Admin…
+                        </button>
+                      ) : (
+                        <div className="mt-4 rounded-xl border border-rose-300 dark:border-rose-700 bg-rose-50 dark:bg-rose-950/40 p-3 text-sm">
+                          <p className="font-bold text-rose-800 dark:text-rose-200">¿Aplicar «{tipoAdmin?.label}» en Admin?</p>
+                          <p className="text-xs text-rose-700 dark:text-rose-300 mt-1">
+                            Cliente(s): <b>{adminForm.customerIds || '—'}</b> · status <b>{adminForm.status}</b> · país {adminForm.countryCode}<br />
+                            Pasos: OFAC (flag={adminForm.ofacFlag ? 'Sí' : 'No'}, {adminForm.ofacProvider}) → Compliance{habraLastStep ? ' → Last-step' : ''}. <b>Bloquea/desbloquea clientes reales.</b>
+                          </p>
+                          <div className="flex items-center gap-2 mt-2">
+                            <button onClick={enviarAdmin} disabled={adminSending} className="px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold disabled:opacity-50">
+                              {adminSending ? 'Enviando…' : 'Sí, aplicar'}
+                            </button>
+                            <button onClick={() => setAdminConfirm(false)} disabled={adminSending} className="px-3 py-1 rounded-lg border border-slate-300 dark:border-slate-600">Cancelar</button>
+                          </div>
+                        </div>
+                      )}
+
+                      {adminResult && (
+                        <div className={`mt-4 rounded-xl px-4 py-3 text-sm border ${adminResult.ok
+                          ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-800/50 text-emerald-800 dark:text-emerald-300'
+                          : 'bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-800/50 text-red-800 dark:text-red-300'}`}>
+                          <p className="font-bold">{adminResult.ok ? '✅ Aplicado en Admin' : '❌ No se pudo aplicar en Admin'}</p>
+                          {adminResult.error && <p className="mt-1">{adminResult.error}</p>}
+                          {adminResult.results.map(r => (
+                            <p key={r.customerId} className="text-xs mt-1">
+                              Cliente {r.customerId}: {r.ok ? 'OK' : 'falló'} — {Object.entries(r.steps).map(([k, v]) => `${k} HTTP ${(v as { status?: number }).status}`).join(' · ') || 'sin pasos'}
+                            </p>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
                 </div>
               </div>
             </div>
