@@ -1646,9 +1646,22 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                           <p className="font-bold">{adminResult.ok ? '✅ Aplicado en Admin' : '❌ No se pudo aplicar en Admin'}</p>
                           {adminResult.error && <p className="mt-1">{adminResult.error}</p>}
                           {adminResult.results.map(r => (
-                            <p key={r.customerId} className="text-xs mt-1">
-                              Cliente {r.customerId}: {r.ok ? 'OK' : 'falló'} — {Object.entries(r.steps).map(([k, v]) => `${k} HTTP ${(v as { status?: number }).status}`).join(' · ') || 'sin pasos'}
-                            </p>
+                            <div key={r.customerId} className="text-xs mt-2">
+                              <p className="font-semibold">Cliente {r.customerId}: {r.ok ? 'OK' : 'falló'}</p>
+                              {Object.keys(r.steps).length === 0 && <p className="ml-2 opacity-80">sin pasos</p>}
+                              {Object.entries(r.steps).map(([k, v]) => {
+                                const step = v as { ok?: boolean; status?: number; data?: unknown };
+                                const detalle = step.data == null ? '' : (typeof step.data === 'string' ? step.data : JSON.stringify(step.data));
+                                return (
+                                  <div key={k} className="ml-2 mt-0.5">
+                                    <span>{step.ok ? '✅' : '❌'} {k} — HTTP {step.status}</span>
+                                    {!step.ok && detalle && (
+                                      <pre className="mt-0.5 whitespace-pre-wrap break-words opacity-80 text-[11px] max-h-40 overflow-auto">{detalle}</pre>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
                           ))}
                         </div>
                       )}
