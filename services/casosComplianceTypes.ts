@@ -143,6 +143,7 @@ export type TipoEventoAuditoria =
   | 'RESPUESTA_SF_INICIADA'
   | 'RESPUESTA_SF_COMPLETADA'
   | 'RESPUESTA_SF_ERROR'
+  | 'CIERRE_ADMIN'
   | 'CASO_RECONSULTADO';
 
 export interface EventoAuditoriaCaso {
