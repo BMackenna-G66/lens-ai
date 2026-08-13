@@ -26,12 +26,12 @@ export const TIPOS_CIERRE: TipoCierre[] = [
     paisSegunCaso: true,
     completo: true,
     campos: {
-      C_Review__c: '(K) - OFAC',
+      C_Review__c: 'OFAC',
       C_Status__c: 'Approved',
       Status: 'Closed',
-      Product__c: '👤 Cuenta Perfil',
+      Product__c: 'Cuenta G66',
       Tipo_de_Caso_Compliance__c: 'OFAC + Coinc c/delito no escalado',
-      Type: 'CMPL',
+      Type: 'Compliance',
       Comments: 'Cliente puede operar con global66 caso liberado bajo logica de bandeja de casos - Dentro de la matriz de riesgo',
       razon_3_dias__c: 'Cliente puede operar con global66 caso liberado bajo logica de bandeja de casos - Dentro de la matriz de riesgo',
       // CAT_CMPL__c: sin cambio (no se envía)
@@ -43,12 +43,12 @@ export const TIPOS_CIERRE: TipoCierre[] = [
     paisSegunCaso: true,
     completo: true,
     campos: {
-      C_Review__c: '(K) - OFAC',
+      C_Review__c: 'OFAC',
       C_Status__c: 'Approved',
       Status: 'Closed',
-      Product__c: '👤 Cuenta Perfil',
+      Product__c: 'Cuenta G66',
       Tipo_de_Caso_Compliance__c: 'OFAC + Coinc c/delito no escalado',
-      Type: 'CMPL',
+      Type: 'Compliance',
       Comments: 'Cliente puede operar UNDER_COMPLIANCE_REVIEW con global66 caso liberado bajo logica de bandeja de casos - Dentro de la matriz de riesgo',
       razon_3_dias__c: 'Cliente puede operar UNDER_COMPLIANCE_REVIEW con global66 caso liberado bajo logica de bandeja de casos - Dentro de la matriz de riesgo',
       // CAT_CMPL__c: sin cambio (no se envía)
@@ -60,13 +60,13 @@ export const TIPOS_CIERRE: TipoCierre[] = [
     paisSegunCaso: true,
     completo: true,
     campos: {
-      C_Review__c: '(K) - OFAC',
+      C_Review__c: 'OFAC',
       C_Status__c: 'Fully Blocked',
       CAT_CMPL__c: '(K) No escalado: 4 o + Delitos precedentes',
       Status: 'Closed',
-      Product__c: '👤 Cuenta Perfil',
+      Product__c: 'Cuenta G66',
       Tipo_de_Caso_Compliance__c: 'OFAC + Coinc c/delito no escalado',
-      Type: 'CMPL',
+      Type: 'Compliance',
       Comments: 'Cliente puede NO operar con global66 caso liberado bajo logica de bandeja de casos - FUERA de la matriz de riesgo',
       razon_3_dias__c: 'Cliente puede NO operar con global66 caso liberado bajo logica de bandeja de casos - FUERA de la matriz de riesgo',
     },
@@ -77,13 +77,13 @@ export const TIPOS_CIERRE: TipoCierre[] = [
     paisSegunCaso: true,
     completo: true,
     campos: {
-      C_Review__c: '(K) - PEP',
+      C_Review__c: 'PEP',
       C_Status__c: 'Requested',
       CAT_CMPL__c: '(K) Bloqueo preventivo form PEP',
       Status: 'Closed',
-      Product__c: '👤 Cuenta Perfil',
+      Product__c: 'Cuenta G66',
       Tipo_de_Caso_Compliance__c: 'INDIRECTO G81',
-      Type: 'CMPL',
+      Type: 'Compliance',
       Comments: 'Cliente debe completar formulario de KYC PEP caso liberado bajo logica de bandeja de casos',
       razon_3_dias__c: 'Cliente debe completar formulario de KYC PEP caso liberado bajo logica de bandeja de casos',
     },
@@ -94,11 +94,11 @@ export const TIPOS_CIERRE: TipoCierre[] = [
 // Si el país no se reconoce, devuelve '' (no se envía Country__c, para no pisar
 // con un valor equivocado).
 const PAIS_A_SF: Record<string, string> = {
-  argentina: 'Argentina 🇦🇷', brasil: 'Brasil 🇧🇷', brazil: 'Brasil 🇧🇷',
-  chile: 'Chile 🇨🇱', colombia: 'Colombia 🇨🇴', 'costa rica': 'Costa Rica 🇨🇷',
-  ecuador: 'Ecuador 🇪🇨', espana: 'España 🇪🇸', 'estados unidos': 'Estados Unidos 🇺🇸',
-  usa: 'Estados Unidos 🇺🇸', mexico: 'México 🇲🇽', paraguay: 'Paraguay 🇵🇾',
-  peru: 'Perú 🇵🇪',
+  argentina: 'Argentina', brasil: 'Brasil', brazil: 'Brasil',
+  chile: 'Chile', colombia: 'Colombia', 'costa rica': 'Costa Rica',
+  ecuador: 'Ecuador', espana: 'España', 'estados unidos': 'Estados Unidos',
+  usa: 'Estados Unidos', mexico: 'México', paraguay: 'Paraguay',
+  peru: 'Perú',
 };
 
 export function paisASF(pais: string): string {
