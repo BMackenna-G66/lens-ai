@@ -36,9 +36,13 @@ export async function sendCaseUpdate(payload: SFCaseUpdate): Promise<SFUpdateRes
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
-  let data: Record<string, unknown> = {};
   const text = await res.text();
-  try { data = text ? JSON.parse(text) : {}; } catch { data = { error: text }; }
+  let parsed: unknown = {};
+  try { parsed = text ? JSON.parse(text) : {}; } catch { parsed = { error: text }; }
+  // Salesforce a veces devuelve el error como array [{errorCode, message}] (ej. recurso
+  // Apex REST no desplegado → NOT_FOUND "Could not find a match for URL"), y a veces como
+  // objeto {message, errorCode, success}. Lo normalizamos a objeto para leer siempre igual.
+  const data: Record<string, unknown> = (Array.isArray(parsed) ? (parsed[0] ?? {}) : parsed) as Record<string, unknown>;
 
   const success = data['success'] === true;
   return {
@@ -55,6 +59,6 @@ export async function sendCaseUpdate(payload: SFCaseUpdate): Promise<SFUpdateRes
     errorCode: data['errorCode'] as string | undefined,
     closed: data['closed'] as boolean | undefined,
     caseId: data['caseId'] as string | undefined,
-    raw: data,
+    raw: parsed,
   };
 }
