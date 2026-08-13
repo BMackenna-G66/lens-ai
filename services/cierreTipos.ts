@@ -84,7 +84,6 @@ export const TIPOS_CIERRE: TipoCierre[] = [
       Product__c: '👤 Cuenta Perfil',
       Tipo_de_Caso_Compliance__c: 'INDIRECTO G81',
       Type: 'CMPL',
-      PEP__c: true,
       Comments: 'Cliente debe completar formulario de KYC PEP caso liberado bajo logica de bandeja de casos',
       razon_3_dias__c: 'Cliente debe completar formulario de KYC PEP caso liberado bajo logica de bandeja de casos',
     },
