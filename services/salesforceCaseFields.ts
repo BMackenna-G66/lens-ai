@@ -23,24 +23,23 @@ export const SF_CASE_FIELDS: SFFieldDef[] = [
   {
     apiName: 'C_Review__c', label: '[C] Review', type: 'picklist',
     options: [
-      '(K) - AUDITORIA B2B', '(K) - AUDITORIA LISTAS', '(K) - BF MIGRACIÓN',
-      '(K) - CAMBIO DATOS PERFIL', '(K) - CONCURSO', '(K) - ELIMINACIÓN DE CUENTA',
-      '(K) - KYC1 B2B [ONBOARDING]', '(K) - KYC2 B2C', '(K) - KYE', '(K) - OFAC',
-      '(K) - OFAC BENEFICIARIO', '(K) - PEP', '(M) ALERTAS B2B', '(M) ALERTAS B2C',
-      '(M) CARTERA CONTROLADA', '(M) CUENTA DUPLICADA', '(M) RECUPERACIÓN DE CUENTA',
-      '(M) VALIDACIONES HR', '(P) AUDITORIA PARTNER', '(P) DOC. ESPECÍFICA',
-      '(P) KYC III_PARTNER', 'COBRO DE TERCEROS', 'Cuenta B2C', 'CUIL no coincide',
-      'KYC1 B2B + UCR', 'KYC1 B2C [DNI]', 'KYC2 B2C', 'KYC2 Gmoney', 'KYC3 B2B',
-      'KYC3 B2C', 'KYC3 B2C +20k', 'Transacciones Bot', '(K) Cliente institucional',
-      'Actualización de datos b2b', 'MIGRACIÓN', '(K)-Multiusuario', 'Notificación interna',
+      'Revisión de cuenta B2B', 'Auditoría OFAC', 'BF - Migración', 'Cambio Datos Perfil',
+      'Concurso', 'Eliminación de Cuenta', 'KYC1 B2B [Onboarding]', 'KYC2 B2B', 'KYE',
+      'OFAC', 'OFAC BENEFICIARIO', 'PEP', '(M) ALERTAS B2B', '(M) ALERTAS B2C',
+      'Cartera Controlada', 'Cuenta Duplicada', 'Recuperación de Cuenta', 'Validaciones HR',
+      'Auditoría Partner', 'Doc. Específica', 'KYC III_Partner', 'COBRO DE TERCEROS',
+      'Cuenta B2C', 'CUIL no coincide', 'KYC1 B2B + UCR', 'KYC1 B2C [DNI]', 'KYC2 B2C',
+      'KYC2 Gmoney', 'KYC3 B2B', 'KYC3 B2C', 'KYC3 B2C +20k', 'Beneficiario',
+      '(K) Cliente institucional', 'Actualización de datos b2b', 'MIGRACIÓN',
+      '(K)-Multiusuario', 'Notificación interna',
     ],
   },
 
   {
     apiName: 'Senales_de_Alerta__c', label: '[C] Señales de Alerta', type: 'picklist',
     options: [
-      'A DISCRECION DEL O.C', 'FRAUDBOT', 'REPORTADO OPS', 'CONTROL ECUADOR',
-      'RFP_8K_30D', 'REMESA_1K_10Q_7D', 'REMESA_IN_9K_1D_A', 'REMESA_IN_12K_1D_M',
+      'A discreción del O.C.', 'FraudBot', 'Reportado OPS', 'Control Ecuador',
+      'KYC3 + RFPreferencial', 'REMESA_1K_10Q_7D', 'REMESA_IN_9K_1D_A', 'REMESA_IN_12K_1D_M',
       'REMESA_IN_16K_30D_PEP', 'REMESA_IN_34K_30D_B', 'REMESA_IN_15K_1D',
       'REMESA_IN_30K_30D', 'REMESA_IN_7K_1D_pep', 'REMESA_IN_B2B_150K_90D',
       'REMESA_IN_B2B_80K_30D', 'HIGH RISK', 'HIGH RISK IBAN B2C', 'HIGH RISK IBAN B2B',
@@ -90,17 +89,14 @@ export const SF_CASE_FIELDS: SFFieldDef[] = [
 
   {
     apiName: 'Country__c', label: 'País Origen', type: 'picklist',
-    options: ['Argentina 🇦🇷', 'Brasil 🇧🇷', 'Chile 🇨🇱', 'Colombia 🇨🇴', 'Costa Rica 🇨🇷',
-      'Ecuador 🇪🇨', 'España 🇪🇸', 'Estados Unidos 🇺🇸', 'México 🇲🇽', 'Paraguay 🇵🇾',
-      'Perú 🇵🇪', 'Otro 🌐'],
+    options: ['Argentina', 'Brasil', 'Chile', 'Colombia', 'Costa Rica',
+      'Ecuador', 'España', 'Estados Unidos', 'México', 'Paraguay', 'Perú', 'Otro'],
   },
 
   {
     apiName: 'Product__c', label: 'Producto', type: 'picklist',
-    // ⚠️ En el sandbox probado, Salesforce devolvió "💳 Tarjeta Digital" (no "Virtual").
-    // Se usa el valor de la tabla oficial; si SF rechaza, alinear picklist/tabla.
-    options: ['👤 Cuenta Perfil', '💰 Cuenta Global', '💵  Exchange', '💸 Transferencias',
-      '👥 Pagos', '💳 Tarjeta Virtual', '💳 Tarjeta Física', '❌ S/ Producto'],
+    options: ['Cuenta G66', 'Wallet', 'Exchange', 'Transactions', 'P2P Payment',
+      'GlobalCard', 'GlobalCard - Physical', 'S/P'],
   },
 
   {
@@ -129,7 +125,7 @@ export const SF_CASE_FIELDS: SFFieldDef[] = [
 
   {
     apiName: 'Type', label: 'Tipo del caso', type: 'picklist',
-    options: ['B2C', 'B2B', 'SEC', 'ONB', 'CS', 'ADV', 'Partner', 'CMPL', 'Fraude', 'OP', 'WTS COM', 'Whatsapp duplicado'],
+    options: ['B2C', 'B2B', 'Security', 'ONB CX', 'CS', 'ADV', 'B2X Partner', 'Compliance', 'Fraude', 'OP', 'WTS COM', 'Whatsapp duplicado'],
   },
 
   { apiName: 'Customer ID', label: 'Customer ID', type: 'text' },
