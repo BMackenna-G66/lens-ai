@@ -10,7 +10,6 @@ export const sfUpdateDisponible = (): boolean => !!PROXY;
 // Los campos y sus valores válidos viven en el MANTENEDOR: salesforceCaseFields.ts
 export type SFCaseUpdate = {
   CaseNumber: string;
-  PEP__c?: boolean;
 } & Record<string, string | boolean | null | undefined>;
 
 export interface SFUpdateResult {
