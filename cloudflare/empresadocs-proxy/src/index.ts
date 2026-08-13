@@ -39,7 +39,6 @@ const INSPEKTOR_BASE = 'https://inspektor.datalaft.com:2121/api';
 const REGCHEQ_INTERNAL_BASE = 'https://api.regcheq.com';
 // Salesforce de PRODUCCIÓN. Se puede sobreescribir con el secret SF_INSTANCE_URL.
 const SF_INSTANCE_DEFAULT = 'https://global66.my.salesforce.com';
-const SF_CASE_UPDATE_PATH = '/services/apexrest/compliance/case-update/v1/';
 const G66_ADMIN_BASE = 'https://api.global66.com';
 // Estados de compliance que disparan el "last-step" (igual que el bot).
 const G66_STATUS_REQUIERE_LAST_STEP = new Set(['NORMAL', 'UNDER_COMPLIANCE_REVIEW', 'UNDER_COMPLIANCE_REVIEW_2']);
@@ -127,9 +126,10 @@ export default {
     }
 
     // ── Salesforce case-update: POST /salesforce/case-update ────────────────────
-    //   Body = payload del PATCH (JSON con CaseNumber + campos). El Worker hace
-    //   OAuth client_credentials (secrets SF_CLIENT_ID/SF_CLIENT_SECRET) y luego
-    //   el PATCH al Apex REST. Devuelve la respuesta de Salesforce.
+    //   Body = { CaseNumber, ...campos }. El Worker hace OAuth client_credentials
+    //   (secrets SF_CLIENT_ID/SF_CLIENT_SECRET), busca el Case por CaseNumber con la
+    //   API estándar (SOQL) y hace PATCH al registro Case por Id. No usa Apex REST
+    //   custom (así no depende de que esa clase esté desplegada en el org).
     if (url.pathname === '/salesforce/case-update') {
       if (request.method !== 'POST') return jsonError('Método no permitido', 405, cors);
       const clientId = env.SF_CLIENT_ID;
@@ -165,18 +165,47 @@ export default {
         return jsonError(`No se pudo obtener token de Salesforce: ${e instanceof Error ? e.message : String(e)}`, 502, cors);
       }
 
-      // 2) PATCH al Apex REST con el payload.
+      const jsonHeaders = () => { const h = new Headers(cors); h.set('Content-Type', 'application/json'); h.set('Cache-Control', 'no-store'); return h; };
+
+      // 2) Resolver el Id del Case por CaseNumber con la API estándar (SOQL). Se usa
+      //    la API estándar de Salesforce (existe en todo org) en vez de un Apex REST
+      //    custom, para no depender de que esa clase esté desplegada en producción.
+      const base = patchInstance;
+      const caseNumber = String(payload['CaseNumber']).trim().replace(/'/g, '');
+      let caseId = '';
       try {
-        const patchRes = await fetchTimeout(`${patchInstance}${SF_CASE_UPDATE_PATH}`, {
+        const soql = `SELECT Id FROM Case WHERE CaseNumber = '${caseNumber}'`;
+        const qRes = await fetchTimeout(`${base}/services/data/v60.0/query/?q=${encodeURIComponent(soql)}`,
+          { headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/json' } }, 20000);
+        const qText = await qRes.text();
+        if (!qRes.ok) return new Response(qText || JSON.stringify({ status: qRes.status }), { status: qRes.status, headers: jsonHeaders() });
+        let qData: { records?: Array<{ Id?: string }> }; try { qData = JSON.parse(qText); } catch { qData = {}; }
+        caseId = qData.records?.[0]?.Id || '';
+      } catch (e) {
+        return jsonError(`No se pudo buscar el Case: ${e instanceof Error ? e.message : String(e)}`, 502, cors);
+      }
+      if (!caseId) {
+        return new Response(JSON.stringify({ message: `No existe un Case con CaseNumber ${caseNumber}.`, errorCode: 'CASE_NOT_FOUND', success: false }),
+          { status: 404, headers: jsonHeaders() });
+      }
+
+      // 3) PATCH estándar al registro Case con los campos (omite el identificador y
+      //    'Customer ID', que no es un campo escribible del Case).
+      const OMIT = new Set(['CaseNumber', 'Customer ID']);
+      const fields: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(payload)) if (!OMIT.has(k)) fields[k] = v;
+      try {
+        const upRes = await fetchTimeout(`${base}/services/data/v60.0/sobjects/Case/${caseId}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'Authorization': `Bearer ${token}` },
-          body: JSON.stringify(payload),
+          body: JSON.stringify(fields),
         }, 30000);
-        const text = await patchRes.text();
-        const headers = new Headers(cors);
-        headers.set('Content-Type', 'application/json');
-        headers.set('Cache-Control', 'no-store');
-        return new Response(text || JSON.stringify({ ok: patchRes.ok, status: patchRes.status }), { status: patchRes.status, headers });
+        // sObject PATCH devuelve 204 sin body en éxito.
+        if (upRes.status === 204) {
+          return new Response(JSON.stringify({ success: true, closed: true, caseId, updatedFields: Object.keys(fields) }), { status: 200, headers: jsonHeaders() });
+        }
+        const upText = await upRes.text();
+        return new Response(upText || JSON.stringify({ success: false, status: upRes.status }), { status: upRes.status, headers: jsonHeaders() });
       } catch (e) {
         return jsonError(`PATCH a Salesforce falló: ${e instanceof Error ? e.message : String(e)}`, 502, cors);
       }
