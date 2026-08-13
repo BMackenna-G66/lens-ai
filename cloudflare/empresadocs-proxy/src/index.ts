@@ -37,7 +37,8 @@ const ALLOWED_ORIGINS = [
 const ALLOWED_HOST_SUFFIXES = ['.amazonaws.com']; // anti-SSRF para /relay
 const INSPEKTOR_BASE = 'https://inspektor.datalaft.com:2121/api';
 const REGCHEQ_INTERNAL_BASE = 'https://api.regcheq.com';
-const SF_INSTANCE_DEFAULT = 'https://global66--katherine.sandbox.my.salesforce.com';
+// Salesforce de PRODUCCIÓN. Se puede sobreescribir con el secret SF_INSTANCE_URL.
+const SF_INSTANCE_DEFAULT = 'https://global66.my.salesforce.com';
 const SF_CASE_UPDATE_PATH = '/services/apexrest/compliance/case-update/v1/';
 const G66_ADMIN_BASE = 'https://api.global66.com';
 // Estados de compliance que disparan el "last-step" (igual que el bot).
