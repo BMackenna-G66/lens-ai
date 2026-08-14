@@ -14,14 +14,18 @@ import { TRANSICIONES_CASO } from '../services/casosComplianceTypes';
 import { inferirTipoCaso } from '../services/casosComplianceMapper';
 import { calcularPrioridadPreliminar } from '../services/casePriority';
 import { cambiarEstado, tomarCaso, liberarCaso, cambiarPrioridad } from '../services/caseWorkflowService';
+import { statusDeCaso, setStatusCaso, registrarCierreCanal, STATUS_CASO_VALORES } from '../services/caseStatusService';
+import type { StatusCaso } from '../services/caseStatusService';
+import { subscribeFlujoConfig, guardarFlujoConfig, flujoConfigDisponible, FLUJO_CONFIG_DEFAULT } from '../services/flujoAutomaticoService';
+import type { FlujoConfig } from '../services/flujoAutomaticoService';
+import { procesarCasoAuto, esCandidatoAuto } from '../services/flujoAutomaticoEngine';
 import { guardarInvestigacion } from '../services/caseInvestigationService';
-import { registrarDecision, resolverAprobacion, requiereAprobacion } from '../services/caseDecisionService';
 import { enviarResolucion, conclusionAStatus } from '../services/caseResolutionService';
 import { TIPOS_CIERRE, camposDeCierre } from '../services/cierreTipos';
 import { TIPOS_CIERRE_ADMIN, OFAC_PROVIDERS, ADMIN_ASSIGNEE_DEFAULT, ADMIN_STATUS_OPTIONS, ADMIN_COMMENT_OPTIONS, RISK_LEVELS, PEP_PROVIDER_DEFAULT } from '../services/cierreAdminTipos';
 import { enviarCierreAdmin, adminCierreDisponible, AdminCierreResult } from '../services/adminCierreService';
 import { registrarAuditoria } from '../services/caseAuditService';
-import type { InvestigacionCaso, DecisionCompliance, TipoDecision } from '../services/casosComplianceTypes';
+import type { InvestigacionCaso } from '../services/casosComplianceTypes';
 import { useAuth } from '../context/AuthContext';
 
 // Estado del screening criminal por caso (cola OFAC/PEP).
@@ -267,7 +271,9 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   const [selId, setSelId] = useState<string | null>(null);
   const [filtro, setFiltro] = useState('');
   const [activeQueue, setActiveQueue] = useState<QueueKey>('ofac');
-  const filtrosVacios = { pais: '', estado: '', prioridad: '', conclusion: '', pep: '', numeroCaso: '', dni: '' };
+  const filtrosVacios = { pais: '', estado: '', prioridad: '', conclusion: '', pep: '', numeroCaso: '', dni: '', status: '' };
+  // Los casos CERRADOS salen de la cola; este toggle los vuelve a mostrar.
+  const [verCerrados, setVerCerrados] = useState(false);
   const [filtros, setFiltros] = useState<Record<string, string>>(filtrosVacios);
   const setFiltroCol = (k: string, v: string) => setFiltros(f => ({ ...f, [k]: v }));
   const [sortCol, setSortCol] = useState<string>('fecha');
@@ -305,7 +311,11 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       try {
         const payload = { CaseNumber: c.numeroCaso, ...camposDeCierre(tipo, c.pais) } as SFCaseUpdate;
         const r = await enviarResolucion(c.id, payload, actor ?? undefined);
-        if (r.yaEnviada || r.sf?.ok) ok++; else err++;
+        if (r.yaEnviada || r.sf?.ok) {
+          ok++;
+          // Status del caso: canal SF cerrado (sale de la cola si Admin también).
+          await registrarCierreCanal(c.id, 'sf', { ok: true, tipologia: tipo.id }, actor ?? undefined).catch(() => {});
+        } else err++;
       } catch { err++; }
     }, 3);
     setCerrando(false); setCierreConfirm(false);
@@ -325,8 +335,10 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     if (!tipo || seleccion.size === 0) return;
     setAdminMasivoSending(true); setAdminMasivoResult(null);
     const seleccionados = [...seleccion].map(id => casos.find(c => c.id === id)).filter((c): c is CasoSF => !!c);
-    // Agrupa customerIds por país (countryCode del last-step).
+    // Agrupa customerIds por país (countryCode del last-step) y guarda el mapa
+    // customerId → casos, para poder marcar el status de cada caso al volver.
     const porPais = new Map<string, string[]>();
+    const casosPorCustomer = new Map<string, string[]>();
     let sinId = 0;
     for (const c of seleccionados) {
       const cid = String(c.datos?.['Id interno del usuario'] ?? '').trim();
@@ -334,6 +346,8 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       const cc = paisCC(c.pais);
       if (!porPais.has(cc)) porPais.set(cc, []);
       porPais.get(cc)!.push(cid);
+      if (!casosPorCustomer.has(cid)) casosPorCustomer.set(cid, []);
+      casosPorCustomer.get(cid)!.push(c.id);
     }
     let ok = 0, err = 0;
     for (const [cc, ids] of porPais) {
@@ -348,13 +362,41 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
           pepValue: !!tipo.pepValue, pepProvider: PEP_PROVIDER_DEFAULT, pepCountryCode: cc, pepPosition: null,
           riskEnabled: !!tipo.riskLevel, riskLevel: tipo.riskLevel || undefined,
         });
-        for (const res of r.results) { if (res.ok) ok++; else err++; }
+        for (const res of r.results) {
+          if (res.ok) {
+            ok++;
+            // Status del caso: canal Admin cerrado (sale de la cola si SF también).
+            for (const caseId of casosPorCustomer.get(String(res.customerId)) ?? []) {
+              await registrarCierreCanal(caseId, 'admin', { ok: true, tipologia: tipo.id }, actor ?? undefined).catch(() => {});
+            }
+          } else err++;
+        }
         if (r.error && !r.results.length) err += ids.length;
       } catch { err += ids.length; }
     }
     setAdminMasivoSending(false); setAdminMasivoConfirm(false);
     setAdminMasivoResult(`${ok} cliente(s) OK${err ? `, ${err} con error` : ''}${sinId ? `, ${sinId} sin Customer ID` : ''}`);
     if (err === 0 && sinId === 0) limpiarSeleccion();
+  };
+
+  // ── Mantenedor del flujo automático (config compartida en Firestore) ─────────
+  const [flujoCfg, setFlujoCfg] = useState<FlujoConfig>(FLUJO_CONFIG_DEFAULT);
+  const [showFlujo, setShowFlujo] = useState(false);
+  const [flujoDraft, setFlujoDraft] = useState<FlujoConfig>(FLUJO_CONFIG_DEFAULT);
+  const [flujoSaving, setFlujoSaving] = useState(false);
+  const [flujoMsg, setFlujoMsg] = useState<string | null>(null);
+  const [autoMsg, setAutoMsg] = useState<string | null>(null);
+  const autoRunning = useRef(false);          // evita corridas superpuestas
+  const autoHechos = useRef<Set<string>>(new Set()); // casos ya procesados en esta sesión
+
+  useEffect(() => subscribeFlujoConfig(cfg => { setFlujoCfg(cfg); setFlujoDraft(cfg); }), []);
+
+  const abrirFlujo = () => { setFlujoDraft(flujoCfg); setFlujoMsg(null); setShowFlujo(s => !s); };
+  const guardarFlujo = async () => {
+    setFlujoSaving(true); setFlujoMsg(null);
+    try { await guardarFlujoConfig(flujoDraft, actor ?? undefined); setFlujoMsg('Guardado ✓'); }
+    catch (e) { setFlujoMsg((e as Error).message); }
+    finally { setFlujoSaving(false); }
   };
 
   useEffect(() => {
@@ -386,16 +428,19 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   };
 
   // Agrupa en colas y ordena cada una por fecha de llegada (asc = FIFO).
+  // Los casos CERRADOS salen de la cola (status del caso); `verCerrados` permite
+  // volver a mostrarlos sin perder el acceso al historial.
   const colas = useMemo(() => {
     const g: Record<QueueKey, QueuedCaso[]> = { ofac: [], remesa: [], otros: [] };
     for (const c of casos) {
+      if (!verCerrados && statusDeCaso(c) === 'CERRADO') continue;
       const qc: QueuedCaso = { ...c, remesa: extraerRemesa(c.asunto) };
       g[clasificar(qc)].push(qc);
     }
     (Object.keys(g) as QueueKey[]).forEach(k =>
       g[k].sort((a, b) => (a.recibidoEn || '').localeCompare(b.recibidoEn || '')));
     return g;
-  }, [casos]);
+  }, [casos, verCerrados]);
 
   // Filtro aplicado dentro de la cola activa.
   const filtrados = useMemo(() => {
@@ -427,7 +472,8 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   }, [selId]);
 
   // ── Responder en Salesforce ────────────────────────────────────────────────
-  const [showResponder, setShowResponder] = useState(false);
+  // La Investigación va colapsada (el cierre es lo que más se usa en la ficha).
+  const [showInvestigacion, setShowInvestigacion] = useState(false);
   const [form, setForm] = useState<FormState>(defaultForm(null));
   const [sending, setSending] = useState(false);
   const [sfResult, setSfResult] = useState<SFUpdateResult | null>(null);
@@ -520,6 +566,10 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
         riskEnabled: !!adminForm.riskLevel, riskLevel: adminForm.riskLevel || undefined,
       });
       setAdminResult(r);
+      // Status del caso: marca el canal Admin. Si SF también quedó OK → CERRADO.
+      if (r.ok) {
+        await registrarCierreCanal(sel.id, 'admin', { ok: true, tipologia: adminTipoSel || null }, actor ?? undefined).catch(() => {});
+      }
       // Auditoría — incluye metadata que NO va a la API (changeTicket, requestedBy).
       registrarAuditoria(sel.id, {
         tipo: 'CIERRE_ADMIN', actorId: actor?.uid ?? 'system', actorTipo: actor ? 'USER' : 'SYSTEM',
@@ -635,6 +685,49 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeQueue, ofacIdsKey]);
 
+  // ── Runner del flujo automático (cola OFAC) ─────────────────────────────────
+  // Corre SOLO si el mantenedor está prendido. Toma los casos de la cola cuya
+  // conclusión de screening ya está resuelta y le aplica la tipología que
+  // corresponde (Liberar / Liberar UCR / Fully Blocked). Las conclusiones de
+  // revisión no se automatizan: quedan para el analista.
+  // Guardas: una corrida a la vez, y cada caso se intenta una sola vez por sesión.
+  useEffect(() => {
+    if (!flujoCfg.ofac.enabled) return;
+    let cancelado = false;
+    const correr = async () => {
+      if (autoRunning.current || cancelado) return;
+      const candidatos = colas.ofac.filter(c => {
+        if (autoHechos.current.has(c.id)) return false;
+        const sc = screenMap[c.id];
+        if (!sc || sc.estado === 'loading') return false;   // screening aún sin resolver
+        return !!esCandidatoAuto(c, sc.decision, flujoCfg.ofac);
+      });
+      if (candidatos.length === 0) return;
+      autoRunning.current = true;
+      let ok = 0, err = 0;
+      try {
+        for (const c of candidatos) {
+          if (cancelado) break;
+          autoHechos.current.add(c.id);
+          const sc = screenMap[c.id];
+          try {
+            const r = await procesarCasoAuto(c, sc?.decision, flujoCfg.ofac, actor ?? undefined);
+            if (!r) continue;
+            const fallo = r.sf === 'error' || r.admin === 'error';
+            if (fallo) err++; else ok++;
+          } catch { err++; }
+        }
+      } finally {
+        autoRunning.current = false;
+        if (ok || err) setAutoMsg(`Flujo automático: ${ok} caso(s) cerrado(s)${err ? `, ${err} con error` : ''}`);
+      }
+    };
+    correr();
+    const t = setInterval(correr, 30000);   // revisa cada 30s por casos nuevos
+    return () => { cancelado = true; clearInterval(t); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flujoCfg, ofacIdsKey, screenMap]);
+
   // Reconsulta manual de un caso (fuerza volver a pegarle a la lista).
   const reconsultar = async (c: QueuedCaso) => {
     setScreenMap(prev => ({ ...prev, [c.id]: { estado: 'loading' } }));
@@ -660,12 +753,14 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   const vistaOp = (c: QueuedCaso) => {
     const raw = c as unknown as Record<string, unknown>;
     const tipo = (raw.tipoCasoCompliance as TipoCasoCompliance) ?? inferirTipoCaso(c);
-    const estado = (raw.estadoCaso as EstadoCaso) ?? 'NUEVO';
-    const asignado = (raw.asignacion as { analistaNombre?: string } | undefined)?.analistaNombre ?? '';
+    const estado = (c.estadoCaso as EstadoCaso) ?? 'NUEVO';
+    const asignado = c.asignacion?.analistaNombre ?? '';
+    const asignadoId = c.asignacion?.analistaId ?? '';
     const tieneCoinc = (screenMap[c.id]?.delitosUnicos ?? 0) > 0;
-    const prioridad = (raw.prioridad as PrioridadCaso) ?? calcularPrioridadPreliminar(tipo, tieneCoinc);
-    const versionCaso = (raw.versionCaso as number) ?? 1;
-    return { tipo, estado, prioridad, asignado, versionCaso };
+    const prioridad = (c.prioridad as PrioridadCaso) ?? calcularPrioridadPreliminar(tipo, tieneCoinc);
+    const versionCaso = c.versionCaso ?? 1;
+    const status = statusDeCaso(c);
+    return { tipo, estado, prioridad, asignado, asignadoId, versionCaso, status };
   };
 
   const prioColor = (p: PrioridadCaso): string =>
@@ -673,6 +768,11 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       : p === 'ALTA' ? 'text-orange-600 dark:text-orange-400'
         : p === 'MEDIA' ? 'text-amber-600 dark:text-amber-400'
           : 'text-slate-500 dark:text-slate-400';
+
+  const statusColor = (s: StatusCaso): string =>
+    s === 'CERRADO' ? 'text-emerald-600 dark:text-emerald-400'
+      : s === 'GESTIONANDO' ? 'text-sky-600 dark:text-sky-400'
+        : 'text-slate-500 dark:text-slate-400';
 
   const conAccion = async (fn: () => Promise<void>) => {
     if (!actor) { setAccionMsg('Sesión no disponible.'); return; }
@@ -684,6 +784,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   const doLiberar = (c: QueuedCaso) => conAccion(() => liberarCaso({ id: c.id, estadoCaso: vistaOp(c).estado, versionCaso: vistaOp(c).versionCaso }, actor!));
   const doEstado = (c: QueuedCaso, nuevo: EstadoCaso) => conAccion(() => cambiarEstado({ id: c.id, estadoCaso: vistaOp(c).estado, versionCaso: vistaOp(c).versionCaso }, nuevo, actor!));
   const doPrioridad = (c: QueuedCaso, nueva: PrioridadCaso) => conAccion(() => cambiarPrioridad({ id: c.id, prioridadActual: vistaOp(c).prioridad, versionCaso: vistaOp(c).versionCaso }, nueva, actor!));
+  const doStatus = (c: QueuedCaso, nuevo: StatusCaso) => conAccion(() => setStatusCaso(c.id, nuevo, actor!));
 
   // ── Investigación (Fase 5): edición con versionado / concurrencia ────────────
   const [invForm, setInvForm] = useState({ resumen: '', hallazgos: '', recomendacion: '', completa: false });
@@ -726,40 +827,6 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     finally { setInvSaving(false); }
   };
 
-  // ── Decisión de Compliance (Fase 6) ─────────────────────────────────────────
-  const TIPOS_DECISION: { v: TipoDecision; label: string }[] = [
-    { v: 'FALSO_POSITIVO', label: 'Falso positivo' },
-    { v: 'PEP_CONFIRMADO', label: 'PEP confirmado' },
-    { v: 'OFAC_CONFIRMADO', label: 'OFAC confirmado' },
-    { v: 'INCONCLUSO', label: 'Inconcluso' },
-    { v: 'DUPLICADO', label: 'Duplicado' },
-    { v: 'ESCALAR', label: 'Escalar' },
-  ];
-  const [decForm, setDecForm] = useState<{ tipo: TipoDecision; reasonCode: string; justificacion: string }>({ tipo: 'FALSO_POSITIVO', reasonCode: '', justificacion: '' });
-  const [decSaving, setDecSaving] = useState(false);
-  const [decMsg, setDecMsg] = useState<string | null>(null);
-  const decActual = ((sel as unknown as Record<string, unknown> | null)?.decisionCompliance) as DecisionCompliance | undefined;
-  useEffect(() => {
-    setDecForm({ tipo: (decActual?.tipo as TipoDecision) ?? 'FALSO_POSITIVO', reasonCode: decActual?.reasonCode ?? '', justificacion: decActual?.justificacion ?? '' });
-    setDecMsg(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sel?.id]);
-
-  const doRegistrarDecision = async () => {
-    if (!actor || !sel) { setDecMsg('Sesión no disponible.'); return; }
-    setDecSaving(true); setDecMsg(null);
-    try { await registrarDecision(sel.id, decForm, actor); setDecMsg('Decisión registrada ✓'); }
-    catch (e) { setDecMsg((e as Error).message); }
-    finally { setDecSaving(false); }
-  };
-  const doAprobar = async (aprobar: boolean) => {
-    if (!actor || !sel) { setDecMsg('Sesión no disponible.'); return; }
-    setDecSaving(true); setDecMsg(null);
-    try { await resolverAprobacion(sel.id, aprobar, actor); setDecMsg(aprobar ? 'Aprobada ✓' : 'Rechazada'); }
-    catch (e) { setDecMsg((e as Error).message); }
-    finally { setDecSaving(false); }
-  };
-
   // Valores distintos por columna (para los desplegables de filtro), tomados de la cola.
   const opcionesFiltro = useMemo(() => {
     const base = colas[activeQueue];
@@ -777,6 +844,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   const cumpleFiltros = (c: QueuedCaso): boolean => {
     if (filtros.pais && (c.pais || '') !== filtros.pais) return false;
     if (filtros.estado && vistaOp(c).estado !== filtros.estado) return false;
+    if (filtros.status && vistaOp(c).status !== filtros.status) return false;
     if (filtros.prioridad && vistaOp(c).prioridad !== filtros.prioridad) return false;
     if (filtros.conclusion && (screenMap[c.id]?.decision || '') !== filtros.conclusion) return false;
     if (filtros.pep) {
@@ -808,6 +876,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
         case 'paisorigen': return paisOrigen(c);
         case 'tipo': return vistaOp(c).tipo;
         case 'estado': return vistaOp(c).estado;
+        case 'status': return vistaOp(c).status;
         case 'prioridad': return vistaOp(c).prioridad;
         case 'asignado': return vistaOp(c).asignado;
         default: return String(c.datos?.[sortCol] ?? '');
@@ -855,7 +924,6 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     try {
       const op = vistaOp(sel);
       const sc = screenMap[sel.id];
-      const d = decActual;
       await generateCasoPdf({
         numeroCaso: sel.numeroCaso,
         recibidoEn: fmtFecha(sel.recibidoEn),
@@ -869,7 +937,6 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
           ? { fuente: sc.fuente, decision: sc.decision, delitosUnicos: sc.delitosUnicos, pep: sc.pep, coincidencias: (sc.coincidencias ?? []) as CasoPdfCoincidencia[] }
           : undefined,
         investigacion: { resumen: invForm.resumen, hallazgos: invForm.hallazgos, recomendacion: invForm.recomendacion, completa: invForm.completa, version: invVersion },
-        decision: d ? { estado: d.estado, tipo: TIPOS_DECISION.find(t => t.v === d.tipo)?.label ?? d.tipo, justificacion: d.justificacion, reasonCode: d.reasonCode, decididoPor: d.decididoPor, aprobadoPor: d.aprobadoPor } : undefined,
         respuestaSF: sfResult ? { estado: sfResult.ok ? 'ENVIADA' : `ERROR (HTTP ${sfResult.status})`, completadoEn: null } : undefined,
         payload: Object.entries(sel.datos).map(([k, v]) => [k, typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v)]),
       });
@@ -893,6 +960,10 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       const { sf, yaEnviada, mensaje } = await enviarResolucion(sel.id, buildPayload(form), actor ?? undefined);
       if (yaEnviada) setSfResult({ ok: true, status: 200, raw: null, warnings: [mensaje ?? 'Ya enviada'] } as SFUpdateResult);
       else if (sf) setSfResult(sf);
+      // Status del caso: marca el canal SF. Si Admin también quedó OK → CERRADO.
+      if (yaEnviada || sf?.ok) {
+        await registrarCierreCanal(sel.id, 'sf', { ok: true, tipologia: tipoCierreSel || null }, actor ?? undefined).catch(() => {});
+      }
     } catch (e) {
       setSfResult({ ok: false, status: 0, errors: [(e as Error).message], raw: null });
     } finally {
@@ -943,9 +1014,125 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
               </button>
             );
           })}
-          <span className="ml-auto flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-emerald-600 dark:text-emerald-400">
+          {/* Mantenedor del flujo automático */}
+          <button
+            onClick={abrirFlujo}
+            title="Prender/apagar el cierre automático de las colas"
+            className={`ml-auto flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-bold border transition-colors ${
+              flujoCfg.ofac.enabled || flujoCfg.remesa.enabled
+                ? 'bg-amber-500 text-white border-amber-500'
+                : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:border-amber-300'}`}
+          >
+            <span>{showFlujo ? '▾' : '▸'}</span> ⚙️ Flujo automático
+            <span className={`px-1.5 py-0.5 rounded-full ${flujoCfg.ofac.enabled || flujoCfg.remesa.enabled ? 'bg-white/25' : 'bg-slate-100 dark:bg-slate-700'}`}>
+              {flujoCfg.ofac.enabled || flujoCfg.remesa.enabled
+                ? `ON: ${[flujoCfg.ofac.enabled && 'OFAC', flujoCfg.remesa.enabled && 'Remesas'].filter(Boolean).join(' + ')}`
+                : 'OFF'}
+            </span>
+          </button>
+          <span className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-emerald-600 dark:text-emerald-400">
             <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" /> en vivo
           </span>
+        </div>
+      )}
+
+      {/* Ficha de configuración del flujo automático */}
+      {showFlujo && !loading && !error && (() => {
+        const sw = (on: boolean) => `relative w-10 h-5 rounded-full transition-colors ${on ? 'bg-emerald-500' : 'bg-slate-300 dark:bg-slate-600'}`;
+        const knob = (on: boolean) => `absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${on ? 'left-[22px]' : 'left-0.5'}`;
+        const selCls = 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1 text-xs outline-none focus:border-amber-400';
+        const setOfac = (patch: Partial<FlujoConfig['ofac']>) => setFlujoDraft(d => ({ ...d, ofac: { ...d.ofac, ...patch } }));
+        const sinCambios = JSON.stringify(flujoDraft.ofac) === JSON.stringify(flujoCfg.ofac)
+          && flujoDraft.remesa.enabled === flujoCfg.remesa.enabled;
+        return (
+          <div className="mb-4 rounded-xl border border-amber-300 dark:border-amber-800/60 bg-amber-50/60 dark:bg-amber-950/20 p-4">
+            <div className="flex items-start justify-between gap-3 mb-3">
+              <div>
+                <h3 className="text-sm font-black text-amber-800 dark:text-amber-300">⚙️ Flujo automático de las colas</h3>
+                <p className="text-[11px] text-amber-700 dark:text-amber-400 mt-0.5">
+                  Con el flujo prendido los casos se cierran <b>solos</b> (sin revisión del analista) aplicando su tipología.
+                  Las conclusiones de <b>revisión</b> nunca se automatizan.
+                </p>
+              </div>
+              <button onClick={() => setShowFlujo(false)} className="text-xs text-slate-500 dark:text-slate-400 hover:text-slate-700">Cerrar</button>
+            </div>
+
+            {!flujoConfigDisponible() && (
+              <p className="text-xs text-red-600 dark:text-red-400 mb-3">Firestore no está configurado: la config no se puede guardar en esta instancia.</p>
+            )}
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              {/* Cola OFAC */}
+              <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-900/40 p-3">
+                <button onClick={() => setOfac({ enabled: !flujoDraft.ofac.enabled })} className="flex items-center gap-2 mb-3 w-full text-left">
+                  <span className={sw(flujoDraft.ofac.enabled)}><span className={knob(flujoDraft.ofac.enabled)} /></span>
+                  <span className="text-sm font-bold text-slate-800 dark:text-slate-200">Coincidencia OFAC</span>
+                  <span className={`text-[11px] font-bold ${flujoDraft.ofac.enabled ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-400'}`}>
+                    {flujoDraft.ofac.enabled ? 'AUTOMÁTICO' : 'MANUAL'}
+                  </span>
+                </button>
+                <div className="space-y-2 text-xs">
+                  <label className="flex items-center gap-2 text-slate-600 dark:text-slate-300">
+                    <input type="checkbox" checked={flujoDraft.ofac.cerrarSF} onChange={e => setOfac({ cerrarSF: e.target.checked })} className="w-3.5 h-3.5" />
+                    Cerrar en Salesforce
+                  </label>
+                  <label className="flex items-center gap-2 text-slate-600 dark:text-slate-300">
+                    <input type="checkbox" checked={flujoDraft.ofac.cerrarAdmin} onChange={e => setOfac({ cerrarAdmin: e.target.checked })} className="w-3.5 h-3.5" />
+                    Cerrar en Admin (bloqueo/desbloqueo del cliente)
+                  </label>
+                  <div className="pt-1 space-y-1.5">
+                    <p className="font-semibold text-slate-500 dark:text-slate-400">Tipología según la conclusión del screening</p>
+                    {([
+                      ['Liberar', 'tipoLiberarNormal'],
+                      ['Liberar UCR', 'tipoLiberarUcr'],
+                      ['Fully Blocked', 'tipoBloquear'],
+                    ] as const).map(([label, key]) => (
+                      <label key={key} className="flex items-center justify-between gap-2">
+                        <span className="text-slate-600 dark:text-slate-300">{label} →</span>
+                        <select value={flujoDraft.ofac[key]} onChange={e => setOfac({ [key]: e.target.value } as Partial<FlujoConfig['ofac']>)} className={selCls}>
+                          {TIPOS_CIERRE.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
+                        </select>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Cola Remesas */}
+              <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-900/40 p-3">
+                <button onClick={() => setFlujoDraft(d => ({ ...d, remesa: { enabled: !d.remesa.enabled } }))} className="flex items-center gap-2 mb-3 w-full text-left">
+                  <span className={sw(flujoDraft.remesa.enabled)}><span className={knob(flujoDraft.remesa.enabled)} /></span>
+                  <span className="text-sm font-bold text-slate-800 dark:text-slate-200">Remesas</span>
+                  <span className={`text-[11px] font-bold ${flujoDraft.remesa.enabled ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-400'}`}>
+                    {flujoDraft.remesa.enabled ? 'AUTOMÁTICO' : 'MANUAL'}
+                  </span>
+                </button>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                  El switch queda registrado, pero <b>todavía no hay acciones automáticas definidas</b> para esta cola:
+                  falta acordar qué tipificación aplica a un caso de remesa. Mientras, la cola sigue manual aunque esté prendido.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3 mt-4">
+              <button
+                onClick={guardarFlujo}
+                disabled={flujoSaving || sinCambios || !flujoConfigDisponible()}
+                className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-sm font-bold"
+              >
+                {flujoSaving ? 'Guardando…' : 'Guardar configuración'}
+              </button>
+              {!sinCambios && <span className="text-[11px] text-amber-700 dark:text-amber-400">Hay cambios sin guardar.</span>}
+              {flujoMsg && <span className={`text-xs ${flujoMsg.includes('✓') ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}`}>{flujoMsg}</span>}
+            </div>
+          </div>
+        );
+      })()}
+
+      {autoMsg && !loading && !error && (
+        <div className="mb-4 flex items-center gap-3 rounded-xl border border-emerald-200 dark:border-emerald-800/50 bg-emerald-50 dark:bg-emerald-950/30 px-4 py-2 text-sm text-emerald-800 dark:text-emerald-300">
+          <span className="font-semibold">🤖 {autoMsg}</span>
+          <button onClick={() => setAutoMsg(null)} className="ml-auto text-xs underline opacity-80">ocultar</button>
         </div>
       )}
 
@@ -968,6 +1155,11 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <FiltroCombo label="País" value={filtros.pais} options={opcionesFiltro.pais} onChange={v => setFiltroCol('pais', v)} />
+              <FiltroCombo label="Status" value={filtros.status} options={[...STATUS_CASO_VALORES]} onChange={v => setFiltroCol('status', v)} />
+              <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-500 dark:text-slate-400 whitespace-nowrap" title="Los casos CERRADOS salen de la cola. Marcá esto para volver a verlos.">
+                <input type="checkbox" checked={verCerrados} onChange={e => setVerCerrados(e.target.checked)} className="w-3.5 h-3.5" />
+                Ver cerrados
+              </label>
               {activeQueue === 'ofac' && <FiltroCombo label="Estado" value={filtros.estado} options={opcionesFiltro.estado} onChange={v => setFiltroCol('estado', v)} />}
               {activeQueue === 'ofac' && <FiltroCombo label="Prioridad" value={filtros.prioridad} options={opcionesFiltro.prioridad} onChange={v => setFiltroCol('prioridad', v)} />}
               {activeQueue === 'ofac' && <FiltroCombo label="Conclusión" value={filtros.conclusion} options={opcionesFiltro.conclusion} onChange={v => setFiltroCol('conclusion', v)} />}
@@ -1113,6 +1305,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                       {Th('delitos', 'Delitos únicos', 'text-center')}
                       {Th('prioridad', 'Prioridad')}
                       {/* Resto de columnas útiles */}
+                      {Th('status', 'Status')}
                       {Th('estado', 'Estado')}
                       {Th('asignado', 'Asignado')}
                       {Th('pep', 'PEP', 'text-center')}
@@ -1174,6 +1367,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                           </td>
                           <td className={`px-3 py-2 whitespace-nowrap font-bold ${prioColor(op.prioridad)}`}>{op.prioridad}</td>
                           {/* Resto de columnas útiles */}
+                          <td className={`px-3 py-2 whitespace-nowrap font-bold ${statusColor(op.status)}`}>{op.status}</td>
                           <td className="px-3 py-2 whitespace-nowrap text-slate-600 dark:text-slate-300">{op.estado}</td>
                           <td className="px-3 py-2 whitespace-nowrap text-slate-600 dark:text-slate-300 max-w-[160px] truncate" title={op.asignado}>{op.asignado || '—'}</td>
                           <td className="px-3 py-2 whitespace-nowrap text-center">
@@ -1328,7 +1522,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                 {/* Estado y asignación del caso */}
                 {(() => {
                   const op = vistaOp(sel);
-                  const esMio = !!actor && op.asignado === actor.nombre;
+                  const esMio = !!actor && (op.asignadoId === actor.uid || (!op.asignadoId && op.asignado === actor.nombre));
                   const selectCls = 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1 text-sm outline-none focus:border-sky-400';
                   return (
                     <div className="mb-5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/60 dark:bg-slate-900/40 p-4">
@@ -1355,7 +1549,19 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                             className={selectCls}
                           >
                             <option value={op.estado}>{op.estado}</option>
-                            {TRANSICIONES_CASO[op.estado].map(s => <option key={s} value={s}>{s}</option>)}
+                            {(TRANSICIONES_CASO[op.estado] ?? []).map(s => <option key={s} value={s}>{s}</option>)}
+                          </select>
+                        </label>
+                        <label className="flex items-center gap-1 text-slate-500 dark:text-slate-400">
+                          Status:
+                          <select
+                            value={op.status}
+                            disabled={accionEnCurso}
+                            onChange={e => e.target.value !== op.status && doStatus(sel, e.target.value as StatusCaso)}
+                            className={`${selectCls} font-bold ${statusColor(op.status)}`}
+                            title="Status del caso en la cola. CERRADO lo saca de la cola."
+                          >
+                            {STATUS_CASO_VALORES.map(s => <option key={s} value={s}>{s}</option>)}
                           </select>
                         </label>
                         <span className="text-slate-500 dark:text-slate-400">Asignado: <b className="text-slate-800 dark:text-slate-200">{op.asignado || '—'}</b></span>
@@ -1434,16 +1640,22 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                   </table>
                 </div>
 
-                <Seccion>🧭 Investigación + Decisión de Compliance</Seccion>
+                <Seccion>🧭 Investigación</Seccion>
 
-                {/* Investigación del analista (Fase 5) */}
-                <div className="mb-5 rounded-xl border border-slate-200 dark:border-slate-700 p-4">
-                  <div className="flex items-center justify-between mb-3">
-                    <h3 className="text-sm font-black text-slate-800 dark:text-slate-200">📝 Investigación</h3>
-                    <span className="text-[11px] text-slate-400 dark:text-slate-500">
+                {/* Investigación del analista — desplegable (se usa menos que el cierre) */}
+                <div className="mb-5">
+                  <button
+                    onClick={() => setShowInvestigacion(s => !s)}
+                    className="flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-600 hover:bg-slate-700 text-white text-sm font-bold"
+                  >
+                    <span>{showInvestigacion ? '▾' : '▸'}</span> 📝 Investigación
+                    <span className="text-[11px] font-semibold opacity-80">
                       {invVersion > 0 ? `v${invVersion}${invActual?.actualizadaEn ? ' · ' + fmtFecha(invActual.actualizadaEn) : ''}` : 'sin iniciar'}
                     </span>
-                  </div>
+                  </button>
+                </div>
+                {showInvestigacion && (
+                <div className="mb-5 rounded-xl border border-slate-200 dark:border-slate-700 p-4">
                   {(() => {
                     const ta = 'w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1.5 text-sm outline-none focus:border-sky-400';
                     return (
@@ -1475,83 +1687,11 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                   })()}
                 </div>
 
-                {/* Decisión de Compliance (Fase 6) */}
-                <div className="mb-5 rounded-xl border border-slate-200 dark:border-slate-700 p-4">
-                  <h3 className="text-sm font-black text-slate-800 dark:text-slate-200 mb-3">⚖️ Decisión de Compliance</h3>
-                  {(() => {
-                    const inp = 'w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1.5 text-sm outline-none focus:border-sky-400';
-                    const d = decActual;
-                    const esMaker = !!d && !!actor && d.decididoPor === actor.uid;
-                    const Msg = () => decMsg ? <span className={`text-xs ${decMsg.includes('✓') ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}`}>{decMsg}</span> : null;
+                )}
 
-                    if (d && (d.estado === 'APROBADA' || d.estado === 'RECHAZADA')) {
-                      return (
-                        <div className="text-sm space-y-1">
-                          <p><b className={d.estado === 'APROBADA' ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}>{d.estado}</b> · {TIPOS_DECISION.find(t => t.v === d.tipo)?.label ?? d.tipo}</p>
-                          {d.reasonCode && <p className="text-xs text-slate-500 dark:text-slate-400">Reason code: {d.reasonCode}</p>}
-                          <p className="text-xs text-slate-600 dark:text-slate-300">{d.justificacion}</p>
-                          <p className="text-[11px] text-slate-400">Decidió: {d.decididoPor}{d.aprobadoPor ? ` · Aprobó: ${d.aprobadoPor}` : ''}</p>
-                        </div>
-                      );
-                    }
-
-                    if (d && d.estado === 'PENDIENTE_APROBACION') {
-                      return (
-                        <div className="text-sm space-y-2">
-                          <p><b className="text-amber-600 dark:text-amber-400">PENDIENTE DE APROBACIÓN</b> · {TIPOS_DECISION.find(t => t.v === d.tipo)?.label ?? d.tipo}</p>
-                          <p className="text-xs text-slate-600 dark:text-slate-300">{d.justificacion}</p>
-                          {esMaker ? (
-                            <p className="text-xs text-slate-500 dark:text-slate-400">Registrada por vos — requiere aprobación de <b>otro</b> analista (maker-checker).</p>
-                          ) : (
-                            <div className="flex items-center gap-2">
-                              <button onClick={() => doAprobar(true)} disabled={decSaving} className="px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-bold disabled:opacity-50">Aprobar</button>
-                              <button onClick={() => doAprobar(false)} disabled={decSaving} className="px-3 py-1 rounded-lg border border-red-300 dark:border-red-700 text-red-600 dark:text-red-400 text-sm font-bold disabled:opacity-50">Rechazar</button>
-                            </div>
-                          )}
-                          <Msg />
-                        </div>
-                      );
-                    }
-
-                    return (
-                      <div className="space-y-2">
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                          <label className="text-xs"><span className="block font-semibold text-slate-500 dark:text-slate-400 mb-1">Decisión</span>
-                            <select value={decForm.tipo} onChange={e => setDecForm(f => ({ ...f, tipo: e.target.value as TipoDecision }))} className={inp}>
-                              {TIPOS_DECISION.map(t => <option key={t.v} value={t.v}>{t.label}</option>)}
-                            </select>
-                          </label>
-                          <label className="text-xs"><span className="block font-semibold text-slate-500 dark:text-slate-400 mb-1">Reason code <span className="text-slate-400">(catálogo pendiente)</span></span>
-                            <input value={decForm.reasonCode} onChange={e => setDecForm(f => ({ ...f, reasonCode: e.target.value }))} className={inp} />
-                          </label>
-                        </div>
-                        <label className="text-xs block"><span className="block font-semibold text-slate-500 dark:text-slate-400 mb-1">Justificación (obligatoria)</span>
-                          <textarea value={decForm.justificacion} onChange={e => setDecForm(f => ({ ...f, justificacion: e.target.value }))} rows={2} className={inp} />
-                        </label>
-                        {requiereAprobacion(decForm.tipo) && <p className="text-[11px] text-amber-600 dark:text-amber-400">Esta decisión requerirá aprobación de otro analista (maker-checker).</p>}
-                        <div className="flex items-center gap-3">
-                          <button onClick={doRegistrarDecision} disabled={decSaving} className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-sm font-bold">
-                            {decSaving ? 'Registrando…' : 'Registrar decisión'}
-                          </button>
-                          <Msg />
-                        </div>
-                      </div>
-                    );
-                  })()}
-                </div>
-
-                {/* ── Sección: Responder en Salesforce (botón que despliega) ── */}
+                {/* ── Sección: Responder en Salesforce (inline, como el Cierre en Admin) ── */}
                 <Seccion>📨 Responder en Salesforce</Seccion>
-                <div>
-                  <button
-                    onClick={() => setShowResponder(s => !s)}
-                    className="flex items-center gap-2 px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-sm font-bold"
-                  >
-                    <span>{showResponder ? '▾' : '▸'}</span> Responder en Salesforce
-                  </button>
-
-                  {showResponder && (
-                    <div className="mt-4">
+                <div className="rounded-xl border border-sky-200 dark:border-sky-800/50 bg-sky-50/40 dark:bg-sky-950/20 p-4">
                       {!sfUpdateDisponible() && (
                         <p className="text-xs text-amber-600 dark:text-amber-400 mb-3">
                           Proxy no configurado en esta instancia (EMPRESADOCS_PROXY_URL).
@@ -1642,8 +1782,6 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                           )}
                         </div>
                       )}
-                    </div>
-                  )}
                 </div>
 
                 {/* ── Sección: Cierre en Admin (bloqueo/desbloqueo del cliente) ── */}

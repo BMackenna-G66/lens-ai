@@ -3,6 +3,8 @@
 // y CORS lo bloquea). Va por el Worker de Cloudflare (ruta /salesforce/case-update),
 // que tiene los secretos y hace client_credentials + PATCH al Apex REST.
 
+import { sanitizarCampos, CAMPOS_TEXTO_SF } from './textSanitizer';
+
 const PROXY = (process.env.EMPRESADOCS_PROXY_URL || '').replace(/\/$/, '');
 
 export const sfUpdateDisponible = (): boolean => !!PROXY;
@@ -30,10 +32,13 @@ export async function sendCaseUpdate(payload: SFCaseUpdate): Promise<SFUpdateRes
   if (!PROXY) throw new Error('Proxy no configurado (EMPRESADOCS_PROXY_URL).');
   if (!payload.CaseNumber?.trim()) throw new Error('Falta el número de caso (CaseNumber).');
 
+  // Salesforce rechaza los textos libres con caracteres especiales (guiones, etc.).
+  const limpio = sanitizarCampos(payload as Record<string, unknown>, CAMPOS_TEXTO_SF) as SFCaseUpdate;
+
   const res = await fetch(`${PROXY}/salesforce/case-update`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(limpio),
   });
   const text = await res.text();
   let parsed: unknown = {};

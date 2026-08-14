@@ -28,7 +28,7 @@ export const TIPOS_CIERRE_ADMIN: TipoCierreAdmin[] = [
     label: 'Liberar Normal',
     status: 'NORMAL',
     comment: 'NO_COMMENTS',
-    observation: 'Cliente puede operar con global66 caso liberado bajo logica de bandeja de casos - Dentro de la matriz de riesgo',
+    observation: 'Cliente puede operar con global66 caso liberado bajo logica de bandeja de casos Dentro de la matriz de riesgo',
     lastStepDefault: true,
   },
   {
@@ -36,7 +36,7 @@ export const TIPOS_CIERRE_ADMIN: TipoCierreAdmin[] = [
     label: 'Liberar UCR',
     status: 'UNDER_COMPLIANCE_REVIEW',
     comment: 'UCR_CRIMINAL_RISK',
-    observation: 'Cliente puede operar UCR con global66 caso liberado bajo logica de bandeja de casos - Dentro de la matriz de riesgo',
+    observation: 'Cliente puede operar UCR con global66 caso liberado bajo logica de bandeja de casos Dentro de la matriz de riesgo',
     lastStepDefault: true,
   },
   {
@@ -44,7 +44,7 @@ export const TIPOS_CIERRE_ADMIN: TipoCierreAdmin[] = [
     label: 'Fully blocked',
     status: 'FULLY_BLOCKED',
     comment: 'COMPLIANCE_OFFICER_REQUEST',
-    observation: 'Cliente NO puede operar con global66 caso liberado bajo logica de bandeja de casos - Fuera de la matriz de riesgo',
+    observation: 'Cliente NO puede operar con global66 caso liberado bajo logica de bandeja de casos Fuera de la matriz de riesgo',
     lastStepDefault: false,
   },
   {
@@ -52,7 +52,7 @@ export const TIPOS_CIERRE_ADMIN: TipoCierreAdmin[] = [
     label: 'Blocked + formulario PEP',
     status: 'FULLY_BLOCKED',
     comment: 'COMPLIANCE_OFFICER_REQUEST',
-    observation: 'Cliente puede operar con global66 caso liberado bajo logica de bandeja de casos - Dentro de la matriz de riesgo',
+    observation: 'Cliente puede operar con global66 caso liberado bajo logica de bandeja de casos Dentro de la matriz de riesgo',
     pep: true,
     lastStepDefault: false,
   },

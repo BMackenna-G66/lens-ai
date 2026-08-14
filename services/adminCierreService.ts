@@ -6,6 +6,8 @@
 // ⚠️ ACCIÓN DE ALTO IMPACTO: cambia el estado de clientes reales. La UI confirma
 // explícitamente antes de llamar acá.
 
+import { sanitizarTexto } from './textSanitizer';
+
 const PROXY = (process.env.EMPRESADOCS_PROXY_URL || '').replace(/\/$/, '');
 
 export const adminCierreDisponible = (): boolean => !!PROXY;
@@ -39,10 +41,14 @@ export async function enviarCierreAdmin(payload: AdminCierrePayload): Promise<Ad
   if (!PROXY) throw new Error('Proxy no configurado (EMPRESADOCS_PROXY_URL).');
   if (!payload.customerIds.length) throw new Error('Falta el customerId.');
 
+  // La API de Admin no responde con éxito si la observación trae caracteres
+  // especiales (guiones, etc.), así que se sanea justo antes de enviar.
+  const limpio: AdminCierrePayload = { ...payload, observation: sanitizarTexto(payload.observation) };
+
   const res = await fetch(`${PROXY}/admin/customer-status`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(limpio),
   });
   const text = await res.text();
   let data: Record<string, unknown> = {};
