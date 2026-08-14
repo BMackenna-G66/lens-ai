@@ -65,7 +65,8 @@ TABLAS = {
     "analista": {
         "pk": ["actor_id"],
         "cols": {
-            "actor_id": "", "nombre": "", "email": "", "es_sistema": "bool",
+            "actor_id": "", "nombre": "", "email": "", "rol": "",
+            "deshabilitado": "bool", "es_sistema": "bool",
             "primer_evento_en": "ts", "ultimo_evento_en": "ts",
         },
     },
@@ -93,7 +94,8 @@ TABLAS = {
             "resultado_ok": "bool", "automatico": "bool", "tipologia": "",
             "status_enviado": "", "ofac_flag": "bool", "pep_enviado": "bool",
             "risk_level": "", "last_step": "bool", "http_status": "int",
-            "detalle_error": "", "actor_id": "", "ocurrido_en": "ts",
+            "detalle_error": "", "actor_id": "", "actor_nombre": "",
+            "actor_tipo": "", "ocurrido_en": "ts",
         },
     },
     "caso_historial": {

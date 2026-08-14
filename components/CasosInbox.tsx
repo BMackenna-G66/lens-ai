@@ -26,7 +26,8 @@ import { TIPOS_CIERRE, camposDeCierre } from '../services/cierreTipos';
 import { TIPOS_CIERRE_ADMIN, OFAC_PROVIDERS, ADMIN_ASSIGNEE_DEFAULT, ADMIN_STATUS_OPTIONS, ADMIN_COMMENT_OPTIONS, RISK_LEVELS, PEP_PROVIDER_DEFAULT, ofacFlagPara } from '../services/cierreAdminTipos';
 import { enviarCierreAdmin, adminCierreDisponible, AdminCierreResult } from '../services/adminCierreService';
 import { registrarAuditoria } from '../services/caseAuditService';
-import { logCierre, logHistorial, logConfigFlujo } from '../services/colasLogService';
+import { logCierre, logHistorial, logConfigFlujo, logScreening, sincronizarAnalistas } from '../services/colasLogService';
+import { getAllUsers } from '../services/firestoreService';
 import type { InvestigacionCaso } from '../services/casosComplianceTypes';
 import { useAuth } from '../context/AuthContext';
 
@@ -266,7 +267,7 @@ const Seccion: React.FC<{ children: React.ReactNode }> = ({ children }) => (
 
 export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onToggleDarkMode }) => {
   const { user } = useAuth();
-  const actor = user ? { uid: user.uid, nombre: user.displayName || user.email || user.uid } : null;
+  const actor = user ? { uid: user.uid, nombre: user.displayName || user.email || user.uid, email: user.email ?? undefined } : null;
   const [casos, setCasos] = useState<CasoSF[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -395,6 +396,14 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   const autoHechos = useRef<Set<string>>(new Set()); // casos ya procesados en esta sesión
 
   useEffect(() => subscribeFlujoConfig(cfg => { setFlujoCfg(cfg); setFlujoDraft(cfg); }), []);
+
+  // Diccionario de analistas en Redshift: se sincroniza con los usuarios de Lens
+  // al abrir la Bandeja, para poder leer los logs por nombre/correo.
+  useEffect(() => {
+    getAllUsers()
+      .then(us => sincronizarAnalistas(us.map(u => ({ uid: u.uid, email: u.email, displayName: u.displayName, role: u.role, disabled: u.disabled }))))
+      .catch(() => {});
+  }, []);
 
   const abrirFlujo = () => { setFlujoDraft(flujoCfg); setFlujoMsg(null); setShowFlujo(s => !s); };
   const guardarFlujo = async () => {
@@ -663,6 +672,14 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
         estado: r.estado, fuente: r.fuente, delitosUnicos: r.delitosUnicos,
         decision: r.decision, razon: r.razon, coincidencias: r.coincidencias, pep: r.pep, alertas,
       }).catch(() => {});
+      // Espejo analítico: deja la conclusión del motor y si el caso quedó retenido
+      // por delito sensible (lo que hay que poder auditar con el flujo automático).
+      logScreening(caso, clasificar(caso), {
+        fuente: r.fuente, estado: r.estado, decision: r.decision,
+        delitosUnicos: r.delitosUnicos, pep: r.pep,
+        categoriasSensibles: retenidoPorDelito(r),
+        coincidencias: r.coincidencias,
+      });
     }
   };
 

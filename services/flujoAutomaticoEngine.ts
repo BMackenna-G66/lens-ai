@@ -13,6 +13,7 @@ import { enviarCierreAdmin, adminCierreDisponible } from './adminCierreService';
 import { sfUpdateDisponible } from './salesforceCaseService';
 import { registrarCierreCanal, statusDeCaso } from './caseStatusService';
 import { registrarAuditoria } from './caseAuditService';
+import { logCierre, ACTOR_SISTEMA } from './colasLogService';
 import { tipologiaParaDecision, paisHabilitado } from './flujoAutomaticoService';
 import type { FlujoOfacConfig } from './flujoAutomaticoService';
 import { categoriasSensibles } from './delitosSensibles';
@@ -104,6 +105,7 @@ export async function procesarCasoAuto(
           if (r.yaEnviada || r.sf?.ok) {
             res.sf = 'ok';
             await registrarCierreCanal(caso.id, 'sf', { ok: true, tipologia: tipoId }, actor).catch(() => {});
+            logCierre(caso, 'ofac', { canal: 'SF', ok: true, automatico: true, tipologia: tipoId }, ACTOR_SISTEMA);
           } else {
             res.sf = 'error';
             res.detalle = r.sf?.errors?.join('; ') ?? `HTTP ${r.sf?.status ?? 0}`;
@@ -136,6 +138,10 @@ export async function procesarCasoAuto(
           if (r.ok) {
             res.admin = 'ok';
             await registrarCierreCanal(caso.id, 'admin', { ok: true, tipologia: tipoId }, actor).catch(() => {});
+            logCierre(caso, 'ofac', {
+              canal: 'ADMIN', ok: true, automatico: true, tipologia: tipoId,
+              statusEnviado: tipo.status, ofacFlag: ofacFlagPara(tipo.status), lastStep: tipo.lastStepDefault,
+            }, ACTOR_SISTEMA);
           } else {
             res.admin = 'error';
             res.detalle = r.error ?? res.detalle ?? 'Admin devolvió error';

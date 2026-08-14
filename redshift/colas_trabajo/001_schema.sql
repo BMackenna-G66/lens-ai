@@ -48,6 +48,8 @@ CREATE TABLE IF NOT EXISTS colas_trabajo.analista (
     actor_id            VARCHAR(64)   NOT NULL,   -- uid de la sesión (o 'system')
     nombre              VARCHAR(160),
     email               VARCHAR(160),
+    rol                 VARCHAR(40),              -- rol en Lens (Lider | Analista | ...)
+    deshabilitado       BOOLEAN,
     es_sistema          BOOLEAN       DEFAULT FALSE,  -- TRUE para el flujo automático
     primer_evento_en    TIMESTAMP,
     ultimo_evento_en    TIMESTAMP,
@@ -118,6 +120,8 @@ CREATE TABLE IF NOT EXISTS colas_trabajo.cierre (
     http_status         INTEGER,
     detalle_error       VARCHAR(1000),
     actor_id            VARCHAR(64),
+    actor_nombre        VARCHAR(160),             -- denormalizado: quién cerró, legible
+    actor_tipo          VARCHAR(10),              -- USER | SYSTEM (flujo automático)
     ocurrido_en         TIMESTAMP,
     cargado_en          TIMESTAMP     DEFAULT SYSDATE,
     PRIMARY KEY (cierre_id)
