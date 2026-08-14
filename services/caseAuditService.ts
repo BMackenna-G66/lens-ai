@@ -6,6 +6,7 @@ import { collection, addDoc, Firestore } from 'firebase/firestore';
 import { getDb } from './firebaseService';
 import { CASOS_COLLECTION } from './casosService';
 import type { EventoAuditoriaCaso } from './casosComplianceTypes';
+import { logEvento } from './colasLogService';
 
 type NuevoEvento = Omit<EventoAuditoriaCaso, 'eventId' | 'numeroCaso' | 'timestamp'>;
 
@@ -29,5 +30,14 @@ export async function registrarAuditoria(caseId: string, ev: NuevoEvento): Promi
   };
   // Firestore no acepta `undefined`: el round-trip por JSON descarta esas claves.
   const limpio = JSON.parse(JSON.stringify(evento));
+  // Espejo analítico en Redshift (fire-and-forget: si falla, la auditoría de
+  // Firestore ya quedó escrita igual). Es el único punto donde hay que engancharlo:
+  // así TODOS los tipos de evento quedan en colas_trabajo.evento_auditoria.
+  logEvento({
+    eventId: evento.eventId, numeroCaso: evento.numeroCaso, tipo: evento.tipo,
+    actorId: evento.actorId, actorTipo: evento.actorTipo, timestamp: evento.timestamp,
+    correlationId: evento.correlationId, versionCaso: evento.versionCaso,
+    cambios: evento.cambios, metadata: evento.metadata,
+  });
   await addDoc(collection(db, CASOS_COLLECTION, caseId, 'auditoria'), limpio);
 }

@@ -15,7 +15,10 @@ export const colasLogDisponible = (): boolean => !!PROXY;
 
 type Fila = { tabla: string; datos: Record<string, unknown> };
 
-export interface ActorLog { uid: string; nombre: string; email?: string }
+export interface ActorLog { uid: string; nombre: string; email?: string; esSistema?: boolean }
+
+// Actor del flujo automático: queda distinguible de una persona en la auditoría.
+export const ACTOR_SISTEMA: ActorLog = { uid: 'system', nombre: 'Flujo automático', esSistema: true };
 
 // Envío fire-and-forget: nunca lanza ni bloquea al que llama.
 async function enviar(eventos: Fila[]): Promise<void> {
@@ -66,7 +69,7 @@ function filaAnalista(actor?: ActorLog): Fila[] {
       actor_id: actor.uid,
       nombre: actor.nombre,
       email: actor.email ?? null,
-      es_sistema: actor.uid === 'system',
+      es_sistema: actor.esSistema ?? actor.uid === 'system',
       ultimo_evento_en: ahora(),
     },
   }];
@@ -109,7 +112,9 @@ export function logCierre(caso: CasoSF, cola: string, cierre: CierreLog, actor?:
         last_step: cierre.lastStep ?? null,
         http_status: cierre.httpStatus ?? null,
         detalle_error: cierre.detalleError ?? null,
-        actor_id: actor?.uid ?? 'system',
+        actor_id: actor?.uid ?? ACTOR_SISTEMA.uid,
+        actor_nombre: actor?.nombre ?? ACTOR_SISTEMA.nombre,
+        actor_tipo: (actor?.esSistema ?? !actor) ? 'SYSTEM' : 'USER',
         ocurrido_en: en,
       },
     },
@@ -195,4 +200,61 @@ export function logConfigFlujo(
       },
     },
   ]);
+}
+
+// ── Diccionario de usuarios de Lens ──────────────────────────────────────────
+// Sincroniza la tabla `analista` con los usuarios del proyecto (Firestore
+// `users`), para que los logs se puedan leer por nombre/correo sin depender de
+// que la persona haya actuado antes. Se llama al abrir la Bandeja.
+export interface UsuarioLens {
+  uid: string; email?: string; displayName?: string; role?: string; disabled?: boolean;
+}
+
+export function sincronizarAnalistas(usuarios: UsuarioLens[]): void {
+  const filas: Fila[] = usuarios
+    .filter(u => u?.uid)
+    .map(u => ({
+      tabla: 'analista',
+      datos: {
+        actor_id: u.uid,
+        nombre: u.displayName || u.email || u.uid,
+        email: u.email ?? null,
+        rol: u.role ?? null,
+        deshabilitado: u.disabled ?? false,
+        es_sistema: false,
+      },
+    }));
+  // El flujo automático también es un "actor": queda en la tabla desde el arranque.
+  filas.push({
+    tabla: 'analista',
+    datos: { actor_id: ACTOR_SISTEMA.uid, nombre: ACTOR_SISTEMA.nombre, rol: 'Sistema', es_sistema: true },
+  });
+  // De a 50 por request (el logger acepta hasta 100).
+  for (let i = 0; i < filas.length; i += 50) void enviar(filas.slice(i, i + 50));
+}
+
+// ── Espejo del evento de auditoría (todo lo que registra caseAuditService) ────
+export interface EventoLog {
+  eventId: string; numeroCaso: string; tipo: string;
+  actorId?: string; actorTipo?: string; timestamp?: string;
+  correlationId?: string; versionCaso?: number;
+  cambios?: unknown; metadata?: unknown;
+}
+
+export function logEvento(ev: EventoLog): void {
+  void enviar([{
+    tabla: 'evento_auditoria',
+    datos: {
+      event_id: ev.eventId,
+      numero_caso: ev.numeroCaso,
+      tipo: ev.tipo,
+      actor_id: ev.actorId ?? null,
+      actor_tipo: ev.actorTipo ?? null,
+      ocurrido_en: (ev.timestamp || ahora()).replace('T', ' ').replace('Z', '').slice(0, 23),
+      correlation_id: ev.correlationId ?? null,
+      version_caso: ev.versionCaso ?? null,
+      cambios: ev.cambios ?? null,
+      metadata: ev.metadata ?? null,
+    },
+  }]);
 }
