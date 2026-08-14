@@ -47,16 +47,30 @@ Sin AWS ni dependencias (stubea boto3):
 python3 tests/test_app.py
 ```
 
-## Deploy
+## Dos modos de escritura
+
+| | `MODO=tcp` (recomendado) | `MODO=dataapi` |
+|---|---|---|
+| Cómo conecta | Usuario/contraseña de Redshift, igual que tu editor SQL | Redshift Data API |
+| Usuario | **El mismo que ya tenés habilitado** | Un usuario mapeado por IAM |
+| Permisos IAM en la cuenta del cluster | **Ninguno** | `redshift-data:*` + `GetClusterCredentials` |
+| Requisito | Que el endpoint sea alcanzable desde la Lambda | Permisos IAM |
+
+Como el usuario de Redshift tiene que ser **el mismo** que ya carga información, el
+modo correcto es **tcp**: así no depende de permisos IAM que hoy no existen.
+
+## Deploy (modo tcp)
 
 ```bash
-sam build && sam deploy \
-  --parameter-overrides "ApiSecretValue=<secreto-nuevo> RedshiftDbUser=<usuario-redshift>"
+sam build --use-container && sam deploy --parameter-overrides \
+  "ApiSecretValue=<secreto-nuevo> Modo=tcp \
+   RedshiftHost=<endpoint-del-cluster> RedshiftUser=<usuario> RedshiftPassword=<clave>"
 ```
 
-Si el cluster está en **otra cuenta** que la Lambda, agregar
-`AssumeRoleArn=arn:aws:iam::235997980558:role/<rol-con-redshift-data>` y el handler
-asume ese rol antes de escribir.
+`--use-container` es porque el driver oficial (`redshift-connector`) trae
+dependencias nativas. Si el build da problemas, en `src/requirements.txt` se puede
+cambiar a `pg8000` (100% Python): el código ya tiene el fallback y no hay que tocar
+nada más.
 
 ## ⚠️ Bloqueos actuales (necesitan a alguien con permisos)
 
@@ -71,17 +85,20 @@ cluster), rol `compliance_analyst`:
 | `cloudformation:ListStacks` | ❌ AccessDenied |
 | `secretsmanager:ListSecrets` | ❌ AccessDenied |
 
-Es decir: ese rol solo sirve para consultar por el editor SQL (JDBC), no por API.
-Para poner esto en marcha hace falta **una** de estas dos:
+Ese rol solo sirve para consultar por el editor SQL (JDBC), no por API. Con
+**MODO=tcp** eso deja de importar para escribir (se usa usuario/contraseña), pero
+igual hay dos cosas por resolver:
 
-1. **Desplegar en la cuenta 561521480266** (donde el perfil `compliance-admin` sí
-   tiene CloudFormation) y darle a la Lambda acceso cross-account a Redshift
-   (`AssumeRoleArn` + un rol en 235997980558 con `redshift-data:ExecuteStatement`
-   y `redshift:GetClusterCredentials`).
-2. **Pedir permisos** de `redshift-data` + Lambda/CloudFormation en 235997980558.
+1. **Dónde se despliega la Lambda.** En 235997980558 no se puede (sin
+   CloudFormation/Lambda). Sí en **561521480266**, donde el perfil
+   `compliance-admin` tiene CloudFormation. En modo tcp la cuenta da lo mismo:
+   solo tiene que alcanzar el endpoint.
+2. **Que el endpoint sea alcanzable.** Si el cluster es público y su security group
+   permite la salida de la Lambda, funciona directo. Si el SG solo permite IPs de
+   oficina/VPN, hay que agregar la regla (o poner la Lambda en una VPC con NAT de
+   IP fija). **Esto lo tiene que confirmar alguien con acceso al SG.**
 
-Mientras eso no exista, el DDL se ejecuta a mano desde el editor SQL (2 minutos) y
-esta Lambda queda lista pero sin desplegar.
+El DDL, mientras tanto, se ejecuta a mano desde el editor SQL (2 minutos).
 
 ## Pendiente de decisión: dónde vive el secreto
 

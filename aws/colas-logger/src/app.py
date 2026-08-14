@@ -2,16 +2,21 @@
 Logger de la gestión de colas de Lens → Redshift (schema `colas_trabajo`).
 
 INDEPENDIENTE del receptor de casos (aws/casos-receptor): stack propio, función
-propia, secreto propio y código propio. No importa ni modifica nada de ese
-proyecto — está inspirado en él (Function URL + header x-api-secret) pero no lo
-reutiliza, para que un cambio acá no pueda romper la ingesta de casos.
+propia, URL propia, secreto propio, rol propio y código propio. No importa ni
+modifica nada de ese proyecto — está inspirado en él (Function URL + header
+x-api-secret) pero no lo reutiliza, así los dos no pueden chocar.
 
-Contrato: POST con
-    { "eventos": [ { "tabla": "evento_auditoria", "datos": { ... } }, ... ] }
+Dos modos de escritura (se elige por env var):
 
-Escribe en Redshift por la **Data API** (sin VPC, sin driver). Cada fila se
-inserta de forma idempotente: se borra por clave natural y se inserta de nuevo,
-así reprocesar el mismo evento no duplica.
+  · MODO=tcp (default recomendado) — conexión directa al cluster con el MISMO
+    usuario de base de datos que ya usás para cargar información. No requiere
+    ningún permiso IAM en la cuenta del cluster; solo que el endpoint sea
+    alcanzable. Usa `redshift_connector` (driver puro Python de AWS).
+
+  · MODO=dataapi — Redshift Data API. Requiere permisos IAM
+    (redshift-data:ExecuteStatement) en la cuenta del cluster.
+
+Contrato: POST { "eventos": [ { "tabla": "...", "datos": { ... } }, ... ] }
 
 La app llama esto fire-and-forget: si falla, la Bandeja sigue funcionando y
 Firestore sigue siendo la fuente operacional.
@@ -20,26 +25,30 @@ Firestore sigue siendo la fuente operacional.
 import json
 import logging
 import os
-import time
-
-import boto3
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 API_SECRET = os.environ.get("API_SECRET", "")
-CLUSTER = os.environ.get("REDSHIFT_CLUSTER", "")
-DATABASE = os.environ.get("REDSHIFT_DATABASE", "dev")
-DB_USER = os.environ.get("REDSHIFT_DB_USER", "")
-SECRET_ARN = os.environ.get("REDSHIFT_SECRET_ARN", "")
 SCHEMA = os.environ.get("REDSHIFT_SCHEMA", "colas_trabajo")
-ASSUME_ROLE_ARN = os.environ.get("ASSUME_ROLE_ARN", "")   # cross-account
-WAIT_RESULT = os.environ.get("WAIT_FOR_RESULT", "") == "1"
 MAX_EVENTOS = int(os.environ.get("MAX_EVENTOS", "100"))
 
+# Modo TCP (usuario/contraseña de Redshift — el mismo que ya está habilitado).
+HOST = os.environ.get("REDSHIFT_HOST", "")
+PORT = int(os.environ.get("REDSHIFT_PORT", "5439"))
+DATABASE = os.environ.get("REDSHIFT_DATABASE", "dev")
+USER = os.environ.get("REDSHIFT_USER", "")
+PASSWORD = os.environ.get("REDSHIFT_PASSWORD", "")
+
+# Modo Data API (alternativo).
+CLUSTER = os.environ.get("REDSHIFT_CLUSTER", "")
+DB_USER = os.environ.get("REDSHIFT_DB_USER", "")
+
+MODO = os.environ.get("MODO", "").lower() or ("tcp" if HOST else "dataapi")
+
 # ── Whitelist de tablas y columnas ───────────────────────────────────────────
-# El SQL se arma SOLO desde este mapa (nunca con nombres que vengan del request),
-# y los valores viajan como parámetros de la Data API. Sin concatenar datos.
+# El SQL se arma SOLO desde este mapa (nunca con nombres que vengan del request)
+# y los valores viajan como parámetros. Sin concatenar datos → sin inyección.
 #   tipo: '' = texto · 'int' · 'bool' · 'ts' = timestamp · 'json' = SUPER
 TABLAS = {
     "caso": {
@@ -118,90 +127,121 @@ def _respuesta(status, body):
     }
 
 
-def _cliente_redshift():
-    """Cliente de la Data API. Si ASSUME_ROLE_ARN está seteado, asume ese rol
-    primero (caso cross-account: la Lambda vive en una cuenta y Redshift en otra)."""
-    if not ASSUME_ROLE_ARN:
-        return boto3.client("redshift-data")
-    creds = boto3.client("sts").assume_role(
-        RoleArn=ASSUME_ROLE_ARN, RoleSessionName="colas-logger"
-    )["Credentials"]
-    return boto3.client(
-        "redshift-data",
-        aws_access_key_id=creds["AccessKeyId"],
-        aws_secret_access_key=creds["SecretAccessKey"],
-        aws_session_token=creds["SessionToken"],
-    )
-
-
-def _expr(col, tipo):
-    """Expresión SQL del valor para una columna. Los vacíos entran como NULL."""
-    p = f":{col}"
+def _normalizar(valor, tipo):
+    """Valor del request → valor Python que entiende el driver."""
+    if valor is None or valor == "":
+        return None
     if tipo == "int":
-        return f"NULLIF({p}, '')::BIGINT"
+        return int(valor)
     if tipo == "bool":
-        return f"NULLIF({p}, '')::BOOLEAN"
-    if tipo == "ts":
-        return f"NULLIF({p}, '')::TIMESTAMP"
+        return bool(valor)
     if tipo == "json":
-        return f"CASE WHEN {p} = '' THEN NULL ELSE JSON_PARSE({p}) END"
-    return f"NULLIF({p}, '')"
+        return valor if isinstance(valor, str) else json.dumps(valor, ensure_ascii=False)
+    return str(valor)
 
 
-def _param(col, valor, tipo):
-    """Valor → parámetro de la Data API (siempre string)."""
-    if valor is None:
-        s = ""
-    elif tipo == "json":
-        s = valor if isinstance(valor, str) else json.dumps(valor, ensure_ascii=False)
-    elif tipo == "bool":
-        s = "true" if valor is True else ("false" if valor is False else "")
-    else:
-        s = str(valor)
-    return {"name": col, "value": s}
-
-
-def _sql_de_fila(tabla, datos):
-    """Devuelve (sql_delete, sql_insert, parametros) para una fila."""
+def _sentencias(tabla, datos):
+    """(delete_sql, delete_vals, insert_sql, insert_vals) para una fila.
+    Usa placeholders %s: los datos nunca se concatenan en el SQL."""
     spec = TABLAS[tabla]
-    cols = [c for c in spec["cols"] if c in datos]           # solo lo que vino
+    cols = [c for c in spec["cols"] if c in datos]      # columnas desconocidas: se ignoran
     for pk in spec["pk"]:
         if pk not in cols:
             raise ValueError(f"falta la clave {pk} para {tabla}")
 
-    params = [_param(c, datos[c], spec["cols"][c]) for c in cols]
     destino = f"{SCHEMA}.{tabla}"
+    exprs, vals = [], []
+    for c in cols:
+        tipo = spec["cols"][c]
+        v = _normalizar(datos[c], tipo)
+        if tipo == "json":
+            exprs.append("JSON_PARSE(%s)" if v is not None else "%s")
+        elif tipo == "ts":
+            exprs.append("%s::TIMESTAMP")
+        else:
+            exprs.append("%s")
+        vals.append(v)
 
-    where = " AND ".join(f"{pk} = :{pk}" for pk in spec["pk"])
-    sql_del = f"DELETE FROM {destino} WHERE {where}"
-    sql_ins = (
-        f"INSERT INTO {destino} ({', '.join(cols)}) VALUES "
-        f"({', '.join(_expr(c, spec['cols'][c]) for c in cols)})"
-    )
-    # El DELETE solo necesita los parámetros de la PK.
-    params_del = [p for p in params if p["name"] in spec["pk"]]
-    return sql_del, sql_ins, params, params_del
+    where = " AND ".join(f"{pk} = %s" for pk in spec["pk"])
+    del_vals = [_normalizar(datos[pk], spec["cols"][pk]) for pk in spec["pk"]]
+    delete_sql = f"DELETE FROM {destino} WHERE {where}"
+    insert_sql = f"INSERT INTO {destino} ({', '.join(cols)}) VALUES ({', '.join(exprs)})"
+    return delete_sql, del_vals, insert_sql, vals
 
 
-def _ejecutar(client, sql, params):
-    kwargs = {"Database": DATABASE, "Sql": sql, "Parameters": params}
-    if CLUSTER:
-        kwargs["ClusterIdentifier"] = CLUSTER
-    if SECRET_ARN:
-        kwargs["SecretArn"] = SECRET_ARN
-    elif DB_USER:
-        kwargs["DbUser"] = DB_USER
-    res = client.execute_statement(**kwargs)
-    sid = res["Id"]
-    if WAIT_RESULT:
-        for _ in range(30):
-            d = client.describe_statement(Id=sid)
-            if d["Status"] in ("FINISHED", "FAILED", "ABORTED"):
-                if d["Status"] != "FINISHED":
-                    raise RuntimeError(f"{d['Status']}: {d.get('Error', '')}")
-                break
-            time.sleep(0.3)
-    return sid
+# ── Modo TCP: mismo usuario de base de datos que ya está habilitado ───────────
+def _conectar_tcp():
+    """Conexión al cluster. Prefiere el driver oficial de AWS; si no está
+    empaquetado, usa pg8000 (100% Python, más fácil de meter en la Lambda).
+    Los dos hablan DB-API con placeholders %s, así que el resto no cambia."""
+    try:
+        import redshift_connector
+        return redshift_connector.connect(
+            host=HOST, port=PORT, database=DATABASE, user=USER, password=PASSWORD,
+            timeout=20,
+        )
+    except ImportError:
+        import ssl
+        import pg8000.dbapi
+        return pg8000.dbapi.connect(
+            host=HOST, port=PORT, database=DATABASE, user=USER, password=PASSWORD,
+            ssl_context=ssl.create_default_context() if os.environ.get("REDSHIFT_SSL", "1") == "1" else None,
+        )
+
+
+def _escribir_tcp(filas):
+    conn = _conectar_tcp()
+    ok, errores = 0, []
+    try:
+        conn.autocommit = False
+        cur = conn.cursor()
+        for i, (tabla, datos) in filas:
+            try:
+                d_sql, d_vals, i_sql, i_vals = _sentencias(tabla, datos)
+                cur.execute(d_sql, tuple(d_vals))   # idempotencia por clave natural
+                cur.execute(i_sql, tuple(i_vals))
+                ok += 1
+            except Exception as e:  # noqa: BLE001 — una fila mala no corta el lote
+                conn.rollback()
+                logger.exception("fallo escribiendo en %s", tabla)
+                errores.append({"i": i, "tabla": tabla, "error": str(e)})
+        conn.commit()
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+    return ok, errores
+
+
+# ── Modo Data API (alternativo; requiere permisos IAM en la cuenta del cluster)
+def _escribir_dataapi(filas):
+    import boto3  # import perezoso
+
+    client = boto3.client("redshift-data")
+    ok, errores = 0, []
+    for i, (tabla, datos) in filas:
+        try:
+            d_sql, d_vals, i_sql, i_vals = _sentencias(tabla, datos)
+            # La Data API usa parámetros nombrados: se re-arma con :p0, :p1, …
+            for sql, vals in ((d_sql, d_vals), (i_sql, i_vals)):
+                nombres = [f"p{n}" for n in range(len(vals))]
+                sql_n = sql
+                for nom in nombres:
+                    sql_n = sql_n.replace("%s", f":{nom}", 1)
+                params = [
+                    {"name": nom, "value": "" if v is None else ("true" if v is True else "false" if v is False else str(v))}
+                    for nom, v in zip(nombres, vals)
+                ]
+                client.execute_statement(
+                    ClusterIdentifier=CLUSTER, Database=DATABASE, DbUser=DB_USER,
+                    Sql=sql_n, Parameters=params,
+                )
+            ok += 1
+        except Exception as e:  # noqa: BLE001
+            logger.exception("fallo escribiendo en %s", tabla)
+            errores.append({"i": i, "tabla": tabla, "error": str(e)})
+    return ok, errores
 
 
 def lambda_handler(event, _context):
@@ -214,10 +254,12 @@ def lambda_handler(event, _context):
     headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
     if not API_SECRET or headers.get("x-api-secret") != API_SECRET:
         return _respuesta(401, {"error": "No autorizado"})
-    if not CLUSTER:
-        return _respuesta(500, {"error": "Falta REDSHIFT_CLUSTER"})
-    if not DB_USER and not SECRET_ARN:
-        return _respuesta(500, {"error": "Falta REDSHIFT_DB_USER o REDSHIFT_SECRET_ARN"})
+
+    if MODO == "tcp":
+        if not HOST or not USER or not PASSWORD:
+            return _respuesta(500, {"error": "Faltan REDSHIFT_HOST / REDSHIFT_USER / REDSHIFT_PASSWORD"})
+    elif not CLUSTER or not DB_USER:
+        return _respuesta(500, {"error": "Faltan REDSHIFT_CLUSTER / REDSHIFT_DB_USER"})
 
     try:
         body = json.loads(event.get("body") or "{}")
@@ -230,21 +272,24 @@ def lambda_handler(event, _context):
     if len(eventos) > MAX_EVENTOS:
         return _respuesta(400, {"error": f"Máximo {MAX_EVENTOS} eventos por request"})
 
-    client = _cliente_redshift()
-    ok, errores = 0, []
+    # Valida el lote ANTES de abrir la conexión (tabla permitida + datos presentes).
+    filas, errores = [], []
     for i, ev in enumerate(eventos):
         tabla = (ev or {}).get("tabla")
         datos = (ev or {}).get("datos")
-        if tabla not in TABLAS or not isinstance(datos, dict):
+        if tabla not in TABLAS or not isinstance(datos, dict) or not datos:
             errores.append({"i": i, "error": f"tabla inválida o datos vacíos: {tabla}"})
             continue
-        try:
-            sql_del, sql_ins, params, params_del = _sql_de_fila(tabla, datos)
-            _ejecutar(client, sql_del, params_del)
-            _ejecutar(client, sql_ins, params)
-            ok += 1
-        except Exception as e:  # noqa: BLE001 — un evento malo no corta el lote
-            logger.exception("fallo escribiendo en %s", tabla)
-            errores.append({"i": i, "tabla": tabla, "error": str(e)})
+        filas.append((i, (tabla, datos)))
 
-    return _respuesta(200 if not errores else 207, {"ok": ok, "errores": errores})
+    ok = 0
+    if filas:
+        escribir = _escribir_tcp if MODO == "tcp" else _escribir_dataapi
+        try:
+            ok, errs = escribir(filas)
+            errores.extend(errs)
+        except Exception as e:  # noqa: BLE001 — no se pudo ni conectar
+            logger.exception("fallo de conexión a Redshift")
+            return _respuesta(502, {"error": f"Redshift inalcanzable: {e}", "ok": 0})
+
+    return _respuesta(200 if not errores else 207, {"ok": ok, "modo": MODO, "errores": errores})

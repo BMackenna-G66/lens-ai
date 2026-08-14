@@ -11,30 +11,40 @@ import sys
 import types
 from pathlib import Path
 
-# ── Stub de boto3 (captura los execute_statement en vez de llamar a AWS) ──────
-EJECUTADOS = []
+# ── Stub del driver de Redshift (captura el SQL en vez de conectarse) ─────────
+EJECUTADOS = []   # [(sql, valores), ...]
 
 
-class _FakeClient:
-    def execute_statement(self, **kwargs):
-        EJECUTADOS.append(kwargs)
-        return {"Id": f"stmt-{len(EJECUTADOS)}"}
-
-    def describe_statement(self, Id):  # noqa: N803
-        return {"Status": "FINISHED"}
+class _FakeCursor:
+    def execute(self, sql, vals=None):
+        EJECUTADOS.append((sql, vals))
 
 
-def _fake_boto3_client(nombre, **_kw):
-    return _FakeClient()
+class _FakeConn:
+    autocommit = False
+
+    def cursor(self):
+        return _FakeCursor()
+
+    def commit(self):
+        pass
+
+    def rollback(self):
+        pass
+
+    def close(self):
+        pass
 
 
-sys.modules["boto3"] = types.SimpleNamespace(client=_fake_boto3_client)
+sys.modules["redshift_connector"] = types.SimpleNamespace(connect=lambda **_kw: _FakeConn())
 
 os.environ.update({
     "API_SECRET": "s3cr3t",
-    "REDSHIFT_CLUSTER": "compliance-redshift-cluster",
+    "MODO": "tcp",
+    "REDSHIFT_HOST": "compliance-redshift-cluster.abc.us-east-1.redshift.amazonaws.com",
     "REDSHIFT_DATABASE": "dev",
-    "REDSHIFT_DB_USER": "compliance",
+    "REDSHIFT_USER": "compliance",
+    "REDSHIFT_PASSWORD": "x",
     "REDSHIFT_SCHEMA": "colas_trabajo",
 })
 
@@ -89,15 +99,15 @@ def test_inserta_evento_auditoria_idempotente():
     assert json.loads(r["body"])["ok"] == 1
     # Un DELETE (por PK) + un INSERT.
     assert len(EJECUTADOS) == 2
-    borrado, insertado = EJECUTADOS
-    assert borrado["Sql"] == "DELETE FROM colas_trabajo.evento_auditoria WHERE event_id = :event_id"
-    assert [p["name"] for p in borrado["Parameters"]] == ["event_id"]
-    assert insertado["Sql"].startswith("INSERT INTO colas_trabajo.evento_auditoria (")
-    assert "JSON_PARSE(:metadata)" in insertado["Sql"]
-    assert "NULLIF(:version_caso, '')::BIGINT" in insertado["Sql"]
-    # El JSON viaja serializado como string.
-    meta = next(p for p in insertado["Parameters"] if p["name"] == "metadata")
-    assert json.loads(meta["value"])["tipologia"] == "liberar_normal"
+    (del_sql, del_vals), (ins_sql, ins_vals) = EJECUTADOS
+    assert del_sql == "DELETE FROM colas_trabajo.evento_auditoria WHERE event_id = %s"
+    assert del_vals == ("ev-1",)
+    assert ins_sql.startswith("INSERT INTO colas_trabajo.evento_auditoria (")
+    assert "JSON_PARSE(%s)" in ins_sql
+    assert "%s::TIMESTAMP" in ins_sql
+    # El JSON viaja serializado; el int como int.
+    assert json.loads(ins_vals[list(ins_sql.split("(")[1].split(")")[0].split(", ")).index("metadata")])["tipologia"] == "liberar_normal"
+    assert 1 in ins_vals
 
 
 def test_tipos_bool_y_nulos():
@@ -109,11 +119,12 @@ def test_tipos_bool_y_nulos():
     }
     r = app.lambda_handler(_evt({"eventos": [{"tabla": "cierre", "datos": datos}]}), None)
     assert r["statusCode"] == 200, r["body"]
-    params = {p["name"]: p["value"] for p in EJECUTADOS[1]["Parameters"]}
-    assert params["resultado_ok"] == "true"
-    assert params["automatico"] == "false"
-    assert params["ofac_flag"] == ""          # entra como NULL vía NULLIF
-    assert "NULLIF(:resultado_ok, '')::BOOLEAN" in EJECUTADOS[1]["Sql"]
+    ins_sql, ins_vals = EJECUTADOS[1]
+    cols = ins_sql.split("(")[1].split(")")[0].split(", ")
+    val = dict(zip(cols, ins_vals))
+    assert val["resultado_ok"] is True
+    assert val["automatico"] is False
+    assert val["ofac_flag"] is None          # None → NULL
 
 
 def test_falta_clave_natural():
@@ -141,8 +152,9 @@ def test_columna_desconocida_se_ignora():
     datos = {"actor_id": "u1", "nombre": "Benja", "columna_rara": "x'; DROP TABLE y;--"}
     r = app.lambda_handler(_evt({"eventos": [{"tabla": "analista", "datos": datos}]}), None)
     assert r["statusCode"] == 200, r["body"]
-    sql = EJECUTADOS[1]["Sql"]
+    sql, vals = EJECUTADOS[1]
     assert "columna_rara" not in sql and "DROP" not in sql
+    assert "x'; DROP TABLE y;--" not in str(vals)
 
 
 if __name__ == "__main__":
