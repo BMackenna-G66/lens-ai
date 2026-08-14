@@ -12,12 +12,13 @@ Parameters:
     Description: Secreto propio del header x-api-secret (NO reusar el del receptor).
   Modo:
     Type: String
-    Default: tcp
-    AllowedValues: [tcp, dataapi]
+    Default: dataapi
+    AllowedValues: [dataapi, tcp]
     Description: >
-      tcp = conexión directa con usuario/contraseña de Redshift (el mismo que ya
-      está habilitado; no requiere permisos IAM en la cuenta del cluster).
-      dataapi = Redshift Data API (requiere permisos IAM en esa cuenta).
+      dataapi = Redshift Data API con auth IAM (sin password, sin VPC). Es el modo
+      que corresponde a este cluster, que NO es público.
+      tcp = conexión con usuario/contraseña; solo sirve si la Lambda está dentro
+      de la VPC del cluster.
   RedshiftHost:
     Type: String
     Default: ''
@@ -46,8 +47,8 @@ Parameters:
     Description: Identificador del cluster (solo modo dataapi).
   RedshiftDbUser:
     Type: String
-    Default: ''
-    Description: Usuario mapeado por IAM (solo modo dataapi).
+    Default: awsuser
+    Description: Usuario de Redshift mapeado por IAM (modo dataapi).
 
 Conditions:
   UsaDataApi: !Equals [!Ref Modo, dataapi]
@@ -89,10 +90,12 @@ Resources:
                 Action:
                   - redshift-data:ExecuteStatement
                   - redshift-data:DescribeStatement
-                Resource: '*'
+                Resource: !Sub 'arn:aws:redshift:${AWS::Region}:${AWS::AccountId}:cluster:${RedshiftCluster}'
               - Effect: Allow
                 Action: redshift:GetClusterCredentials
-                Resource: '*'
+                Resource:
+                  - !Sub 'arn:aws:redshift:${AWS::Region}:${AWS::AccountId}:dbuser:${RedshiftCluster}/${RedshiftDbUser}'
+                  - !Sub 'arn:aws:redshift:${AWS::Region}:${AWS::AccountId}:dbname:${RedshiftCluster}/${RedshiftDatabase}'
           - !Ref AWS::NoValue
       # Endpoint HTTPS nativo (sin API Gateway). La protección es el header
       # x-api-secret que valida el handler.

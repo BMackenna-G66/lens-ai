@@ -124,7 +124,10 @@ def test_tipos_bool_y_nulos():
     val = dict(zip(cols, ins_vals))
     assert val["resultado_ok"] is True
     assert val["automatico"] is False
-    assert val["ofac_flag"] is None          # None → NULL
+    # La columna nula se OMITE del INSERT (la Data API no acepta valores vacíos):
+    # queda NULL por defecto en la tabla.
+    assert "ofac_flag" not in val
+    assert "::BOOLEAN" in ins_sql and "::TIMESTAMP" in ins_sql
 
 
 def test_falta_clave_natural():

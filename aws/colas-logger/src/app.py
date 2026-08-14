@@ -8,13 +8,14 @@ x-api-secret) pero no lo reutiliza, así los dos no pueden chocar.
 
 Dos modos de escritura (se elige por env var):
 
-  · MODO=tcp (default recomendado) — conexión directa al cluster con el MISMO
-    usuario de base de datos que ya usás para cargar información. No requiere
-    ningún permiso IAM en la cuenta del cluster; solo que el endpoint sea
-    alcanzable. Usa `redshift_connector` (driver puro Python de AWS).
+  · MODO=dataapi (el que aplica acá) — Redshift Data API. No necesita VPC ni
+    contraseña: el rol de la Lambda usa auth IAM con DbUser (awsuser), igual que
+    el otro proyecto que ya carga este cluster. Verificado contra
+    compliance-redshift-cluster (cuenta 561521480266).
 
-  · MODO=dataapi — Redshift Data API. Requiere permisos IAM
-    (redshift-data:ExecuteStatement) en la cuenta del cluster.
+  · MODO=tcp — conexión directa con usuario/contraseña. OJO: este cluster NO es
+    público (vive en una VPC), así que este modo solo sirve si la Lambda se mete
+    en la misma VPC. Se deja implementado por si el cluster cambia.
 
 Contrato: POST { "eventos": [ { "tabla": "...", "datos": { ... } }, ... ] }
 
@@ -45,6 +46,7 @@ CLUSTER = os.environ.get("REDSHIFT_CLUSTER", "")
 DB_USER = os.environ.get("REDSHIFT_DB_USER", "")
 
 MODO = os.environ.get("MODO", "").lower() or ("tcp" if HOST else "dataapi")
+DB_USER = DB_USER or "awsuser"
 
 # ── Whitelist de tablas y columnas ───────────────────────────────────────────
 # El SQL se arma SOLO desde este mapa (nunca con nombres que vengan del request)
@@ -142,25 +144,40 @@ def _normalizar(valor, tipo):
 
 def _sentencias(tabla, datos):
     """(delete_sql, delete_vals, insert_sql, insert_vals) para una fila.
-    Usa placeholders %s: los datos nunca se concatenan en el SQL."""
+    Usa placeholders %s: los datos nunca se concatenan en el SQL.
+
+    Las columnas con valor nulo se OMITEN del INSERT (quedan NULL por defecto).
+    Es necesario: la Data API rechaza parámetros con string vacío
+    ("Invalid length for parameter ... valid min length: 1"), así que no se puede
+    mandar '' como marcador de nulo. Verificado contra el cluster."""
     spec = TABLAS[tabla]
-    cols = [c for c in spec["cols"] if c in datos]      # columnas desconocidas: se ignoran
+    destino = f"{SCHEMA}.{tabla}"
+
+    # Columnas desconocidas: se ignoran. Columnas nulas: se omiten.
+    cols, exprs, vals = [], [], []
+    for c, tipo in spec["cols"].items():
+        if c not in datos:
+            continue
+        v = _normalizar(datos[c], tipo)
+        if v is None:
+            continue
+        # Casts explícitos: en Data API todos los valores viajan como texto.
+        if tipo == "json":
+            exprs.append("JSON_PARSE(%s)")
+        elif tipo == "ts":
+            exprs.append("%s::TIMESTAMP")
+        elif tipo == "int":
+            exprs.append("%s::BIGINT")
+        elif tipo == "bool":
+            exprs.append("%s::BOOLEAN")
+        else:
+            exprs.append("%s")
+        cols.append(c)
+        vals.append(v)
+
     for pk in spec["pk"]:
         if pk not in cols:
             raise ValueError(f"falta la clave {pk} para {tabla}")
-
-    destino = f"{SCHEMA}.{tabla}"
-    exprs, vals = [], []
-    for c in cols:
-        tipo = spec["cols"][c]
-        v = _normalizar(datos[c], tipo)
-        if tipo == "json":
-            exprs.append("JSON_PARSE(%s)" if v is not None else "%s")
-        elif tipo == "ts":
-            exprs.append("%s::TIMESTAMP")
-        else:
-            exprs.append("%s")
-        vals.append(v)
 
     where = " AND ".join(f"{pk} = %s" for pk in spec["pk"])
     del_vals = [_normalizar(datos[pk], spec["cols"][pk]) for pk in spec["pk"]]
@@ -235,13 +252,15 @@ def _escribir_dataapi(filas):
         try:
             d_sql, d_vals, i_sql, i_vals = _sentencias(tabla, datos)
             # La Data API usa parámetros nombrados: se re-arma con :p0, :p1, …
+            # Todos los valores viajan como TEXTO (los casts van en el SQL) y
+            # ninguno puede ser vacío: por eso las columnas nulas ya se omitieron.
             for sql, vals in ((d_sql, d_vals), (i_sql, i_vals)):
                 nombres = [f"p{n}" for n in range(len(vals))]
                 sql_n = sql
                 for nom in nombres:
                     sql_n = sql_n.replace("%s", f":{nom}", 1)
                 params = [
-                    {"name": nom, "value": "" if v is None else ("true" if v is True else "false" if v is False else str(v))}
+                    {"name": nom, "value": "true" if v is True else "false" if v is False else str(v)}
                     for nom, v in zip(nombres, vals)
                 ]
                 client.execute_statement(

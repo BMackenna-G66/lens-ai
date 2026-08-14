@@ -47,65 +47,52 @@ Sin AWS ni dependencias (stubea boto3):
 python3 tests/test_app.py
 ```
 
-## Dos modos de escritura
+## Cómo escribe (verificado contra el cluster)
 
-| | `MODO=tcp` (recomendado) | `MODO=dataapi` |
+El cluster **no es público**: vive en `vpc-0c505d3b18a721212` (SG `sg-044db66f536ae0db1`),
+así que una Lambda fuera de esa VPC **no lo alcanza por TCP**. Por eso el modo que
+corresponde es **Data API**, igual que el otro proyecto que ya carga este cluster:
+va por la API de AWS con auth IAM, **sin password y sin VPC**.
+
+| | `MODO=dataapi` (default) | `MODO=tcp` |
 |---|---|---|
-| Cómo conecta | Usuario/contraseña de Redshift, igual que tu editor SQL | Redshift Data API |
-| Usuario | **El mismo que ya tenés habilitado** | Un usuario mapeado por IAM |
-| Permisos IAM en la cuenta del cluster | **Ninguno** | `redshift-data:*` + `GetClusterCredentials` |
-| Requisito | Que el endpoint sea alcanzable desde la Lambda | Permisos IAM |
+| Auth | IAM + `DbUser=awsuser` | usuario/contraseña |
+| VPC | No hace falta | Obligatoria (cluster privado) |
+| Password | **Ninguno** | Sí |
 
-Como el usuario de Redshift tiene que ser **el mismo** que ya carga información, el
-modo correcto es **tcp**: así no depende de permisos IAM que hoy no existen.
+Datos del cluster (cuenta **561521480266**, la misma donde se despliega):
 
-## Deploy (modo tcp)
+| | |
+|---|---|
+| Cluster | `compliance-redshift-cluster` |
+| Endpoint | `compliance-redshift-cluster.cszw4nrem7jk.us-east-1.redshift.amazonaws.com` |
+| Database | `dev` · Schema `colas_trabajo` |
+| DbUser | `awsuser` |
+
+## Deploy
 
 ```bash
-sam build && sam deploy --parameter-overrides \
-  "ApiSecretValue=<secreto-nuevo> Modo=tcp \
-   RedshiftHost=<endpoint-del-cluster> RedshiftUser=<usuario> RedshiftPassword=<clave>"
+sam build
+sam deploy --parameter-overrides "ApiSecretValue=$(openssl rand -hex 32)"
 ```
 
-**Sin Docker**: se empaqueta `pg8000` (100% Python), así que `sam build` normal
-alcanza — NO usar `--use-container`. Si algún día se prefiere el driver oficial de
-AWS (`redshift-connector`), se descomenta en `src/requirements.txt` y ahí sí hace
-falta `--use-container` con Docker corriendo; el código toma el que esté disponible.
+No hace falta `--use-container` (se empaqueta `pg8000`, 100% Python) ni Docker, y
+**no se pasa ninguna contraseña de Redshift**. El resto de los parámetros ya tienen
+el default correcto (`Modo=dataapi`, cluster, `awsuser`, database `dev`).
 
-### SSL
+Para no dejar el secreto en el historial de la shell ni en los parámetros del
+stack, se puede guardar en Secrets Manager y referenciarlo:
 
-Redshift normalmente exige TLS. La conexión va cifrada por defecto y verificando el
-certificado. Si el cluster usa una CA privada y falla la verificación, se agrega al
-deploy `REDSHIFT_SSL=noverify` (sigue cifrado, no valida el certificado). `0`
-desactiva TLS por completo (no recomendado).
+```bash
+aws secretsmanager create-secret --name colas-logger/api-secret --secret-string "$(openssl rand -hex 32)"
+sam deploy --parameter-overrides "ApiSecretValue={{resolve:secretsmanager:colas-logger/api-secret}}"
+```
 
-## ⚠️ Bloqueos actuales (necesitan a alguien con permisos)
+## Estado del schema en Redshift
 
-Verificado en esta sesión con el SSO activo, cuenta **235997980558** (donde vive el
-cluster), rol `compliance_analyst`:
-
-| Acción | Resultado |
-|---|---|
-| `redshift:DescribeClusters` | ❌ AccessDenied |
-| `redshift-data:ExecuteStatement` | ❌ AccessDenied |
-| `lambda:ListFunctions` | ❌ AccessDenied |
-| `cloudformation:ListStacks` | ❌ AccessDenied |
-| `secretsmanager:ListSecrets` | ❌ AccessDenied |
-
-Ese rol solo sirve para consultar por el editor SQL (JDBC), no por API. Con
-**MODO=tcp** eso deja de importar para escribir (se usa usuario/contraseña), pero
-igual hay dos cosas por resolver:
-
-1. **Dónde se despliega la Lambda.** En 235997980558 no se puede (sin
-   CloudFormation/Lambda). Sí en **561521480266**, donde el perfil
-   `compliance-admin` tiene CloudFormation. En modo tcp la cuenta da lo mismo:
-   solo tiene que alcanzar el endpoint.
-2. **Que el endpoint sea alcanzable.** Si el cluster es público y su security group
-   permite la salida de la Lambda, funciona directo. Si el SG solo permite IPs de
-   oficina/VPN, hay que agregar la regla (o poner la Lambda en una VPC con NAT de
-   IP fija). **Esto lo tiene que confirmar alguien con acceso al SG.**
-
-El DDL, mientras tanto, se ejecuta a mano desde el editor SQL (2 minutos).
+Ya creado y verificado en `dev`: 8 tablas + 3 vistas + las 5 categorías del
+catálogo. Se probaron los INSERT reales (SUPER navegable, booleanos, timestamps,
+`cargado_en` por defecto) y se borraron las filas de prueba.
 
 ## Pendiente de decisión: dónde vive el secreto
 
