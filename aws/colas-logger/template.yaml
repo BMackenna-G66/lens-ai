@@ -1,0 +1,99 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Logger de la gestión de colas de Lens → Redshift (schema colas_trabajo).
+  Stack INDEPENDIENTE del receptor de casos: no comparte función, secreto ni rol,
+  así un cambio acá no puede afectar la ingesta de casos desde Salesforce.
+
+Parameters:
+  ApiSecretValue:
+    Type: String
+    NoEcho: true
+    Description: Secreto propio del header x-api-secret (NO reusar el del receptor).
+  RedshiftCluster:
+    Type: String
+    Default: compliance-redshift-cluster
+  RedshiftDatabase:
+    Type: String
+    Default: dev
+  RedshiftDbUser:
+    Type: String
+    Default: ''
+    Description: Usuario de Redshift (deja vacío si usás RedshiftSecretArn).
+  RedshiftSecretArn:
+    Type: String
+    Default: ''
+    Description: ARN del secreto con las credenciales (alternativa a RedshiftDbUser).
+  RedshiftSchema:
+    Type: String
+    Default: colas_trabajo
+  AssumeRoleArn:
+    Type: String
+    Default: ''
+    Description: >
+      Rol a asumir para llegar a Redshift si el cluster vive en OTRA cuenta.
+      Vacío = mismo cuenta que la Lambda.
+
+Conditions:
+  ConAssumeRole: !Not [!Equals [!Ref AssumeRoleArn, '']]
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 30
+    MemorySize: 256
+    Architectures: [arm64]
+
+Resources:
+  ColasLoggerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: colas-trabajo-logger
+      Handler: app.lambda_handler
+      CodeUri: src/
+      Description: Recibe eventos de gestión de la Bandeja de Lens y los escribe en Redshift.
+      Environment:
+        Variables:
+          API_SECRET: !Ref ApiSecretValue
+          REDSHIFT_CLUSTER: !Ref RedshiftCluster
+          REDSHIFT_DATABASE: !Ref RedshiftDatabase
+          REDSHIFT_DB_USER: !Ref RedshiftDbUser
+          REDSHIFT_SECRET_ARN: !Ref RedshiftSecretArn
+          REDSHIFT_SCHEMA: !Ref RedshiftSchema
+          ASSUME_ROLE_ARN: !Ref AssumeRoleArn
+      Policies:
+        # Solo lo necesario para escribir por la Data API. Sin permisos de VPC ni
+        # de otros recursos.
+        - Statement:
+            - Effect: Allow
+              Action:
+                - redshift-data:ExecuteStatement
+                - redshift-data:DescribeStatement
+              Resource: '*'
+            - Effect: Allow
+              Action: redshift:GetClusterCredentials
+              Resource: '*'
+        - !If
+          - ConAssumeRole
+          - Statement:
+              - Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !Ref AssumeRoleArn
+          - !Ref AWS::NoValue
+      # Endpoint HTTPS nativo (sin API Gateway). La protección es el header
+      # x-api-secret que valida el handler.
+      FunctionUrlConfig:
+        AuthType: NONE
+        Cors:
+          AllowOrigins: ['*']
+          AllowMethods: [POST]
+          AllowHeaders: [content-type, x-api-secret]
+
+Outputs:
+  EndpointUrl:
+    Description: URL del logger. Va en la variable COLAS_LOGGER_URL del frontend.
+    Value: !GetAtt ColasLoggerFunctionUrl.FunctionUrl
+  FunctionName:
+    Value: !Ref ColasLoggerFunction
+  LogGroup:
+    Value: !Sub '/aws/lambda/${ColasLoggerFunction}'
