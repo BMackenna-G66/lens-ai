@@ -26,6 +26,7 @@ import { TIPOS_CIERRE, camposDeCierre } from '../services/cierreTipos';
 import { TIPOS_CIERRE_ADMIN, OFAC_PROVIDERS, ADMIN_ASSIGNEE_DEFAULT, ADMIN_STATUS_OPTIONS, ADMIN_COMMENT_OPTIONS, RISK_LEVELS, PEP_PROVIDER_DEFAULT, ofacFlagPara } from '../services/cierreAdminTipos';
 import { enviarCierreAdmin, adminCierreDisponible, AdminCierreResult } from '../services/adminCierreService';
 import { registrarAuditoria } from '../services/caseAuditService';
+import { logCierre, logHistorial, logConfigFlujo } from '../services/colasLogService';
 import type { InvestigacionCaso } from '../services/casosComplianceTypes';
 import { useAuth } from '../context/AuthContext';
 
@@ -316,6 +317,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
           ok++;
           // Status del caso: canal SF cerrado (sale de la cola si Admin también).
           await registrarCierreCanal(c.id, 'sf', { ok: true, tipologia: tipo.id }, actor ?? undefined).catch(() => {});
+          logCierre(c, activeQueue, { canal: 'SF', ok: true, tipologia: tipo.id }, actor ?? undefined);
         } else err++;
       } catch { err++; }
     }, 3);
@@ -369,6 +371,8 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
             // Status del caso: canal Admin cerrado (sale de la cola si SF también).
             for (const caseId of casosPorCustomer.get(String(res.customerId)) ?? []) {
               await registrarCierreCanal(caseId, 'admin', { ok: true, tipologia: tipo.id }, actor ?? undefined).catch(() => {});
+              const caso = seleccionados.find(x => x.id === caseId);
+              if (caso) logCierre(caso, activeQueue, { canal: 'ADMIN', ok: true, tipologia: tipo.id, statusEnviado: tipo.status, ofacFlag: ofacFlagPara(tipo.status) }, actor ?? undefined);
             }
           } else err++;
         }
@@ -395,7 +399,18 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   const abrirFlujo = () => { setFlujoDraft(flujoCfg); setFlujoMsg(null); setShowFlujo(s => !s); };
   const guardarFlujo = async () => {
     setFlujoSaving(true); setFlujoMsg(null);
-    try { await guardarFlujoConfig(flujoDraft, actor ?? undefined); setFlujoMsg('Guardado ✓'); }
+    try {
+      await guardarFlujoConfig(flujoDraft, actor ?? undefined);
+      // Deja registro en Redshift de quién prendió/apagó la automatización.
+      logConfigFlujo('ofac', {
+        habilitado: flujoDraft.ofac.enabled,
+        paises: Object.entries(flujoDraft.ofac.paises ?? {}).filter(([, v]) => v).map(([k]) => k),
+        cerrarSF: flujoDraft.ofac.cerrarSF, cerrarAdmin: flujoDraft.ofac.cerrarAdmin,
+        tipologias: { liberar: flujoDraft.ofac.tipoLiberarNormal, ucr: flujoDraft.ofac.tipoLiberarUcr, bloquear: flujoDraft.ofac.tipoBloquear },
+      }, actor ?? undefined);
+      logConfigFlujo('remesa', { habilitado: flujoDraft.remesa.enabled }, actor ?? undefined);
+      setFlujoMsg('Guardado ✓');
+    }
     catch (e) { setFlujoMsg((e as Error).message); }
     finally { setFlujoSaving(false); }
   };
@@ -573,6 +588,11 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       if (r.ok) {
         await registrarCierreCanal(sel.id, 'admin', { ok: true, tipologia: adminTipoSel || null }, actor ?? undefined).catch(() => {});
       }
+      logCierre(sel, activeQueue, {
+        canal: 'ADMIN', ok: r.ok, tipologia: adminTipoSel || null, statusEnviado: adminForm.status,
+        ofacFlag: adminForm.ofacFlag, pepEnviado: adminForm.pepEnabled, riskLevel: adminForm.riskLevel || null,
+        lastStep: adminForm.lastStep, detalleError: r.ok ? null : (r.error ?? null),
+      }, actor ?? undefined);
       // Auditoría — incluye metadata que NO va a la API (changeTicket, requestedBy).
       registrarAuditoria(sel.id, {
         tipo: 'CIERRE_ADMIN', actorId: actor?.uid ?? 'system', actorTipo: actor ? 'USER' : 'SYSTEM',
@@ -787,7 +807,11 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   const doLiberar = (c: QueuedCaso) => conAccion(() => liberarCaso({ id: c.id, estadoCaso: vistaOp(c).estado, versionCaso: vistaOp(c).versionCaso }, actor!));
   const doEstado = (c: QueuedCaso, nuevo: EstadoCaso) => conAccion(() => cambiarEstado({ id: c.id, estadoCaso: vistaOp(c).estado, versionCaso: vistaOp(c).versionCaso }, nuevo, actor!));
   const doPrioridad = (c: QueuedCaso, nueva: PrioridadCaso) => conAccion(() => cambiarPrioridad({ id: c.id, prioridadActual: vistaOp(c).prioridad, versionCaso: vistaOp(c).versionCaso }, nueva, actor!));
-  const doStatus = (c: QueuedCaso, nuevo: StatusCaso) => conAccion(() => setStatusCaso(c.id, nuevo, actor!));
+  const doStatus = (c: QueuedCaso, nuevo: StatusCaso) => conAccion(async () => {
+    const anterior = vistaOp(c).status;
+    await setStatusCaso(c.id, nuevo, actor!);
+    logHistorial(c, 'STATUS', anterior, nuevo, actor ?? undefined);
+  });
 
   // ── Investigación (Fase 5): edición con versionado / concurrencia ────────────
   const [invForm, setInvForm] = useState({ resumen: '', hallazgos: '', recomendacion: '', completa: false });
@@ -967,6 +991,10 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       if (yaEnviada || sf?.ok) {
         await registrarCierreCanal(sel.id, 'sf', { ok: true, tipologia: tipoCierreSel || null }, actor ?? undefined).catch(() => {});
       }
+      logCierre(sel, activeQueue, {
+        canal: 'SF', ok: !!(yaEnviada || sf?.ok), tipologia: tipoCierreSel || null,
+        httpStatus: sf?.status ?? null, detalleError: sf?.ok === false ? (sf.errors?.join('; ') ?? null) : null,
+      }, actor ?? undefined);
     } catch (e) {
       setSfResult({ ok: false, status: 0, errors: [(e as Error).message], raw: null });
     } finally {

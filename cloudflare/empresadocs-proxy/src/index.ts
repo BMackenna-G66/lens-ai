@@ -26,6 +26,10 @@ interface Env {
   // Admin Global66 (bloqueo/desbloqueo de clientes): refresh-token de admin.
   // Secret: `wrangler secret put G66_ADMIN_REFRESH_TOKEN`. NUNCA en el repo.
   G66_ADMIN_REFRESH_TOKEN?: string;
+  // Logger de gestión de colas → Redshift (Lambda colas-trabajo-logger).
+  // El Worker guarda la URL y el secreto para que NO viajen al navegador.
+  COLAS_LOGGER_URL?: string;
+  COLAS_LOGGER_SECRET?: string;
 }
 
 const ALLOWED_ORIGINS = [
@@ -124,6 +128,32 @@ export default {
       headers.set('Content-Type', 'application/json');
       headers.set('Cache-Control', 'no-store');
       return new Response(text, { status: upstream.status, headers });
+    }
+
+    // ── Logger de gestión de colas: POST /colas/log ─────────────────────────────
+    //   Reenvía los eventos de la Bandeja a la Lambda colas-trabajo-logger, que los
+    //   escribe en Redshift (schema colas_trabajo). El Worker pone el header
+    //   x-api-secret: así el secreto NO queda en el bundle público del frontend.
+    //   Es un relay de solo-escritura de auditoría; no devuelve datos del negocio.
+    if (url.pathname === '/colas/log') {
+      if (request.method !== 'POST') return jsonError('Método no permitido', 405, cors);
+      const destino = (env.COLAS_LOGGER_URL || '').replace(/\/$/, '');
+      const secreto = env.COLAS_LOGGER_SECRET || '';
+      if (!destino || !secreto) return jsonError('Logger no configurado (COLAS_LOGGER_URL / COLAS_LOGGER_SECRET)', 500, cors);
+      try {
+        const upstream = await fetchTimeout(destino, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-api-secret': secreto },
+          body: await request.text(),
+        }, 30000);
+        const texto = await upstream.text();
+        return new Response(texto || JSON.stringify({ ok: upstream.ok }), {
+          status: upstream.status,
+          headers: { ...cors, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+        });
+      } catch (e) {
+        return jsonError(`No se pudo registrar el log: ${e instanceof Error ? e.message : String(e)}`, 502, cors);
+      }
     }
 
     // ── Salesforce case-update: POST /salesforce/case-update ────────────────────
