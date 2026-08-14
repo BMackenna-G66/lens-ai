@@ -62,15 +62,22 @@ modo correcto es **tcp**: así no depende de permisos IAM que hoy no existen.
 ## Deploy (modo tcp)
 
 ```bash
-sam build --use-container && sam deploy --parameter-overrides \
+sam build && sam deploy --parameter-overrides \
   "ApiSecretValue=<secreto-nuevo> Modo=tcp \
    RedshiftHost=<endpoint-del-cluster> RedshiftUser=<usuario> RedshiftPassword=<clave>"
 ```
 
-`--use-container` es porque el driver oficial (`redshift-connector`) trae
-dependencias nativas. Si el build da problemas, en `src/requirements.txt` se puede
-cambiar a `pg8000` (100% Python): el código ya tiene el fallback y no hay que tocar
-nada más.
+**Sin Docker**: se empaqueta `pg8000` (100% Python), así que `sam build` normal
+alcanza — NO usar `--use-container`. Si algún día se prefiere el driver oficial de
+AWS (`redshift-connector`), se descomenta en `src/requirements.txt` y ahí sí hace
+falta `--use-container` con Docker corriendo; el código toma el que esté disponible.
+
+### SSL
+
+Redshift normalmente exige TLS. La conexión va cifrada por defecto y verificando el
+certificado. Si el cluster usa una CA privada y falla la verificación, se agrega al
+deploy `REDSHIFT_SSL=noverify` (sigue cifrado, no valida el certificado). `0`
+desactiva TLS por completo (no recomendado).
 
 ## ⚠️ Bloqueos actuales (necesitan a alguien con permisos)
 

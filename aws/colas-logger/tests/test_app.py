@@ -157,6 +157,30 @@ def test_columna_desconocida_se_ignora():
     assert "x'; DROP TABLE y;--" not in str(vals)
 
 
+def test_fallback_pg8000_cuando_no_hay_driver_oficial():
+    """Sin redshift_connector instalado, debe usar pg8000 igual (es el camino
+    real del deploy: se empaqueta pg8000 para no depender de Docker)."""
+    _reset()
+    oficial = sys.modules.pop("redshift_connector", None)
+    usados = {}
+
+    def _fake_connect(**kw):
+        usados.update(kw)
+        return _FakeConn()
+
+    sys.modules["pg8000"] = types.SimpleNamespace(dbapi=types.SimpleNamespace(connect=_fake_connect))
+    sys.modules["pg8000.dbapi"] = sys.modules["pg8000"].dbapi
+    try:
+        datos = {"actor_id": "u1", "nombre": "Benja"}
+        r = app.lambda_handler(_evt({"eventos": [{"tabla": "analista", "datos": datos}]}), None)
+        assert r["statusCode"] == 200, r["body"]
+        assert usados["host"] and usados["user"] == "compliance"
+        assert len(EJECUTADOS) == 2      # DELETE + INSERT
+    finally:
+        if oficial is not None:
+            sys.modules["redshift_connector"] = oficial
+
+
 if __name__ == "__main__":
     fallos = 0
     for nombre, fn in sorted(globals().items()):
