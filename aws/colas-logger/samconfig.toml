@@ -1,0 +1,14 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "colas-logger-fnurl"
+resolve_s3 = true
+s3_prefix = "colas-logger"
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+# Perfil con permisos de CloudFormation/Lambda. OJO: el rol compliance_analyst de
+# la cuenta del cluster (235997980558) NO puede desplegar; ver README.
+profile = "compliance-admin"
+# Los secretos NO se guardan acá: se pasan en cada deploy con
+#   --parameter-overrides "ApiSecretValue=... RedshiftDbUser=..."

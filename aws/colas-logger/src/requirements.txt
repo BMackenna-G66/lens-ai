@@ -1,0 +1,9 @@
+# Driver de Redshift para el modo TCP (conexión con usuario/contraseña).
+#
+# Opción A (oficial de AWS). Trae dependencias nativas (lxml), así que conviene
+# construir con:  sam build --use-container
+redshift-connector>=2.1.0
+
+# Opción B (fallback en el código): 100% Python, sin binarios. Si el build de la
+# opción A da problemas, comentar la línea de arriba y dejar solo esta.
+# pg8000>=1.31.0

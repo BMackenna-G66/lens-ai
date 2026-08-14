@@ -1,0 +1,113 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Logger de la gestión de colas de Lens → Redshift (schema colas_trabajo).
+  Stack INDEPENDIENTE del receptor de casos: no comparte función, URL, secreto ni
+  rol, así los dos no pueden chocar.
+
+Parameters:
+  ApiSecretValue:
+    Type: String
+    NoEcho: true
+    Description: Secreto propio del header x-api-secret (NO reusar el del receptor).
+  Modo:
+    Type: String
+    Default: tcp
+    AllowedValues: [tcp, dataapi]
+    Description: >
+      tcp = conexión directa con usuario/contraseña de Redshift (el mismo que ya
+      está habilitado; no requiere permisos IAM en la cuenta del cluster).
+      dataapi = Redshift Data API (requiere permisos IAM en esa cuenta).
+  RedshiftHost:
+    Type: String
+    Default: ''
+    Description: Endpoint del cluster (modo tcp). Ej. xxx.us-east-1.redshift.amazonaws.com
+  RedshiftPort:
+    Type: String
+    Default: '5439'
+  RedshiftDatabase:
+    Type: String
+    Default: dev
+  RedshiftUser:
+    Type: String
+    Default: ''
+    Description: Usuario de Redshift (modo tcp) — el mismo que ya carga información.
+  RedshiftPassword:
+    Type: String
+    Default: ''
+    NoEcho: true
+    Description: Contraseña de ese usuario (modo tcp).
+  RedshiftSchema:
+    Type: String
+    Default: colas_trabajo
+  RedshiftCluster:
+    Type: String
+    Default: compliance-redshift-cluster
+    Description: Identificador del cluster (solo modo dataapi).
+  RedshiftDbUser:
+    Type: String
+    Default: ''
+    Description: Usuario mapeado por IAM (solo modo dataapi).
+
+Conditions:
+  UsaDataApi: !Equals [!Ref Modo, dataapi]
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 30
+    MemorySize: 256
+    Architectures: [arm64]
+
+Resources:
+  ColasLoggerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: colas-trabajo-logger
+      Handler: app.lambda_handler
+      CodeUri: src/
+      Description: Recibe eventos de gestión de la Bandeja de Lens y los escribe en Redshift.
+      Environment:
+        Variables:
+          API_SECRET: !Ref ApiSecretValue
+          MODO: !Ref Modo
+          REDSHIFT_HOST: !Ref RedshiftHost
+          REDSHIFT_PORT: !Ref RedshiftPort
+          REDSHIFT_DATABASE: !Ref RedshiftDatabase
+          REDSHIFT_USER: !Ref RedshiftUser
+          REDSHIFT_PASSWORD: !Ref RedshiftPassword
+          REDSHIFT_SCHEMA: !Ref RedshiftSchema
+          REDSHIFT_CLUSTER: !Ref RedshiftCluster
+          REDSHIFT_DB_USER: !Ref RedshiftDbUser
+      # En modo tcp la Lambda NO necesita ningún permiso de Redshift: se conecta
+      # con usuario/contraseña. Los permisos solo se agregan si se usa Data API.
+      Policies:
+        - !If
+          - UsaDataApi
+          - Statement:
+              - Effect: Allow
+                Action:
+                  - redshift-data:ExecuteStatement
+                  - redshift-data:DescribeStatement
+                Resource: '*'
+              - Effect: Allow
+                Action: redshift:GetClusterCredentials
+                Resource: '*'
+          - !Ref AWS::NoValue
+      # Endpoint HTTPS nativo (sin API Gateway). La protección es el header
+      # x-api-secret que valida el handler.
+      FunctionUrlConfig:
+        AuthType: NONE
+        Cors:
+          AllowOrigins: ['*']
+          AllowMethods: [POST]
+          AllowHeaders: [content-type, x-api-secret]
+
+Outputs:
+  EndpointUrl:
+    Description: URL del logger (va como secret del Worker, no en el frontend).
+    Value: !GetAtt ColasLoggerFunctionUrl.FunctionUrl
+  FunctionName:
+    Value: !Ref ColasLoggerFunction
+  LogGroup:
+    Value: !Sub '/aws/lambda/${ColasLoggerFunction}'
