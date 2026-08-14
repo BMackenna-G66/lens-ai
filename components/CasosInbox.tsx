@@ -410,11 +410,12 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   // Sincroniza a Redshift el histórico ya ocurrido (casos, su auditoría y los
   // cierres). Hace falta para los cierres automáticos de la primera corrida, que
   // se hicieron antes de que el motor los registrara. Es idempotente.
+  const [showBackfill, setShowBackfill] = useState(false);
   const [backfillRun, setBackfillRun] = useState(false);
   const [backfillMsg, setBackfillMsg] = useState<string | null>(null);
   const sincronizarHistorico = async () => {
     setBackfillRun(true); setBackfillMsg('Sincronizando…');
-    let nCasos = 0, nCierres = 0, nEventos = 0, errores = 0;
+    let nCasos = 0, nEscritas = 0, nFallidas = 0, errores = 0; let primerError: string | undefined;
     const nombrePorUid: Record<string, string> = {};
     try {
       const us = await getAllUsers();
@@ -425,12 +426,19 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       try {
         const eventos = await leerAuditoria(c.id);
         const r = await backfillCaso(c, clasificar(c), eventos, nombrePorUid);
-        nCasos += r.casos; nCierres += r.cierres; nEventos += r.eventos;
+        nCasos++; nEscritas += r.escritas; nFallidas += r.fallidas;
+        if (r.error && !primerError) primerError = r.error;
         setBackfillMsg(`Sincronizando… ${nCasos}/${todos.length} casos`);
       } catch { errores++; }
     }, 4);
     setBackfillRun(false);
-    setBackfillMsg(`${nCasos} caso(s), ${nCierres} cierre(s) y ${nEventos} evento(s) sincronizados${errores ? ` · ${errores} con error` : ''}`);
+    // Reporta lo REALMENTE escrito en Redshift, no lo enviado: si el cluster está
+    // pausado o caído, el POST no falla pero no se escribe nada.
+    setBackfillMsg(
+      nFallidas === 0 && nEscritas > 0
+        ? `✅ ${nCasos} caso(s) · ${nEscritas} fila(s) escritas en Redshift`
+        : `⚠️ ${nEscritas} fila(s) escritas, ${nFallidas} fallidas${errores ? ` · ${errores} caso(s) con error` : ''}${primerError ? ` · ${primerError}` : ''}`,
+    );
   };
   const guardarFlujo = async () => {
     setFlujoSaving(true); setFlujoMsg(null);
@@ -1225,20 +1233,28 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
               </div>
             </div>
 
-            <div className="mt-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-900/40 p-3">
-              <p className="text-xs font-bold text-slate-700 dark:text-slate-200">🔄 Sincronizar histórico a Redshift</p>
-              <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
-                Manda a <code>colas_trabajo</code> los casos, su auditoría y los cierres que ya ocurrieron.
-                Sirve para recuperar lo que se cerró antes de que el log estuviera completo. Es idempotente:
-                se puede correr las veces que haga falta sin duplicar.
-              </p>
-              <div className="flex items-center gap-3 mt-2">
-                <button onClick={sincronizarHistorico} disabled={backfillRun || casos.length === 0}
-                  className="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-800 disabled:opacity-50 text-white text-xs font-bold">
-                  {backfillRun ? 'Sincronizando…' : `Sincronizar ${casos.length} caso(s)`}
-                </button>
-                {backfillMsg && <span className="text-[11px] text-slate-600 dark:text-slate-300">{backfillMsg}</span>}
-              </div>
+            {/* Herramienta de recuperación: se muestra solo si se despliega, para no
+                ensuciar el panel. Sirve si el logger estuvo caído (ej. cluster pausado). */}
+            <div className="mt-3">
+              <button onClick={() => setShowBackfill(v => !v)}
+                className="text-[11px] text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:hover:text-slate-300 underline">
+                {showBackfill ? '▾' : '▸'} Sincronizar histórico a Redshift
+              </button>
+              {showBackfill && (
+                <div className="mt-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-900/40 p-3">
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                    Reenvía a <code>colas_trabajo</code> los casos, su auditoría y los cierres ya ocurridos.
+                    Es idempotente. Útil si Redshift estuvo caído o pausado y se perdieron logs.
+                  </p>
+                  <div className="flex items-center gap-3 mt-2">
+                    <button onClick={sincronizarHistorico} disabled={backfillRun || casos.length === 0}
+                      className="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-800 disabled:opacity-50 text-white text-xs font-bold">
+                      {backfillRun ? 'Sincronizando…' : `Sincronizar ${casos.length} caso(s)`}
+                    </button>
+                    {backfillMsg && <span className="text-[11px] text-slate-600 dark:text-slate-300">{backfillMsg}</span>}
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="flex items-center gap-3 mt-4">

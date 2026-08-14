@@ -20,18 +20,34 @@ export interface ActorLog { uid: string; nombre: string; email?: string; esSiste
 // Actor del flujo automático: queda distinguible de una persona en la auditoría.
 export const ACTOR_SISTEMA: ActorLog = { uid: 'system', nombre: 'Flujo automático', esSistema: true };
 
-// Envío fire-and-forget: nunca lanza ni bloquea al que llama.
-async function enviar(eventos: Fila[]): Promise<void> {
-  if (!PROXY || eventos.length === 0) return;
+// Envío fire-and-forget: nunca lanza ni bloquea al que llama. Devuelve cuántas
+// filas confirmó el logger, para que el backfill pueda reportar la verdad (si
+// Redshift está caído o pausado, escritas = 0 aunque el POST no tire excepción).
+export interface ResultadoEnvio { escritas: number; fallidas: number; error?: string }
+
+async function enviar(eventos: Fila[]): Promise<ResultadoEnvio> {
+  if (!PROXY || eventos.length === 0) return { escritas: 0, fallidas: eventos.length, error: 'logger no configurado' };
   try {
-    await fetch(`${PROXY}/colas/log`, {
+    const res = await fetch(`${PROXY}/colas/log`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ eventos }),
       keepalive: true,   // sobrevive si el analista navega justo después
     });
-  } catch {
-    /* el log es best-effort: no rompe la gestión */
+    const txt = await res.text();
+    let data: { ok?: number; errores?: unknown[]; error?: string } = {};
+    try { data = txt ? JSON.parse(txt) : {}; } catch { data = { error: txt.slice(0, 200) }; }
+    if (!res.ok) return { escritas: 0, fallidas: eventos.length, error: data.error || `HTTP ${res.status}` };
+    const escritas = typeof data.ok === 'number' ? data.ok : 0;
+    const errs = Array.isArray(data.errores) ? data.errores : [];
+    return {
+      escritas,
+      fallidas: eventos.length - escritas,
+      error: errs.length ? JSON.stringify(errs[0]).slice(0, 200) : undefined,
+    };
+  } catch (e) {
+    // el log es best-effort: no rompe la gestión, pero se reporta
+    return { escritas: 0, fallidas: eventos.length, error: (e as Error).message };
   }
 }
 
@@ -277,7 +293,7 @@ export interface EventoAuditoriaLeido {
   versionCaso?: number; cambios?: unknown; metadata?: Record<string, unknown>;
 }
 
-export interface ResumenBackfill { casos: number; cierres: number; eventos: number }
+export interface ResumenBackfill { escritas: number; fallidas: number; cierres: number; eventos: number; error?: string }
 
 export async function backfillCaso(
   caso: CasoSF,
@@ -336,6 +352,11 @@ export async function backfillCaso(
     cierres++;
   }
 
-  for (let i = 0; i < filas.length; i += 50) await enviar(filas.slice(i, i + 50));
-  return { casos: 1, cierres, eventos: eventos.length };
+  let escritas = 0, fallidas = 0, error: string | undefined;
+  for (let i = 0; i < filas.length; i += 50) {
+    const r = await enviar(filas.slice(i, i + 50));
+    escritas += r.escritas; fallidas += r.fallidas;
+    if (r.error && !error) error = r.error;
+  }
+  return { escritas, fallidas, cierres, eventos: eventos.length, error };
 }
