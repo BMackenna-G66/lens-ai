@@ -144,7 +144,9 @@ export type TipoEventoAuditoria =
   | 'RESPUESTA_SF_COMPLETADA'
   | 'RESPUESTA_SF_ERROR'
   | 'CIERRE_ADMIN'
-  | 'CASO_RECONSULTADO';
+  | 'CASO_RECONSULTADO'
+  | 'STATUS_CAMBIADO'
+  | 'CIERRE_AUTOMATICO';
 
 export interface EventoAuditoriaCaso {
   eventId: string;

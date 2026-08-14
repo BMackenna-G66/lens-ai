@@ -32,8 +32,8 @@ export const TIPOS_CIERRE: TipoCierre[] = [
       Product__c: 'Cuenta G66',
       Tipo_de_Caso_Compliance__c: 'OFAC + Coinc c/delito no escalado',
       Type: 'Compliance',
-      Comments: 'Cliente puede operar con global66 caso liberado bajo logica de bandeja de casos - Dentro de la matriz de riesgo',
-      razon_3_dias__c: 'Cliente puede operar con global66 caso liberado bajo logica de bandeja de casos - Dentro de la matriz de riesgo',
+      Comments: 'Cliente puede operar con global66 caso liberado bajo logica de bandeja de casos Dentro de la matriz de riesgo',
+      razon_3_dias__c: 'Cliente puede operar con global66 caso liberado bajo logica de bandeja de casos Dentro de la matriz de riesgo',
       // CAT_CMPL__c: sin cambio (no se envía)
     },
   },
@@ -49,8 +49,8 @@ export const TIPOS_CIERRE: TipoCierre[] = [
       Product__c: 'Cuenta G66',
       Tipo_de_Caso_Compliance__c: 'OFAC + Coinc c/delito no escalado',
       Type: 'Compliance',
-      Comments: 'Cliente puede operar UNDER_COMPLIANCE_REVIEW con global66 caso liberado bajo logica de bandeja de casos - Dentro de la matriz de riesgo',
-      razon_3_dias__c: 'Cliente puede operar UNDER_COMPLIANCE_REVIEW con global66 caso liberado bajo logica de bandeja de casos - Dentro de la matriz de riesgo',
+      Comments: 'Cliente puede operar UNDER COMPLIANCE REVIEW con global66 caso liberado bajo logica de bandeja de casos Dentro de la matriz de riesgo',
+      razon_3_dias__c: 'Cliente puede operar UNDER COMPLIANCE REVIEW con global66 caso liberado bajo logica de bandeja de casos Dentro de la matriz de riesgo',
       // CAT_CMPL__c: sin cambio (no se envía)
     },
   },
@@ -67,8 +67,8 @@ export const TIPOS_CIERRE: TipoCierre[] = [
       Product__c: 'Cuenta G66',
       Tipo_de_Caso_Compliance__c: 'OFAC + Coinc c/delito no escalado',
       Type: 'Compliance',
-      Comments: 'Cliente puede NO operar con global66 caso liberado bajo logica de bandeja de casos - FUERA de la matriz de riesgo',
-      razon_3_dias__c: 'Cliente puede NO operar con global66 caso liberado bajo logica de bandeja de casos - FUERA de la matriz de riesgo',
+      Comments: 'Cliente puede NO operar con global66 caso liberado bajo logica de bandeja de casos FUERA de la matriz de riesgo',
+      razon_3_dias__c: 'Cliente puede NO operar con global66 caso liberado bajo logica de bandeja de casos FUERA de la matriz de riesgo',
     },
   },
   {

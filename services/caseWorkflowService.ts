@@ -69,6 +69,8 @@ export async function tomarCaso(caso: CasoRef, actor: Actor): Promise<void> {
     'asignacion.asignadoEn': ahora,
     'asignacion.asignadoPor': actor.uid,
     estadoCaso: 'ASIGNADO',
+    // Tomar el caso es el inicio de la gestión (status simple de la Bandeja).
+    statusCaso: 'GESTIONANDO',
     actualizadoEn: ahora,
   });
   await registrarAuditoria(caso.id, {

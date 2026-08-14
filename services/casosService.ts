@@ -24,6 +24,22 @@ export interface StoredScreening {
   screenedAt?: string;       // ISO — cuándo se consultó
 }
 
+// Asignación del caso a un analista (la escribe caseWorkflowService).
+export interface AsignacionCasoDoc {
+  analistaId?: string | null;
+  analistaNombre?: string | null;
+  asignadoEn?: string | null;
+  asignadoPor?: string | null;
+}
+
+// Resultado de cada canal de cierre (SF / Admin), para derivar el status del caso.
+export interface CierreCanal {
+  ok?: boolean;
+  en?: string | null;        // ISO
+  tipologia?: string | null;
+  detalle?: string | null;
+}
+
 export interface CasoSF {
   id: string;
   numeroCaso: string;
@@ -34,6 +50,16 @@ export interface CasoSF {
   origen: string;
   datos: Record<string, unknown>;  // payload completo tal cual llegó
   screening?: StoredScreening;     // screening cacheado (si ya se consultó)
+  // ── Bloques operacionales (los escriben los servicios de workflow/cierre).
+  // Deben viajar en el objeto o la UI no puede mostrar estado/prioridad/asignado.
+  estadoCaso?: string;
+  prioridad?: string;
+  asignacion?: AsignacionCasoDoc;
+  versionCaso?: number;
+  investigacion?: unknown;
+  respuestaSalesforce?: unknown;
+  statusCaso?: string;             // ABIERTO | GESTIONANDO | CERRADO
+  cierres?: { sf?: CierreCanal; admin?: CierreCanal };
 }
 
 export const isCasosAvailable = (): boolean => !!getDb();
@@ -62,6 +88,15 @@ function docToCaso(id: string, data: Record<string, unknown>): CasoSF {
     origen: s(data.origen) || 'salesforce',
     datos,
     screening: (data.screening && typeof data.screening === 'object') ? data.screening as StoredScreening : undefined,
+    // Passthrough de los bloques operacionales (sin defaults: la UI los resuelve).
+    estadoCaso: data.estadoCaso as string | undefined,
+    prioridad: data.prioridad as string | undefined,
+    asignacion: (data.asignacion && typeof data.asignacion === 'object') ? data.asignacion as AsignacionCasoDoc : undefined,
+    versionCaso: typeof data.versionCaso === 'number' ? data.versionCaso : undefined,
+    investigacion: data.investigacion,
+    respuestaSalesforce: data.respuestaSalesforce,
+    statusCaso: data.statusCaso as string | undefined,
+    cierres: (data.cierres && typeof data.cierres === 'object') ? data.cierres as CasoSF['cierres'] : undefined,
   };
 }
 
