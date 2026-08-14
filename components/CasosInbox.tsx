@@ -25,8 +25,8 @@ import { enviarResolucion, conclusionAStatus } from '../services/caseResolutionS
 import { TIPOS_CIERRE, camposDeCierre } from '../services/cierreTipos';
 import { TIPOS_CIERRE_ADMIN, OFAC_PROVIDERS, ADMIN_ASSIGNEE_DEFAULT, ADMIN_STATUS_OPTIONS, ADMIN_COMMENT_OPTIONS, RISK_LEVELS, PEP_PROVIDER_DEFAULT, ofacFlagPara } from '../services/cierreAdminTipos';
 import { enviarCierreAdmin, adminCierreDisponible, AdminCierreResult } from '../services/adminCierreService';
-import { registrarAuditoria } from '../services/caseAuditService';
-import { logCierre, logHistorial, logConfigFlujo, logScreening, sincronizarAnalistas } from '../services/colasLogService';
+import { registrarAuditoria, leerAuditoria } from '../services/caseAuditService';
+import { logCierre, logHistorial, logConfigFlujo, logScreening, sincronizarAnalistas, backfillCaso } from '../services/colasLogService';
 import { getAllUsers } from '../services/firestoreService';
 import type { InvestigacionCaso } from '../services/casosComplianceTypes';
 import { useAuth } from '../context/AuthContext';
@@ -406,6 +406,32 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   }, []);
 
   const abrirFlujo = () => { setFlujoDraft(flujoCfg); setFlujoMsg(null); setShowFlujo(s => !s); };
+
+  // Sincroniza a Redshift el histórico ya ocurrido (casos, su auditoría y los
+  // cierres). Hace falta para los cierres automáticos de la primera corrida, que
+  // se hicieron antes de que el motor los registrara. Es idempotente.
+  const [backfillRun, setBackfillRun] = useState(false);
+  const [backfillMsg, setBackfillMsg] = useState<string | null>(null);
+  const sincronizarHistorico = async () => {
+    setBackfillRun(true); setBackfillMsg('Sincronizando…');
+    let nCasos = 0, nCierres = 0, nEventos = 0, errores = 0;
+    const nombrePorUid: Record<string, string> = {};
+    try {
+      const us = await getAllUsers();
+      for (const u of us) nombrePorUid[u.uid] = u.displayName || u.email || u.uid;
+    } catch { /* sin diccionario: los uid quedan sin nombre */ }
+    const todos = casos.map(c => ({ ...c, remesa: extraerRemesa(c.asunto) } as QueuedCaso));
+    await runPool(todos, async c => {
+      try {
+        const eventos = await leerAuditoria(c.id);
+        const r = await backfillCaso(c, clasificar(c), eventos, nombrePorUid);
+        nCasos += r.casos; nCierres += r.cierres; nEventos += r.eventos;
+        setBackfillMsg(`Sincronizando… ${nCasos}/${todos.length} casos`);
+      } catch { errores++; }
+    }, 4);
+    setBackfillRun(false);
+    setBackfillMsg(`${nCasos} caso(s), ${nCierres} cierre(s) y ${nEventos} evento(s) sincronizados${errores ? ` · ${errores} con error` : ''}`);
+  };
   const guardarFlujo = async () => {
     setFlujoSaving(true); setFlujoMsg(null);
     try {
@@ -1196,6 +1222,22 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                     {c.label}
                   </span>
                 ))}
+              </div>
+            </div>
+
+            <div className="mt-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-900/40 p-3">
+              <p className="text-xs font-bold text-slate-700 dark:text-slate-200">🔄 Sincronizar histórico a Redshift</p>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
+                Manda a <code>colas_trabajo</code> los casos, su auditoría y los cierres que ya ocurrieron.
+                Sirve para recuperar lo que se cerró antes de que el log estuviera completo. Es idempotente:
+                se puede correr las veces que haga falta sin duplicar.
+              </p>
+              <div className="flex items-center gap-3 mt-2">
+                <button onClick={sincronizarHistorico} disabled={backfillRun || casos.length === 0}
+                  className="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-800 disabled:opacity-50 text-white text-xs font-bold">
+                  {backfillRun ? 'Sincronizando…' : `Sincronizar ${casos.length} caso(s)`}
+                </button>
+                {backfillMsg && <span className="text-[11px] text-slate-600 dark:text-slate-300">{backfillMsg}</span>}
               </div>
             </div>
 

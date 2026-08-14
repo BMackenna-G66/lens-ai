@@ -2,7 +2,7 @@
 // `casos_sf/{numeroCaso}/auditoria`. NO guarda payload, DNI ni secretos: solo
 // metadatos seguros y los cambios de campos operacionales.
 
-import { collection, addDoc, Firestore } from 'firebase/firestore';
+import { collection, addDoc, getDocs, Firestore } from 'firebase/firestore';
 import { getDb } from './firebaseService';
 import { CASOS_COLLECTION } from './casosService';
 import type { EventoAuditoriaCaso } from './casosComplianceTypes';
@@ -40,4 +40,16 @@ export async function registrarAuditoria(caseId: string, ev: NuevoEvento): Promi
     cambios: evento.cambios, metadata: evento.metadata,
   });
   await addDoc(collection(db, CASOS_COLLECTION, caseId, 'auditoria'), limpio);
+}
+
+// Lee la auditoría de un caso (para el backfill del histórico a Redshift).
+export async function leerAuditoria(caseId: string): Promise<EventoAuditoriaCaso[]> {
+  const db = getDb() as Firestore | null;
+  if (!db) return [];
+  try {
+    const snap = await getDocs(collection(db, CASOS_COLLECTION, caseId, 'auditoria'));
+    return snap.docs.map(d => d.data() as EventoAuditoriaCaso);
+  } catch {
+    return [];
+  }
 }

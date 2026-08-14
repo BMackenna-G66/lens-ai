@@ -258,3 +258,84 @@ export function logEvento(ev: EventoLog): void {
     },
   }]);
 }
+
+// ── Backfill del histórico ───────────────────────────────────────────────────
+// Reconstruye en Redshift lo que ya pasó, leyendo el caso + su auditoría de
+// Firestore. Hace falta porque el log de los cierres AUTOMÁTICOS se agregó
+// después de la primera corrida del flujo: esos cierres existen en Firestore
+// pero nunca se escribieron acá.
+//
+// Es idempotente: las claves naturales se derivan de los timestamps guardados,
+// así que reprocesar no duplica (el logger hace DELETE + INSERT por clave).
+
+const aTimestamp = (iso?: string | null): string | null =>
+  iso ? String(iso).replace('T', ' ').replace('Z', '').slice(0, 23) : null;
+
+export interface EventoAuditoriaLeido {
+  eventId?: string; numeroCaso?: string; tipo?: string; actorId?: string;
+  actorTipo?: string; timestamp?: string; correlationId?: string;
+  versionCaso?: number; cambios?: unknown; metadata?: Record<string, unknown>;
+}
+
+export interface ResumenBackfill { casos: number; cierres: number; eventos: number }
+
+export async function backfillCaso(
+  caso: CasoSF,
+  cola: string,
+  eventos: EventoAuditoriaLeido[],
+  nombrePorUid: Record<string, string> = {},
+): Promise<ResumenBackfill> {
+  const filas: Fila[] = [filaCaso(caso, cola)];
+
+  // 1) Todos los eventos de auditoría del caso.
+  for (const ev of eventos) {
+    if (!ev?.eventId) continue;
+    filas.push({
+      tabla: 'evento_auditoria',
+      datos: {
+        event_id: ev.eventId,
+        numero_caso: ev.numeroCaso || caso.numeroCaso,
+        tipo: ev.tipo ?? 'DESCONOCIDO',
+        actor_id: ev.actorId ?? null,
+        actor_tipo: ev.actorTipo ?? null,
+        ocurrido_en: aTimestamp(ev.timestamp),
+        correlation_id: ev.correlationId ?? null,
+        version_caso: ev.versionCaso ?? null,
+        cambios: ev.cambios ?? null,
+        metadata: ev.metadata ?? null,
+      },
+    });
+  }
+
+  // 2) Cierres por canal, desde el bloque `cierres` del caso. Si el caso tiene un
+  //    evento CIERRE_AUTOMATICO se marca automatico=true con el actor del sistema;
+  //    si no, se deja en desconocido (no se inventa quién lo hizo).
+  const auto = eventos.find(e => e.tipo === 'CIERRE_AUTOMATICO');
+  const cerradoPor = eventos.find(e => e.tipo === 'STATUS_CAMBIADO' && e.actorId && e.actorId !== 'system');
+  let cierres = 0;
+  for (const canal of ['sf', 'admin'] as const) {
+    const c = caso.cierres?.[canal];
+    if (!c?.ok) continue;
+    const en = aTimestamp(c.en) ?? aTimestamp(caso.recibidoEn) ?? ahora();
+    const actorId = auto ? ACTOR_SISTEMA.uid : (cerradoPor?.actorId ?? null);
+    filas.push({
+      tabla: 'cierre',
+      datos: {
+        cierre_id: `${caso.numeroCaso}|${canal.toUpperCase()}|${en}`,
+        numero_caso: caso.numeroCaso,
+        canal: canal.toUpperCase(),
+        resultado_ok: true,
+        automatico: auto ? true : null,          // null = no se puede saber
+        tipologia: c.tipologia ?? (auto?.metadata?.tipologia as string | undefined) ?? null,
+        actor_id: actorId,
+        actor_nombre: auto ? ACTOR_SISTEMA.nombre : (actorId ? nombrePorUid[actorId] ?? null : null),
+        actor_tipo: auto ? 'SYSTEM' : (actorId ? 'USER' : null),
+        ocurrido_en: en,
+      },
+    });
+    cierres++;
+  }
+
+  for (let i = 0; i < filas.length; i += 50) await enviar(filas.slice(i, i + 50));
+  return { casos: 1, cierres, eventos: eventos.length };
+}
