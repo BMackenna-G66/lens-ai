@@ -410,7 +410,6 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   // Sincroniza a Redshift el histórico ya ocurrido (casos, su auditoría y los
   // cierres). Hace falta para los cierres automáticos de la primera corrida, que
   // se hicieron antes de que el motor los registrara. Es idempotente.
-  const [showBackfill, setShowBackfill] = useState(false);
   const [backfillRun, setBackfillRun] = useState(false);
   const [backfillMsg, setBackfillMsg] = useState<string | null>(null);
   const sincronizarHistorico = async () => {
@@ -1233,28 +1232,23 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
               </div>
             </div>
 
-            {/* Herramienta de recuperación: se muestra solo si se despliega, para no
-                ensuciar el panel. Sirve si el logger estuvo caído (ej. cluster pausado). */}
-            <div className="mt-3">
-              <button onClick={() => setShowBackfill(v => !v)}
-                className="text-[11px] text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:hover:text-slate-300 underline">
-                {showBackfill ? '▾' : '▸'} Sincronizar histórico a Redshift
-              </button>
-              {showBackfill && (
-                <div className="mt-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-900/40 p-3">
-                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                    Reenvía a <code>colas_trabajo</code> los casos, su auditoría y los cierres ya ocurridos.
-                    Es idempotente. Útil si Redshift estuvo caído o pausado y se perdieron logs.
-                  </p>
-                  <div className="flex items-center gap-3 mt-2">
-                    <button onClick={sincronizarHistorico} disabled={backfillRun || casos.length === 0}
-                      className="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-800 disabled:opacity-50 text-white text-xs font-bold">
-                      {backfillRun ? 'Sincronizando…' : `Sincronizar ${casos.length} caso(s)`}
-                    </button>
-                    {backfillMsg && <span className="text-[11px] text-slate-600 dark:text-slate-300">{backfillMsg}</span>}
-                  </div>
-                </div>
-              )}
+            {/* Sincronización diaria: el cluster se pausa 18:30–04:00 (hora Chile), así
+                que los cierres de esa ventana NO llegan a Redshift. Este botón los
+                recupera; por eso está siempre visible. */}
+            <div className="mt-3 rounded-xl border border-sky-200 dark:border-sky-800/50 bg-sky-50/70 dark:bg-sky-950/20 p-3">
+              <p className="text-xs font-bold text-sky-800 dark:text-sky-300">🔄 Sincronizar histórico a Redshift</p>
+              <p className="text-[11px] text-sky-700 dark:text-sky-400 mt-1">
+                El cluster se pausa entre <b>18:30 y 04:00</b>: lo que se cierre en esa ventana
+                (incluido el flujo automático) <b>no llega solo</b>. Apretá esto cada mañana para
+                recuperarlo. Incluye los casos ya cerrados y es idempotente: no duplica.
+              </p>
+              <div className="flex items-center gap-3 mt-2">
+                <button onClick={sincronizarHistorico} disabled={backfillRun || casos.length === 0}
+                  className="px-3 py-1.5 rounded-lg bg-sky-700 hover:bg-sky-800 disabled:opacity-50 text-white text-xs font-bold">
+                  {backfillRun ? 'Sincronizando…' : `Sincronizar ${casos.length} caso(s)`}
+                </button>
+                {backfillMsg && <span className="text-[11px] font-semibold text-slate-700 dark:text-slate-200">{backfillMsg}</span>}
+              </div>
             </div>
 
             <div className="flex items-center gap-3 mt-4">
