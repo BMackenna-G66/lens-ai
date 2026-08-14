@@ -183,9 +183,20 @@ def _conectar_tcp():
     except ImportError:
         import ssl
         import pg8000.dbapi
+        # REDSHIFT_SSL: '1' verifica el certificado (default) · 'noverify' cifra sin
+        # verificarlo (si el cluster usa una CA privada) · '0' sin SSL.
+        modo_ssl = os.environ.get("REDSHIFT_SSL", "1")
+        if modo_ssl == "0":
+            ctx = None
+        elif modo_ssl == "noverify":
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        else:
+            ctx = ssl.create_default_context()
         return pg8000.dbapi.connect(
             host=HOST, port=PORT, database=DATABASE, user=USER, password=PASSWORD,
-            ssl_context=ssl.create_default_context() if os.environ.get("REDSHIFT_SSL", "1") == "1" else None,
+            ssl_context=ctx, timeout=20,
         )
 
 

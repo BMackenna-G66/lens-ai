@@ -1,9 +1,10 @@
 # Driver de Redshift para el modo TCP (conexión con usuario/contraseña).
 #
-# Opción A (oficial de AWS). Trae dependencias nativas (lxml), así que conviene
-# construir con:  sam build --use-container
-redshift-connector>=2.1.0
+# pg8000 es 100% Python: se empaqueta sin Docker (`sam build` normal, sin
+# --use-container). Redshift habla el protocolo de PostgreSQL, así que sirve.
+pg8000>=1.31.0
 
-# Opción B (fallback en el código): 100% Python, sin binarios. Si el build de la
-# opción A da problemas, comentar la línea de arriba y dejar solo esta.
-# pg8000>=1.31.0
+# Alternativa: driver oficial de AWS. Trae dependencias nativas (lxml), así que
+# necesita `sam build --use-container` y Docker corriendo. El código usa este si
+# está disponible, y si no cae a pg8000 — no hay que tocar nada más.
+# redshift-connector>=2.1.0
