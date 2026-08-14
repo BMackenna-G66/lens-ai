@@ -16,13 +16,14 @@ import { calcularPrioridadPreliminar } from '../services/casePriority';
 import { cambiarEstado, tomarCaso, liberarCaso, cambiarPrioridad } from '../services/caseWorkflowService';
 import { statusDeCaso, setStatusCaso, registrarCierreCanal, STATUS_CASO_VALORES } from '../services/caseStatusService';
 import type { StatusCaso } from '../services/caseStatusService';
-import { subscribeFlujoConfig, guardarFlujoConfig, flujoConfigDisponible, FLUJO_CONFIG_DEFAULT } from '../services/flujoAutomaticoService';
+import { subscribeFlujoConfig, guardarFlujoConfig, flujoConfigDisponible, FLUJO_CONFIG_DEFAULT, PAISES_FLUJO } from '../services/flujoAutomaticoService';
+import { CATEGORIAS_SENSIBLES } from '../services/delitosSensibles';
 import type { FlujoConfig } from '../services/flujoAutomaticoService';
-import { procesarCasoAuto, esCandidatoAuto } from '../services/flujoAutomaticoEngine';
+import { procesarCasoAuto, evaluarCasoAuto, retenidoPorDelito } from '../services/flujoAutomaticoEngine';
 import { guardarInvestigacion } from '../services/caseInvestigationService';
 import { enviarResolucion, conclusionAStatus } from '../services/caseResolutionService';
 import { TIPOS_CIERRE, camposDeCierre } from '../services/cierreTipos';
-import { TIPOS_CIERRE_ADMIN, OFAC_PROVIDERS, ADMIN_ASSIGNEE_DEFAULT, ADMIN_STATUS_OPTIONS, ADMIN_COMMENT_OPTIONS, RISK_LEVELS, PEP_PROVIDER_DEFAULT } from '../services/cierreAdminTipos';
+import { TIPOS_CIERRE_ADMIN, OFAC_PROVIDERS, ADMIN_ASSIGNEE_DEFAULT, ADMIN_STATUS_OPTIONS, ADMIN_COMMENT_OPTIONS, RISK_LEVELS, PEP_PROVIDER_DEFAULT, ofacFlagPara } from '../services/cierreAdminTipos';
 import { enviarCierreAdmin, adminCierreDisponible, AdminCierreResult } from '../services/adminCierreService';
 import { registrarAuditoria } from '../services/caseAuditService';
 import type { InvestigacionCaso } from '../services/casosComplianceTypes';
@@ -354,7 +355,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       try {
         const r = await enviarCierreAdmin({
           customerIds: ids, status: tipo.status, comment: tipo.comment, observation: tipo.observation,
-          agent: ADMIN_ASSIGNEE_DEFAULT, ofacFlag: false, ofacProvider: 'REGCHECK',
+          agent: ADMIN_ASSIGNEE_DEFAULT, ofacFlag: ofacFlagPara(tipo.status), ofacProvider: 'REGCHECK',
           countryCode: cc, lastStep: tipo.lastStepDefault,
           // Risk/PEP solo si la tipología los define explícitamente (hoy: ninguna) — el
           // masivo no cambia PEP/riesgo de clientes reales sin revisión por ficha.
@@ -547,6 +548,8 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       // legacy `pep` es solo etiqueta ("requiere formulario PEP"), no dispara el PUT.
       pepEnabled: t?.pepValue !== undefined, pepValue: !!t?.pepValue, riskLevel: t?.riskLevel ?? '',
       lastStep: t?.lastStepDefault ?? true,
+      // OFAC/blacklist se deriva del status (true solo en FULLY_BLOCKED); editable.
+      ofacFlag: ofacFlagPara(t?.status ?? ''),
     });
   };
 
@@ -700,7 +703,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
         if (autoHechos.current.has(c.id)) return false;
         const sc = screenMap[c.id];
         if (!sc || sc.estado === 'loading') return false;   // screening aún sin resolver
-        return !!esCandidatoAuto(c, sc.decision, flujoCfg.ofac);
+        return evaluarCasoAuto(c, sc, flujoCfg.ofac).automatizable;
       });
       if (candidatos.length === 0) return;
       autoRunning.current = true;
@@ -711,7 +714,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
           autoHechos.current.add(c.id);
           const sc = screenMap[c.id];
           try {
-            const r = await procesarCasoAuto(c, sc?.decision, flujoCfg.ofac, actor ?? undefined);
+            const r = await procesarCasoAuto(c, sc, flujoCfg.ofac, actor ?? undefined);
             if (!r) continue;
             const fallo = r.sf === 'error' || r.admin === 'error';
             if (fallo) err++; else ok++;
@@ -1072,6 +1075,26 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                   </span>
                 </button>
                 <div className="space-y-2 text-xs">
+                  {/* Activación por país: se prende de a uno (Chile primero). */}
+                  <div className="rounded-lg border border-slate-200 dark:border-slate-700 p-2">
+                    <p className="font-semibold text-slate-500 dark:text-slate-400 mb-1.5">Países habilitados</p>
+                    <div className="flex flex-wrap gap-3">
+                      {PAISES_FLUJO.map(p => (
+                        <label key={p.code} className="flex items-center gap-1.5 text-slate-600 dark:text-slate-300">
+                          <input
+                            type="checkbox"
+                            checked={flujoDraft.ofac.paises?.[p.code] === true}
+                            onChange={e => setOfac({ paises: { ...flujoDraft.ofac.paises, [p.code]: e.target.checked } })}
+                            className="w-3.5 h-3.5"
+                          />
+                          {p.label} <span className="text-slate-400">({p.code})</span>
+                        </label>
+                      ))}
+                    </div>
+                    <p className="text-[10px] text-slate-400 dark:text-slate-500 mt-1.5">
+                      Un caso solo se automatiza si su país está prendido. Los países sin screening nunca entran.
+                    </p>
+                  </div>
                   <label className="flex items-center gap-2 text-slate-600 dark:text-slate-300">
                     <input type="checkbox" checked={flujoDraft.ofac.cerrarSF} onChange={e => setOfac({ cerrarSF: e.target.checked })} className="w-3.5 h-3.5" />
                     Cerrar en Salesforce
@@ -1111,6 +1134,23 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                   El switch queda registrado, pero <b>todavía no hay acciones automáticas definidas</b> para esta cola:
                   falta acordar qué tipificación aplica a un caso de remesa. Mientras, la cola sigue manual aunque esté prendido.
                 </p>
+              </div>
+            </div>
+
+            {/* Freno duro: no es configurable a propósito. */}
+            <div className="mt-3 rounded-xl border border-red-200 dark:border-red-800/50 bg-red-50/70 dark:bg-red-950/20 p-3">
+              <p className="text-xs font-bold text-red-800 dark:text-red-300">🛑 Delitos que siempre retienen el caso</p>
+              <p className="text-[11px] text-red-700 dark:text-red-400 mt-1">
+                Si el screening trae un delito de estas categorías, el caso <b>no se cierra automáticamente</b> (ni en
+                Salesforce ni en Admin) aunque la conclusión diga liberar. Queda para el analista. Regla fija, no se
+                puede desactivar desde acá.
+              </p>
+              <div className="flex flex-wrap gap-1.5 mt-2">
+                {CATEGORIAS_SENSIBLES.map(c => (
+                  <span key={c.id} className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-300">
+                    {c.label}
+                  </span>
+                ))}
               </div>
             </div>
 
@@ -1265,7 +1305,10 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
               {adminMasivoTipo && adminMasivoConfirm && (
                 <span className="flex items-center gap-2">
                   <span className="text-rose-800 dark:text-rose-200">
-                    ¿Aplicar «{TIPOS_CIERRE_ADMIN.find(t => t.id === adminMasivoTipo)?.label}» a {seleccion.size} cliente(s) en Admin? OFAC=No · <b>bloquea/desbloquea clientes reales</b>.
+                    {(() => {
+                      const t = TIPOS_CIERRE_ADMIN.find(x => x.id === adminMasivoTipo);
+                      return <>¿Aplicar «{t?.label}» a {seleccion.size} cliente(s) en Admin? status {t?.status} · OFAC={ofacFlagPara(t?.status ?? '') ? 'Sí' : 'No'} · <b>bloquea/desbloquea clientes reales</b>.</>;
+                    })()}
                   </span>
                   <button onClick={cerrarMasivoAdmin} disabled={adminMasivoSending} className="px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold disabled:opacity-50">
                     {adminMasivoSending ? 'Enviando…' : 'Sí, aplicar'}
@@ -1361,6 +1404,12 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                               : s.estado === 'error' ? 'Error'
                               : s.estado === 'sin_causas' ? 'Sin causas'
                               : (s.decision || '—')}
+                            {(() => {
+                              const cats = retenidoPorDelito(s);
+                              return cats.length ? (
+                                <span className="ml-1.5 text-red-600 dark:text-red-400" title={`Retenido del flujo automático: ${cats.join(', ')}`}>🛑</span>
+                              ) : null;
+                            })()}
                           </td>
                           <td className="px-3 py-2 whitespace-nowrap text-center font-bold text-slate-800 dark:text-slate-200">
                             {!s || s.estado === 'loading' ? '…' : s.estado === 'na' ? '—' : s.estado === 'error' ? '⚠️' : (s.delitosUnicos ?? 0)}
@@ -1601,6 +1650,17 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                         )}
                       </div>
                     </div>
+                    {(() => {
+                      const cats = retenidoPorDelito(screenMap[sel.id]);
+                      return cats.length ? (
+                        <div className="mb-3 rounded-lg border border-red-200 dark:border-red-800/50 bg-red-50 dark:bg-red-950/30 px-3 py-2">
+                          <p className="text-xs font-bold text-red-800 dark:text-red-300">🛑 Retenido del flujo automático</p>
+                          <p className="text-[11px] text-red-700 dark:text-red-400 mt-0.5">
+                            Delitos de categoría: <b>{cats.join(', ')}</b>. Este caso no se cierra solo — requiere revisión del analista.
+                          </p>
+                        </div>
+                      ) : null;
+                    })()}
                     {(() => {
                       const sc = screenMap[sel.id];
                       if (!sc || sc.estado === 'loading') return <p className="text-xs text-slate-500 dark:text-slate-400 animate-pulse">Consultando lista…</p>;
