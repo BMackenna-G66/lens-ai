@@ -50,7 +50,8 @@ export const TIPOS_CIERRE_ADMIN: TipoCierreAdmin[] = [
   {
     id: 'blocked_pep',
     label: 'Blocked + formulario PEP',
-    status: 'FULLY_BLOCKED',
+    // Bloqueo preventivo por formulario PEP: es BLOCKED, no FULLY_BLOCKED.
+    status: 'BLOCKED',
     comment: 'COMPLIANCE_OFFICER_REQUEST',
     observation: 'Cliente puede operar con global66 caso liberado bajo logica de bandeja de casos Dentro de la matriz de riesgo',
     pep: true,
@@ -63,8 +64,12 @@ export const ADMIN_ASSIGNEE_DEFAULT = 'compliance.masivo@global66.com';
 
 // Valores válidos de status/comment de la API de admin (editables en la ficha).
 // Si la API acepta otros, agregarlos acá.
-export const ADMIN_STATUS_OPTIONS = ['NORMAL', 'UNDER_COMPLIANCE_REVIEW', 'UNDER_COMPLIANCE_REVIEW_2', 'FULLY_BLOCKED'] as const;
+export const ADMIN_STATUS_OPTIONS = ['NORMAL', 'UNDER_COMPLIANCE_REVIEW', 'UNDER_COMPLIANCE_REVIEW_2', 'BLOCKED', 'FULLY_BLOCKED'] as const;
 export const ADMIN_COMMENT_OPTIONS = ['NO_COMMENTS', 'UCR_CRIMINAL_RISK', 'COMPLIANCE_OFFICER_REQUEST'] as const;
+
+// El flag OFAC / blacklist va en true SOLO cuando el cliente queda Fully Blocked.
+// Regla única para el cierre individual, el masivo y el flujo automático.
+export const ofacFlagPara = (status: string): boolean => status === 'FULLY_BLOCKED';
 
 // Risk Level (paso PUT /customer) y provider PEP por defecto (PUT isPep).
 export const RISK_LEVELS = ['Bajo', 'Medio', 'Alto'] as const;

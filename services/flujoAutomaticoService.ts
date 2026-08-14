@@ -16,8 +16,25 @@ import type { Actor } from './caseWorkflowService';
 export const FLUJO_COLLECTION = 'config';
 export const FLUJO_DOC = 'flujoAutomatico';
 
+// Países donde se puede prender el automático. Son los que tienen screening:
+// Chile (Regcheq) y Colombia (Inspektor). Para sumar otro, agregarlo acá.
+export const PAISES_FLUJO: { code: string; label: string }[] = [
+  { code: 'CL', label: 'Chile' },
+  { code: 'CO', label: 'Colombia' },
+];
+
+// País del caso → código del catálogo. '' = país sin screening/no soportado, que
+// nunca entra al flujo automático.
+export function paisCodigo(pais: string): string {
+  const p = (pais || '').trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  if (/^cl$|chile/.test(p)) return 'CL';
+  if (/^co$|colombia/.test(p)) return 'CO';
+  return '';
+}
+
 export interface FlujoOfacConfig {
   enabled: boolean;
+  paises: Record<string, boolean>; // por país: { CL: false, CO: false } — todos OFF
   cerrarSF: boolean;        // ejecutar el cierre en Salesforce
   cerrarAdmin: boolean;     // ejecutar el cierre en Admin (bloqueo/desbloqueo)
   tipoLiberarNormal: string; // id de tipología para "Liberar"
@@ -36,6 +53,7 @@ export interface FlujoConfig {
 export const FLUJO_CONFIG_DEFAULT: FlujoConfig = {
   ofac: {
     enabled: false,
+    paises: { CL: false, CO: false },   // por pedido explícito: todos apagados
     cerrarSF: true,
     cerrarAdmin: true,
     tipoLiberarNormal: 'liberar_normal',
@@ -57,6 +75,7 @@ function normalizar(raw: Record<string, unknown> | undefined): FlujoConfig {
   return {
     ofac: {
       enabled: ofacRaw.enabled === true,                       // default OFF
+      paises: Object.fromEntries(PAISES_FLUJO.map(p => [p.code, (ofacRaw.paises ?? {})[p.code] === true])), // default OFF
       cerrarSF: ofacRaw.cerrarSF !== false,
       cerrarAdmin: ofacRaw.cerrarAdmin !== false,
       tipoLiberarNormal: ofacRaw.tipoLiberarNormal || d.ofac.tipoLiberarNormal,
@@ -92,6 +111,12 @@ export async function guardarFlujoConfig(cfg: FlujoConfig, actor?: Actor): Promi
     actualizadoEn: new Date().toISOString(),
     actualizadoPor: actor?.nombre ?? 'system',
   }, { merge: true });
+}
+
+// ¿El país del caso tiene el automático prendido?
+export function paisHabilitado(pais: string, cfg: FlujoOfacConfig): boolean {
+  const code = paisCodigo(pais);
+  return !!code && cfg.paises?.[code] === true;
 }
 
 // ── Clasificador PURO: conclusión del screening → id de tipología ───────────────

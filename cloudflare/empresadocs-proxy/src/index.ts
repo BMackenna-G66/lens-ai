@@ -42,7 +42,8 @@ const SF_INSTANCE_DEFAULT = 'https://global66.my.salesforce.com';
 const G66_ADMIN_BASE = 'https://api.global66.com';
 // Estados de compliance que disparan el "last-step" (igual que el bot).
 const G66_STATUS_REQUIERE_LAST_STEP = new Set(['NORMAL', 'UNDER_COMPLIANCE_REVIEW', 'UNDER_COMPLIANCE_REVIEW_2']);
-const G66_STATUS_VALIDOS = ['NORMAL', 'UNDER_COMPLIANCE_REVIEW', 'UNDER_COMPLIANCE_REVIEW_2', 'FULLY_BLOCKED'];
+// BLOCKED = bloqueo preventivo (ej. formulario PEP); no dispara last-step.
+const G66_STATUS_VALIDOS = ['NORMAL', 'UNDER_COMPLIANCE_REVIEW', 'UNDER_COMPLIANCE_REVIEW_2', 'BLOCKED', 'FULLY_BLOCKED'];
 
 // Decodifica el payload de un JWT (base64url) sin validar la firma — solo para
 // leer companyId y exp del token de sesión.
