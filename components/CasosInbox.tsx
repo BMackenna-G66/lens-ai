@@ -5,6 +5,8 @@ import {
 } from '../services/salesforceCaseService';
 import { SF_CASE_FIELDS } from '../services/salesforceCaseFields';
 import { buscarRemesa, buscarRemesas, RemesaResult, RemesaRow } from '../services/remesasService';
+import { screenBeneficiario, flujoDeBeneficiario, nombreBeneficiario } from '../services/remesaScreeningService';
+import type { RemesaScreening } from '../services/remesaScreeningService';
 import { screenCaso, esScreenable, runPool, Coincidencia, CasoScreening } from '../services/casosCriminalService';
 import { generateCasoPdf, CasoPdfCoincidencia } from '../services/pdfGenerator';
 import { normalizarScreening } from '../services/screeningNormalizer';
@@ -736,6 +738,24 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       .finally(() => { if (!cancelado) setRemesaLoading(false); });
     return () => { cancelado = true; };
   }, [sel?.id, sel?.remesa, activeQueue]);
+
+  // ── Screening del BENEFICIARIO (cola Remesa) ────────────────────────────────
+  // Se dispara cuando ya llegaron los datos de la TX, porque el flujo depende del
+  // país del beneficiario: Chile → Regcheq, Colombia → Inspektor, resto → listas.
+  const [benefScreen, setBenefScreen] = useState<RemesaScreening | null>(null);
+  const [benefLoading, setBenefLoading] = useState(false);
+  useEffect(() => {
+    setBenefScreen(null);
+    const row = remesaData?.estado === 'ok' ? remesaData.row : undefined;
+    if (activeQueue !== 'remesa' || !row) return;
+    let cancelado = false;
+    setBenefLoading(true);
+    screenBeneficiario(row)
+      .then(r => { if (!cancelado) setBenefScreen(r); })
+      .catch(e => { if (!cancelado) setBenefScreen({ estado: 'error', flujo: flujoDeBeneficiario(row), fuente: '—', decision: '—', delitosUnicos: 0, coincidencias: [], listas: [], mensaje: (e as Error).message }); })
+      .finally(() => { if (!cancelado) setBenefLoading(false); });
+    return () => { cancelado = true; };
+  }, [remesaData, activeQueue]);
 
   // Consulta en LOTE de todas las remesas de la cola (para columnas de la tabla).
   const [remesaMap, setRemesaMap] = useState<Record<string, RemesaRow>>({});
@@ -1811,6 +1831,85 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                     )}
                   </div>
                 )}
+
+                {/* Screening del BENEFICIARIO de la remesa (Chile / Colombia / Internacional) */}
+                {activeQueue === 'remesa' && remesaData?.estado === 'ok' && remesaData.row && (() => {
+                  const row = remesaData.row;
+                  const flujo = flujoDeBeneficiario(row);
+                  const etiquetaFlujo = flujo === 'CL' ? '🇨🇱 Chile · Regcheq'
+                    : flujo === 'CO' ? '🇨🇴 Colombia · Inspektor'
+                    : '🌍 Internacional · listas Regcheq';
+                  const sc = benefScreen;
+                  return (
+                    <div className="mb-5 rounded-xl border border-indigo-200 dark:border-indigo-800/50 bg-indigo-50/60 dark:bg-indigo-950/30 p-4">
+                      <div className="flex items-center justify-between mb-2">
+                        <h3 className="text-sm font-black text-indigo-800 dark:text-indigo-300">
+                          ⚖️ Screening del beneficiario · {etiquetaFlujo}
+                        </h3>
+                        {benefLoading
+                          ? <span className="text-xs text-slate-500 dark:text-slate-400 animate-pulse">consultando…</span>
+                          : sc && <span className={`text-xs font-bold ${decisionColor(sc.decision)}`}>{sc.decision}</span>}
+                      </div>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-3">
+                        {nombreBeneficiario(row) || '(sin nombre)'}
+                        {row.beneficiary_dni ? ` · ${row.beneficiary_dni_type || 'DNI'} ${row.beneficiary_dni}` : ''}
+                        {row.beneficiary_country_name ? ` · ${row.beneficiary_country_name}` : ''}
+                      </p>
+
+                      {benefLoading && <p className="text-xs text-slate-500 dark:text-slate-400 animate-pulse">Consultando listas…</p>}
+
+                      {!benefLoading && sc?.estado === 'error' && (
+                        <p className="text-xs text-red-600 dark:text-red-400">Error: {sc.mensaje}</p>
+                      )}
+                      {!benefLoading && sc?.estado === 'na' && (
+                        <p className="text-xs text-slate-500 dark:text-slate-400">No se puede screenear: {sc.mensaje}</p>
+                      )}
+
+                      {/* Chile / Colombia: causas penales contra el catálogo */}
+                      {!benefLoading && sc && (sc.flujo === 'CL' || sc.flujo === 'CO') && sc.estado !== 'error' && (
+                        sc.coincidencias.length === 0
+                          ? <p className="text-xs text-emerald-600 dark:text-emerald-400">Sin causas penales.{sc.pep ? ' (marcado PEP)' : ''}</p>
+                          : (
+                            <>
+                              <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">
+                                {sc.delitosUnicos} delito(s) único(s) · {sc.coincidencias.length} coincidencia(s)
+                                {sc.pep ? ' · PEP' : ''}
+                              </p>
+                              <CoincidenciasAgrupadas co={sc.coincidencias} />
+                            </>
+                          )
+                      )}
+
+                      {/* Internacional: qué listas coinciden y de qué tipo (sin catálogo aún) */}
+                      {!benefLoading && sc?.flujo === 'INTL' && sc.estado !== 'error' && sc.estado !== 'na' && (
+                        sc.listas.length === 0
+                          ? <p className="text-xs text-emerald-600 dark:text-emerald-400">Sin coincidencias en listas.</p>
+                          : (
+                            <>
+                              <p className="text-[11px] text-amber-700 dark:text-amber-400 mb-2">
+                                Envío internacional: todavía no hay catálogo para concluir automáticamente.
+                                Estas son las listas donde coincide — la decisión la toma el analista.
+                              </p>
+                              <table className="w-full text-xs">
+                                <thead className="text-slate-500 dark:text-slate-400 text-left">
+                                  <tr><th className="py-1">Lista</th><th className="py-1">Riesgo</th><th className="py-1">Detalle</th></tr>
+                                </thead>
+                                <tbody>
+                                  {sc.listas.map(l => (
+                                    <tr key={l.clave} className="border-t border-slate-200 dark:border-slate-700/50">
+                                      <td className="py-1.5 font-bold text-slate-800 dark:text-slate-100">{l.lista}</td>
+                                      <td className="py-1.5 text-slate-600 dark:text-slate-300">{l.riesgo || '—'}</td>
+                                      <td className="py-1.5 text-slate-600 dark:text-slate-300">{l.detalle || '—'}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </>
+                          )
+                      )}
+                    </div>
+                  );
+                })()}
 
                 {/* Estado y asignación del caso */}
                 {(() => {
