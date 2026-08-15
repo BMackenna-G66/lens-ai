@@ -28,7 +28,7 @@ import { TIPOS_CIERRE, camposDeCierre } from '../services/cierreTipos';
 import { TIPOS_CIERRE_ADMIN, OFAC_PROVIDERS, ADMIN_ASSIGNEE_DEFAULT, ADMIN_STATUS_OPTIONS, ADMIN_COMMENT_OPTIONS, RISK_LEVELS, PEP_PROVIDER_DEFAULT, ofacFlagPara } from '../services/cierreAdminTipos';
 import { enviarCierreAdmin, adminCierreDisponible, AdminCierreResult } from '../services/adminCierreService';
 import { registrarAuditoria, leerAuditoria } from '../services/caseAuditService';
-import { logCierre, logHistorial, logConfigFlujo, logScreening, sincronizarAnalistas, backfillCaso } from '../services/colasLogService';
+import { logCierre, logHistorial, logConfigFlujo, logScreening, sincronizarAnalistas, filasBackfillCaso, enviarLote } from '../services/colasLogService';
 import { getAllUsers } from '../services/firestoreService';
 import type { InvestigacionCaso } from '../services/casosComplianceTypes';
 import { useAuth } from '../context/AuthContext';
@@ -462,30 +462,35 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   const [backfillRun, setBackfillRun] = useState(false);
   const [backfillMsg, setBackfillMsg] = useState<string | null>(null);
   const sincronizarHistorico = async () => {
-    setBackfillRun(true); setBackfillMsg('Sincronizando…');
-    let nCasos = 0, nEscritas = 0, nFallidas = 0, errores = 0; let primerError: string | undefined;
+    setBackfillRun(true); setBackfillMsg('Leyendo casos…');
     const nombrePorUid: Record<string, string> = {};
     try {
       const us = await getAllUsers();
       for (const u of us) nombrePorUid[u.uid] = u.displayName || u.email || u.uid;
     } catch { /* sin diccionario: los uid quedan sin nombre */ }
+
+    // 1) Lee la auditoría de cada caso (esto sí en paralelo: es Firestore).
     const todos = casos.map(c => ({ ...c, remesa: extraerRemesa(c.asunto) } as QueuedCaso));
+    const filas: ReturnType<typeof filasBackfillCaso> = [];
+    let leidos = 0, errores = 0;
     await runPool(todos, async c => {
       try {
         const eventos = await leerAuditoria(c.id);
-        const r = await backfillCaso(c, clasificar(c), eventos, nombrePorUid);
-        nCasos++; nEscritas += r.escritas; nFallidas += r.fallidas;
-        if (r.error && !primerError) primerError = r.error;
-        setBackfillMsg(`Sincronizando… ${nCasos}/${todos.length} casos`);
+        filas.push(...filasBackfillCaso(c, clasificar(c), eventos, nombrePorUid));
       } catch { errores++; }
+      leidos++;
+      if (leidos % 10 === 0) setBackfillMsg(`Leyendo casos… ${leidos}/${todos.length}`);
     }, 4);
+
+    // 2) Manda TODO en lotes grandes y secuenciales: la Data API tiene una cuota
+    //    de statements activos por cuenta y el paralelismo la hacía saltar.
+    const r = await enviarLote(filas, (hechas, total) =>
+      setBackfillMsg(`Enviando… ${hechas}/${total} filas`));
     setBackfillRun(false);
-    // Reporta lo REALMENTE escrito en Redshift, no lo enviado: si el cluster está
-    // pausado o caído, el POST no falla pero no se escribe nada.
     setBackfillMsg(
-      nFallidas === 0 && nEscritas > 0
-        ? `✅ ${nCasos} caso(s) · ${nEscritas} fila(s) escritas en Redshift`
-        : `⚠️ ${nEscritas} fila(s) escritas, ${nFallidas} fallidas${errores ? ` · ${errores} caso(s) con error` : ''}${primerError ? ` · ${primerError}` : ''}`,
+      r.fallidas === 0 && r.escritas > 0
+        ? `✅ ${todos.length} caso(s) · ${r.escritas} fila(s) escritas en Redshift`
+        : `⚠️ ${r.escritas} escritas, ${r.fallidas} fallidas${errores ? ` · ${errores} caso(s) no se pudieron leer` : ''}${r.error ? ` · ${r.error}` : ''}`,
     );
   };
   const guardarFlujo = async () => {

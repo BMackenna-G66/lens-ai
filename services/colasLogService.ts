@@ -295,12 +295,15 @@ export interface EventoAuditoriaLeido {
 
 export interface ResumenBackfill { escritas: number; fallidas: number; cierres: number; eventos: number; error?: string }
 
-export async function backfillCaso(
+// PURO: arma las filas del caso, sin mandarlas. El envío se hace por lotes
+// grandes y secuenciales (ver enviarLote), porque la Data API tiene una cuota de
+// statements activos por cuenta y muchos requests en paralelo la revientan.
+export function filasBackfillCaso(
   caso: CasoSF,
   cola: string,
   eventos: EventoAuditoriaLeido[],
   nombrePorUid: Record<string, string> = {},
-): Promise<ResumenBackfill> {
+): Fila[] {
   const filas: Fila[] = [filaCaso(caso, cola)];
 
   // 1) Todos los eventos de auditoría del caso.
@@ -352,11 +355,24 @@ export async function backfillCaso(
     cierres++;
   }
 
+  void cierres;   // el conteo real de cierres sale de las filas enviadas
+  return filas;
+}
+
+// Envía las filas en lotes grandes y DE A UNO (sin paralelismo): así la cantidad
+// de statements activos en Redshift queda acotada y no se topa con la cuota.
+export async function enviarLote(
+  filas: Fila[],
+  onAvance?: (enviadas: number, total: number) => void,
+): Promise<ResumenBackfill> {
+  const TAMANO = 80;
   let escritas = 0, fallidas = 0, error: string | undefined;
-  for (let i = 0; i < filas.length; i += 50) {
-    const r = await enviar(filas.slice(i, i + 50));
+  for (let i = 0; i < filas.length; i += TAMANO) {
+    const trozo = filas.slice(i, i + TAMANO);
+    const r = await enviar(trozo);
     escritas += r.escritas; fallidas += r.fallidas;
     if (r.error && !error) error = r.error;
+    onAvance?.(Math.min(i + TAMANO, filas.length), filas.length);
   }
-  return { escritas, fallidas, cierres, eventos: eventos.length, error };
+  return { escritas, fallidas, cierres: 0, eventos: 0, error };
 }
