@@ -13,7 +13,9 @@ import type { AlertaScreening, EstadoCaso, PrioridadCaso, TipoCasoCompliance } f
 import { TRANSICIONES_CASO } from '../services/casosComplianceTypes';
 import { inferirTipoCaso } from '../services/casosComplianceMapper';
 import { calcularPrioridadPreliminar } from '../services/casePriority';
-import { cambiarEstado, tomarCaso, liberarCaso, cambiarPrioridad } from '../services/caseWorkflowService';
+import { cambiarEstado, tomarCaso, liberarCaso, cambiarPrioridad, asignarCaso } from '../services/caseWorkflowService';
+import { notificar, subscribeNotificaciones, marcarTodasLeidas, marcarLeida } from '../services/notificacionesService';
+import type { Notificacion } from '../services/notificacionesService';
 import { statusDeCaso, setStatusCaso, registrarCierreCanal, STATUS_CASO_VALORES } from '../services/caseStatusService';
 import type { StatusCaso } from '../services/caseStatusService';
 import { subscribeFlujoConfig, guardarFlujoConfig, flujoConfigDisponible, FLUJO_CONFIG_DEFAULT, PAISES_FLUJO } from '../services/flujoAutomaticoService';
@@ -397,13 +399,60 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
 
   useEffect(() => subscribeFlujoConfig(cfg => { setFlujoCfg(cfg); setFlujoDraft(cfg); }), []);
 
-  // Diccionario de analistas en Redshift: se sincroniza con los usuarios de Lens
-  // al abrir la Bandeja, para poder leer los logs por nombre/correo.
+  // Usuarios de Lens: sirven para asignar casos y como diccionario de analistas en
+  // Redshift (para poder leer los logs por nombre/correo).
+  const [usuarios, setUsuarios] = useState<{ uid: string; nombre: string; email: string }[]>([]);
   useEffect(() => {
     getAllUsers()
-      .then(us => sincronizarAnalistas(us.map(u => ({ uid: u.uid, email: u.email, displayName: u.displayName, role: u.role, disabled: u.disabled }))))
+      .then(us => {
+        const activos = us.filter(u => !u.disabled);
+        setUsuarios(activos.map(u => ({ uid: u.uid, nombre: u.displayName || u.email || u.uid, email: u.email })));
+        sincronizarAnalistas(us.map(u => ({ uid: u.uid, email: u.email, displayName: u.displayName, role: u.role, disabled: u.disabled })));
+      })
       .catch(() => {});
   }, []);
+
+  // Notificaciones del analista logueado (campanita).
+  const [notis, setNotis] = useState<Notificacion[]>([]);
+  const [showNotis, setShowNotis] = useState(false);
+  useEffect(() => {
+    if (!actor?.uid) return;
+    return subscribeNotificaciones(actor.uid, setNotis);
+  }, [actor?.uid]);
+  const notisSinLeer = notis.filter(n => !n.leida);
+
+  // ── Asignación de casos a otro analista ────────────────────────────────────
+  const [asignarA, setAsignarA] = useState('');
+  const [asignando, setAsignando] = useState(false);
+  const [asignarMsg, setAsignarMsg] = useState<string | null>(null);
+
+  // Asigna una lista de casos y le avisa al destinatario (una sola notificación).
+  const asignarCasos = async (lista: QueuedCaso[], destinoUid: string) => {
+    const destino = usuarios.find(u => u.uid === destinoUid);
+    if (!destino || !actor || lista.length === 0) return;
+    setAsignando(true); setAsignarMsg(null);
+    let ok = 0, err = 0;
+    for (const c of lista) {
+      try {
+        const anterior = vistaOp(c).asignado || null;
+        await asignarCaso({ id: c.id, estadoCaso: vistaOp(c).estado, versionCaso: vistaOp(c).versionCaso }, destino, actor);
+        logHistorial(c, 'ASIGNACION', anterior, destino.nombre, actor);
+        ok++;
+      } catch { err++; }
+    }
+    if (ok > 0) {
+      await notificar(destino.uid, {
+        tipo: 'CASOS_ASIGNADOS',
+        titulo: `Te asignaron ${ok} caso(s)`,
+        detalle: `${actor.nombre} te asignó ${ok} caso(s) de la cola.`,
+        casos: lista.slice(0, 20).map(c => c.numeroCaso),
+        creadaPorNombre: actor.nombre,
+      });
+    }
+    setAsignando(false);
+    setAsignarMsg(`${ok} caso(s) asignado(s) a ${destino.nombre}${err ? `, ${err} con error` : ''}`);
+    if (err === 0) { limpiarSeleccion(); setAsignarA(''); }
+  };
 
   const abrirFlujo = () => { setFlujoDraft(flujoCfg); setFlujoMsg(null); setShowFlujo(s => !s); };
 
@@ -1070,9 +1119,51 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
             Casos OFAC/PEP + Transacciones recibidos desde Salesforce · en vivo
           </p>
         </div>
-        <button onClick={onToggleDarkMode} className="text-xs px-3 py-2 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
-          {darkMode ? '☀️' : '🌙'}
-        </button>
+        <div className="flex items-center gap-2">
+          {/* Notificaciones del analista (asignaciones) */}
+          <div className="relative">
+            <button
+              onClick={() => { setShowNotis(v => !v); if (notisSinLeer.length) marcarTodasLeidas(notisSinLeer.map(n => n.id)); }}
+              title="Notificaciones"
+              className="relative text-xs px-3 py-2 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700"
+            >
+              🔔
+              {notisSinLeer.length > 0 && (
+                <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] font-black flex items-center justify-center">
+                  {notisSinLeer.length}
+                </span>
+              )}
+            </button>
+            {showNotis && (
+              <div className="absolute right-0 mt-2 w-80 max-h-96 overflow-y-auto z-30 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-xl p-2">
+                <div className="flex items-center justify-between px-2 py-1">
+                  <span className="text-xs font-black text-slate-700 dark:text-slate-200">Notificaciones</span>
+                  <button onClick={() => setShowNotis(false)} className="text-[11px] text-slate-400 hover:text-slate-600">cerrar</button>
+                </div>
+                {notis.length === 0 && <p className="text-xs text-slate-400 px-2 py-3">Sin notificaciones.</p>}
+                {notis.map(n => (
+                  <button
+                    key={n.id}
+                    onClick={() => { marcarLeida(n.id); if (n.casos?.[0]) { setFiltroCol('numeroCaso', n.casos[0]); setShowNotis(false); } }}
+                    className={`w-full text-left rounded-lg px-2 py-2 mb-1 border ${n.leida
+                      ? 'border-transparent hover:bg-slate-50 dark:hover:bg-slate-700/40'
+                      : 'border-sky-200 dark:border-sky-800/50 bg-sky-50 dark:bg-sky-950/30'}`}
+                  >
+                    <p className="text-xs font-bold text-slate-800 dark:text-slate-100">{n.titulo}</p>
+                    {n.detalle && <p className="text-[11px] text-slate-600 dark:text-slate-300 mt-0.5">{n.detalle}</p>}
+                    {n.casos?.length ? (
+                      <p className="text-[10px] text-slate-400 mt-1 truncate">{n.casos.slice(0, 6).join(' · ')}{n.casos.length > 6 ? ` +${n.casos.length - 6}` : ''}</p>
+                    ) : null}
+                    <p className="text-[10px] text-slate-400 mt-0.5">{fmtFecha(n.creadaEn)}</p>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <button onClick={onToggleDarkMode} className="text-xs px-3 py-2 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
+            {darkMode ? '☀️' : '🌙'}
+          </button>
+        </div>
       </header>
 
       {/* Tabs de colas */}
@@ -1348,6 +1439,32 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
           )}
 
           {/* Barra de cierre masivo en Salesforce (solo cola OFAC/PEP) */}
+          {/* Asignación masiva: repartir casos entre analistas desde la cola */}
+          {seleccion.size > 0 && (
+            <div className="flex flex-wrap items-center gap-3 mb-3 bg-violet-50 dark:bg-violet-950/40 border border-violet-200 dark:border-violet-800/50 rounded-xl px-4 py-2 text-sm">
+              <span className="font-semibold text-violet-700 dark:text-violet-300">Asignar a</span>
+              <select
+                value={asignarA}
+                onChange={e => { setAsignarA(e.target.value); setAsignarMsg(null); }}
+                className="px-2 py-1 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800"
+              >
+                <option value="">Elegir analista…</option>
+                {usuarios.map(u => <option key={u.uid} value={u.uid}>{u.nombre}</option>)}
+                {actor && <option value={actor.uid}>— Yo ({actor.nombre}) —</option>}
+              </select>
+              {asignarA && (
+                <button
+                  onClick={() => asignarCasos([...seleccion].map(id => filtrados.find(c => c.id === id)).filter((c): c is QueuedCaso => !!c), asignarA)}
+                  disabled={asignando}
+                  className="font-bold text-violet-700 dark:text-violet-400 hover:underline disabled:opacity-50"
+                >
+                  {asignando ? 'Asignando…' : `Asignar ${seleccion.size} caso(s)`}
+                </button>
+              )}
+              {asignarMsg && <span className="text-violet-800 dark:text-violet-200 font-medium">{asignarMsg}</span>}
+            </div>
+          )}
+
           {seleccion.size > 0 && activeQueue === 'ofac' && sfUpdateDisponible() && (
             <div className="flex flex-wrap items-center gap-3 mb-3 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/50 rounded-xl px-4 py-2 text-sm">
               <span className="font-semibold text-emerald-700 dark:text-emerald-300">Cerrar en Salesforce</span>
@@ -1716,6 +1833,20 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                         ) : (
                           <button onClick={() => doTomar(sel)} disabled={accionEnCurso} className="px-3 py-1 rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-sm font-bold disabled:opacity-50">Tomar caso</button>
                         )}
+                        {/* Asignar este caso a otra persona (le llega notificación) */}
+                        <label className="flex items-center gap-1 text-slate-500 dark:text-slate-400">
+                          Asignar a:
+                          <select
+                            value=""
+                            disabled={asignando || usuarios.length === 0}
+                            onChange={e => { if (e.target.value) asignarCasos([sel], e.target.value); }}
+                            className={selectCls}
+                            title="Asigna el caso a otro analista y le avisa"
+                          >
+                            <option value="">{asignando ? 'Asignando…' : 'Elegir…'}</option>
+                            {usuarios.filter(u => u.uid !== op.asignadoId).map(u => <option key={u.uid} value={u.uid}>{u.nombre}</option>)}
+                          </select>
+                        </label>
                         {accionMsg && <span className="text-xs text-red-600 dark:text-red-400">{accionMsg}</span>}
                       </div>
                     </div>
