@@ -21,7 +21,7 @@ import type { StatusCaso } from '../services/caseStatusService';
 import { subscribeFlujoConfig, guardarFlujoConfig, flujoConfigDisponible, FLUJO_CONFIG_DEFAULT, PAISES_FLUJO } from '../services/flujoAutomaticoService';
 import { CATEGORIAS_SENSIBLES } from '../services/delitosSensibles';
 import type { FlujoConfig } from '../services/flujoAutomaticoService';
-import { procesarCasoAuto, evaluarCasoAuto, retenidoPorDelito } from '../services/flujoAutomaticoEngine';
+import { procesarCasoAuto, evaluarCasoAuto, motivosRetencion, retenidoPorDelito } from '../services/flujoAutomaticoEngine';
 import { guardarInvestigacion } from '../services/caseInvestigationService';
 import { enviarResolucion, conclusionAStatus } from '../services/caseResolutionService';
 import { TIPOS_CIERRE, camposDeCierre } from '../services/cierreTipos';
@@ -1308,11 +1308,11 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
 
             {/* Freno duro: no es configurable a propósito. */}
             <div className="mt-3 rounded-xl border border-red-200 dark:border-red-800/50 bg-red-50/70 dark:bg-red-950/20 p-3">
-              <p className="text-xs font-bold text-red-800 dark:text-red-300">🛑 Delitos que siempre retienen el caso</p>
+              <p className="text-xs font-bold text-red-800 dark:text-red-300">🛑 Qué retiene siempre el caso</p>
               <p className="text-[11px] text-red-700 dark:text-red-400 mt-1">
-                Si el screening trae un delito de estas categorías, el caso <b>no se cierra automáticamente</b> (ni en
-                Salesforce ni en Admin) aunque la conclusión diga liberar. Queda para el analista. Regla fija, no se
-                puede desactivar desde acá.
+                Si el screening trae un delito de estas categorías <b>o el cliente es PEP</b>, el caso
+                <b> no se cierra automáticamente</b> (ni en Salesforce ni en Admin) aunque la conclusión diga liberar.
+                Queda para el analista. Regla fija, no se puede desactivar desde acá.
               </p>
               <div className="flex flex-wrap gap-1.5 mt-2">
                 {CATEGORIAS_SENSIBLES.map(c => (
@@ -1320,6 +1320,9 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                     {c.label}
                   </span>
                 ))}
+                <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-300">
+                  Coincidencia PEP
+                </span>
               </div>
             </div>
 
@@ -1619,7 +1622,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                               : s.estado === 'sin_causas' ? 'Sin causas'
                               : (s.decision || '—')}
                             {(() => {
-                              const cats = retenidoPorDelito(s);
+                              const cats = motivosRetencion(s);
                               return cats.length ? (
                                 <span className="ml-1.5 text-red-600 dark:text-red-400" title={`Retenido del flujo automático: ${cats.join(', ')}`}>🛑</span>
                               ) : null;
@@ -1879,12 +1882,12 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                       </div>
                     </div>
                     {(() => {
-                      const cats = retenidoPorDelito(screenMap[sel.id]);
+                      const cats = motivosRetencion(screenMap[sel.id]);
                       return cats.length ? (
                         <div className="mb-3 rounded-lg border border-red-200 dark:border-red-800/50 bg-red-50 dark:bg-red-950/30 px-3 py-2">
                           <p className="text-xs font-bold text-red-800 dark:text-red-300">🛑 Retenido del flujo automático</p>
                           <p className="text-[11px] text-red-700 dark:text-red-400 mt-0.5">
-                            Delitos de categoría: <b>{cats.join(', ')}</b>. Este caso no se cierra solo — requiere revisión del analista.
+                            Motivo: <b>{cats.join(', ')}</b>. Este caso no se cierra solo — requiere revisión del analista.
                           </p>
                         </div>
                       ) : null;
