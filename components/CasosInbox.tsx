@@ -28,7 +28,7 @@ import { TIPOS_CIERRE, camposDeCierre } from '../services/cierreTipos';
 import { TIPOS_CIERRE_ADMIN, OFAC_PROVIDERS, ADMIN_ASSIGNEE_DEFAULT, ADMIN_STATUS_OPTIONS, ADMIN_COMMENT_OPTIONS, RISK_LEVELS, PEP_PROVIDER_DEFAULT, ofacFlagPara } from '../services/cierreAdminTipos';
 import { enviarCierreAdmin, adminCierreDisponible, AdminCierreResult } from '../services/adminCierreService';
 import { registrarAuditoria, leerAuditoria } from '../services/caseAuditService';
-import { logCierre, logHistorial, logConfigFlujo, logScreening, sincronizarAnalistas, filasBackfillCaso, enviarLote } from '../services/colasLogService';
+import { logCierre, logHistorial, logConfigFlujo, logScreening, sincronizarAnalistas, filasBackfillCaso, enviarLote, reintentarPendientes, pendientesEnBuffer } from '../services/colasLogService';
 import { getAllUsers } from '../services/firestoreService';
 import type { InvestigacionCaso } from '../services/casosComplianceTypes';
 import { useAuth } from '../context/AuthContext';
@@ -410,6 +410,21 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
         sincronizarAnalistas(us.map(u => ({ uid: u.uid, email: u.email, displayName: u.displayName, role: u.role, disabled: u.disabled })));
       })
       .catch(() => {});
+  }, []);
+
+  // Reintento del log pendiente: si Redshift estuvo pausado o caído, las filas
+  // quedaron guardadas en el navegador. Se reintentan al abrir y cada 5 minutos,
+  // así el analista no depende de acordarse de sincronizar.
+  const [pendientes, setPendientes] = useState(0);
+  useEffect(() => {
+    const correr = async () => {
+      if (pendientesEnBuffer() === 0) { setPendientes(0); return; }
+      const r = await reintentarPendientes();
+      setPendientes(r.quedan);
+    };
+    correr();
+    const t = setInterval(correr, 5 * 60 * 1000);
+    return () => clearInterval(t);
   }, []);
 
   // Notificaciones del analista logueado (campanita).
@@ -1364,6 +1379,13 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
           </div>
         );
       })()}
+
+      {pendientes > 0 && !loading && !error && (
+        <div className="mb-4 flex items-center gap-3 rounded-xl border border-amber-200 dark:border-amber-800/50 bg-amber-50 dark:bg-amber-950/30 px-4 py-2 text-sm text-amber-800 dark:text-amber-300">
+          <span className="font-semibold">⏳ {pendientes} registro(s) de log esperando a Redshift</span>
+          <span className="text-[11px] opacity-80">Se reenvían solos cuando el cluster vuelve (reintento cada 5 min).</span>
+        </div>
+      )}
 
       {autoMsg && !loading && !error && (
         <div className="mb-4 flex items-center gap-3 rounded-xl border border-emerald-200 dark:border-emerald-800/50 bg-emerald-50 dark:bg-emerald-950/30 px-4 py-2 text-sm text-emerald-800 dark:text-emerald-300">

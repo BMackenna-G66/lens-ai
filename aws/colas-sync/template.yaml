@@ -1,0 +1,91 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Sincronización diaria Firestore → Redshift (schema colas_trabajo). Recupera lo
+  que la app no pudo escribir mientras el cluster estaba pausado. Stack
+  INDEPENDIENTE del receptor de casos y del logger.
+
+Parameters:
+  FirebaseSaB64:
+    Type: String
+    NoEcho: true
+    Description: Service account de Firebase (JSON) en base64.
+  FirestoreProject:
+    Type: String
+    Default: lens-ai-9da63
+  FirestoreCollection:
+    Type: String
+    Default: casos_sf
+  RedshiftCluster:
+    Type: String
+    Default: compliance-redshift-cluster
+  RedshiftDatabase:
+    Type: String
+    Default: dev
+  RedshiftDbUser:
+    Type: String
+    Default: awsuser
+  RedshiftSchema:
+    Type: String
+    Default: colas_trabajo
+  Horario:
+    Type: String
+    Default: 'cron(30 12 * * ? *)'
+    Description: >
+      UTC. Default 12:30 UTC = 08:30 hora Chile: después de que el cluster se
+      reanuda (08:00 UTC) y antes de que se pause (22:30 UTC).
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 600
+    MemorySize: 512
+    Architectures: [arm64]
+
+Resources:
+  ColasSyncFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: colas-trabajo-sync-diario
+      Handler: app.lambda_handler
+      CodeUri: src/
+      Description: Lee los casos y su auditoría de Firestore y los escribe en Redshift.
+      Environment:
+        Variables:
+          FIREBASE_SA_JSON: !Ref FirebaseSaB64
+          FIRESTORE_PROJECT: !Ref FirestoreProject
+          FIRESTORE_COLLECTION: !Ref FirestoreCollection
+          REDSHIFT_CLUSTER: !Ref RedshiftCluster
+          REDSHIFT_DATABASE: !Ref RedshiftDatabase
+          REDSHIFT_DB_USER: !Ref RedshiftDbUser
+          REDSHIFT_SCHEMA: !Ref RedshiftSchema
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: redshift-data:ExecuteStatement
+              Resource: !Sub 'arn:aws:redshift:${AWS::Region}:${AWS::AccountId}:cluster:${RedshiftCluster}'
+            # DescribeStatement identifica por Id de statement, no por recurso:
+            # AWS no admite scope por ARN acá, tiene que ir con '*'.
+            - Effect: Allow
+              Action: redshift-data:DescribeStatement
+              Resource: '*'
+            - Effect: Allow
+              Action: redshift:GetClusterCredentials
+              Resource:
+                - !Sub 'arn:aws:redshift:${AWS::Region}:${AWS::AccountId}:dbuser:${RedshiftCluster}/${RedshiftDbUser}'
+                - !Sub 'arn:aws:redshift:${AWS::Region}:${AWS::AccountId}:dbname:${RedshiftCluster}/${RedshiftDatabase}'
+      Events:
+        Diario:
+          Type: Schedule
+          Properties:
+            Schedule: !Ref Horario
+            Name: colas-sync-diario
+            Description: Sincroniza la Bandeja de Casos con Redshift todas las mañanas.
+
+Outputs:
+  FunctionName:
+    Value: !Ref ColasSyncFunction
+  LogGroup:
+    Value: !Sub '/aws/lambda/${ColasSyncFunction}'
+  Horario:
+    Value: !Ref Horario
