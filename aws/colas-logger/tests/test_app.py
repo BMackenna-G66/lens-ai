@@ -184,6 +184,62 @@ def test_fallback_pg8000_cuando_no_hay_driver_oficial():
             sys.modules["redshift_connector"] = oficial
 
 
+def test_dataapi_agrupa_en_insert_multifila():
+    """El modo dataapi debe mandar 1 DELETE + 1 INSERT por grupo, no 2 por fila:
+    si no, se revienta la cuota de 500 statements activos de la Data API."""
+    llamadas = []
+
+    class _FakeRsClient:
+        def execute_statement(self, **kw):
+            llamadas.append(kw)
+            return {"Id": "x"}
+
+    sys.modules["boto3"] = types.SimpleNamespace(client=lambda *a, **k: _FakeRsClient())
+    app.MODO = "dataapi"
+    app.CLUSTER = "compliance-redshift-cluster"
+    app.DB_USER = "awsuser"
+    try:
+        eventos = [
+            {"tabla": "caso", "datos": {"numero_caso": f"026488{n}", "cola": "ofac", "pais": "Chile"}}
+            for n in range(3)
+        ]
+        r = app.lambda_handler(_evt({"eventos": eventos}), None)
+        assert r["statusCode"] == 200, r["body"]
+        assert json.loads(r["body"])["ok"] == 3
+        # 3 filas → 2 statements (no 6)
+        assert len(llamadas) == 2, f"esperaba 2 statements, hubo {len(llamadas)}"
+        borrado, insertado = llamadas
+        assert borrado["Sql"].startswith("DELETE FROM colas_trabajo.caso WHERE numero_caso IN (")
+        assert len(borrado["Parameters"]) == 3
+        assert insertado["Sql"].count("), (") == 2      # 3 tuplas de VALUES
+        assert len(insertado["Parameters"]) == 9        # 3 filas x 3 columnas
+    finally:
+        app.MODO = "tcp"
+
+
+def test_dataapi_separa_grupos_por_columnas():
+    """Filas con distinto set de columnas no se pueden mezclar en un INSERT."""
+    llamadas = []
+
+    class _FakeRsClient:
+        def execute_statement(self, **kw):
+            llamadas.append(kw)
+            return {"Id": "x"}
+
+    sys.modules["boto3"] = types.SimpleNamespace(client=lambda *a, **k: _FakeRsClient())
+    app.MODO = "dataapi"
+    try:
+        eventos = [
+            {"tabla": "caso", "datos": {"numero_caso": "1", "cola": "ofac"}},
+            {"tabla": "caso", "datos": {"numero_caso": "2", "cola": "ofac", "pais": "Chile"}},
+        ]
+        r = app.lambda_handler(_evt({"eventos": eventos}), None)
+        assert json.loads(r["body"])["ok"] == 2
+        assert len(llamadas) == 4, f"esperaba 2 grupos (4 statements), hubo {len(llamadas)}"
+    finally:
+        app.MODO = "tcp"
+
+
 if __name__ == "__main__":
     fallos = 0
     for nombre, fn in sorted(globals().items()):
