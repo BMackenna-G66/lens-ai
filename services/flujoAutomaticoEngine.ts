@@ -39,7 +39,8 @@ export type MotivoNoAuto =
   | 'pais_apagado'
   | 'ya_cerrado'
   | 'sin_conclusion'      // screening sin resolver, o conclusión de revisión
-  | 'delito_sensible';    // freno duro: tráfico/defraudaciones/armas/lavado/terrorismo
+  | 'delito_sensible'     // freno duro: tráfico/defraudaciones/armas/lavado/terrorismo
+  | 'pep';                // freno duro: coincidencia PEP
 
 export interface EvaluacionAuto {
   automatizable: boolean;
@@ -51,6 +52,7 @@ export interface EvaluacionAuto {
 // Screening mínimo que necesita la evaluación.
 export interface ScreeningParaAuto {
   decision?: string;
+  pep?: boolean;
   coincidencias?: Array<{ tipo?: string; detalle?: string }>;
 }
 
@@ -66,6 +68,11 @@ export function evaluarCasoAuto(caso: CasoSF, screening: ScreeningParaAuto | und
   const categorias = categoriasSensibles(screening?.coincidencias);
   if (categorias.length > 0) return { automatizable: false, motivo: 'delito_sensible', categorias };
 
+  // Freno duro por PEP: un cliente PEP NO se libera solo. Su tratamiento correcto
+  // es el bloqueo preventivo + formulario PEP, que hoy no está automatizado, así
+  // que el caso queda entero para el analista (tampoco se bloquea solo).
+  if (screening?.pep === true) return { automatizable: false, motivo: 'pep', categorias: ['PEP'] };
+
   const tipologia = tipologiaParaDecision(screening?.decision, cfg);
   if (!tipologia) return { automatizable: false, motivo: 'sin_conclusion' };
   return { automatizable: true, tipologia };
@@ -75,6 +82,13 @@ export function evaluarCasoAuto(caso: CasoSF, screening: ScreeningParaAuto | und
 // UI aunque el flujo esté apagado).
 export const retenidoPorDelito = (screening: ScreeningParaAuto | undefined): string[] =>
   categoriasSensibles(screening?.coincidencias);
+
+// TODOS los motivos por los que un caso queda fuera del automático (delitos + PEP).
+// Es lo que muestra la UI: al analista le importa que está retenido y por qué.
+export const motivosRetencion = (screening: ScreeningParaAuto | undefined): string[] => [
+  ...categoriasSensibles(screening?.coincidencias),
+  ...(screening?.pep === true ? ['PEP'] : []),
+];
 
 // Cierra un caso automáticamente. Devuelve null si no era candidato (flujo o país
 // apagado, ya cerrado, conclusión no automatizable, o retenido por delito sensible).
