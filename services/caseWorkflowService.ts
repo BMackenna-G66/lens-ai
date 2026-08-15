@@ -98,3 +98,29 @@ export async function liberarCaso(caso: CasoRef, actor: Actor): Promise<void> {
     correlationId: caso.id, versionCaso: caso.versionCaso ?? 1,
   });
 }
+
+// Asigna el caso a OTRO analista (distinto de tomarlo uno mismo). Se usa desde la
+// cola (masivo) y desde la ficha. Aditivo + auditoría, igual que tomarCaso.
+export async function asignarCaso(
+  caso: CasoRef,
+  destino: { uid: string; nombre: string },
+  actor: Actor,
+): Promise<void> {
+  const db = getDb() as Firestore | null;
+  if (!db) return;
+  const ahora = new Date().toISOString();
+  await updateDoc(doc(db, CASOS_COLLECTION, caso.id), {
+    'asignacion.analistaId': destino.uid,
+    'asignacion.analistaNombre': destino.nombre,
+    'asignacion.asignadoEn': ahora,
+    'asignacion.asignadoPor': actor.uid,
+    estadoCaso: 'ASIGNADO',
+    statusCaso: 'GESTIONANDO',
+    actualizadoEn: ahora,
+  });
+  await registrarAuditoria(caso.id, {
+    tipo: 'CASO_ASIGNADO', actorId: actor.uid, actorTipo: 'USER',
+    correlationId: caso.id, versionCaso: caso.versionCaso ?? 1,
+    metadata: { analistaId: destino.uid, analistaNombre: destino.nombre, asignadoPor: actor.nombre },
+  });
+}
