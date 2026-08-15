@@ -282,8 +282,11 @@ def _escribir_tcp(filas):
 # como 2 statements: un DELETE con IN (...) y un INSERT con varios VALUES. Un lote
 # de 100 filas pasa de ~200 statements a ~6.
 
-def _ejecutar_con_reintento(client, sql, params, intentos=4):
-    """Ejecuta con backoff si la cuota de statements activos está llena."""
+def _ejecutar_con_reintento(client, sql, params, intentos=6):
+    """Ejecuta con backoff si la cuota de statements activos está llena.
+    La cuota (500) es de TODA la cuenta, así que otro proceso puede estar
+    consumiéndola: conviene insistir un rato antes de dar la fila por perdida."""
+    import random
     import time
     for n in range(intentos):
         try:
@@ -292,8 +295,10 @@ def _ejecutar_con_reintento(client, sql, params, intentos=4):
                 Sql=sql, Parameters=params,
             )
         except Exception as e:  # noqa: BLE001
-            if "ActiveStatementsExceeded" in str(e) and n < intentos - 1:
-                time.sleep(1.5 * (n + 1))   # 1.5s, 3s, 4.5s
+            transitorio = "ActiveStatementsExceeded" in str(e) or "ThrottlingException" in str(e)
+            if transitorio and n < intentos - 1:
+                # backoff exponencial con jitter: 1s, 2s, 4s, 8s, 16s (+ hasta 1s)
+                time.sleep(min(2 ** n, 16) + random.random())
                 continue
             raise
 
