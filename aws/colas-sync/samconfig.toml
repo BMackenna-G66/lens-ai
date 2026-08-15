@@ -1,0 +1,12 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "colas-sync-diario"
+resolve_s3 = true
+s3_prefix = "colas-sync"
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = false
+profile = "compliance-admin"
+# El service account NO se guarda acá: se pasa en el deploy con
+#   --parameter-overrides "FirebaseSaB64=$(...)"

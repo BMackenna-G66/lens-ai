@@ -25,7 +25,52 @@ export const ACTOR_SISTEMA: ActorLog = { uid: 'system', nombre: 'Flujo automáti
 // Redshift está caído o pausado, escritas = 0 aunque el POST no tire excepción).
 export interface ResultadoEnvio { escritas: number; fallidas: number; error?: string }
 
-async function enviar(eventos: Fila[]): Promise<ResultadoEnvio> {
+// ── Buffer de reintento ──────────────────────────────────────────────────────
+// El cluster se pausa de noche: lo que se manda en esa ventana no se escribe.
+// En vez de perderlo, las filas que fallan quedan guardadas en el navegador y se
+// reintentan solas cuando Redshift vuelve. Como el logger es idempotente
+// (DELETE + INSERT por clave natural), reenviar de más nunca duplica.
+const BUFFER_KEY = 'colas_log_pendientes';
+const BUFFER_MAX = 3000;   // techo: si se pasa, se descartan las más viejas
+
+function leerPendientes(): Fila[] {
+  try {
+    const crudo = localStorage.getItem(BUFFER_KEY);
+    const arr = crudo ? JSON.parse(crudo) : [];
+    return Array.isArray(arr) ? arr : [];
+  } catch { return []; }
+}
+
+function guardarPendientes(filas: Fila[]): void {
+  try {
+    localStorage.setItem(BUFFER_KEY, JSON.stringify(filas.slice(-BUFFER_MAX)));
+  } catch { /* sin espacio: se pierde el buffer, no la gestión */ }
+}
+
+function bufferizar(filas: Fila[]): void {
+  if (filas.length === 0) return;
+  guardarPendientes([...leerPendientes(), ...filas]);
+}
+
+export const pendientesEnBuffer = (): number => leerPendientes().length;
+
+// Reintenta lo pendiente. Se llama al abrir la Bandeja y cada tanto.
+export async function reintentarPendientes(): Promise<{ escritas: number; quedan: number }> {
+  const filas = leerPendientes();
+  if (filas.length === 0) return { escritas: 0, quedan: 0 };
+  let escritas = 0;
+  const fallaron: Fila[] = [];
+  for (let i = 0; i < filas.length; i += 80) {
+    const trozo = filas.slice(i, i + 80);
+    const r = await enviar(trozo, false);   // sin re-bufferizar acá
+    escritas += r.escritas;
+    if (r.escritas < trozo.length) fallaron.push(...trozo);
+  }
+  guardarPendientes(fallaron);
+  return { escritas, quedan: fallaron.length };
+}
+
+async function enviar(eventos: Fila[], bufferizarSiFalla = true): Promise<ResultadoEnvio> {
   if (!PROXY || eventos.length === 0) return { escritas: 0, fallidas: eventos.length, error: 'logger no configurado' };
   try {
     const res = await fetch(`${PROXY}/colas/log`, {
@@ -37,16 +82,22 @@ async function enviar(eventos: Fila[]): Promise<ResultadoEnvio> {
     const txt = await res.text();
     let data: { ok?: number; errores?: unknown[]; error?: string } = {};
     try { data = txt ? JSON.parse(txt) : {}; } catch { data = { error: txt.slice(0, 200) }; }
-    if (!res.ok) return { escritas: 0, fallidas: eventos.length, error: data.error || `HTTP ${res.status}` };
+    if (!res.ok) {
+      if (bufferizarSiFalla) bufferizar(eventos);
+      return { escritas: 0, fallidas: eventos.length, error: data.error || `HTTP ${res.status}` };
+    }
     const escritas = typeof data.ok === 'number' ? data.ok : 0;
     const errs = Array.isArray(data.errores) ? data.errores : [];
+    // Si no entraron todas, el lote entero vuelve al buffer (es idempotente).
+    if (bufferizarSiFalla && escritas < eventos.length) bufferizar(eventos);
     return {
       escritas,
       fallidas: eventos.length - escritas,
       error: errs.length ? JSON.stringify(errs[0]).slice(0, 200) : undefined,
     };
   } catch (e) {
-    // el log es best-effort: no rompe la gestión, pero se reporta
+    // el log es best-effort: no rompe la gestión, pero se reporta y se guarda
+    if (bufferizarSiFalla) bufferizar(eventos);
     return { escritas: 0, fallidas: eventos.length, error: (e as Error).message };
   }
 }
