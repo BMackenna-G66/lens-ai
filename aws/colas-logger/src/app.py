@@ -144,6 +144,35 @@ def _normalizar(valor, tipo):
     return str(valor)
 
 
+def _columnas(tabla, datos):
+    """(cols, exprs, vals) de una fila: qué columnas van, con qué expresión SQL y
+    con qué valores. Las columnas desconocidas se ignoran y las nulas se omiten."""
+    spec = TABLAS[tabla]
+    cols, exprs, vals = [], [], []
+    for c, tipo in spec["cols"].items():
+        if c not in datos:
+            continue
+        v = _normalizar(datos[c], tipo)
+        if v is None:
+            continue
+        if tipo == "json":
+            exprs.append("JSON_PARSE(%s)")
+        elif tipo == "ts":
+            exprs.append("%s::TIMESTAMP")
+        elif tipo == "int":
+            exprs.append("%s::BIGINT")
+        elif tipo == "bool":
+            exprs.append("%s::BOOLEAN")
+        else:
+            exprs.append("%s")
+        cols.append(c)
+        vals.append(v)
+    for pk in spec["pk"]:
+        if pk not in cols:
+            raise ValueError(f"falta la clave {pk} para {tabla}")
+    return cols, exprs, vals
+
+
 def _sentencias(tabla, datos):
     """(delete_sql, delete_vals, insert_sql, insert_vals) para una fila.
     Usa placeholders %s: los datos nunca se concatenan en el SQL.
@@ -244,35 +273,82 @@ def _escribir_tcp(filas):
     return ok, errores
 
 
-# ── Modo Data API (alternativo; requiere permisos IAM en la cuenta del cluster)
+# ── Modo Data API ────────────────────────────────────────────────────────────
+# La Data API tiene una cuota de 500 statements ACTIVOS por cuenta, y no espera a
+# que terminen: mandar 2 statements por fila (DELETE + INSERT) la revienta apenas
+# el backfill sube unos cientos de filas (ActiveStatementsExceededException).
+#
+# Por eso las filas se AGRUPAN por (tabla, columnas presentes) y cada grupo sale
+# como 2 statements: un DELETE con IN (...) y un INSERT con varios VALUES. Un lote
+# de 100 filas pasa de ~200 statements a ~6.
+
+def _ejecutar_con_reintento(client, sql, params, intentos=4):
+    """Ejecuta con backoff si la cuota de statements activos está llena."""
+    import time
+    for n in range(intentos):
+        try:
+            return client.execute_statement(
+                ClusterIdentifier=CLUSTER, Database=DATABASE, DbUser=DB_USER,
+                Sql=sql, Parameters=params,
+            )
+        except Exception as e:  # noqa: BLE001
+            if "ActiveStatementsExceeded" in str(e) and n < intentos - 1:
+                time.sleep(1.5 * (n + 1))   # 1.5s, 3s, 4.5s
+                continue
+            raise
+
+
 def _escribir_dataapi(filas):
     import boto3  # import perezoso
 
     client = boto3.client("redshift-data")
     ok, errores = 0, []
+
+    # 1) Agrupa por tabla + firma de columnas (las filas no siempre traen las mismas).
+    grupos = {}
     for i, (tabla, datos) in filas:
         try:
-            d_sql, d_vals, i_sql, i_vals = _sentencias(tabla, datos)
-            # La Data API usa parámetros nombrados: se re-arma con :p0, :p1, …
-            # Todos los valores viajan como TEXTO (los casts van en el SQL) y
-            # ninguno puede ser vacío: por eso las columnas nulas ya se omitieron.
-            for sql, vals in ((d_sql, d_vals), (i_sql, i_vals)):
-                nombres = [f"p{n}" for n in range(len(vals))]
-                sql_n = sql
-                for nom in nombres:
-                    sql_n = sql_n.replace("%s", f":{nom}", 1)
-                params = [
-                    {"name": nom, "value": "true" if v is True else "false" if v is False else str(v)}
-                    for nom, v in zip(nombres, vals)
-                ]
-                client.execute_statement(
-                    ClusterIdentifier=CLUSTER, Database=DATABASE, DbUser=DB_USER,
-                    Sql=sql_n, Parameters=params,
-                )
-            ok += 1
+            cols, exprs, vals = _columnas(tabla, datos)
         except Exception as e:  # noqa: BLE001
-            logger.exception("fallo escribiendo en %s", tabla)
             errores.append({"i": i, "tabla": tabla, "error": str(e)})
+            continue
+        grupos.setdefault((tabla, tuple(cols), tuple(exprs)), []).append((i, vals))
+
+    # 2) Un DELETE + un INSERT por grupo.
+    for (tabla, cols, exprs), items in grupos.items():
+        destino = f"{SCHEMA}.{tabla}"
+        pk = TABLAS[tabla]["pk"][0]                  # todas las tablas tienen PK simple
+        pos_pk = cols.index(pk)
+        indices = [i for i, _ in items]
+        try:
+            # DELETE ... WHERE pk IN (:p0, :p1, …)
+            claves = [v[pos_pk] for _, v in items]
+            nombres = [f"p{n}" for n in range(len(claves))]
+            sql_del = f"DELETE FROM {destino} WHERE {pk} IN ({', '.join(':' + n for n in nombres)})"
+            _ejecutar_con_reintento(
+                client, sql_del,
+                [{"name": n, "value": str(v)} for n, v in zip(nombres, claves)],
+            )
+
+            # INSERT ... VALUES (…), (…), …
+            params, tuplas, k = [], [], 0
+            for _, vals in items:
+                expr_fila = []
+                for expr, v in zip(exprs, vals):
+                    nom = f"p{k}"; k += 1
+                    expr_fila.append(expr.replace("%s", f":{nom}"))
+                    params.append({
+                        "name": nom,
+                        "value": "true" if v is True else "false" if v is False else str(v),
+                    })
+                tuplas.append(f"({', '.join(expr_fila)})")
+            sql_ins = f"INSERT INTO {destino} ({', '.join(cols)}) VALUES {', '.join(tuplas)}"
+            _ejecutar_con_reintento(client, sql_ins, params)
+            ok += len(items)
+        except Exception as e:  # noqa: BLE001 — un grupo malo no corta el resto
+            logger.exception("fallo escribiendo en %s", tabla)
+            for i in indices:
+                errores.append({"i": i, "tabla": tabla, "error": str(e)})
     return ok, errores
 
 
