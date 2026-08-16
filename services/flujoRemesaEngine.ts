@@ -28,7 +28,7 @@ import { enviarResolucion } from './caseResolutionService';
 import { sfUpdateDisponible, type SFCaseUpdate } from './salesforceCaseService';
 import { enviarCierreRemesaAdmin, remesaAdminDisponible } from './remesaAdminService';
 import { registrarCierreCanal } from './caseStatusService';
-import { logCierre } from './colasLogService';
+import { logCierre, logLiberacionRemesa } from './colasLogService';
 import type { Actor } from './caseWorkflowService';
 
 export type MotivoNoAutoRemesa =
@@ -180,6 +180,19 @@ export async function procesarRemesaAuto(
       } catch (e) { res.admin = 'error'; res.detalle = (e as Error).message; }
     }
   }
+
+  // Auditoría de la liberación automática: misma tabla que la manual, con
+  // automatico = true para poder separarlas al reportar.
+  logLiberacionRemesa(caso, {
+    transaccionId: transaccion || null,
+    tipologia: tipo.id,
+    automatico: true,
+    adminOk: res.admin === 'ok' || res.admin === 'ya_cerrado',
+    sfOk: res.sf === 'ok' || res.sf === 'ya_cerrado',
+    estadoNuevo: res.admin === 'ok' ? tipo.statusDB : null,
+    requestedBy: actor?.nombre ?? 'flujo automático',
+    detalleError: res.detalle ?? null,
+  }, undefined, screening as Parameters<typeof logLiberacionRemesa>[3], ACTOR_SISTEMA as unknown as Parameters<typeof logLiberacionRemesa>[4]);
 
   return res;
 }
