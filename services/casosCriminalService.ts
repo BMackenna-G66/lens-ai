@@ -4,6 +4,7 @@
 // Devuelve, para cada caso, la cantidad de delitos únicos y la conclusión.
 
 import { screenChileCriminal } from './lens360Service';
+import { evaluarColombia } from './colombiaCatalogo';
 import { evaluateLegalPolicy } from './legalPolicyGate';
 import { analyzeCriminalProfile, type RawResult as CriminalInput } from './colombiaCriminalModel';
 
@@ -106,13 +107,44 @@ export async function screenColombia(nombre: string, dni: string, tipoDocumento:
     riesgo: r.provider_severity || undefined,
   }));
 
+  // Catálogo de Colombia: clasifica las coincidencias, descarta lo que no es
+  // antecedente penal y concluye con la MISMA tabla de decisión que Chile.
+  //
+  // Esto reemplaza la recomendación del proveedor como conclusión. Motivo: esa
+  // recomendación contaba como evidencia criminal cosas que no lo son (personas
+  // desaparecidas, cadáveres en medicina legal, funcionarios públicos, procesos
+  // civiles) y por eso el 95% de los casos caía en "Revisar" y casi nada
+  // liberaba. Medido sobre la cola real: 69% de las coincidencias era ruido.
+  //
+  // Además el vocabulario del catálogo (Liberar / UNDER_COMPLIANCE_REVIEW /
+  // Fully Blocked) es el que entiende el flujo automático, así que Colombia pasa
+  // a ser automatizable igual que Chile.
+  const cat = evaluarColombia(coincidencias);
+
+  // Lo excluido se reporta aparte, agrupado, para que el analista lo vea.
+  const porEtiqueta = new Map<string, number>();
+  for (const e of cat.excluidas) porEtiqueta.set(e.etiqueta, (porEtiqueta.get(e.etiqueta) ?? 0) + 1);
+  if (cat.indeterminadas.length) porEtiqueta.set('Sin clasificar', cat.indeterminadas.length);
+  const otrasListas = [...porEtiqueta.entries()].map(([lista, n]) => ({
+    clave: lista, lista: `${lista} (${n})`,
+  }));
+
   return {
-    estado: outcome.distinct_event_count > 0 ? 'ok' : 'sin_causas',
+    estado: cat.penales.length > 0 ? 'ok' : 'sin_causas',
     fuente: 'Inspektor',
-    delitosUnicos: outcome.distinct_event_count,
-    decision: RECO_LABEL[outcome.recommendation] ?? outcome.recommendation,
-    razon: (outcome.risk_factors ?? []).join('; '),
-    coincidencias,
+    delitosUnicos: cat.precedentes + cat.noPrecedentes,   // eventos únicos, no menciones
+    decision: cat.decision,
+    // Se conserva la lectura del proveedor como contexto, no como conclusión.
+    razon: [cat.razon, (outcome.risk_factors ?? []).join('; '),
+      `proveedor: ${RECO_LABEL[outcome.recommendation] ?? outcome.recommendation}`]
+      .filter(Boolean).join(' · '),
+    coincidencias: cat.penales.map(p => ({
+      tipo: p.etiqueta,
+      detalle: p.texto,
+      riesgo: p.riesgoG66,
+      fuente: 'Inspektor',
+    })) as Coincidencia[],
+    otrasListas,
   };
 }
 
