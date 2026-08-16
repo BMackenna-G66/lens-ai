@@ -47,6 +47,7 @@ interface ScreeningState {
   razon?: string;
   coincidencias?: Coincidencia[];
   pep?: boolean;
+  mensaje?: string;   // motivo cuando estado = 'error'
 }
 
 type FormState = Record<string, string | boolean>;
@@ -1132,7 +1133,18 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   // Aplica un resultado al estado y lo PERSISTE en Firestore (salvo errores, que se
   // reintentan la próxima vez). Compartido entre analistas y sobrevive recargas.
   const aplicarScreening = (caso: QueuedCaso, r: CasoScreening) => {
-    setScreenMap(prev => ({ ...prev, [caso.id]: { estado: r.estado, fuente: r.fuente, delitosUnicos: r.delitosUnicos, decision: r.decision, razon: r.razon, coincidencias: r.coincidencias, pep: r.pep } }));
+    setScreenMap(prev => ({ ...prev, [caso.id]: { estado: r.estado, fuente: r.fuente, delitosUnicos: r.delitosUnicos, decision: r.decision, razon: r.razon, coincidencias: r.coincidencias, pep: r.pep, mensaje: r.mensaje } }));
+    if (r.estado === 'error') {
+      // El error NO se cachea (así se reintenta), pero SÍ se registra: antes los
+      // fallos no dejaban rastro en ninguna parte y un caso que fallaba se veía
+      // igual que uno que nunca se consultó. Se libera para el próximo intento.
+      ofacTomados.current.delete(caso.id);
+      logScreening(caso, clasificar(caso), {
+        fuente: r.fuente, estado: 'error',
+        decision: (r.mensaje ?? 'error sin detalle').slice(0, 200),
+        delitosUnicos: 0,
+      });
+    }
     if (r.estado !== 'error') {
       // Persiste v2: alertas normalizadas + dedupeadas (merge con las previas para
       // conservar `creadaEn`); mantiene los campos legacy para la UI actual.
@@ -1171,16 +1183,32 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     });
   }, [casos]);
 
+  // Control de la tanda de screening de OFAC (ver el comentario del efecto).
+  const ofacRunning = useRef(false);
+  const ofacTomados = useRef<Set<string>>(new Set());
+  const [ofacRun, setOfacRun] = useState(0);
+
   const ofacIdsKey = colas.ofac.map(c => c.id).join(',');
   useEffect(() => {
-    if (activeQueue !== 'ofac') return;
+    if (activeQueue !== 'ofac' || ofacRunning.current) return;
     // Ojo: `screenMap` puede estar vacío todavía aunque el caso ya tenga screening
     // guardado (la semilla se aplica en el mismo commit y el estado aún no se
     // actualizó). Por eso se mira TAMBIÉN `c.screening`: si no, se re-consultan
     // las listas en cada recarga, que es lento y se cobra por consulta.
-    const pendientes = colas.ofac.filter(c => !(c.id in screenMap) && !c.screening);
+    //
+    // El pendiente se decide con un ref, NO con screenMap: antes el efecto marcaba
+    // todos los pendientes como 'loading' de una y, si se remontaba a mitad de la
+    // tanda (basta que llegue o se cierre un caso: cambia ofacIdsKey), el pool en
+    // vuelo se cancelaba y los que no habían alcanzado a procesarse quedaban
+    // marcados 'loading' para siempre. Al estar ya en screenMap, la corrida
+    // siguiente los daba por hechos y NUNCA se consultaban: la celda se quedaba
+    // en "…" y parecía que el proveedor no respondía.
+    const pendientes = colas.ofac.filter(c =>
+      !ofacTomados.current.has(c.id) && !(c.id in screenMap) && !c.screening);
     if (pendientes.length === 0) return;
-    let cancelado = false;
+
+    ofacRunning.current = true;
+    pendientes.forEach(c => ofacTomados.current.add(c.id));
 
     // Estado inicial: loading para los screeneables (Chile/Colombia), 'na' para el resto.
     setScreenMap(prev => {
@@ -1192,14 +1220,19 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     // Procesa por País (Chile→Regcheq, Colombia→Inspektor) con concurrencia limitada.
     const aProcesar = pendientes.filter(esScreenable);
     runPool(aProcesar, async c => {
-      if (cancelado) return;
-      const r = await screenCaso(c);
-      if (cancelado) return;
-      aplicarScreening(c, r);
-    }, 4);
-    return () => { cancelado = true; };
+      try {
+        aplicarScreening(c, await screenCaso(c));
+      } catch (e) {
+        // Un fallo no puede dejar el caso colgado: se libera para reintentarlo.
+        ofacTomados.current.delete(c.id);
+        setScreenMap(prev => ({ ...prev, [c.id]: { estado: 'error', mensaje: e instanceof Error ? e.message : String(e) } }));
+      }
+    }, 4).finally(() => {
+      ofacRunning.current = false;
+      setOfacRun(n => n + 1);   // re-render: el efecto vuelve a tomar lo que quedó
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeQueue, ofacIdsKey]);
+  }, [activeQueue, ofacIdsKey, ofacRun]);
 
   // ── Runner del flujo automático (cola OFAC) ─────────────────────────────────
   // Corre SOLO si el mantenedor está prendido. Toma los casos de la cola cuya
@@ -2216,10 +2249,14 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                           <td className="px-3 py-2 max-w-[200px] truncate text-slate-700 dark:text-slate-200" title={nombreCompleto(c)}>{nombreCompleto(c)}</td>
                           <td className="px-3 py-2 whitespace-nowrap text-slate-600 dark:text-slate-300">{idInterno(c)}</td>
                           <td className="px-3 py-2 whitespace-nowrap text-slate-700 dark:text-slate-200">{paisOrigen(c)}</td>
-                          <td className={`px-3 py-2 whitespace-nowrap font-semibold ${decisionColor(s?.decision)}`} title={s?.razon}>
+                          {/* El motivo tiene que quedar a la vista: "No aplica" y
+                              "Error" a secas no dejaban distinguir un país sin
+                              lista de una caída del proveedor. */}
+                          <td className={`px-3 py-2 whitespace-nowrap font-semibold ${decisionColor(s?.decision)}`}
+                              title={s?.estado === 'error' ? (s?.mensaje || 'Error del proveedor') : s?.razon}>
                             {!s || s.estado === 'loading' ? 'consultando…'
-                              : s.estado === 'na' ? 'No aplica'
-                              : s.estado === 'error' ? 'Error'
+                              : s.estado === 'na' ? `Sin lista · ${paisOrigen(c) || 'país no soportado'}`
+                              : s.estado === 'error' ? <span className="text-red-600 dark:text-red-400">⚠️ Error del proveedor</span>
                               : s.estado === 'sin_causas' ? 'Sin causas'
                               : (s.decision || '—')}
                             {(() => {
