@@ -3,6 +3,7 @@ import { subscribeCasos, isCasosAvailable, guardarScreening, guardarRemesaRow, g
 import { traerCasosCola, importarCasos, CasoSFRemoto } from '../services/salesforceColaService';
 import { TIPOS_CIERRE_REMESA, tipoRemesaPorId, camposDeCierreRemesa } from '../services/cierreRemesaTipos';
 import { enviarCierreRemesaAdmin, remesaAdminDisponible, resumenRemesaAdmin } from '../services/remesaAdminService';
+import { evaluarRemesaAuto, procesarRemesaAuto, retenidoPorDelitoRemesa, motivoRemesaLegible } from '../services/flujoRemesaEngine';
 import {
   sfUpdateDisponible, SFCaseUpdate, SFUpdateResult,
 } from '../services/salesforceCaseService';
@@ -991,6 +992,48 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeQueue, benefTriggerKey, benefMap]);
 
+  // ── Runner del flujo automático (cola REMESA) ───────────────────────────────
+  // Mismo patrón que el de OFAC, pero acá se libera la TRANSACCIÓN. Los frenos
+  // los decide flujoRemesaEngine: delito sensible detiene el caso; la marca PEP
+  // del beneficiario NO (decisión de negocio: es una transacción, no una
+  // vinculación). Corre solo si el mantenedor está prendido.
+  const autoRemesaRunning = useRef(false);
+  const autoRemesaHechos = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!flujoCfg.remesa.enabled) return;
+    let cancelado = false;
+    const correr = async () => {
+      if (autoRemesaRunning.current || cancelado) return;
+      const candidatos = colas.remesa.filter(c => {
+        if (autoRemesaHechos.current.has(c.id)) return false;
+        const sc = benefMap[c.id];
+        if (!sc) return false;                       // screening todavía sin resolver
+        return evaluarRemesaAuto(c, sc, flujoCfg.remesa).automatizable;
+      });
+      if (candidatos.length === 0) return;
+      autoRemesaRunning.current = true;
+      let ok = 0, err = 0;
+      try {
+        for (const c of candidatos) {
+          if (cancelado) break;
+          autoRemesaHechos.current.add(c.id);
+          try {
+            const r = await procesarRemesaAuto(c, c.remesa, benefMap[c.id], flujoCfg.remesa, actor ?? undefined);
+            if (!r) continue;
+            if (r.sf === 'error' || r.admin === 'error') err++; else ok++;
+          } catch { err++; }
+        }
+      } finally {
+        autoRemesaRunning.current = false;
+        if (ok || err) setAutoMsg(`Flujo automático (remesas): ${ok} liberada(s)${err ? `, ${err} con error` : ''}`);
+      }
+    };
+    correr();
+    const t = setInterval(correr, 30000);
+    return () => { cancelado = true; clearInterval(t); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flujoCfg, remesaIdsKey, benefMap]);
+
   // ── Recuperación de la cola desde Salesforce ────────────────────────────────
   // El receptor solo empuja: si la Bandeja se vacía, los casos que siguen abiertos
   // en Salesforce no vuelven solos. Acá se consulta Salesforce y se reconstruyen.
@@ -1836,7 +1879,9 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                       <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-2">
                         Con el switch prendido, un caso de remesa se cierra solo cuando el screening del
                         beneficiario no arroja coincidencias. <b>Cualquier coincidencia lo deja al analista</b>,
-                        igual que en OFAC. La tipología de arriba es la que se aplica.
+                        y los delitos sensibles lo <b>retienen siempre</b> (igual que en OFAC).
+                        A diferencia de OFAC, la marca <b>PEP del beneficiario NO retiene</b> la remesa:
+                        acá se libera una transacción, no se vincula a un cliente.
                       </p>
                     </>
                   );
@@ -2231,9 +2276,17 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                           </td>
                           <td className={`px-3 py-2 whitespace-nowrap font-semibold ${decisionColor(b?.decision)}`} title={b?.razon}>
                             {!b ? (r ? (benefMapLoading ? 'consultando…' : '…') : '—')
-                              : b.estado === 'error' ? 'Error'
+                              : b.estado === 'error' ? <span className="text-red-600 dark:text-red-400" title={b.mensaje || 'Error del proveedor'}>⚠️ Error del proveedor</span>
                               : b.estado === 'na' ? (b.decision || 'Sin revisión')
                               : (b.decision || '—')}
+                            {/* Freno duro: delito sensible retiene la remesa aunque
+                                el flujo automático esté prendido. */}
+                            {(() => {
+                              const cats = retenidoPorDelitoRemesa(b);
+                              return cats.length ? (
+                                <span className="ml-1.5 text-red-600 dark:text-red-400" title={`Retenido del flujo automático: ${cats.join(', ')}`}>🛑</span>
+                              ) : null;
+                            })()}
                           </td>
                           <td className="px-3 py-2 whitespace-nowrap text-center font-bold text-slate-800 dark:text-slate-200">
                             {hallazgos === null ? '…' : hallazgos}
@@ -2483,6 +2536,26 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                       )}
 
                       {/* Internacional: qué listas coinciden y de qué tipo (sin catálogo aún) */}
+                      {/* Por qué este caso no se libera solo. Deja explícito el freno
+                          por delito sensible, que es el que más importa auditar. */}
+                      {!benefLoading && sc && sel && (() => {
+                        const ev = evaluarRemesaAuto(sel, sc, flujoCfg.remesa);
+                        if (ev.automatizable) {
+                          return (
+                            <p className="text-[11px] text-emerald-700 dark:text-emerald-400 mt-2">
+                              ✅ Habilitado para el flujo automático (tipología {ev.tipologia}).
+                            </p>
+                          );
+                        }
+                        const duro = ev.motivo === 'delito_sensible';
+                        return (
+                          <p className={`text-[11px] mt-2 ${duro ? 'text-red-700 dark:text-red-400 font-semibold' : 'text-slate-500 dark:text-slate-400'}`}>
+                            {duro ? '🛑 ' : '⏸️ '}No se libera solo: {motivoRemesaLegible(ev.motivo)}
+                            {ev.categorias?.length ? ` (${ev.categorias.join(', ')})` : ''}.
+                          </p>
+                        );
+                      })()}
+
                       {!benefLoading && sc?.flujo === 'INTL' && sc.estado !== 'error' && sc.estado !== 'na' && (
                         sc.listas.length === 0
                           ? <p className="text-xs text-emerald-600 dark:text-emerald-400">Sin coincidencias en listas.</p>
