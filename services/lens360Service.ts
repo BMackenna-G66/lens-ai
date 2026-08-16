@@ -157,6 +157,18 @@ async function createRegcheqRecord(rut: string, nombre: string, personType: Lens
   });
 }
 
+// Re-dispara el screening de una ficha YA existente. Se manda solo el dni y su
+// personType actual: la API rechaza cambiar el personType de una ficha creada, y
+// mandar el nombre lo pisaría.
+async function refrescarRegcheqRecord(rut: string, personType: string): Promise<void> {
+  try {
+    await fetch(`${REGCHEQ_BASE}/record/${REGCHEQ_KEY}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dni: rut, personType }),
+    });
+  } catch { /* si el refresco falla se usa la ficha que ya estaba */ }
+}
+
 // Crea/refresca el registro SIEMPRE antes de consultar — dispara el screening real
 // (mismo efecto que marcar "crear ficha" en el módulo Regcheq). Sin este POST, el GET
 // puede devolver un registro existente pero sin coincidencias, aunque sí las tenga.
@@ -355,6 +367,13 @@ function computeVerdict(r: Lens360Result): void {
 // Reutiliza el fetch a Regcheq + el motor de decisión (evaluateCriminal), pero sin
 // SII ni personas relacionadas: solo necesita el DNI. Devuelve la cantidad de
 // delitos únicos y la conclusión del perfil criminal.
+// Coincidencia en una lista distinta de causas penales (OFAC, ONU, GAFI, …).
+export interface OtraLista {
+  clave: string;
+  lista: string;
+  riesgo?: string;
+}
+
 export interface CasoScreeningChile {
   estado: 'ok' | 'sin_causas' | 'error';
   delitosUnicos: number;
@@ -362,8 +381,42 @@ export interface CasoScreeningChile {
   razon: string;
   crimes: Lens360Crime[];
   pep: boolean;       // ¿es PEP? (nivel PEP o coincidencia en lista PEP Chile)
+  // Resto de listas con coincidencia. El catálogo de Chile concluye SOLO con
+  // causas penales + PEP, así que estas no cambian la conclusión: se reportan
+  // para que el analista las vea (puede haber match en OFAC/GAFI/etc. sin causas).
+  otrasListas: OtraLista[];
   profile?: PersonProfile;
   mensaje?: string;
+}
+
+// Nombre legible de cualquier lista del perfil (incluye las que no están en
+// NOMBRE_LISTA, para no esconder una coincidencia por no tener etiqueta).
+const ETIQUETA_OTRA: Record<string, string> = {
+  ...NOMBRE_LISTA,
+  funcPublicChile: 'Función Pública Chile',
+  keywordsResult: 'Palabras Clave',
+  riskComments: 'Comentarios de Riesgo',
+  bicResult: 'BIC',
+  secondCriminalCasesChile: 'Causas Penales Chile',
+};
+
+// Claves que NO son "otra lista": son las que ya alimentan la conclusión.
+const CLAVES_CONCLUSION = new Set(['causasPenalesRegcheq', 'secondCriminalCasesChile', 'pepChile']);
+// Metadatos del perfil que vienen mezclados entre las listas.
+const NO_ES_LISTA_CL = new Set(['total', 'dni', 'personType', 'lastChecked', 'error']);
+
+function otrasListasCon(listasRaw: Record<string, Record<string, unknown>>): OtraLista[] {
+  const vistas = new Set<string>();
+  const out: OtraLista[] = [];
+  for (const [clave, entrada] of Object.entries(listasRaw)) {
+    if (NO_ES_LISTA_CL.has(clave) || CLAVES_CONCLUSION.has(clave)) continue;
+    if (!entrada?.coincidence) continue;
+    const lista = ETIQUETA_OTRA[clave] ?? clave;
+    if (vistas.has(lista)) continue;   // la API repite claves con alias (rtp / rtpResult)
+    vistas.add(lista);
+    out.push({ clave, lista, riesgo: String(entrada.risk ?? '') || undefined });
+  }
+  return out;
 }
 
 // ¿El perfil de Regcheq indica PEP? (nivel PEP distinto de vacío/none o lista PEP Chile).
@@ -376,7 +429,7 @@ function esPepRegcheq(perfil: Record<string, unknown>, listasRaw: Record<string,
 
 export async function screenChileCriminal(rut: string, nombre = ''): Promise<CasoScreeningChile> {
   const vacio = (estado: CasoScreeningChile['estado'], mensaje?: string): CasoScreeningChile =>
-    ({ estado, delitosUnicos: 0, decision: estado === 'sin_causas' ? 'Sin causas penales' : '—', razon: '', crimes: [], pep: false, mensaje });
+    ({ estado, delitosUnicos: 0, decision: estado === 'sin_causas' ? 'Sin causas penales' : '—', razon: '', crimes: [], pep: false, otrasListas: [], mensaje });
 
   if (!REGCHEQ_KEY) return vacio('error', 'Falta la key de Regcheq');
   const rutN = rut.replace(/[.\s-]/g, '').toUpperCase();
@@ -385,24 +438,50 @@ export async function screenChileCriminal(rut: string, nombre = ''): Promise<Cas
   const GET = `${REGCHEQ_BASE}/record/${rutN}/${REGCHEQ_KEY}`;
   let resp: Response;
   try {
+    // SIEMPRE se refresca la ficha antes de leerla. Antes se hacía GET primero y
+    // solo se creaba si daba 404, así que una ficha ya existente se devolvía tal
+    // cual quedó el día que se creó: con datos de meses atrás y, peor, con el
+    // esquema viejo de la API (las causas penales en `secondCriminalCasesChile`
+    // en vez de `causasPenalesRegcheq`), que el motor no leía. Resultado:
+    // "Sin causas penales" en gente que sí las tenía. El POST re-dispara el
+    // screening y migra la ficha al esquema actual.
     resp = await fetch(GET);
-    if (resp.status === 404) {
-      // No existe la ficha → crearla (dispara el screening) y reintentar.
+    const existe = resp.ok;
+    if (!existe || resp.status === 404) {
+      // No existe → crear con nombre (dispara el screening) y reintentar.
       await createRegcheqRecord(rutN, nombre, 'natural');
       await sleep(1500); resp = await fetch(GET);
       if (resp.status === 404) { await sleep(2500); resp = await fetch(GET); }
+    } else {
+      // Ya existe → refrescar SIN mandar el nombre: el personType de una ficha
+      // creada no se puede modificar y mandar el nombre pisaría el que ya tiene
+      // (la API parte "Alimentos Fruna Ltda" en name/fatherName). Solo con el DNI
+      // vuelve a correr el screening y conserva los datos de la ficha.
+      const perfilPrevio = await resp.clone().json().catch(() => ({}));
+      const tipo = String((perfilPrevio as { personType?: string }).personType ?? 'natural');
+      await refrescarRegcheqRecord(rutN, tipo);
+      await sleep(2500);
+      const r2 = await fetch(GET);
+      if (r2.ok) resp = r2;   // si el refresco falla, se sigue con lo que había
     }
   } catch (e) { return vacio('error', e instanceof Error ? e.message : String(e)); }
   if (!resp.ok) return vacio('error', `Regcheq ${resp.status}`);
 
   const perfil = await resp.json();
   const listasRaw = (perfil.listas ?? {}) as Record<string, Record<string, unknown>>;
-  const causas = listasRaw['causasPenalesRegcheq'];
+  // Las causas penales pueden venir en cualquiera de las dos claves según cuándo
+  // se creó la ficha. Se leen las dos para no perder coincidencias de fichas
+  // viejas que no se hayan podido refrescar.
+  const causas = listasRaw['causasPenalesRegcheq']?.coincidence
+    ? listasRaw['causasPenalesRegcheq']
+    : listasRaw['secondCriminalCasesChile'];
   const nombreEff = (perfil.name ?? perfil.socialReason ?? nombre ?? '') as string;
   const pep = esPepRegcheq(perfil, listasRaw);
+  const otrasListas = otrasListasCon(listasRaw);
 
-  // Sin causas penales: igual reportamos el flag PEP (un PEP puede no tener causas).
-  if (!causas?.coincidence || !causas.data) return { estado: 'sin_causas', delitosUnicos: 0, decision: 'Sin causas penales', razon: '', crimes: [], pep };
+  // Sin causas penales: igual reportamos el flag PEP (un PEP puede no tener causas)
+  // y las coincidencias en otras listas.
+  if (!causas?.coincidence || !causas.data) return { estado: 'sin_causas', delitosUnicos: 0, decision: 'Sin causas penales', razon: '', crimes: [], pep, otrasListas };
 
   const raw = causas.data as Record<string, unknown>;
   const additionalData = Array.isArray(raw['additionalData']) ? (raw['additionalData'] as Record<string, unknown>[]) : [];
@@ -416,6 +495,7 @@ export async function screenChileCriminal(rut: string, nombre = ''): Promise<Cas
     razon: ev.decision?.razon ?? '',
     crimes: ev.crimes,
     pep,
+    otrasListas,
     profile: ev.profile,
   };
 }

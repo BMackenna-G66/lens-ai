@@ -194,7 +194,11 @@ export async function screenBeneficiario(row: RemesaRow): Promise<RemesaScreenin
           detalle: c.ruc || c.tribunal || '—',
           estado: c.estado, fecha: c.fecha, fuente: 'Regcheq',
         })) as Coincidencia[],
-        listas: [], mensaje: r.mensaje,
+        // El catálogo de Chile concluye con causas penales + PEP, pero el
+        // beneficiario puede coincidir en OFAC/GAFI/etc. sin tener causas: esas
+        // listas se reportan igual para que el analista las vea.
+        listas: (r.otrasListas ?? []).map(l => ({ clave: l.clave, lista: l.lista, riesgo: l.riesgo })),
+        mensaje: r.mensaje,
       };
     }
 
