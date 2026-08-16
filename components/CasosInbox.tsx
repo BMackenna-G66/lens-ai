@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { subscribeCasos, isCasosAvailable, guardarScreening, guardarRemesaRow, guardarRemesaRows, guardarScreeningBeneficiario, eliminarCasos, CasoSF } from '../services/casosService';
 import { traerCasosCola, importarCasos, CasoSFRemoto } from '../services/salesforceColaService';
+import { TIPOS_CIERRE_REMESA, tipoRemesaPorId, camposDeCierreRemesa } from '../services/cierreRemesaTipos';
+import { enviarCierreRemesaAdmin, remesaAdminDisponible, resumenRemesaAdmin } from '../services/remesaAdminService';
 import {
   sfUpdateDisponible, SFCaseUpdate, SFUpdateResult,
 } from '../services/salesforceCaseService';
@@ -344,6 +346,68 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     if (err === 0) limpiarSeleccion();
   };
 
+  // ── Cierre masivo de la cola REMESA ────────────────────────────────────────
+  // Aparte del de OFAC a propósito: acá se cierra el caso en Salesforce con la
+  // tipificación de remesa y se libera la TRANSACCIÓN en Admin (no se toca al
+  // cliente). Se manda todo en una sola llamada por lote.
+  const [remesaMasivoTipo, setRemesaMasivoTipo] = useState('');
+  const [remesaMasivoConfirm, setRemesaMasivoConfirm] = useState(false);
+  const [remesaMasivoSending, setRemesaMasivoSending] = useState(false);
+  const [remesaMasivoResult, setRemesaMasivoResult] = useState<string | null>(null);
+  const [remesaMasivoCanal, setRemesaMasivoCanal] = useState<'sf' | 'admin'>('sf');
+
+  const cerrarMasivoRemesa = async () => {
+    const tipo = tipoRemesaPorId(remesaMasivoTipo);
+    if (!tipo || seleccion.size === 0) return;
+    setRemesaMasivoSending(true); setRemesaMasivoResult(null);
+    const seleccionados = [...seleccion]
+      .map(id => colas.remesa.find(c => c.id === id))
+      .filter((c): c is QueuedCaso => !!c);
+
+    try {
+      if (remesaMasivoCanal === 'sf') {
+        let ok = 0, err = 0;
+        await runPool(seleccionados, async c => {
+          try {
+            const payload = { CaseNumber: c.numeroCaso, ...camposDeCierreRemesa(tipo, c.pais) } as SFCaseUpdate;
+            const r = await enviarResolucion(c.id, payload, actor ?? undefined);
+            if (r.yaEnviada || r.sf?.ok) {
+              ok++;
+              await registrarCierreCanal(c.id, 'sf', { ok: true, tipologia: tipo.id }, actor ?? undefined).catch(() => {});
+              logCierre(c, 'remesa', { canal: 'SF', ok: true, tipologia: tipo.id }, actor ?? undefined);
+            } else err++;
+          } catch { err++; }
+        }, 3);
+        setRemesaMasivoResult(`${ok} cerrado(s) en Salesforce${err ? `, ${err} con error` : ''}`);
+        if (err === 0) limpiarSeleccion();
+      } else {
+        // Admin: una sola llamada con todas las transacciones del lote.
+        const conTx = seleccionados.filter(c => c.remesa);
+        const sinTx = seleccionados.length - conTx.length;
+        const r = await enviarCierreRemesaAdmin({
+          transactionIds: conTx.map(c => c.remesa),
+          targetStatusDB: tipo.statusDB,
+          targetStatusLabel: tipo.statusLabel,
+          requestedBy: actor?.email ?? actor?.nombre ?? '',
+        });
+        // Marca el canal Admin de cada caso cuya transacción volvió OK.
+        const okPorTx = new Map(r.results.map(x => [String(x.transactionId), x.ok]));
+        for (const c of conTx) {
+          if (!okPorTx.get(String(c.remesa))) continue;
+          await registrarCierreCanal(c.id, 'admin', { ok: true, tipologia: tipo.id }, actor ?? undefined).catch(() => {});
+          logCierre(c, 'remesa', { canal: 'ADMIN', ok: true, tipologia: tipo.id, statusEnviado: tipo.statusDB }, actor ?? undefined);
+        }
+        setRemesaMasivoResult(`${resumenRemesaAdmin(r)}${sinTx ? ` · ${sinTx} sin N° de transacción` : ''}`);
+        if (r.ok && !sinTx) limpiarSeleccion();
+      }
+    } catch (e) {
+      setRemesaMasivoResult(`❌ ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setRemesaMasivoSending(false);
+      setRemesaMasivoConfirm(false);
+    }
+  };
+
   // Cierre masivo en Admin (bloqueo/desbloqueo): mismo patrón que el de SF, pero
   // agrupando por país (el last-step usa countryCode por cliente). Usa el
   // customerId = "Id interno del usuario" de cada caso. ALTO impacto → confirma.
@@ -639,12 +703,26 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   // mantenedor que el cierre masivo). Parte de un form limpio del caso y aplica
   // los campos del tipo (incluye Country__c según el país del caso).
   const [tipoCierreSel, setTipoCierreSel] = useState('');
+  // Cada cola tiene su propio juego de tipologías: OFAC cierra sobre el cliente y
+  // Remesa sobre la transacción, con tipificaciones distintas en Salesforce.
+  const tiposSFdeCola = (q: QueueKey) =>
+    q === 'remesa'
+      ? TIPOS_CIERRE_REMESA.map(t => ({ id: t.id, label: t.label, completo: true }))
+      : TIPOS_CIERRE.map(t => ({ id: t.id, label: t.label, completo: t.completo }));
+
   const aplicarTipoAlForm = (tipoId: string) => {
     setTipoCierreSel(tipoId);
-    const tipo = TIPOS_CIERRE.find(t => t.id === tipoId);
-    if (!tipo || !sel) return;
+    if (!sel) return;
     const base = defaultForm(sel);
-    const campos = camposDeCierre(tipo, sel.pais);
+    let campos: Record<string, unknown> | null = null;
+    if (activeQueue === 'remesa') {
+      const t = tipoRemesaPorId(tipoId);
+      if (t) campos = camposDeCierreRemesa(t, sel.pais);
+    } else {
+      const t = TIPOS_CIERRE.find(x => x.id === tipoId);
+      if (t) campos = camposDeCierre(t, sel.pais);
+    }
+    if (!campos) return;
     for (const [k, v] of Object.entries(campos)) if (v !== undefined) base[k] = v as string | boolean;
     setForm(base);
   };
@@ -966,6 +1044,69 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     } catch (e) {
       setImpEstado('error');
       setImpMsg(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  // ── Cierre en Admin de la cola REMESA (libera la transacción) ───────────────
+  const [remesaAdminTipo, setRemesaAdminTipo] = useState('');
+  const [remesaAdminIds, setRemesaAdminIds] = useState('');
+  const [remesaAdminBy, setRemesaAdminBy] = useState('');
+  const [remesaAdminTicket, setRemesaAdminTicket] = useState('');
+  const [remesaAdminConfirm, setRemesaAdminConfirm] = useState(false);
+  const [remesaAdminSending, setRemesaAdminSending] = useState(false);
+  const [remesaAdminMsg, setRemesaAdminMsg] = useState('');
+
+  // Al cambiar de caso se pre-llena con el N° de transacción del asunto y el
+  // usuario logueado, y se limpia lo de la ficha anterior.
+  useEffect(() => {
+    setRemesaAdminTipo(TIPOS_CIERRE_REMESA[0]?.id ?? '');
+    setRemesaAdminIds(sel?.remesa ?? '');
+    setRemesaAdminBy(actor?.email ?? actor?.nombre ?? '');
+    setRemesaAdminTicket('');
+    setRemesaAdminConfirm(false);
+    setRemesaAdminMsg('');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sel?.id]);
+
+  const enviarRemesaAdmin = async () => {
+    const tipo = tipoRemesaPorId(remesaAdminTipo);
+    const ids = remesaAdminIds.split(',').map(s => s.trim()).filter(Boolean);
+    if (!tipo || !sel || ids.length === 0) return;
+    setRemesaAdminSending(true); setRemesaAdminMsg('');
+    try {
+      const r = await enviarCierreRemesaAdmin({
+        transactionIds: ids,
+        targetStatusDB: tipo.statusDB,
+        targetStatusLabel: tipo.statusLabel,
+        requestedBy: remesaAdminBy,
+        changeTicket: remesaAdminTicket,
+      });
+      setRemesaAdminMsg(resumenRemesaAdmin(r));
+      if (r.ok) {
+        // Mismo circuito que OFAC: el canal cerrado saca el caso de la cola
+        // cuando ambos (SF + Admin) quedaron OK.
+        await registrarCierreCanal(sel.id, 'admin', { ok: true, tipologia: tipo.id }, actor ?? undefined).catch(() => {});
+      }
+      logCierre(sel, clasificar(sel), {
+        canal: 'ADMIN', ok: r.ok, tipologia: tipo.id, statusEnviado: tipo.statusDB,
+        detalleError: r.ok ? null : (r.error ?? null),
+      });
+      registrarAuditoria(sel.id, {
+        tipo: 'CIERRE_ADMIN_REMESA', actorId: actor?.uid ?? 'system', actorTipo: actor ? 'USER' : 'SYSTEM',
+        correlationId: sel.id, versionCaso: 1,
+        metadata: {
+          tipologia: tipo.id, statusDB: tipo.statusDB, transactionIds: ids, ok: r.ok,
+          // requestedBy/changeTicket NO viajan a la API (el script de referencia
+          // manda el objeto de la transacción tal cual): quedan como trazabilidad.
+          requestedBy: remesaAdminBy, changeTicket: remesaAdminTicket,
+          resultados: r.results,
+        },
+      }).catch(() => {});
+    } catch (e) {
+      setRemesaAdminMsg(`❌ ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setRemesaAdminSending(false);
+      setRemesaAdminConfirm(false);
     }
   };
 
@@ -1618,17 +1759,55 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
 
               {/* Cola Remesas */}
               <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-900/40 p-3">
-                <button onClick={() => setFlujoDraft(d => ({ ...d, remesa: { enabled: !d.remesa.enabled } }))} className="flex items-center gap-2 mb-3 w-full text-left">
-                  <span className={sw(flujoDraft.remesa.enabled)}><span className={knob(flujoDraft.remesa.enabled)} /></span>
-                  <span className="text-sm font-bold text-slate-800 dark:text-slate-200">Remesas</span>
-                  <span className={`text-[11px] font-bold ${flujoDraft.remesa.enabled ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-400'}`}>
-                    {flujoDraft.remesa.enabled ? 'AUTOMÁTICO' : 'MANUAL'}
-                  </span>
-                </button>
-                <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                  El switch queda registrado, pero <b>todavía no hay acciones automáticas definidas</b> para esta cola:
-                  falta acordar qué tipificación aplica a un caso de remesa. Mientras, la cola sigue manual aunque esté prendido.
-                </p>
+                {(() => {
+                  const setRem = (patch: Partial<FlujoConfig['remesa']>) =>
+                    setFlujoDraft(d => ({ ...d, remesa: { ...d.remesa, ...patch } }));
+                  return (
+                    <>
+                      <button onClick={() => setRem({ enabled: !flujoDraft.remesa.enabled })} className="flex items-center gap-2 mb-3 w-full text-left">
+                        <span className={sw(flujoDraft.remesa.enabled)}><span className={knob(flujoDraft.remesa.enabled)} /></span>
+                        <span className="text-sm font-bold text-slate-800 dark:text-slate-200">Remesas</span>
+                        <span className={`text-[11px] font-bold ${flujoDraft.remesa.enabled ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-400'}`}>
+                          {flujoDraft.remesa.enabled ? 'AUTOMÁTICO' : 'MANUAL'}
+                        </span>
+                      </button>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <label className="text-xs">
+                          <span className="block font-semibold text-slate-500 dark:text-slate-400 mb-1">Tipología activa</span>
+                          <select
+                            value={flujoDraft.remesa.tipoLiberar}
+                            onChange={e => setRem({ tipoLiberar: e.target.value })}
+                            className="w-full px-2 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-sm"
+                          >
+                            {TIPOS_CIERRE_REMESA.map(t => (
+                              <option key={t.id} value={t.id}>{t.label} — {t.statusDB}</option>
+                            ))}
+                          </select>
+                        </label>
+                        <div className="text-xs">
+                          <span className="block font-semibold text-slate-500 dark:text-slate-400 mb-1">Canales que cierra</span>
+                          <div className="flex items-center gap-4 h-[34px]">
+                            <label className="flex items-center gap-1.5 cursor-pointer">
+                              <input type="checkbox" checked={flujoDraft.remesa.cerrarSF} onChange={e => setRem({ cerrarSF: e.target.checked })} className="accent-sky-600" />
+                              Salesforce
+                            </label>
+                            <label className="flex items-center gap-1.5 cursor-pointer">
+                              <input type="checkbox" checked={flujoDraft.remesa.cerrarAdmin} onChange={e => setRem({ cerrarAdmin: e.target.checked })} className="accent-rose-600" />
+                              Admin (libera la transacción)
+                            </label>
+                          </div>
+                        </div>
+                      </div>
+
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-2">
+                        Con el switch prendido, un caso de remesa se cierra solo cuando el screening del
+                        beneficiario no arroja coincidencias. <b>Cualquier coincidencia lo deja al analista</b>,
+                        igual que en OFAC. La tipología de arriba es la que se aplica.
+                      </p>
+                    </>
+                  );
+                })()}
               </div>
             </div>
 
@@ -1808,6 +1987,47 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                 </button>
               )}
               {asignarMsg && <span className="text-violet-800 dark:text-violet-200 font-medium">{asignarMsg}</span>}
+            </div>
+          )}
+
+          {/* Cierre masivo de la cola Remesa: Salesforce o liberación en Admin */}
+          {seleccion.size > 0 && activeQueue === 'remesa' && (
+            <div className="flex flex-wrap items-center gap-3 mb-3 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/50 rounded-xl px-4 py-2 text-sm">
+              <span className="font-semibold text-amber-800 dark:text-amber-300">Cerrar remesas</span>
+              <select
+                value={remesaMasivoCanal}
+                onChange={e => { setRemesaMasivoCanal(e.target.value as 'sf' | 'admin'); setRemesaMasivoConfirm(false); setRemesaMasivoResult(null); }}
+                className="px-2 py-1 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800"
+              >
+                <option value="sf">en Salesforce</option>
+                <option value="admin">en Admin (liberar transacción)</option>
+              </select>
+              <select
+                value={remesaMasivoTipo}
+                onChange={e => { setRemesaMasivoTipo(e.target.value); setRemesaMasivoConfirm(false); setRemesaMasivoResult(null); }}
+                className="px-2 py-1 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800"
+              >
+                <option value="">Tipología…</option>
+                {TIPOS_CIERRE_REMESA.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
+              </select>
+              {remesaMasivoTipo && !remesaMasivoConfirm && (
+                <button onClick={() => setRemesaMasivoConfirm(true)} disabled={remesaMasivoSending} className="font-bold text-amber-800 dark:text-amber-300 hover:underline disabled:opacity-50">
+                  Aplicar a {seleccion.size} caso(s)
+                </button>
+              )}
+              {remesaMasivoConfirm && (
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="text-amber-900 dark:text-amber-200">
+                    ¿Aplicar «{tipoRemesaPorId(remesaMasivoTipo)?.label}» a {seleccion.size} caso(s)
+                    {remesaMasivoCanal === 'admin' ? <> en Admin? <b>Libera plata real.</b></> : ' en Salesforce?'}
+                  </span>
+                  <button onClick={cerrarMasivoRemesa} disabled={remesaMasivoSending} className="px-3 py-1 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold disabled:opacity-50">
+                    {remesaMasivoSending ? 'Enviando…' : 'Sí, aplicar'}
+                  </button>
+                  <button onClick={() => setRemesaMasivoConfirm(false)} disabled={remesaMasivoSending} className="px-3 py-1 rounded-lg border border-slate-300 dark:border-slate-600">Cancelar</button>
+                </div>
+              )}
+              {remesaMasivoResult && <span className="text-xs text-amber-900 dark:text-amber-200 font-medium">{remesaMasivoResult}</span>}
             </div>
           )}
 
@@ -2469,7 +2689,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                           className="px-2 py-1 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-sm"
                         >
                           <option value="">Elegir para autocompletar…</option>
-                          {TIPOS_CIERRE.map(t => (
+                          {tiposSFdeCola(activeQueue).map(t => (
                             <option key={t.id} value={t.id}>{t.label}{t.completo ? '' : ' (preliminar)'}</option>
                           ))}
                         </select>
@@ -2546,9 +2766,84 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                       )}
                 </div>
 
+                {/* ── Sección: Cierre en Admin de la REMESA (libera la transacción) ──
+                    Es su propio bloque: acá no se bloquea al cliente, se cambia el
+                    estado de la transacción. Solo aplica a la cola Remesa. */}
+                {activeQueue === 'remesa' && (() => {
+                  const inp = 'w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1.5 text-sm outline-none focus:border-rose-400';
+                  const tipo = tipoRemesaPorId(remesaAdminTipo);
+                  return (
+                    <>
+                      <Seccion>💸 Cierre en Admin (liberar transacción)</Seccion>
+                      <div className="rounded-xl border border-rose-200 dark:border-rose-800/50 bg-rose-50/40 dark:bg-rose-950/20 p-4">
+                        <p className="text-[11px] text-rose-700 dark:text-rose-300 mb-3 font-semibold">
+                          ⚠️ Cambia el estado de la transacción en Admin (producción): libera plata real.
+                        </p>
+                        {!remesaAdminDisponible() && (
+                          <p className="text-xs text-amber-600 dark:text-amber-400 mb-3">Proxy no configurado (EMPRESADOCS_PROXY_URL).</p>
+                        )}
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                          <label className="text-xs">
+                            <span className="block font-semibold text-slate-500 dark:text-slate-400 mb-1">Tipología</span>
+                            <select value={remesaAdminTipo} onChange={e => setRemesaAdminTipo(e.target.value)} className={inp}>
+                              <option value="">Elegir…</option>
+                              {TIPOS_CIERRE_REMESA.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
+                            </select>
+                          </label>
+                          <label className="text-xs">
+                            <span className="block font-semibold text-slate-500 dark:text-slate-400 mb-1">N° de transacción</span>
+                            <input value={remesaAdminIds} onChange={e => setRemesaAdminIds(e.target.value)} className={inp} placeholder="14363322, 14362110" />
+                          </label>
+                          <label className="text-xs">
+                            <span className="block font-semibold text-slate-500 dark:text-slate-400 mb-1">requestedBy</span>
+                            <input value={remesaAdminBy} onChange={e => setRemesaAdminBy(e.target.value)} className={inp} />
+                          </label>
+                          <label className="text-xs">
+                            <span className="block font-semibold text-slate-500 dark:text-slate-400 mb-1">changeTicket</span>
+                            <input value={remesaAdminTicket} onChange={e => setRemesaAdminTicket(e.target.value)} className={inp} placeholder="TICKET-1234" />
+                          </label>
+                        </div>
+
+                        {tipo && (
+                          <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-2">
+                            Estado destino: <b>{tipo.statusDB}</b> ({tipo.statusLabel}). Si la transacción ya
+                            está en ese estado, se omite.
+                          </p>
+                        )}
+
+                        <div className="flex items-center gap-3 mt-3 flex-wrap">
+                          {!remesaAdminConfirm ? (
+                            <button
+                              onClick={() => setRemesaAdminConfirm(true)}
+                              disabled={!tipo || !remesaAdminIds.trim() || !remesaAdminDisponible()}
+                              className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white text-sm font-bold"
+                            >
+                              Aplicar en Admin
+                            </button>
+                          ) : (
+                            <div className="flex items-center gap-2 text-xs bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800/50 rounded-xl px-3 py-2">
+                              <span className="text-rose-700 dark:text-rose-300">
+                                ¿Aplicar «{tipo?.label}» a {remesaAdminIds.split(',').filter(s => s.trim()).length} transacción(es)? <b>Libera plata real.</b>
+                              </span>
+                              <button onClick={enviarRemesaAdmin} disabled={remesaAdminSending} className="px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold disabled:opacity-50">
+                                {remesaAdminSending ? 'Enviando…' : 'Sí, aplicar'}
+                              </button>
+                              <button onClick={() => setRemesaAdminConfirm(false)} disabled={remesaAdminSending} className="px-3 py-1 rounded-lg border border-slate-300 dark:border-slate-600">Cancelar</button>
+                            </div>
+                          )}
+                          {remesaAdminMsg && (
+                            <span className={`text-xs ${remesaAdminMsg.startsWith('❌') ? 'text-red-600 dark:text-red-400' : 'text-emerald-600 dark:text-emerald-400'}`}>{remesaAdminMsg}</span>
+                          )}
+                        </div>
+                      </div>
+                    </>
+                  );
+                })()}
+
                 {/* ── Sección: Cierre en Admin (bloqueo/desbloqueo del cliente) ── */}
-                <Seccion>📛 Cierre en Admin (bloqueo/desbloqueo)</Seccion>
-                {(() => {
+                {activeQueue !== 'remesa' && <Seccion>📛 Cierre en Admin (bloqueo/desbloqueo)</Seccion>}
+                {activeQueue !== 'remesa' && (() => {
                   const inp = 'w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1.5 text-sm outline-none focus:border-rose-400';
                   const lbl = 'text-xs block';
                   const cap = 'block font-semibold text-slate-500 dark:text-slate-400 mb-1';

@@ -144,6 +144,7 @@ export type TipoEventoAuditoria =
   | 'RESPUESTA_SF_COMPLETADA'
   | 'RESPUESTA_SF_ERROR'
   | 'CIERRE_ADMIN'
+  | 'CIERRE_ADMIN_REMESA'   // liberación de la transacción (cola Remesa)
   | 'CASO_RECONSULTADO'
   | 'STATUS_CAMBIADO'
   | 'CIERRE_AUTOMATICO';

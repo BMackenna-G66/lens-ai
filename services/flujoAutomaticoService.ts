@@ -42,9 +42,18 @@ export interface FlujoOfacConfig {
   tipoBloquear: string;      // id de tipología para "Fully Blocked"
 }
 
+// Cola Remesa: prendido/apagado + qué cierres ejecuta + tipología activa.
+// Hoy la única tipología es "Liberar" (ver cierreRemesaTipos.ts).
+export interface FlujoRemesaConfig {
+  enabled: boolean;
+  cerrarSF: boolean;      // ejecutar el cierre en Salesforce
+  cerrarAdmin: boolean;   // liberar la transacción en Admin
+  tipoLiberar: string;    // id de la tipología que se aplica
+}
+
 export interface FlujoConfig {
   ofac: FlujoOfacConfig;
-  remesa: { enabled: boolean };
+  remesa: FlujoRemesaConfig;
   actualizadoEn?: string | null;
   actualizadoPor?: string | null;
 }
@@ -60,7 +69,12 @@ export const FLUJO_CONFIG_DEFAULT: FlujoConfig = {
     tipoLiberarUcr: 'liberar_ucr',
     tipoBloquear: 'fully_blocked',
   },
-  remesa: { enabled: false },
+  remesa: {
+    enabled: false,          // por pedido explícito: arranca APAGADO
+    cerrarSF: true,
+    cerrarAdmin: true,
+    tipoLiberar: 'liberar',
+  },
   actualizadoEn: null,
   actualizadoPor: null,
 };
@@ -70,7 +84,7 @@ export const flujoConfigDisponible = (): boolean => !!getDb();
 // Normaliza lo que venga de Firestore contra los defaults (tolera docs viejos).
 function normalizar(raw: Record<string, unknown> | undefined): FlujoConfig {
   const ofacRaw = (raw?.ofac ?? {}) as Partial<FlujoOfacConfig>;
-  const remesaRaw = (raw?.remesa ?? {}) as { enabled?: boolean };
+  const remesaRaw = (raw?.remesa ?? {}) as Partial<FlujoRemesaConfig>;
   const d = FLUJO_CONFIG_DEFAULT;
   return {
     ofac: {
@@ -82,7 +96,12 @@ function normalizar(raw: Record<string, unknown> | undefined): FlujoConfig {
       tipoLiberarUcr: ofacRaw.tipoLiberarUcr || d.ofac.tipoLiberarUcr,
       tipoBloquear: ofacRaw.tipoBloquear || d.ofac.tipoBloquear,
     },
-    remesa: { enabled: remesaRaw.enabled === true },            // default OFF
+    remesa: {
+      enabled: remesaRaw.enabled === true,                     // default OFF
+      cerrarSF: remesaRaw.cerrarSF !== false,
+      cerrarAdmin: remesaRaw.cerrarAdmin !== false,
+      tipoLiberar: remesaRaw.tipoLiberar || d.remesa.tipoLiberar,
+    },
     actualizadoEn: (raw?.actualizadoEn as string | undefined) ?? null,
     actualizadoPor: (raw?.actualizadoPor as string | undefined) ?? null,
   };
