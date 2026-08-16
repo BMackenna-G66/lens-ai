@@ -109,7 +109,15 @@ export const CATEGORIAS_CO: ReglaCategoria[] = [
   {
     id: 'terrorismo', categoria: 'Terrorismo', tipo: 'DELITOS PRECEDENTES',
     valor: 1, riesgoG66: 'ALTO',
-    patron: /TERRORIS|FINANCIACION DEL TERROR|GRUPO ARMADO|CLAN DEL GOLFO|GUERRILL|PARAMILITAR|AUTODEFENSA|CONCIERTO PARA DELINQUIR/,
+    patron: /TERRORIS|FINANCIACION DEL TERROR|GRUPO ARMADO|CLAN DEL GOLFO|GUERRILL|PARAMILITAR|AUTODEFENSA/,
+  },
+  {
+    // Concierto para delinquir NO es terrorismo, aunque pese lo mismo. Se separa
+    // porque el analista lee la etiqueta y "Terrorismo" en un hurto agravado es
+    // engañoso.
+    id: 'crimen_organizado', categoria: 'Crimen organizado / concierto para delinquir',
+    tipo: 'DELITOS PRECEDENTES', valor: 1, riesgoG66: 'ALTO',
+    patron: /CONCIERTO PARA DELINQUIR|ORGANIZACION CRIMINAL|BANDA CRIMINAL|RED DELICTIVA|AGRUPACIONES ILICITAS|ASOCIACION ILICITA/,
   },
   {
     id: 'narcotrafico', categoria: 'Narcotráfico / estupefacientes', tipo: 'DELITOS PRECEDENTES',
@@ -132,9 +140,9 @@ export const CATEGORIAS_CO: ReglaCategoria[] = [
     patron: /TRATA DE PERSONA|TRAFICO DE MIGRANTE|EXPLOTACION SEXUAL|PROXENETISMO/,
   },
   {
-    id: 'sexual_menores', categoria: 'Delitos sexuales / contra menores', tipo: 'DELITOS PRECEDENTES',
+    id: 'sexual', categoria: 'Delitos sexuales', tipo: 'DELITOS PRECEDENTES',
     valor: 1, riesgoG66: 'ALTO',
-    patron: /ABUSO SEXUAL|ACCESO CARNAL|ACTOS SEXUALES|PORNOGRAFIA|UTILIZACION DE MENORES|CONTRA MENOR/,
+    patron: /ABUSO SEXUAL|AGRESION SEXUAL|LIBERTAD SEXUAL|DELITO SEXUAL|VIOLACION|ACCESO CARNAL|ACTOS SEXUALES|PORNOGRAFIA|UTILIZACION DE MENORES|CONTRA MENOR/,
   },
   {
     id: 'corrupcion', categoria: 'Corrupción / soborno / peculado', tipo: 'DELITOS PRECEDENTES',
