@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { subscribeCasos, isCasosAvailable, guardarScreening, guardarRemesaRow, guardarScreeningBeneficiario, eliminarCasos, CasoSF } from '../services/casosService';
+import { subscribeCasos, isCasosAvailable, guardarScreening, guardarRemesaRow, guardarRemesaRows, guardarScreeningBeneficiario, eliminarCasos, CasoSF } from '../services/casosService';
 import {
   sfUpdateDisponible, SFCaseUpdate, SFUpdateResult,
 } from '../services/salesforceCaseService';
@@ -806,10 +806,13 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       .then(m => {
         if (cancelado) return;
         setRemesaMap(prev => ({ ...prev, ...m }));
-        // Se cachea la fila en cada caso: la próxima sesión no vuelve a Redshift.
-        for (const c of colas.remesa) {
-          if (c.remesa && m[c.remesa]) guardarRemesaRow(c.id, m[c.remesa]);
-        }
+        // Se cachea en UN SOLO commit: escrituras sueltas dispararían un snapshot
+        // por caso y la tabla se re-renderiza hasta trabarse.
+        guardarRemesaRows(
+          colas.remesa
+            .filter(c => c.remesa && m[c.remesa])
+            .map(c => ({ caseId: c.id, row: m[c.remesa] })),
+        );
       })
       .finally(() => { if (!cancelado) setRemesaMapLoading(false); });
     return () => { cancelado = true; };
@@ -846,8 +849,22 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       if (tx && c.remesaRow) filas[tx] = c.remesaRow as unknown as RemesaRow;
       if (c.screeningBeneficiario) screens[c.id] = c.screeningBeneficiario as unknown as RemesaScreening;
     }
-    if (Object.keys(filas).length) setRemesaMap(prev => ({ ...filas, ...prev }));
-    if (Object.keys(screens).length) setBenefMap(prev => ({ ...screens, ...prev }));
+    // Solo se actualiza el estado si hay algo nuevo: si no, cada snapshot de
+    // Firestore crearía objetos nuevos y volvería a renderizar toda la tabla.
+    setRemesaMap(prev => {
+      const nuevos = Object.keys(filas).filter(k => !(k in prev));
+      if (nuevos.length === 0) return prev;
+      const next = { ...prev };
+      for (const k of nuevos) next[k] = filas[k];
+      return next;
+    });
+    setBenefMap(prev => {
+      const nuevos = Object.keys(screens).filter(k => !(k in prev));
+      if (nuevos.length === 0) return prev;
+      const next = { ...prev };
+      for (const k of nuevos) next[k] = screens[k];
+      return next;
+    });
   }, [casos]);
 
   // Dispara el screening de los beneficiarios que ya tienen datos de TX y aún no
