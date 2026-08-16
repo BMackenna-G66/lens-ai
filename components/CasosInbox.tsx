@@ -290,7 +290,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   const [selId, setSelId] = useState<string | null>(null);
   const [filtro, setFiltro] = useState('');
   const [activeQueue, setActiveQueue] = useState<QueueKey>('ofac');
-  const filtrosVacios = { pais: '', estado: '', prioridad: '', conclusion: '', pep: '', numeroCaso: '', dni: '', status: '' };
+  const filtrosVacios = { pais: '', estado: '', prioridad: '', conclusion: '', pep: '', numeroCaso: '', dni: '', status: '', tipoEnvio: '', flujoBenef: '' };
   // Los casos CERRADOS salen de la cola; este toggle los vuelve a mostrar.
   const [verCerrados, setVerCerrados] = useState(false);
   const [filtros, setFiltros] = useState<Record<string, string>>(filtrosVacios);
@@ -1049,15 +1049,19 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       estado: uniq(base.map(c => vistaOp(c).estado)),
       prioridad: uniq(base.map(c => vistaOp(c).prioridad)),
       conclusion: uniq(base.map(c => screenMap[c.id]?.decision || '')),
+      tipoEnvio: uniq(base.map(c => (c.remesa ? remesaMap[c.remesa]?.tipo_envio : '') || '')),
+      flujoBenef: uniq(base.map(c => benefMap[c.id]?.flujo || '')),
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [colas, activeQueue, screenMap]);
+  }, [colas, activeQueue, screenMap, remesaMap, benefMap]);
 
   // Filtros por columna (tipo Excel): se combinan en AND con el buscador global.
   const cumpleFiltros = (c: QueuedCaso): boolean => {
     if (filtros.pais && (c.pais || '') !== filtros.pais) return false;
     if (filtros.estado && vistaOp(c).estado !== filtros.estado) return false;
     if (filtros.status && vistaOp(c).status !== filtros.status) return false;
+    if (filtros.tipoEnvio && ((c.remesa ? remesaMap[c.remesa]?.tipo_envio : '') || '') !== filtros.tipoEnvio) return false;
+    if (filtros.flujoBenef && (benefMap[c.id]?.flujo || '') !== filtros.flujoBenef) return false;
     if (filtros.prioridad && vistaOp(c).prioridad !== filtros.prioridad) return false;
     if (filtros.conclusion && (screenMap[c.id]?.decision || '') !== filtros.conclusion) return false;
     if (filtros.pep) {
@@ -1497,6 +1501,8 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                 <input type="checkbox" checked={verCerrados} onChange={e => setVerCerrados(e.target.checked)} className="w-3.5 h-3.5" />
                 Ver cerrados
               </label>
+              {activeQueue === 'remesa' && <FiltroCombo label="Tipo de envío" value={filtros.tipoEnvio} options={opcionesFiltro.tipoEnvio} onChange={v => setFiltroCol('tipoEnvio', v)} />}
+              {activeQueue === 'remesa' && <FiltroCombo label="Flujo" value={filtros.flujoBenef} options={opcionesFiltro.flujoBenef} onChange={v => setFiltroCol('flujoBenef', v)} />}
               {activeQueue === 'ofac' && <FiltroCombo label="Estado" value={filtros.estado} options={opcionesFiltro.estado} onChange={v => setFiltroCol('estado', v)} />}
               {activeQueue === 'ofac' && <FiltroCombo label="Prioridad" value={filtros.prioridad} options={opcionesFiltro.prioridad} onChange={v => setFiltroCol('prioridad', v)} />}
               {activeQueue === 'ofac' && <FiltroCombo label="Conclusión" value={filtros.conclusion} options={opcionesFiltro.conclusion} onChange={v => setFiltroCol('conclusion', v)} />}
@@ -1737,12 +1743,12 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                           <td className="px-3 py-2 whitespace-nowrap text-slate-700 dark:text-slate-200">{rCell(r?.tipo_envio)}</td>
                           {/* Screening del beneficiario */}
                           <td className="px-3 py-2 whitespace-nowrap text-slate-600 dark:text-slate-300">
-                            {b ? (b.flujo === 'CL' ? '🇨🇱 Chile' : b.flujo === 'CO' ? '🇨🇴 Colombia' : '🌍 Intl') : (r ? '…' : '—')}
+                            {b ? (b.flujo === 'CL' ? '🇨🇱 Chile' : b.flujo === 'CO' ? '🇨🇴 Colombia' : b.flujo === 'SIN_DATO' ? '⚠️ Sin dato' : '🌍 Intl') : (r ? '…' : '—')}
                           </td>
                           <td className={`px-3 py-2 whitespace-nowrap font-semibold ${decisionColor(b?.decision)}`} title={b?.razon}>
                             {!b ? (r ? (benefMapLoading ? 'consultando…' : '…') : '—')
                               : b.estado === 'error' ? 'Error'
-                              : b.estado === 'na' ? 'No aplica'
+                              : b.estado === 'na' ? (b.decision || 'Sin revisión')
                               : (b.decision || '—')}
                           </td>
                           <td className="px-3 py-2 whitespace-nowrap text-center font-bold text-slate-800 dark:text-slate-200">
@@ -1935,6 +1941,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                   const flujo = flujoDeBeneficiario(row);
                   const etiquetaFlujo = flujo === 'CL' ? '🇨🇱 Chile · Regcheq'
                     : flujo === 'CO' ? '🇨🇴 Colombia · Inspektor'
+                    : flujo === 'SIN_DATO' ? '⚠️ Sin nacionalidad · sin revisión'
                     : '🌍 Internacional · listas Regcheq';
                   const sc = benefScreen;
                   return (
