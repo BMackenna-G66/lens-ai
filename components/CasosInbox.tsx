@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { subscribeCasos, isCasosAvailable, guardarScreening, guardarRemesaRow, guardarRemesaRows, guardarScreeningBeneficiario, eliminarCasos, CasoSF } from '../services/casosService';
+import { traerCasosCola, importarCasos, CasoSFRemoto } from '../services/salesforceColaService';
 import {
   sfUpdateDisponible, SFCaseUpdate, SFUpdateResult,
 } from '../services/salesforceCaseService';
@@ -869,32 +870,118 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
 
   // Dispara el screening de los beneficiarios que ya tienen datos de TX y aún no
   // fueron consultados.
-  const benefPendientesKey = colas.remesa
-    .filter(c => c.remesa && remesaMap[c.remesa] && !(c.id in benefMap) && !c.screeningBeneficiario)
-    .map(c => c.id).join(',');
+  //
+  // OJO con las dependencias: la lista de pendientes se achica con cada resultado,
+  // así que NO puede ser la llave del efecto. Si lo es, cada screening que termina
+  // cambia la llave, el efecto se vuelve a montar, cancela el pool en vuelo y
+  // arranca otro con lo que queda: el trabajo a medio hacer se tira, se re-consulta
+  // y la cola nunca converge (eso es lo que dejaba la Bandeja pegada). Acá el pool
+  // se arranca UNA vez, se marca lo ya tomado en un ref, y al terminar el efecto
+  // vuelve a correr para recoger lo que haya quedado.
+  const benefRunning = useRef(false);
+  const benefTomados = useRef<Set<string>>(new Set());
+  // Cambia cuando llegan casos nuevos o filas de TX nuevas, no con cada resultado.
+  const benefTriggerKey = `${remesaIdsKey}|${Object.keys(remesaMap).length}`;
   useEffect(() => {
-    if (activeQueue !== 'remesa') return;
-    const pendientes = colas.remesa.filter(c => c.remesa && remesaMap[c.remesa] && !(c.id in benefMap) && !c.screeningBeneficiario);
+    if (activeQueue !== 'remesa' || benefRunning.current) return;
+    const pendientes = colas.remesa.filter(c =>
+      c.remesa && remesaMap[c.remesa] && !benefTomados.current.has(c.id)
+      && !(c.id in benefMap) && !c.screeningBeneficiario);
     if (pendientes.length === 0) return;
-    let cancelado = false;
+    benefRunning.current = true;
+    pendientes.forEach(c => benefTomados.current.add(c.id));
     setBenefMapLoading(true);
     runPool(pendientes, async c => {
-      if (cancelado) return;
       const row = remesaMap[c.remesa];
       try {
         const r = await screenBeneficiario(row);
-        if (!cancelado) setBenefMap(prev => ({ ...prev, [c.id]: r }));
+        setBenefMap(prev => ({ ...prev, [c.id]: r }));
         // Se cachea en el caso: no se vuelve a consultar en la próxima sesión.
         if (r.estado !== 'error') guardarScreeningBeneficiario(c.id, r);
+        else benefTomados.current.delete(c.id);   // error → se puede reintentar
       } catch (e) {
-        if (!cancelado) setBenefMap(prev => ({ ...prev, [c.id]: {
+        benefTomados.current.delete(c.id);
+        setBenefMap(prev => ({ ...prev, [c.id]: {
           estado: 'error', flujo: flujoDeBeneficiario(row), fuente: '—', decision: '—',
           delitosUnicos: 0, coincidencias: [], listas: [], mensaje: (e as Error).message } }));
       }
-    }, 2).finally(() => { if (!cancelado) setBenefMapLoading(false); });
-    return () => { cancelado = true; };
+    }, 2).finally(() => {
+      benefRunning.current = false;
+      setBenefMapLoading(false);   // el re-render deja que el efecto tome el resto
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeQueue, benefPendientesKey]);
+  }, [activeQueue, benefTriggerKey, benefMap]);
+
+  // ── Recuperación de la cola desde Salesforce ────────────────────────────────
+  // El receptor solo empuja: si la Bandeja se vacía, los casos que siguen abiertos
+  // en Salesforce no vuelven solos. Acá se consulta Salesforce y se reconstruyen.
+  // Es en dos pasos a propósito: primero se muestra QUÉ hay y recién con la
+  // confirmación se escribe, para no meter cientos de casos sin querer.
+  type ImpEstado = 'idle' | 'validando' | 'listo' | 'importando' | 'error';
+  const [impEstado, setImpEstado] = useState<ImpEstado>('idle');
+  const [impMsg, setImpMsg] = useState('');
+  const [impRemotos, setImpRemotos] = useState<CasoSFRemoto[]>([]);
+
+  const validarCasosSF = async () => {
+    setImpEstado('validando'); setImpMsg(''); setImpRemotos([]);
+    try {
+      const remotos = await traerCasosCola();
+      setImpRemotos(remotos);
+      setImpEstado(remotos.length > 0 ? 'listo' : 'error');
+      if (remotos.length === 0) setImpMsg('Salesforce no devolvió casos abiertos en las colas de trabajo.');
+    } catch (e) {
+      setImpEstado('error');
+      setImpMsg(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  // Qué colas se importan. La cola "Compliance" de Salesforce mezcla las remesas
+  // del bot con casos de otro tipo, así que se puede elegir para no llenar la
+  // Bandeja de casos que no se gestionan acá.
+  const [impColas, setImpColas] = useState<Record<QueueKey, boolean>>({ ofac: true, remesa: true, otros: true });
+
+  // Desglose de lo encontrado: por cola de la Bandeja y cuántos ya están.
+  const impResumen = useMemo(() => {
+    const enBandeja = new Set(casos.map(c => c.id));
+    const porCola: Record<QueueKey, number> = { ofac: 0, remesa: 0, otros: 0 };
+    const elegidos: CasoSFRemoto[] = [];
+    let nuevos = 0;
+    for (const r of impRemotos) {
+      const q = clasificar({ asunto: r.asunto } as QueuedCaso);   // clasificar solo mira el asunto
+      porCola[q]++;
+      if (!impColas[q]) continue;
+      elegidos.push(r);
+      if (!enBandeja.has(r.numeroCaso.replace(/\//g, '-'))) nuevos++;
+    }
+    return { porCola, nuevos, elegidos, total: impRemotos.length, enBandeja };
+  }, [impRemotos, casos, impColas]);
+
+  const confirmarImportacion = async () => {
+    setImpEstado('importando');
+    try {
+      const r = await importarCasos(impResumen.elegidos, impResumen.enBandeja);
+      setImpEstado('idle');
+      setImpRemotos([]);
+      setImpMsg(`✅ ${r.nuevos} caso(s) nuevo(s) y ${r.actualizados} actualizado(s).`);
+    } catch (e) {
+      setImpEstado('error');
+      setImpMsg(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  // Se dibuja en la barra de colas y también en el estado vacío.
+  const botonTraerSF = (
+    <button
+      onClick={validarCasosSF}
+      disabled={impEstado === 'validando' || impEstado === 'importando'}
+      title="Consulta Salesforce y trae los casos abiertos de las colas de trabajo"
+      className="flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-bold border transition-colors bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:border-sky-300 disabled:opacity-60"
+    >
+      {impEstado === 'validando' ? '⏳ Consultando…'
+        : impEstado === 'importando' ? '⏳ Importando…'
+        : '📡 Traer casos de Salesforce'}
+    </button>
+  );
 
   // ── Screening criminal EN VIVO de la cola OFAC/PEP ──────────────────────────
   // Chile → Regcheq (solo DNI) + motor de decisión. Colombia queda pendiente
@@ -1368,11 +1455,12 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
               </button>
             );
           })}
+          <span className="ml-auto">{botonTraerSF}</span>
           {/* Mantenedor del flujo automático */}
           <button
             onClick={abrirFlujo}
             title="Prender/apagar el cierre automático de las colas"
-            className={`ml-auto flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-bold border transition-colors ${
+            className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-bold border transition-colors ${
               flujoCfg.ofac.enabled || flujoCfg.remesa.enabled
                 ? 'bg-amber-500 text-white border-amber-500'
                 : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:border-amber-300'}`}
@@ -1387,6 +1475,62 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
           <span className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-emerald-600 dark:text-emerald-400">
             <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" /> en vivo
           </span>
+        </div>
+      )}
+
+      {/* Recuperación desde Salesforce: qué se encontró y confirmación */}
+      {(impEstado === 'listo' || impEstado === 'error' || impMsg) && (
+        <div className={`mb-4 rounded-2xl border p-4 ${impEstado === 'error'
+          ? 'border-red-200 dark:border-red-800/50 bg-red-50 dark:bg-red-950/30'
+          : 'border-sky-200 dark:border-sky-800/50 bg-sky-50 dark:bg-sky-950/30'}`}>
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-sm font-black text-slate-800 dark:text-slate-200">📡 Casos abiertos en Salesforce</p>
+              {impEstado === 'listo' ? (
+                <>
+                  <p className="text-xs text-slate-600 dark:text-slate-300 mt-1">
+                    Se encontraron <b>{impResumen.total}</b> caso(s) abiertos en las colas de trabajo.
+                    Elegí cuáles traer:
+                  </p>
+                  <div className="flex flex-wrap items-center gap-3 mt-2">
+                    {QUEUES.map(q => (
+                      <label key={q.key} className="flex items-center gap-1.5 text-xs text-slate-700 dark:text-slate-200 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={impColas[q.key]}
+                          onChange={e => setImpColas(v => ({ ...v, [q.key]: e.target.checked }))}
+                          className="accent-sky-600"
+                        />
+                        {q.label} <b>{impResumen.porCola[q.key]}</b>
+                      </label>
+                    ))}
+                  </div>
+                  <p className="text-xs text-slate-600 dark:text-slate-300 mt-2">
+                    <b>{impResumen.nuevos}</b> de los seleccionados no están en la Bandeja. Los que ya
+                    están se actualizan conservando screening, asignación y cierres.
+                  </p>
+                </>
+              ) : (
+                <p className="text-xs text-slate-600 dark:text-slate-300 mt-1">{impMsg}</p>
+              )}
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              {impEstado === 'listo' && (
+                <button
+                  onClick={confirmarImportacion}
+                  className="text-xs font-bold px-3 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white"
+                >
+                  Traer {impResumen.elegidos.length} a la Bandeja
+                </button>
+              )}
+              <button
+                onClick={() => { setImpEstado('idle'); setImpRemotos([]); setImpMsg(''); }}
+                className="text-xs font-semibold px-3 py-2 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700"
+              >
+                Cerrar
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -1606,8 +1750,16 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       )}
 
       {!loading && !error && casos.length === 0 && (
-        <div className="text-center text-slate-400 dark:text-slate-500 py-16 text-sm">
-          Todavía no llegó ningún caso. Cuando Salesforce haga <code>POST /casos</code>, aparecerán acá al instante.
+        <div className="text-center py-16">
+          <p className="text-sm text-slate-400 dark:text-slate-500">
+            Todavía no llegó ningún caso. Cuando Salesforce haga <code>POST /casos</code>, aparecerán acá al instante.
+          </p>
+          {/* La cola vacía es justo cuando más se necesita la recuperación: sin esto
+              el botón vivía solo en la barra de colas, que no se dibuja sin casos. */}
+          <p className="text-xs text-slate-400 dark:text-slate-500 mt-4 mb-3">
+            ¿Se vació la Bandeja? Traé de vuelta los casos que siguen abiertos en Salesforce:
+          </p>
+          <div className="flex justify-center">{botonTraerSF}</div>
         </div>
       )}
 
