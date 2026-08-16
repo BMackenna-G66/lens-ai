@@ -131,10 +131,28 @@ export async function guardarScreening(caseId: string, screening: StoredScreenin
 
 // Cachea la fila de la TX (Redshift) en el caso, para no re-consultarla.
 export async function guardarRemesaRow(caseId: string, row: unknown): Promise<void> {
+  await guardarRemesaRows([{ caseId, row }]);
+}
+
+// Versión en LOTE: escribe todas las filas en un solo commit. Es importante que sea
+// así y no una escritura por caso: con una cola grande, cientos de updateDoc
+// sueltos disparan cientos de snapshots y la tabla se re-renderiza hasta trabar el
+// navegador.
+export async function guardarRemesaRows(items: { caseId: string; row: unknown }[]): Promise<void> {
   const db = getDb() as Firestore | null;
-  if (!db || !row) return;
-  const limpio = JSON.parse(JSON.stringify({ ...(row as object), cacheadoEn: new Date().toISOString() }));
-  await updateDoc(doc(db, CASOS_COLLECTION, caseId), { remesaRow: limpio }).catch(() => {});
+  const validos = items.filter(i => i.caseId && i.row);
+  if (!db || validos.length === 0) return;
+  const cacheadoEn = new Date().toISOString();
+  try {
+    for (let i = 0; i < validos.length; i += 450) {   // límite de 500 por batch
+      const batch = writeBatch(db);
+      for (const it of validos.slice(i, i + 450)) {
+        const limpio = JSON.parse(JSON.stringify({ ...(it.row as object), cacheadoEn }));
+        batch.update(doc(db, CASOS_COLLECTION, it.caseId), { remesaRow: limpio });
+      }
+      await batch.commit();
+    }
+  } catch { /* el caché es best-effort: si falla, se re-consulta la próxima vez */ }
 }
 
 // Cachea el screening del beneficiario. Se mantiene hasta que el caso se cierre o
