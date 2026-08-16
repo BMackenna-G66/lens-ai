@@ -60,6 +60,11 @@ export interface CasoSF {
   respuestaSalesforce?: unknown;
   statusCaso?: string;             // ABIERTO | GESTIONANDO | CERRADO
   cierres?: { sf?: CierreCanal; admin?: CierreCanal };
+  // ── Cola Remesa: se cachean los dos resultados caros del caso ───────────────
+  // Sin esto, cada vez que alguien abre la Bandeja se vuelve a consultar Redshift
+  // y a los proveedores de listas, que es lento y se cobra por consulta.
+  remesaRow?: Record<string, unknown>;          // fila de la TX (Redshift)
+  screeningBeneficiario?: Record<string, unknown>;  // screening del beneficiario
 }
 
 export const isCasosAvailable = (): boolean => !!getDb();
@@ -97,6 +102,9 @@ function docToCaso(id: string, data: Record<string, unknown>): CasoSF {
     respuestaSalesforce: data.respuestaSalesforce,
     statusCaso: data.statusCaso as string | undefined,
     cierres: (data.cierres && typeof data.cierres === 'object') ? data.cierres as CasoSF['cierres'] : undefined,
+    remesaRow: (data.remesaRow && typeof data.remesaRow === 'object') ? data.remesaRow as Record<string, unknown> : undefined,
+    screeningBeneficiario: (data.screeningBeneficiario && typeof data.screeningBeneficiario === 'object')
+      ? data.screeningBeneficiario as Record<string, unknown> : undefined,
   };
 }
 
@@ -119,6 +127,23 @@ export async function guardarScreening(caseId: string, screening: StoredScreenin
   // Firestore no acepta `undefined`: el round-trip por JSON descarta esas claves.
   const limpio = JSON.parse(JSON.stringify({ ...screening, screenedAt: new Date().toISOString() }));
   await updateDoc(doc(db, CASOS_COLLECTION, caseId), { screening: limpio });
+}
+
+// Cachea la fila de la TX (Redshift) en el caso, para no re-consultarla.
+export async function guardarRemesaRow(caseId: string, row: unknown): Promise<void> {
+  const db = getDb() as Firestore | null;
+  if (!db || !row) return;
+  const limpio = JSON.parse(JSON.stringify({ ...(row as object), cacheadoEn: new Date().toISOString() }));
+  await updateDoc(doc(db, CASOS_COLLECTION, caseId), { remesaRow: limpio }).catch(() => {});
+}
+
+// Cachea el screening del beneficiario. Se mantiene hasta que el caso se cierre o
+// se borre; para forzar una consulta nueva está el botón "Reconsultar".
+export async function guardarScreeningBeneficiario(caseId: string, screening: unknown): Promise<void> {
+  const db = getDb() as Firestore | null;
+  if (!db || !screening) return;
+  const limpio = JSON.parse(JSON.stringify({ ...(screening as object), screenedAt: new Date().toISOString() }));
+  await updateDoc(doc(db, CASOS_COLLECTION, caseId), { screeningBeneficiario: limpio }).catch(() => {});
 }
 
 // Suscripción en vivo. Devuelve unsubscribe. Ordena por recibidoEn desc en cliente
