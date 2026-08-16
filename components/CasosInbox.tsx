@@ -34,7 +34,7 @@ import { TIPOS_CIERRE, camposDeCierre } from '../services/cierreTipos';
 import { TIPOS_CIERRE_ADMIN, OFAC_PROVIDERS, ADMIN_ASSIGNEE_DEFAULT, ADMIN_STATUS_OPTIONS, ADMIN_COMMENT_OPTIONS, RISK_LEVELS, PEP_PROVIDER_DEFAULT, ofacFlagPara } from '../services/cierreAdminTipos';
 import { enviarCierreAdmin, adminCierreDisponible, AdminCierreResult } from '../services/adminCierreService';
 import { registrarAuditoria, leerAuditoria } from '../services/caseAuditService';
-import { logCierre, logHistorial, logConfigFlujo, logScreening, sincronizarAnalistas, filasBackfillCaso, enviarLote, reintentarPendientes, pendientesEnBuffer } from '../services/colasLogService';
+import { logCierre, logHistorial, logConfigFlujo, logScreening, sincronizarAnalistas, filasBackfillCaso, enviarLote, reintentarPendientes, pendientesEnBuffer, logLiberacionRemesa } from '../services/colasLogService';
 import { getAllUsers } from '../services/firestoreService';
 import type { InvestigacionCaso } from '../services/casosComplianceTypes';
 import { useAuth } from '../context/AuthContext';
@@ -385,8 +385,14 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   const [remesaMasivoConfirm, setRemesaMasivoConfirm] = useState(false);
   const [remesaMasivoSending, setRemesaMasivoSending] = useState(false);
   const [remesaMasivoResult, setRemesaMasivoResult] = useState<string | null>(null);
-  const [remesaMasivoCanal, setRemesaMasivoCanal] = useState<'sf' | 'admin'>('sf');
 
+  // Una sola acción libera los DOS canales: primero Admin (una llamada con todas
+  // las transacciones del lote) y después Salesforce. Antes había que elegir canal
+  // y correr el masivo dos veces.
+  //
+  // Admin va primero a propósito: es el que mueve la plata. Si falla, no tiene
+  // sentido cerrar el caso en Salesforce diciendo que se liberó, así que ese caso
+  // se saltea en el canal SF.
   const cerrarMasivoRemesa = async () => {
     const tipo = tipoRemesaPorId(remesaMasivoTipo);
     if (!tipo || seleccion.size === 0) return;
@@ -396,41 +402,68 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       .filter((c): c is QueuedCaso => !!c);
 
     try {
-      if (remesaMasivoCanal === 'sf') {
-        let ok = 0, err = 0;
-        await runPool(seleccionados, async c => {
-          try {
-            const payload = { CaseNumber: c.numeroCaso, ...camposDeCierreRemesa(tipo, c.pais) } as SFCaseUpdate;
-            const r = await enviarResolucion(c.id, payload, actor ?? undefined);
-            if (r.yaEnviada || r.sf?.ok) {
-              ok++;
-              await registrarCierreCanal(c.id, 'sf', { ok: true, tipologia: tipo.id }, actor ?? undefined).catch(() => {});
-              logCierre(c, 'remesa', { canal: 'SF', ok: true, tipologia: tipo.id }, actor ?? undefined);
-            } else err++;
-          } catch { err++; }
-        }, 3);
-        setRemesaMasivoResult(`${ok} cerrado(s) en Salesforce${err ? `, ${err} con error` : ''}`);
-        if (err === 0) limpiarSeleccion();
-      } else {
-        // Admin: una sola llamada con todas las transacciones del lote.
-        const conTx = seleccionados.filter(c => c.remesa);
-        const sinTx = seleccionados.length - conTx.length;
-        const r = await enviarCierreRemesaAdmin({
-          transactionIds: conTx.map(c => c.remesa),
+      // ── 1) Admin: libera las transacciones ──
+      const conTx = seleccionados.filter(c => c.remesa);
+      const sinTx = seleccionados.length - conTx.length;
+      const pendientesAdmin = conTx.filter(c => c.cierres?.admin?.ok !== true);
+
+      let rAdmin: Awaited<ReturnType<typeof enviarCierreRemesaAdmin>> = { ok: true, results: [] };
+      if (pendientesAdmin.length > 0) {
+        rAdmin = await enviarCierreRemesaAdmin({
+          transactionIds: pendientesAdmin.map(c => c.remesa),
           targetStatusDB: tipo.statusDB,
           targetStatusLabel: tipo.statusLabel,
-          requestedBy: actor?.email ?? actor?.nombre ?? '',
+          requestedBy: actor?.nombre ?? '',
         });
-        // Marca el canal Admin de cada caso cuya transacción volvió OK.
-        const okPorTx = new Map(r.results.map(x => [String(x.transactionId), x.ok]));
-        for (const c of conTx) {
-          if (!okPorTx.get(String(c.remesa))) continue;
-          await registrarCierreCanal(c.id, 'admin', { ok: true, tipologia: tipo.id }, actor ?? undefined).catch(() => {});
-          logCierre(c, 'remesa', { canal: 'ADMIN', ok: true, tipologia: tipo.id, statusEnviado: tipo.statusDB }, actor ?? undefined);
-        }
-        setRemesaMasivoResult(`${resumenRemesaAdmin(r)}${sinTx ? ` · ${sinTx} sin N° de transacción` : ''}`);
-        if (r.ok && !sinTx) limpiarSeleccion();
       }
+      const resPorTx = new Map(rAdmin.results.map(x => [String(x.transactionId), x]));
+      for (const c of pendientesAdmin) {
+        const res = resPorTx.get(String(c.remesa));
+        if (!res?.ok) continue;
+        await registrarCierreCanal(c.id, 'admin', { ok: true, tipologia: tipo.id }, actor ?? undefined).catch(() => {});
+        logCierre(c, 'remesa', { canal: 'ADMIN', ok: true, tipologia: tipo.id, statusEnviado: tipo.statusDB }, actor ?? undefined);
+      }
+
+      // ── 2) Salesforce: solo los casos cuya plata quedó liberada ──
+      const adminOk = (c: QueuedCaso) =>
+        c.cierres?.admin?.ok === true || resPorTx.get(String(c.remesa))?.ok === true;
+      const paraSF = seleccionados.filter(c => adminOk(c) && c.cierres?.sf?.ok !== true);
+      let sfOk = 0, sfErr = 0;
+      await runPool(paraSF, async c => {
+        try {
+          const payload = { CaseNumber: c.numeroCaso, ...camposDeCierreRemesa(tipo, c.pais) } as SFCaseUpdate;
+          const r = await enviarResolucion(c.id, payload, actor ?? undefined);
+          if (r.yaEnviada || r.sf?.ok) {
+            sfOk++;
+            await registrarCierreCanal(c.id, 'sf', { ok: true, tipologia: tipo.id }, actor ?? undefined).catch(() => {});
+            logCierre(c, 'remesa', { canal: 'SF', ok: true, tipologia: tipo.id }, actor ?? undefined);
+          } else sfErr++;
+        } catch { sfErr++; }
+      }, 3);
+
+      // ── 3) Auditoría de la liberación (una fila por caso, con la evidencia) ──
+      for (const c of seleccionados) {
+        const res = resPorTx.get(String(c.remesa));
+        logLiberacionRemesa(c, {
+          transaccionId: c.remesa || null,
+          tipologia: tipo.id,
+          adminOk: c.cierres?.admin?.ok === true || res?.ok === true,
+          adminOmitido: res?.omitido ?? false,
+          estadoAnterior: res?.estadoAnterior ?? null,
+          estadoNuevo: res?.ok ? tipo.statusDB : null,
+          sfOk: adminOk(c) && c.cierres?.sf?.ok !== true ? undefined : c.cierres?.sf?.ok,
+          requestedBy: actor?.nombre ?? null,
+          detalleError: res && !res.ok ? (res.detalle ?? `paso ${res.paso}`) : null,
+        }, remesaMap[c.remesa], benefMap[c.id], actor ?? undefined);
+      }
+
+      const partes = [
+        resumenRemesaAdmin(rAdmin),
+        `${sfOk} cerrado(s) en Salesforce${sfErr ? `, ${sfErr} con error` : ''}`,
+        sinTx ? `${sinTx} sin N° de transacción` : '',
+      ].filter(Boolean);
+      setRemesaMasivoResult(partes.join(' · '));
+      if (rAdmin.ok && sfErr === 0 && !sinTx) limpiarSeleccion();
     } catch (e) {
       setRemesaMasivoResult(`❌ ${e instanceof Error ? e.message : String(e)}`);
     } finally {
@@ -1164,6 +1197,17 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
         canal: 'ADMIN', ok: r.ok, tipologia: tipo.id, statusEnviado: tipo.statusDB,
         detalleError: r.ok ? null : (r.error ?? null),
       });
+      // Auditoría de la liberación, con la transacción y la evidencia.
+      const primero = r.results[0];
+      logLiberacionRemesa(sel, {
+        transaccionId: ids[0] ?? null, tipologia: tipo.id,
+        adminOk: r.ok, adminOmitido: primero?.omitido ?? false,
+        estadoAnterior: primero?.estadoAnterior ?? null,
+        estadoNuevo: r.ok ? tipo.statusDB : null,
+        sfOk: sel.cierres?.sf?.ok,
+        requestedBy: remesaAdminBy || null, changeTicket: remesaAdminTicket || null,
+        detalleError: r.ok ? null : (r.error ?? primero?.detalle ?? null),
+      }, remesaMap[sel.remesa], benefMap[sel.id], actor ?? undefined);
       registrarAuditoria(sel.id, {
         tipo: 'CIERRE_ADMIN_REMESA', actorId: actor?.uid ?? 'system', actorTipo: actor ? 'USER' : 'SYSTEM',
         correlationId: sel.id, versionCaso: 1,
@@ -2102,14 +2146,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
           {seleccion.size > 0 && activeQueue === 'remesa' && (
             <div className="flex flex-wrap items-center gap-3 mb-3 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/50 rounded-xl px-4 py-2 text-sm">
               <span className="font-semibold text-amber-800 dark:text-amber-300">Cerrar remesas</span>
-              <select
-                value={remesaMasivoCanal}
-                onChange={e => { setRemesaMasivoCanal(e.target.value as 'sf' | 'admin'); setRemesaMasivoConfirm(false); setRemesaMasivoResult(null); }}
-                className="px-2 py-1 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800"
-              >
-                <option value="sf">en Salesforce</option>
-                <option value="admin">en Admin (liberar transacción)</option>
-              </select>
+              <span className="text-xs text-amber-700 dark:text-amber-400">Admin + Salesforce en un paso</span>
               <select
                 value={remesaMasivoTipo}
                 onChange={e => { setRemesaMasivoTipo(e.target.value); setRemesaMasivoConfirm(false); setRemesaMasivoResult(null); }}
@@ -2126,8 +2163,8 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
               {remesaMasivoConfirm && (
                 <div className="flex items-center gap-2 text-xs">
                   <span className="text-amber-900 dark:text-amber-200">
-                    ¿Aplicar «{tipoRemesaPorId(remesaMasivoTipo)?.label}» a {seleccion.size} caso(s)
-                    {remesaMasivoCanal === 'admin' ? <> en Admin? <b>Libera plata real.</b></> : ' en Salesforce?'}
+                    ¿Aplicar «{tipoRemesaPorId(remesaMasivoTipo)?.label}» a {seleccion.size} caso(s)?
+                    Libera la transacción en Admin y cierra el caso en Salesforce. <b>Libera plata real.</b>
                   </span>
                   <button onClick={cerrarMasivoRemesa} disabled={remesaMasivoSending} className="px-3 py-1 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold disabled:opacity-50">
                     {remesaMasivoSending ? 'Enviando…' : 'Sí, aplicar'}

@@ -8,6 +8,7 @@
 // son fire-and-forget: si el logger falla, la Bandeja no se entera.
 
 import type { CasoSF } from './casosService';
+import { categoriasSensibles } from './delitosSensibles';
 
 const PROXY = (process.env.EMPRESADOCS_PROXY_URL || '').replace(/\/$/, '');
 
@@ -426,4 +427,96 @@ export async function enviarLote(
     onAvance?.(Math.min(i + TAMANO, filas.length), filas.length);
   }
   return { escritas, fallidas, cierres: 0, eventos: 0, error };
+}
+
+// ── Liberación de remesas ────────────────────────────────────────────────────
+// Espejo auditable de lo que se libera en la cola Remesa. Va a su propia tabla
+// (`liberacion_remesa`) y NO reemplaza a `cierre`: esa sigue guardando una fila
+// por canal. Acá se guarda la liberación completa con la transacción, el monto y
+// la evidencia del screening que la respaldó — lo que hay que poder mostrar si
+// alguien pregunta por qué se soltó esa plata.
+
+export interface LiberacionRemesaLog {
+  transaccionId?: string | null;
+  tipologia?: string | null;
+  automatico?: boolean;
+  adminOk?: boolean;
+  adminOmitido?: boolean;
+  sfOk?: boolean;
+  estadoAnterior?: string | null;
+  estadoNuevo?: string | null;
+  requestedBy?: string | null;
+  changeTicket?: string | null;
+  detalleError?: string | null;
+}
+
+// Fila de la TX (Redshift) y screening del beneficiario, ambos opcionales: si el
+// caso se libera sin ellos igual queda registrado, con las columnas en null.
+interface RemesaRowLog {
+  beneficiary_name?: unknown; beneficiary_first_name?: unknown; beneficiary_last_name?: unknown;
+  beneficiary_dni?: unknown; beneficiary_country_name?: unknown;
+  amount_usd?: unknown; transaction_type?: unknown;
+}
+interface ScreeningRemesaLog {
+  flujo?: string; estado?: string; decision?: string; delitosUnicos?: number;
+  listas?: Array<{ lista?: string }>;
+  coincidencias?: Array<{ tipo?: string; detalle?: string }>;
+}
+
+const texto = (v: unknown): string => (v === null || v === undefined ? '' : String(v)).trim();
+
+export function logLiberacionRemesa(
+  caso: CasoSF,
+  lib: LiberacionRemesaLog,
+  row?: RemesaRowLog,
+  screening?: ScreeningRemesaLog,
+  actor?: ActorLog,
+): void {
+  const en = ahora();
+  const tx = texto(lib.transaccionId);
+  const benef = texto(row?.beneficiary_name)
+    || [row?.beneficiary_first_name, row?.beneficiary_last_name].map(texto).filter(Boolean).join(' ');
+  const cats = categoriasSensibles(screening?.coincidencias);
+  const monto = Number(row?.amount_usd);
+
+  void enviar([
+    filaCaso(caso, 'remesa'),
+    ...filaAnalista(actor),
+    {
+      tabla: 'liberacion_remesa',
+      datos: {
+        liberacion_id: `${caso.numeroCaso}|${tx || 's-tx'}|${en}`,
+        numero_caso: caso.numeroCaso,
+        transaccion_id: tx || null,
+        tipologia: lib.tipologia ?? null,
+        automatico: lib.automatico ?? false,
+        admin_ok: lib.adminOk ?? null,
+        admin_omitido: lib.adminOmitido ?? null,
+        sf_ok: lib.sfOk ?? null,
+        estado_anterior: lib.estadoAnterior ?? null,
+        estado_nuevo: lib.estadoNuevo ?? null,
+        beneficiario: benef || null,
+        beneficiario_dni: texto(row?.beneficiary_dni) || null,
+        beneficiario_pais: texto(row?.beneficiary_country_name) || null,
+        monto_usd: Number.isFinite(monto) ? monto : null,
+        tipo_envio: texto(row?.transaction_type) || null,
+        screening_flujo: screening?.flujo ?? null,
+        screening_estado: screening?.estado ?? null,
+        screening_decision: screening?.decision ?? null,
+        delitos_unicos: screening?.delitosUnicos ?? null,
+        listas_coincidencia: screening?.listas?.length
+          ? screening.listas.map(l => texto(l.lista)).filter(Boolean).join(', ').slice(0, 600)
+          : null,
+        retenido_sensible: cats.length > 0,
+        categorias_sensibles: cats.length ? cats.join(', ') : null,
+        requested_by: lib.requestedBy ?? null,
+        change_ticket: lib.changeTicket ?? null,
+        detalle_error: lib.detalleError ?? null,
+        actor_id: actor?.uid ?? ACTOR_SISTEMA.uid,
+        actor_nombre: actor?.nombre ?? ACTOR_SISTEMA.nombre,
+        actor_tipo: (actor?.esSistema ?? !actor) ? 'SYSTEM' : 'USER',
+        ocurrido_en: en,
+      },
+    },
+  ]);
 }

@@ -51,7 +51,7 @@ DB_USER = DB_USER or "awsuser"
 # ── Whitelist de tablas y columnas ───────────────────────────────────────────
 # El SQL se arma SOLO desde este mapa (nunca con nombres que vengan del request)
 # y los valores viajan como parámetros. Sin concatenar datos → sin inyección.
-#   tipo: '' = texto · 'int' · 'bool' · 'ts' = timestamp · 'json' = SUPER
+#   tipo: '' = texto · 'int' · 'num' = decimal · 'bool' · 'ts' = timestamp · 'json' = SUPER
 TABLAS = {
     "caso": {
         "pk": ["numero_caso"],
@@ -98,6 +98,22 @@ TABLAS = {
             "actor_tipo": "", "ocurrido_en": "ts",
         },
     },
+    "liberacion_remesa": {
+        "pk": ["liberacion_id"],
+        "cols": {
+            "liberacion_id": "", "numero_caso": "", "transaccion_id": "",
+            "tipologia": "", "automatico": "bool",
+            "admin_ok": "bool", "admin_omitido": "bool", "sf_ok": "bool",
+            "estado_anterior": "", "estado_nuevo": "",
+            "beneficiario": "", "beneficiario_dni": "", "beneficiario_pais": "",
+            "monto_usd": "num", "tipo_envio": "",
+            "screening_flujo": "", "screening_estado": "", "screening_decision": "",
+            "delitos_unicos": "int", "listas_coincidencia": "",
+            "retenido_sensible": "bool", "categorias_sensibles": "",
+            "requested_by": "", "change_ticket": "", "detalle_error": "",
+            "actor_id": "", "actor_nombre": "", "actor_tipo": "", "ocurrido_en": "ts",
+        },
+    },
     "caso_historial": {
         "pk": ["historial_id"],
         "cols": {
@@ -137,6 +153,8 @@ def _normalizar(valor, tipo):
         return None
     if tipo == "int":
         return int(valor)
+    if tipo == "num":
+        return float(valor)
     if tipo == "bool":
         return bool(valor)
     if tipo == "json":
@@ -161,6 +179,8 @@ def _columnas(tabla, datos):
             exprs.append("%s::TIMESTAMP")
         elif tipo == "int":
             exprs.append("%s::BIGINT")
+        elif tipo == "num":
+            exprs.append("%s::DECIMAL(18,2)")
         elif tipo == "bool":
             exprs.append("%s::BOOLEAN")
         else:
@@ -199,6 +219,8 @@ def _sentencias(tabla, datos):
             exprs.append("%s::TIMESTAMP")
         elif tipo == "int":
             exprs.append("%s::BIGINT")
+        elif tipo == "num":
+            exprs.append("%s::DECIMAL(18,2)")
         elif tipo == "bool":
             exprs.append("%s::BOOLEAN")
         else:
