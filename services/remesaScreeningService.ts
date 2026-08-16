@@ -23,7 +23,7 @@ import type { RemesaRow } from './remesasService';
 const REGCHEQ_BASE = 'https://external-api.regcheq.com';
 const REGCHEQ_KEY = ((import.meta as unknown) as { env: Record<string, string> }).env.VITE_REGCHEQ_API_KEY ?? '';
 
-export type FlujoRemesa = 'CL' | 'CO' | 'INTL';
+export type FlujoRemesa = 'CL' | 'CO' | 'INTL' | 'SIN_DATO';
 export type EstadoRemesaScreening = 'ok' | 'sin_causas' | 'error' | 'na';
 
 // Una lista de Regcheq con coincidencia (lo que importa en el flujo internacional).
@@ -67,12 +67,15 @@ const limpiar = (v: unknown): string => String(v ?? '').trim();
 const normalizar = (v: string): string =>
   v.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
 
-// País del beneficiario → flujo de screening.
-export function flujoDeBeneficiario(row: Pick<RemesaRow, 'beneficiary_country_name' | 'beneficiary_dni_type'>): FlujoRemesa {
+// NACIONALIDAD del beneficiario → flujo de screening. Es lo único que decide:
+//   Chile → CL · Colombia → CO · cualquier otra → INTL · vacía/nula → SIN_DATO
+// SIN_DATO no se screenea: sin nacionalidad no se puede elegir proveedor, así que
+// el caso queda marcado "Sin revisión" para que el analista lo mire.
+export function flujoDeBeneficiario(row: Pick<RemesaRow, 'beneficiary_country_name'>): FlujoRemesa {
   const pais = normalizar(limpiar(row?.beneficiary_country_name));
-  const tipoDni = normalizar(limpiar(row?.beneficiary_dni_type));
-  if (/chile/.test(pais) || pais === 'cl' || tipoDni === 'rut') return 'CL';
-  if (/colombia/.test(pais) || pais === 'co') return 'CO';
+  if (!pais || pais === 'null' || pais === 'n/a' || pais === '-') return 'SIN_DATO';
+  if (/chile/.test(pais) || pais === 'cl' || pais === 'chl') return 'CL';
+  if (/colombia/.test(pais) || pais === 'co' || pais === 'col') return 'CO';
   return 'INTL';
 }
 
@@ -97,8 +100,12 @@ async function screenInternacional(nombre: string, dni: string, nacionalidad: st
   // Sin DNI utilizable se usa el nombre como referencia de la ficha.
   const ref = dni.replace(/[.\s-]/g, '').toUpperCase() || nombre.replace(/\s+/g, '_').toUpperCase();
 
+  // Crea/actualiza la ficha. Se guarda el resultado: si el POST falla, el GET va a
+  // dar 404 y sin este dato el error no dice nada (era el caso del 404 "misterioso").
+  let postEstado = 0;
+  let postDetalle = '';
   try {
-    await fetch(`${REGCHEQ_BASE}/record/${REGCHEQ_KEY}`, {
+    const post = await fetch(`${REGCHEQ_BASE}/record/${REGCHEQ_KEY}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         dni: ref, personType: 'natural',
@@ -106,19 +113,33 @@ async function screenInternacional(nombre: string, dni: string, nacionalidad: st
         ...(nacionalidad ? { nationality: nacionalidad } : {}),
       }),
     });
-  } catch { /* si ya existe, la API responde 400: se consulta igual */ }
-
-  let perfil: Record<string, unknown>;
-  try {
-    let resp = await fetch(`${REGCHEQ_BASE}/record/${ref}/${REGCHEQ_KEY}`);
-    if (resp.status === 404) {   // la ficha recién creada tarda en indexarse
-      await new Promise(r => setTimeout(r, 1500));
-      resp = await fetch(`${REGCHEQ_BASE}/record/${ref}/${REGCHEQ_KEY}`);
-    }
-    if (!resp.ok) return { ...base, mensaje: `Regcheq ${resp.status}` };
-    perfil = await resp.json();
+    postEstado = post.status;
+    if (!post.ok) postDetalle = (await post.text()).slice(0, 200);
   } catch (e) {
-    return { ...base, mensaje: e instanceof Error ? e.message : String(e) };
+    postDetalle = e instanceof Error ? e.message : String(e);
+  }
+
+  // La ficha recién creada tarda en indexarse: se reintenta con esperas crecientes
+  // (mismo criterio que el módulo Regcheq, que espera hasta ~3s).
+  let perfil: Record<string, unknown> | null = null;
+  let ultimoEstado = 0;
+  for (const espera of [postEstado >= 200 && postEstado < 300 ? 1000 : 300, 2000, 3000]) {
+    await new Promise(r => setTimeout(r, espera));
+    try {
+      const resp = await fetch(`${REGCHEQ_BASE}/record/${ref}/${REGCHEQ_KEY}`);
+      ultimoEstado = resp.status;
+      if (resp.ok) { perfil = await resp.json(); break; }
+      if (resp.status !== 404) break;   // 404 = todavía no indexada; otro código no se reintenta
+    } catch (e) {
+      return { ...base, mensaje: e instanceof Error ? e.message : String(e) };
+    }
+  }
+  if (!perfil) {
+    // Mensaje accionable: distingue "no se pudo crear la ficha" de "no se indexó".
+    const motivo = postEstado && (postEstado < 200 || postEstado >= 300)
+      ? `no se pudo crear la ficha en Regcheq (POST ${postEstado}${postDetalle ? `: ${postDetalle}` : ''})`
+      : `la ficha no quedó disponible a tiempo (GET ${ultimoEstado})`;
+    return { ...base, mensaje: `${motivo} · ref ${ref}` };
   }
 
   const listasRaw = (perfil.listas ?? {}) as Record<string, Record<string, unknown>>;
@@ -152,6 +173,14 @@ export async function screenBeneficiario(row: RemesaRow): Promise<RemesaScreenin
   const flujo = flujoDeBeneficiario(row);
   const nombre = nombreBeneficiario(row);
   const dni = limpiar(row?.beneficiary_dni);
+
+  if (flujo === 'SIN_DATO') {
+    return {
+      estado: 'na', flujo, fuente: '—', decision: 'Sin revisión',
+      delitosUnicos: 0, coincidencias: [], listas: [],
+      mensaje: 'El beneficiario no trae nacionalidad: no se puede determinar el flujo.',
+    };
+  }
 
   try {
     if (flujo === 'CL') {
