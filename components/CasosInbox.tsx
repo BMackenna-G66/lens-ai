@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { subscribeCasos, isCasosAvailable, guardarScreening, eliminarCasos, CasoSF } from '../services/casosService';
+import { subscribeCasos, isCasosAvailable, guardarScreening, guardarRemesaRow, guardarScreeningBeneficiario, eliminarCasos, CasoSF } from '../services/casosService';
 import {
   sfUpdateDisponible, SFCaseUpdate, SFUpdateResult,
 } from '../services/salesforceCaseService';
@@ -738,10 +738,14 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   const [remesaData, setRemesaData] = useState<RemesaResult | null>(null);
   const [remesaLoading, setRemesaLoading] = useState(false);
 
-  // Al seleccionar un caso de la cola Remesa, consulta la TX en Redshift.
+  // Al seleccionar un caso de la cola Remesa, muestra la TX. Si ya está cacheada
+  // en el caso (o en memoria) NO se vuelve a consultar Redshift: solo se re-consulta
+  // con el botón Reconsultar.
   useEffect(() => {
     setRemesaData(null);
     if (activeQueue !== 'remesa' || !sel?.remesa) return;
+    const cacheada = (sel.remesaRow as unknown as RemesaRow | undefined) ?? remesaMap[sel.remesa];
+    if (cacheada) { setRemesaData({ estado: 'ok', notFound: [], row: cacheada }); return; }
     let cancelado = false;
     setRemesaLoading(true);
     buscarRemesa(sel.remesa)
@@ -760,11 +764,19 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   useEffect(() => {
     setBenefScreen(null);
     const row = remesaData?.estado === 'ok' ? remesaData.row : undefined;
-    if (activeQueue !== 'remesa' || !row) return;
+    if (activeQueue !== 'remesa' || !row || !sel) return;
+    // Si el caso ya tiene screening guardado, se muestra ese (no se re-consulta).
+    const guardado = (sel.screeningBeneficiario as unknown as RemesaScreening | undefined) ?? benefMap[sel.id];
+    if (guardado) { setBenefScreen(guardado); return; }
     let cancelado = false;
     setBenefLoading(true);
     screenBeneficiario(row)
-      .then(r => { if (!cancelado) setBenefScreen(r); })
+      .then(r => {
+        if (cancelado) return;
+        setBenefScreen(r);
+        setBenefMap(prev => ({ ...prev, [sel.id]: r }));
+        if (r.estado !== 'error') guardarScreeningBeneficiario(sel.id, r);
+      })
       .catch(e => { if (!cancelado) setBenefScreen({ estado: 'error', flujo: flujoDeBeneficiario(row), fuente: '—', decision: '—', delitosUnicos: 0, coincidencias: [], listas: [], mensaje: (e as Error).message }); })
       .finally(() => { if (!cancelado) setBenefLoading(false); });
     return () => { cancelado = true; };
@@ -783,25 +795,69 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   const remesaIdsKey = colas.remesa.map(c => c.remesa).filter(Boolean).join(',');
   useEffect(() => {
     if (activeQueue !== 'remesa') return;
-    const faltantes = colas.remesa.map(c => c.remesa).filter(id => id && !(id in remesaMap));
+    // Solo se consultan las TX que no están en memoria NI cacheadas en el caso.
+    const faltantes = colas.remesa
+      .filter(c => c.remesa && !(c.remesa in remesaMap) && !c.remesaRow)
+      .map(c => c.remesa);
     if (faltantes.length === 0) return;
     let cancelado = false;
     setRemesaMapLoading(true);
     buscarRemesas(faltantes)
-      .then(m => { if (!cancelado) setRemesaMap(prev => ({ ...prev, ...m })); })
+      .then(m => {
+        if (cancelado) return;
+        setRemesaMap(prev => ({ ...prev, ...m }));
+        // Se cachea la fila en cada caso: la próxima sesión no vuelve a Redshift.
+        for (const c of colas.remesa) {
+          if (c.remesa && m[c.remesa]) guardarRemesaRow(c.id, m[c.remesa]);
+        }
+      })
       .finally(() => { if (!cancelado) setRemesaMapLoading(false); });
     return () => { cancelado = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeQueue, remesaIdsKey]);
 
+  // Fuerza volver a consultar Redshift y las listas para un caso puntual. Es la
+  // única forma de refrescar, porque el resultado se cachea hasta el cierre.
+  const reconsultarRemesa = async (c: QueuedCaso) => {
+    if (!c.remesa) return;
+    setRemesaLoading(true); setBenefScreen(null); setBenefLoading(true);
+    try {
+      const r = await buscarRemesa(c.remesa);
+      setRemesaData(r);
+      if (r.estado === 'ok' && r.row) {
+        setRemesaMap(prev => ({ ...prev, [c.remesa]: r.row! }));
+        guardarRemesaRow(c.id, r.row);
+        const sc = await screenBeneficiario(r.row);
+        setBenefScreen(sc);
+        setBenefMap(prev => ({ ...prev, [c.id]: sc }));
+        if (sc.estado !== 'error') guardarScreeningBeneficiario(c.id, sc);
+      }
+    } finally { setRemesaLoading(false); setBenefLoading(false); }
+  };
+
+  // Semilla de la cola Remesa desde lo ya cacheado en el caso: la fila de la TX y
+  // el screening del beneficiario. Evita volver a pagar Redshift y los proveedores
+  // de listas en cada recarga. Se mantiene hasta que el caso se cierre o se borre.
+  useEffect(() => {
+    const filas: Record<string, RemesaRow> = {};
+    const screens: Record<string, RemesaScreening> = {};
+    for (const c of casos) {
+      const tx = extraerRemesa(c.asunto);
+      if (tx && c.remesaRow) filas[tx] = c.remesaRow as unknown as RemesaRow;
+      if (c.screeningBeneficiario) screens[c.id] = c.screeningBeneficiario as unknown as RemesaScreening;
+    }
+    if (Object.keys(filas).length) setRemesaMap(prev => ({ ...filas, ...prev }));
+    if (Object.keys(screens).length) setBenefMap(prev => ({ ...screens, ...prev }));
+  }, [casos]);
+
   // Dispara el screening de los beneficiarios que ya tienen datos de TX y aún no
   // fueron consultados.
   const benefPendientesKey = colas.remesa
-    .filter(c => c.remesa && remesaMap[c.remesa] && !(c.id in benefMap))
+    .filter(c => c.remesa && remesaMap[c.remesa] && !(c.id in benefMap) && !c.screeningBeneficiario)
     .map(c => c.id).join(',');
   useEffect(() => {
     if (activeQueue !== 'remesa') return;
-    const pendientes = colas.remesa.filter(c => c.remesa && remesaMap[c.remesa] && !(c.id in benefMap));
+    const pendientes = colas.remesa.filter(c => c.remesa && remesaMap[c.remesa] && !(c.id in benefMap) && !c.screeningBeneficiario);
     if (pendientes.length === 0) return;
     let cancelado = false;
     setBenefMapLoading(true);
@@ -811,6 +867,8 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       try {
         const r = await screenBeneficiario(row);
         if (!cancelado) setBenefMap(prev => ({ ...prev, [c.id]: r }));
+        // Se cachea en el caso: no se vuelve a consultar en la próxima sesión.
+        if (r.estado !== 'error') guardarScreeningBeneficiario(c.id, r);
       } catch (e) {
         if (!cancelado) setBenefMap(prev => ({ ...prev, [c.id]: {
           estado: 'error', flujo: flujoDeBeneficiario(row), fuente: '—', decision: '—',
@@ -871,7 +929,11 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   const ofacIdsKey = colas.ofac.map(c => c.id).join(',');
   useEffect(() => {
     if (activeQueue !== 'ofac') return;
-    const pendientes = colas.ofac.filter(c => !(c.id in screenMap));
+    // Ojo: `screenMap` puede estar vacío todavía aunque el caso ya tenga screening
+    // guardado (la semilla se aplica en el mismo commit y el estado aún no se
+    // actualizó). Por eso se mira TAMBIÉN `c.screening`: si no, se re-consultan
+    // las listas en cada recarga, que es lento y se cobra por consulta.
+    const pendientes = colas.ofac.filter(c => !(c.id in screenMap) && !c.screening);
     if (pendientes.length === 0) return;
     let cancelado = false;
 
@@ -1950,9 +2012,19 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                         <h3 className="text-sm font-black text-indigo-800 dark:text-indigo-300">
                           ⚖️ Screening del beneficiario · {etiquetaFlujo}
                         </h3>
-                        {benefLoading
-                          ? <span className="text-xs text-slate-500 dark:text-slate-400 animate-pulse">consultando…</span>
-                          : sc && <span className={`text-xs font-bold ${decisionColor(sc.decision)}`}>{sc.decision}</span>}
+                        <div className="flex items-center gap-3">
+                          {benefLoading
+                            ? <span className="text-xs text-slate-500 dark:text-slate-400 animate-pulse">consultando…</span>
+                            : sc && <span className={`text-xs font-bold ${decisionColor(sc.decision)}`}>{sc.decision}</span>}
+                          <button
+                            onClick={() => reconsultarRemesa(sel)}
+                            disabled={benefLoading || remesaLoading}
+                            title="Volver a consultar Redshift y las listas (el resultado queda cacheado)"
+                            className="text-[11px] font-bold text-slate-500 dark:text-slate-400 hover:text-sky-600 dark:hover:text-sky-400 disabled:opacity-40"
+                          >
+                            ↻ Reconsultar
+                          </button>
+                        </div>
                       </div>
                       <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-3">
                         {nombreBeneficiario(row) || '(sin nombre)'}
