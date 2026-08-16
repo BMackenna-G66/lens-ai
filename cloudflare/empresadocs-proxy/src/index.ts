@@ -156,6 +156,57 @@ export default {
       }
     }
 
+    // ── Casos abiertos de la cola: GET /salesforce/casos-cola ───────────────────
+    //   Trae de Salesforce los Case ABIERTOS que pertenecen a una cola (Owner de
+    //   tipo Queue). Sirve para repoblar la Bandeja: el flujo normal es push
+    //   (Salesforce → Lambda → Firestore) y no había forma de recuperar la cola si
+    //   se borraba. Solo LECTURA: no modifica nada en Salesforce.
+    if (url.pathname === '/salesforce/casos-cola') {
+      const clientId = env.SF_CLIENT_ID;
+      const clientSecret = env.SF_CLIENT_SECRET;
+      if (!clientId || !clientSecret) return jsonError('Faltan secrets SF_CLIENT_ID/SF_CLIENT_SECRET', 500, cors);
+      const instance = (env.SF_INSTANCE_URL || SF_INSTANCE_DEFAULT).replace(/\/$/, '');
+      // Solo se permiten caracteres seguros: el nombre de cola va dentro del SOQL.
+      const cola = (url.searchParams.get('cola') || '').replace(/['\\]/g, '').slice(0, 120);
+      const limite = Math.min(Number(url.searchParams.get('limite') || 500) || 500, 2000);
+      const soloConteo = url.searchParams.get('conteo') === '1';
+
+      try {
+        const form = new URLSearchParams({ grant_type: 'client_credentials', client_id: clientId, client_secret: clientSecret });
+        const tokRes = await fetchTimeout(`${instance}/services/oauth2/token`, {
+          method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: form.toString(),
+        }, 20000);
+        if (!tokRes.ok) return jsonError(`OAuth de Salesforce falló: ${(await tokRes.text()).slice(0, 300)}`, 502, cors);
+        const tok = JSON.parse(await tokRes.text()) as { access_token?: string; instance_url?: string };
+        const base = (tok.instance_url || instance).replace(/\/$/, '');
+
+        const donde = [
+          "Owner.Type = 'Queue'",
+          "IsClosed = false",
+          cola ? `Owner.Name = '${cola}'` : '',
+        ].filter(Boolean).join(' AND ');
+
+        const soql = soloConteo
+          ? `SELECT COUNT(Id) total, Owner.Name colaNombre FROM Case WHERE ${donde} GROUP BY Owner.Name ORDER BY COUNT(Id) DESC`
+          : `SELECT Id, CaseNumber, Subject, Status, CreatedDate, Priority, Owner.Name, Country__c, C_Review__c,
+               C_Status__c, Type, Nacionalidad__c, ContactEmail, SuppliedEmail, userId__c,
+               Account.Name, Account.customer_id__c, Account.first_name__c, Account.last_name__c,
+               Account.id_number__c, Account.id_type__c, Account.nationality__c, Account.country__c,
+               Account.PersonEmail, Account.compliance_status__c
+             FROM Case WHERE ${donde} ORDER BY CreatedDate DESC LIMIT ${limite}`.replace(/\s+/g, ' ');
+
+        const q = await fetchTimeout(`${base}/services/data/v60.0/query/?q=${encodeURIComponent(soql)}`,
+          { headers: { 'Authorization': `Bearer ${tok.access_token}`, 'Accept': 'application/json' } }, 30000);
+        const texto = await q.text();
+        return new Response(texto, {
+          status: q.status,
+          headers: { ...cors, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+        });
+      } catch (e) {
+        return jsonError(`No se pudo consultar Salesforce: ${e instanceof Error ? e.message : String(e)}`, 502, cors);
+      }
+    }
+
     // ── Salesforce case-update: POST /salesforce/case-update ────────────────────
     //   Body = { CaseNumber, ...campos }. El Worker hace OAuth client_credentials
     //   (secrets SF_CLIENT_ID/SF_CLIENT_SECRET), busca el Case por CaseNumber con la

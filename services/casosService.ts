@@ -4,7 +4,7 @@
 // POST /casos. Este servicio solo LEE (onSnapshot); la app no escribe acá.
 // Ver aws/casos-receptor/ para el productor.
 
-import { collection, onSnapshot, query, doc, updateDoc, writeBatch, Firestore } from 'firebase/firestore';
+import { collection, onSnapshot, query, doc, writeBatch, Firestore } from 'firebase/firestore';
 import { getDb } from './firebaseService';
 
 export const CASOS_COLLECTION = 'casos_sf';
@@ -120,13 +120,56 @@ export async function eliminarCasos(ids: string[]): Promise<void> {
   }
 }
 
+// ── Escrituras de caché agrupadas ────────────────────────────────────────────
+// Todo lo que se cachea en el caso (screening, screening del beneficiario, fila de
+// la TX) pasa por acá. Las tandas de screening producen un resultado por caso, y
+// una escritura suelta por resultado significa un snapshot de TODA la colección
+// por resultado: con la cola llena, la tabla se re-renderiza cientos de veces
+// seguidas y el navegador se traba. Acá se juntan en una ventana corta y se
+// mandan en un solo commit.
+const VENTANA_MS = 1500;
+// Solo se cachean estos tres campos del caso; el resto lo escriben los servicios
+// de workflow, que sí necesitan escribir en el momento.
+type PatchCache = Partial<Pick<CasoSF, 'screening' | 'remesaRow' | 'screeningBeneficiario'>>;
+const pendientes = new Map<string, PatchCache>();
+let timer: ReturnType<typeof setTimeout> | null = null;
+
+function encolar(caseId: string, patch: PatchCache): void {
+  if (!caseId) return;
+  pendientes.set(caseId, { ...(pendientes.get(caseId) ?? {}), ...patch });
+  if (!timer) timer = setTimeout(() => { void vaciarPendientes(); }, VENTANA_MS);
+}
+
+// Manda lo acumulado. Best-effort: si falla, el dato se vuelve a consultar en la
+// próxima sesión (es caché, no la fuente de verdad).
+export async function vaciarPendientes(): Promise<void> {
+  if (timer) { clearTimeout(timer); timer = null; }
+  const db = getDb() as Firestore | null;
+  const items = [...pendientes.entries()];
+  pendientes.clear();
+  if (!db || items.length === 0) return;
+  try {
+    for (let i = 0; i < items.length; i += 450) {   // límite de 500 por batch
+      const batch = writeBatch(db);
+      for (const [caseId, patch] of items.slice(i, i + 450)) {
+        batch.update(doc(db, CASOS_COLLECTION, caseId), patch);
+      }
+      await batch.commit();
+    }
+  } catch { /* caché best-effort */ }
+}
+
+// Si el usuario cierra la pestaña con escrituras en vuelo, se mandan igual.
+if (typeof window !== 'undefined') {
+  window.addEventListener('pagehide', () => { void vaciarPendientes(); });
+}
+
+// Firestore no acepta `undefined`: el round-trip por JSON descarta esas claves.
+const paraFirestore = <T>(v: T): T => JSON.parse(JSON.stringify(v));
+
 // Persiste el screening del caso en Firestore (compartido entre analistas).
 export async function guardarScreening(caseId: string, screening: StoredScreening): Promise<void> {
-  const db = getDb() as Firestore | null;
-  if (!db) return;
-  // Firestore no acepta `undefined`: el round-trip por JSON descarta esas claves.
-  const limpio = JSON.parse(JSON.stringify({ ...screening, screenedAt: new Date().toISOString() }));
-  await updateDoc(doc(db, CASOS_COLLECTION, caseId), { screening: limpio });
+  encolar(caseId, { screening: paraFirestore({ ...screening, screenedAt: new Date().toISOString() }) });
 }
 
 // Cachea la fila de la TX (Redshift) en el caso, para no re-consultarla.
@@ -134,34 +177,20 @@ export async function guardarRemesaRow(caseId: string, row: unknown): Promise<vo
   await guardarRemesaRows([{ caseId, row }]);
 }
 
-// Versión en LOTE: escribe todas las filas en un solo commit. Es importante que sea
-// así y no una escritura por caso: con una cola grande, cientos de updateDoc
-// sueltos disparan cientos de snapshots y la tabla se re-renderiza hasta trabar el
-// navegador.
 export async function guardarRemesaRows(items: { caseId: string; row: unknown }[]): Promise<void> {
-  const db = getDb() as Firestore | null;
-  const validos = items.filter(i => i.caseId && i.row);
-  if (!db || validos.length === 0) return;
   const cacheadoEn = new Date().toISOString();
-  try {
-    for (let i = 0; i < validos.length; i += 450) {   // límite de 500 por batch
-      const batch = writeBatch(db);
-      for (const it of validos.slice(i, i + 450)) {
-        const limpio = JSON.parse(JSON.stringify({ ...(it.row as object), cacheadoEn }));
-        batch.update(doc(db, CASOS_COLLECTION, it.caseId), { remesaRow: limpio });
-      }
-      await batch.commit();
-    }
-  } catch { /* el caché es best-effort: si falla, se re-consulta la próxima vez */ }
+  for (const it of items.filter(i => i.caseId && i.row)) {
+    encolar(it.caseId, { remesaRow: paraFirestore({ ...(it.row as object), cacheadoEn }) });
+  }
 }
 
 // Cachea el screening del beneficiario. Se mantiene hasta que el caso se cierre o
 // se borre; para forzar una consulta nueva está el botón "Reconsultar".
 export async function guardarScreeningBeneficiario(caseId: string, screening: unknown): Promise<void> {
-  const db = getDb() as Firestore | null;
-  if (!db || !screening) return;
-  const limpio = JSON.parse(JSON.stringify({ ...(screening as object), screenedAt: new Date().toISOString() }));
-  await updateDoc(doc(db, CASOS_COLLECTION, caseId), { screeningBeneficiario: limpio }).catch(() => {});
+  if (!screening) return;
+  encolar(caseId, {
+    screeningBeneficiario: paraFirestore({ ...(screening as object), screenedAt: new Date().toISOString() }),
+  });
 }
 
 // Suscripción en vivo. Devuelve unsubscribe. Ordena por recibidoEn desc en cliente
