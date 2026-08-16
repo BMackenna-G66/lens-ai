@@ -34,6 +34,10 @@ export interface CasoScreening {
   razon: string;
   coincidencias: Coincidencia[];
   pep?: boolean;      // ¿PEP? (hoy desde Regcheq/Chile)
+  // Coincidencias en listas que NO entran en la conclusión (OFAC, GAFI, ONU…).
+  // El catálogo de Chile concluye solo con causas penales + PEP; estas se
+  // reportan aparte para que el analista las vea.
+  otrasListas?: Array<{ clave: string; lista: string; riesgo?: string }>;
   mensaje?: string;
 }
 
@@ -130,7 +134,7 @@ export async function screenCaso(caso: CasoMin): Promise<CasoScreening> {
         fuente: c.tribunal || undefined,
         riesgo: undefined,
       }));
-      return { estado: r.estado, fuente: 'Regcheq', delitosUnicos: r.delitosUnicos, decision: r.decision, razon: r.razon, coincidencias, pep: r.pep, mensaje: r.mensaje };
+      return { estado: r.estado, fuente: 'Regcheq', delitosUnicos: r.delitosUnicos, decision: r.decision, razon: r.razon, coincidencias, pep: r.pep, otrasListas: r.otrasListas, mensaje: r.mensaje };
     }
     if (esColombia(pais)) {
       const tipo = String(caso.datos?.['Tipo de DNI'] ?? '');

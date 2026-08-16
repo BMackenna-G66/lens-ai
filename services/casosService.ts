@@ -11,8 +11,20 @@ export const CASOS_COLLECTION = 'casos_sf';
 
 // Resultado del screening (Regcheq/Inspektor) que se persiste en el caso para no
 // re-consultar la lista al recargar. Se guarda desde el navegador (updateDoc).
+// Versión del screening guardado. Subirla INVALIDA el caché: los casos con una
+// versión anterior se vuelven a consultar solos la próxima vez que se abre la
+// cola. Se sube cuando cambia lo que se lee del proveedor, no el formato nomás.
+//   v2 → alertas normalizadas
+//   v3 → se refresca la ficha de Regcheq antes de leerla y se leen las causas
+//        penales de las DOS claves posibles; además se guardan las otras listas
+export const SCREENING_SCHEMA = 3;
+
+// ¿El screening guardado sirve, o hay que volver a consultarlo?
+export const screeningVigente = (s?: { schemaVersion?: number }): boolean =>
+  (s?.schemaVersion ?? 1) >= SCREENING_SCHEMA;
+
 export interface StoredScreening {
-  schemaVersion?: number;   // 2 = shape extendido (con alertas). Ausente = v1 (legacy).
+  schemaVersion?: number;   // ver SCREENING_SCHEMA
   estado?: string;
   fuente?: string;
   delitosUnicos?: number;
@@ -21,6 +33,7 @@ export interface StoredScreening {
   coincidencias?: unknown[]; // legacy, se mantiene por compatibilidad de la UI
   alertas?: unknown[];       // v2: alertas normalizadas con dedupKey
   pep?: boolean;             // ¿PEP? (Regcheq/Chile)
+  otrasListas?: unknown[];   // coincidencias en listas fuera de la conclusión
   screenedAt?: string;       // ISO — cuándo se consultó
 }
 
@@ -189,7 +202,9 @@ export async function guardarRemesaRows(items: { caseId: string; row: unknown }[
 export async function guardarScreeningBeneficiario(caseId: string, screening: unknown): Promise<void> {
   if (!screening) return;
   encolar(caseId, {
-    screeningBeneficiario: paraFirestore({ ...(screening as object), screenedAt: new Date().toISOString() }),
+    screeningBeneficiario: paraFirestore({
+      ...(screening as object), schemaVersion: SCREENING_SCHEMA, screenedAt: new Date().toISOString(),
+    }),
   });
 }
 

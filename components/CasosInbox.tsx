@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { subscribeCasos, isCasosAvailable, guardarScreening, guardarRemesaRow, guardarRemesaRows, guardarScreeningBeneficiario, eliminarCasos, CasoSF } from '../services/casosService';
+import { screeningVigente, SCREENING_SCHEMA, subscribeCasos, isCasosAvailable, guardarScreening, guardarRemesaRow, guardarRemesaRows, guardarScreeningBeneficiario, eliminarCasos, CasoSF } from '../services/casosService';
 import { traerCasosCola, importarCasos, CasoSFRemoto } from '../services/salesforceColaService';
 import { TIPOS_CIERRE_REMESA, tipoRemesaPorId, camposDeCierreRemesa } from '../services/cierreRemesaTipos';
 import { enviarCierreRemesaAdmin, remesaAdminDisponible, resumenRemesaAdmin } from '../services/remesaAdminService';
@@ -48,6 +48,7 @@ interface ScreeningState {
   razon?: string;
   coincidencias?: Coincidencia[];
   pep?: boolean;
+  otrasListas?: Array<{ clave: string; lista: string; riesgo?: string }>;
   mensaje?: string;   // motivo cuando estado = 'error'
 }
 
@@ -194,6 +195,34 @@ const rucDeDetalle = (d?: string): string => {
 // Tabla de coincidencias AGRUPADA por RUC: cada RUC muestra su causa más
 // reciente y colapsa el resto en un desplegable (evita el ruido de RUCs
 // repetidos). Los grupos se ordenan por su causa más reciente.
+// Coincidencias en listas que NO entran en la conclusión del catálogo (que en
+// Chile se arma solo con causas penales + PEP). Se muestran igual: un
+// beneficiario puede estar en OFAC o GAFI sin tener ninguna causa penal, y eso
+// el analista tiene que verlo. Sirve para OFAC, remesas Chile e internacional.
+const OtrasListas: React.FC<{ listas?: Array<{ clave?: string; lista: string; riesgo?: string }> }> = ({ listas }) => {
+  if (!listas?.length) return null;
+  const color = (r?: string) => {
+    const v = (r ?? '').toLowerCase();
+    if (v === 'high' || v === 'alto') return 'bg-red-100 text-red-700 dark:bg-red-950/50 dark:text-red-300';
+    if (v === 'medium' || v === 'medio') return 'bg-amber-100 text-amber-700 dark:bg-amber-950/50 dark:text-amber-300';
+    return 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300';
+  };
+  return (
+    <div className="mt-3">
+      <p className="text-[11px] font-bold text-slate-500 dark:text-slate-400 mb-1.5">
+        Coincidencias en otras listas ({listas.length}) — no entran en la conclusión del catálogo
+      </p>
+      <div className="flex flex-wrap gap-1.5">
+        {listas.map(l => (
+          <span key={l.clave ?? l.lista} className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${color(l.riesgo)}`}>
+            {l.lista}{l.riesgo ? ` · ${l.riesgo}` : ''}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+};
+
 const CoincidenciasAgrupadas: React.FC<{ co: Coincidencia[] }> = ({ co }) => {
   const grupos = useMemo(() => {
     const map = new Map<string, Coincidencia[]>();
@@ -928,7 +957,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     for (const c of casos) {
       const tx = extraerRemesa(c.asunto);
       if (tx && c.remesaRow) filas[tx] = c.remesaRow as unknown as RemesaRow;
-      if (c.screeningBeneficiario) screens[c.id] = c.screeningBeneficiario as unknown as RemesaScreening;
+      if (screeningVigente(c.screeningBeneficiario)) screens[c.id] = c.screeningBeneficiario as unknown as RemesaScreening;
     }
     // Solo se actualiza el estado si hay algo nuevo: si no, cada snapshot de
     // Firestore crearía objetos nuevos y volvería a renderizar toda la tabla.
@@ -966,7 +995,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     if (activeQueue !== 'remesa' || benefRunning.current) return;
     const pendientes = colas.remesa.filter(c =>
       c.remesa && remesaMap[c.remesa] && !benefTomados.current.has(c.id)
-      && !(c.id in benefMap) && !c.screeningBeneficiario);
+      && !(c.id in benefMap) && !screeningVigente(c.screeningBeneficiario));
     if (pendientes.length === 0) return;
     benefRunning.current = true;
     pendientes.forEach(c => benefTomados.current.add(c.id));
@@ -1176,7 +1205,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   // Aplica un resultado al estado y lo PERSISTE en Firestore (salvo errores, que se
   // reintentan la próxima vez). Compartido entre analistas y sobrevive recargas.
   const aplicarScreening = (caso: QueuedCaso, r: CasoScreening) => {
-    setScreenMap(prev => ({ ...prev, [caso.id]: { estado: r.estado, fuente: r.fuente, delitosUnicos: r.delitosUnicos, decision: r.decision, razon: r.razon, coincidencias: r.coincidencias, pep: r.pep, mensaje: r.mensaje } }));
+    setScreenMap(prev => ({ ...prev, [caso.id]: { estado: r.estado, fuente: r.fuente, delitosUnicos: r.delitosUnicos, decision: r.decision, razon: r.razon, coincidencias: r.coincidencias, pep: r.pep, otrasListas: r.otrasListas, mensaje: r.mensaje } }));
     if (r.estado === 'error') {
       // El error NO se cachea (así se reintenta), pero SÍ se registra: antes los
       // fallos no dejaban rastro en ninguna parte y un caso que fallaba se veía
@@ -1195,9 +1224,10 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       const norm = normalizarScreening(r, caso, screenedAt);
       const alertas = mergeAlertas((caso.screening?.alertas as AlertaScreening[]) ?? [], norm.alertas);
       guardarScreening(caso.id, {
-        schemaVersion: 2,
+        schemaVersion: SCREENING_SCHEMA,
         estado: r.estado, fuente: r.fuente, delitosUnicos: r.delitosUnicos,
-        decision: r.decision, razon: r.razon, coincidencias: r.coincidencias, pep: r.pep, alertas,
+        decision: r.decision, razon: r.razon, coincidencias: r.coincidencias, pep: r.pep,
+        otrasListas: r.otrasListas, alertas,
       }).catch(() => {});
       // Espejo analítico: deja la conclusión del motor y si el caso quedó retenido
       // por delito sensible (lo que hay que poder auditar con el flujo automático).
@@ -1216,9 +1246,9 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       let changed = false;
       const next = { ...prev };
       for (const c of casos) {
-        if (c.screening && !(c.id in next)) {
+        if (screeningVigente(c.screening) && c.screening && !(c.id in next)) {
           const sc = c.screening;
-          next[c.id] = { estado: (sc.estado as ScreeningState['estado']) ?? 'ok', fuente: sc.fuente, delitosUnicos: sc.delitosUnicos, decision: sc.decision, razon: sc.razon, coincidencias: sc.coincidencias as Coincidencia[] | undefined, pep: sc.pep };
+          next[c.id] = { estado: (sc.estado as ScreeningState['estado']) ?? 'ok', fuente: sc.fuente, delitosUnicos: sc.delitosUnicos, decision: sc.decision, razon: sc.razon, coincidencias: sc.coincidencias as Coincidencia[] | undefined, pep: sc.pep, otrasListas: sc.otrasListas as ScreeningState['otrasListas'] };
           changed = true;
         }
       }
@@ -1247,7 +1277,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     // siguiente los daba por hechos y NUNCA se consultaban: la celda se quedaba
     // en "…" y parecía que el proveedor no respondía.
     const pendientes = colas.ofac.filter(c =>
-      !ofacTomados.current.has(c.id) && !(c.id in screenMap) && !c.screening);
+      !ofacTomados.current.has(c.id) && !(c.id in screenMap) && !screeningVigente(c.screening));
     if (pendientes.length === 0) return;
 
     ofacRunning.current = true;
@@ -2522,17 +2552,22 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
 
                       {/* Chile / Colombia: causas penales contra el catálogo */}
                       {!benefLoading && sc && (sc.flujo === 'CL' || sc.flujo === 'CO') && sc.estado !== 'error' && (
-                        sc.coincidencias.length === 0
-                          ? <p className="text-xs text-emerald-600 dark:text-emerald-400">Sin causas penales.{sc.pep ? ' (marcado PEP)' : ''}</p>
-                          : (
-                            <>
-                              <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">
-                                {sc.delitosUnicos} delito(s) único(s) · {sc.coincidencias.length} coincidencia(s)
-                                {sc.pep ? ' · PEP' : ''}
-                              </p>
-                              <CoincidenciasAgrupadas co={sc.coincidencias} />
-                            </>
-                          )
+                        <>
+                          {sc.coincidencias.length === 0
+                            ? <p className="text-xs text-emerald-600 dark:text-emerald-400">Sin causas penales.{sc.pep ? ' (marcado PEP)' : ''}</p>
+                            : (
+                              <>
+                                <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">
+                                  {sc.delitosUnicos} delito(s) único(s) · {sc.coincidencias.length} coincidencia(s)
+                                  {sc.pep ? ' · PEP' : ''}
+                                </p>
+                                <CoincidenciasAgrupadas co={sc.coincidencias} />
+                              </>
+                            )}
+                          {/* Chile: el catálogo concluye con causas penales + PEP, pero
+                              puede haber match en OFAC/GAFI/etc. sin causas. */}
+                          <OtrasListas listas={sc.listas} />
+                        </>
                       )}
 
                       {/* Internacional: qué listas coinciden y de qué tipo (sin catálogo aún) */}
@@ -2699,11 +2734,17 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                       if (sc.estado === 'na') return <p className="text-xs text-slate-500 dark:text-slate-400">País sin lista configurada (ni Chile ni Colombia).</p>;
                       if (sc.estado === 'error') return <p className="text-xs text-red-600 dark:text-red-400">Error en la consulta.</p>;
                       const co = sc.coincidencias ?? [];
-                      if (co.length === 0) return <p className="text-xs text-emerald-600 dark:text-emerald-400">Sin coincidencias / causas penales.</p>;
                       return (
                         <>
-                          <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">{sc.delitosUnicos} delito(s) único(s) · {co.length} coincidencia(s) · agrupadas por RUC</p>
-                          <CoincidenciasAgrupadas co={co} />
+                          {co.length === 0
+                            ? <p className="text-xs text-emerald-600 dark:text-emerald-400">Sin coincidencias / causas penales.</p>
+                            : (
+                              <>
+                                <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">{sc.delitosUnicos} delito(s) único(s) · {co.length} coincidencia(s) · agrupadas por RUC</p>
+                                <CoincidenciasAgrupadas co={co} />
+                              </>
+                            )}
+                          <OtrasListas listas={sc.otrasListas} />
                         </>
                       );
                     })()}
