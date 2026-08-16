@@ -5,6 +5,8 @@ import {
 } from '../services/salesforceCaseService';
 import { SF_CASE_FIELDS } from '../services/salesforceCaseFields';
 import { buscarRemesa, buscarRemesas, RemesaResult, RemesaRow } from '../services/remesasService';
+import { screenBeneficiario, flujoDeBeneficiario, nombreBeneficiario } from '../services/remesaScreeningService';
+import type { RemesaScreening } from '../services/remesaScreeningService';
 import { screenCaso, esScreenable, runPool, Coincidencia, CasoScreening } from '../services/casosCriminalService';
 import { generateCasoPdf, CasoPdfCoincidencia } from '../services/pdfGenerator';
 import { normalizarScreening } from '../services/screeningNormalizer';
@@ -98,6 +100,18 @@ const cellText = (v: unknown): string => {
 // Campos del payload que la cola OFAC "promueve" a columnas propias (con el orden
 // pedido); se excluyen del bloque de columnas dinámicas para no duplicarlas.
 const OFAC_PROMOVIDAS = ['Número del caso', 'Id interno del usuario', 'Nombre', 'Apellido', 'Nombre completo', 'País Origen', 'País'];
+
+// Igual para la cola Remesa: lo que ya se muestra en columnas propias no se repite
+// en el bloque de columnas dinámicas del payload.
+const REMESA_PROMOVIDAS = ['Número del caso', 'Id interno del usuario', 'Nombre', 'Apellido', 'Nombre completo', 'Email', 'Correo', 'País Origen', 'País'];
+
+// Correo del cliente (el que envía), no el del beneficiario.
+const correoCliente = (c: CasoSF): string => {
+  const d = c.datos || {};
+  const mail = String(d['Email'] ?? d['Correo'] ?? d['Mail'] ?? '').trim();
+  if (mail) return mail;
+  return /@/.test(c.nombreCuenta || '') ? c.nombreCuenta : '—';
+};
 
 // Nombre a mostrar: "Nombre completo" si viene; si no, Nombre + Apellido; si no, la cuenta.
 const nombreCompleto = (c: CasoSF): string => {
@@ -737,6 +751,32 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     return () => { cancelado = true; };
   }, [sel?.id, sel?.remesa, activeQueue]);
 
+
+  // ── Screening del BENEFICIARIO (cola Remesa) ────────────────────────────────
+  // Se dispara cuando ya llegaron los datos de la TX, porque el flujo depende del
+  // país del beneficiario: Chile → Regcheq, Colombia → Inspektor, resto → listas.
+  const [benefScreen, setBenefScreen] = useState<RemesaScreening | null>(null);
+  const [benefLoading, setBenefLoading] = useState(false);
+  useEffect(() => {
+    setBenefScreen(null);
+    const row = remesaData?.estado === 'ok' ? remesaData.row : undefined;
+    if (activeQueue !== 'remesa' || !row) return;
+    let cancelado = false;
+    setBenefLoading(true);
+    screenBeneficiario(row)
+      .then(r => { if (!cancelado) setBenefScreen(r); })
+      .catch(e => { if (!cancelado) setBenefScreen({ estado: 'error', flujo: flujoDeBeneficiario(row), fuente: '—', decision: '—', delitosUnicos: 0, coincidencias: [], listas: [], mensaje: (e as Error).message }); })
+      .finally(() => { if (!cancelado) setBenefLoading(false); });
+    return () => { cancelado = true; };
+  }, [remesaData, activeQueue]);
+
+  // Screening EN LOTE de los beneficiarios de la cola. Arranca cuando ya llegaron
+  // los datos de la TX desde Redshift, porque el flujo depende del país del
+  // beneficiario. Concurrencia baja: son APIs externas y el flujo internacional
+  // crea la ficha en Regcheq.
+  const [benefMap, setBenefMap] = useState<Record<string, RemesaScreening>>({});
+  const [benefMapLoading, setBenefMapLoading] = useState(false);
+
   // Consulta en LOTE de todas las remesas de la cola (para columnas de la tabla).
   const [remesaMap, setRemesaMap] = useState<Record<string, RemesaRow>>({});
   const [remesaMapLoading, setRemesaMapLoading] = useState(false);
@@ -753,6 +793,33 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     return () => { cancelado = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeQueue, remesaIdsKey]);
+
+  // Dispara el screening de los beneficiarios que ya tienen datos de TX y aún no
+  // fueron consultados.
+  const benefPendientesKey = colas.remesa
+    .filter(c => c.remesa && remesaMap[c.remesa] && !(c.id in benefMap))
+    .map(c => c.id).join(',');
+  useEffect(() => {
+    if (activeQueue !== 'remesa') return;
+    const pendientes = colas.remesa.filter(c => c.remesa && remesaMap[c.remesa] && !(c.id in benefMap));
+    if (pendientes.length === 0) return;
+    let cancelado = false;
+    setBenefMapLoading(true);
+    runPool(pendientes, async c => {
+      if (cancelado) return;
+      const row = remesaMap[c.remesa];
+      try {
+        const r = await screenBeneficiario(row);
+        if (!cancelado) setBenefMap(prev => ({ ...prev, [c.id]: r }));
+      } catch (e) {
+        if (!cancelado) setBenefMap(prev => ({ ...prev, [c.id]: {
+          estado: 'error', flujo: flujoDeBeneficiario(row), fuente: '—', decision: '—',
+          delitosUnicos: 0, coincidencias: [], listas: [], mensaje: (e as Error).message } }));
+      }
+    }, 2).finally(() => { if (!cancelado) setBenefMapLoading(false); });
+    return () => { cancelado = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeQueue, benefPendientesKey]);
 
   // ── Screening criminal EN VIVO de la cola OFAC/PEP ──────────────────────────
   // Chile → Regcheq (solo DNI) + motor de decisión. Colombia queda pendiente
@@ -1012,6 +1079,18 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
         case 'remesa': return c.remesa || '';
         case 'benef': return remesaMap[c.remesa]?.beneficiary_name || '';
         case 'dni': return remesaMap[c.remesa]?.beneficiary_dni || '';
+        case 'benefdni': return remesaMap[c.remesa]?.beneficiary_dni || '';
+        case 'beneftipodni': return remesaMap[c.remesa]?.beneficiary_dni_type || '';
+        case 'benefpais': return remesaMap[c.remesa]?.beneficiary_country_name || '';
+        case 'customerid': return remesaMap[c.remesa]?.customer_id ?? idInterno(c);
+        case 'correocliente': return correoCliente(c);
+        case 'nombrecliente': return nombreCompleto(c);
+        case 'benefflujo': return benefMap[c.id]?.flujo || '';
+        case 'benefconclusion': return benefMap[c.id]?.decision || '';
+        case 'benefhallazgos': {
+          const b = benefMap[c.id];
+          return b ? (b.flujo === 'INTL' ? b.listas.length : b.delitosUnicos) : -1;
+        }
         case 'tipoenvio': return remesaMap[c.remesa]?.tipo_envio || '';
         case 'delitos': return screenMap[c.id]?.delitosUnicos ?? -1;
         case 'conclusion': return screenMap[c.id]?.decision || '';
@@ -1572,13 +1651,26 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                   <th className="px-3 py-2 w-8">
                     <input type="checkbox" checked={allSel} onChange={toggleAll} className="w-4 h-4 cursor-pointer align-middle" title="Seleccionar todo" />
                   </th>
-                  {activeQueue !== 'ofac' && Th('fecha', 'Fecha llegada')}
+                  {activeQueue === 'otros' && Th('fecha', 'Fecha llegada')}
                   {activeQueue === 'remesa' && (
                     <>
-                      {Th('remesa', 'remesa')}
+                      {/* Orden pedido: caso → beneficiario → identificación → TX → cliente */}
+                      {Th('numeroCaso', 'Nº caso')}
                       {Th('benef', 'Beneficiario')}
-                      {Th('dni', 'DNI')}
+                      {Th('benefdni', 'DNI benef.')}
+                      {Th('beneftipodni', 'Tipo DNI')}
+                      {Th('benefpais', 'Nacionalidad benef.')}
+                      {Th('remesa', 'Nº remesa')}
+                      {Th('customerid', 'Customer ID')}
+                      {Th('correocliente', 'Correo cliente')}
+                      {Th('nombrecliente', 'Nombre cliente')}
+                      {Th('paisorigen', 'País origen')}
                       {Th('tipoenvio', 'Tipo de envío')}
+                      {/* Screening del beneficiario */}
+                      {Th('benefflujo', 'Flujo')}
+                      {Th('benefconclusion', 'Conclusión')}
+                      {Th('benefhallazgos', 'Hallazgos', 'text-center')}
+                      {Th('fecha', 'Fecha llegada')}
                     </>
                   )}
                   {activeQueue === 'ofac' && (
@@ -1600,13 +1692,13 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                       {Th('fecha', 'Fecha llegada')}
                     </>
                   )}
-                  {(activeQueue === 'ofac' ? columnas.filter(k => !OFAC_PROMOVIDAS.includes(k)) : columnas).map(k => Th(k, k))}
+                  {(activeQueue === 'ofac' ? columnas.filter(k => !OFAC_PROMOVIDAS.includes(k)) : activeQueue === 'remesa' ? columnas.filter(k => !REMESA_PROMOVIDAS.includes(k)) : columnas).map(k => Th(k, k))}
                 </tr>
               </thead>
               <tbody>
                 {ordenados.length === 0 && (
                   <tr>
-                    <td colSpan={columnas.length + (activeQueue === 'remesa' ? 6 : activeQueue === 'ofac' ? 13 : 2)} className="py-8 text-center text-slate-400">
+                    <td colSpan={columnas.length + (activeQueue === 'remesa' ? 16 : activeQueue === 'ofac' ? 13 : 2)} className="py-8 text-center text-slate-400">
                       Sin casos en esta cola.
                     </td>
                   </tr>
@@ -1626,15 +1718,40 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                       <td className="px-3 py-2" onClick={e => e.stopPropagation()}>
                         <input type="checkbox" checked={seleccion.has(c.id)} onChange={() => toggleSel(c.id)} className="w-4 h-4 cursor-pointer align-middle" />
                       </td>
-                      {activeQueue !== 'ofac' && <td className="px-3 py-2 whitespace-nowrap text-slate-500 dark:text-slate-400">{fmtFecha(c.recibidoEn)}</td>}
-                      {activeQueue === 'remesa' && (
+                      {activeQueue === 'otros' && <td className="px-3 py-2 whitespace-nowrap text-slate-500 dark:text-slate-400">{fmtFecha(c.recibidoEn)}</td>}
+                      {activeQueue === 'remesa' && (() => {
+                        const b = benefMap[c.id];
+                        const hallazgos = b ? (b.flujo === 'INTL' ? b.listas.length : b.delitosUnicos) : null;
+                        return (
                         <>
-                          <td className="px-3 py-2 whitespace-nowrap font-bold text-sky-700 dark:text-sky-400">{c.remesa || '—'}</td>
+                          <td className="px-3 py-2 whitespace-nowrap font-bold text-slate-800 dark:text-slate-100">{c.numeroCaso || '—'}</td>
                           <td className="px-3 py-2 max-w-[220px] truncate text-slate-700 dark:text-slate-200" title={r?.beneficiary_name}>{rCell(r?.beneficiary_name)}</td>
-                          <td className="px-3 py-2 whitespace-nowrap text-slate-700 dark:text-slate-200">{r ? `${r.beneficiary_dni_type} ${r.beneficiary_dni}` : (remesaMapLoading ? '…' : '—')}</td>
+                          <td className="px-3 py-2 whitespace-nowrap text-slate-700 dark:text-slate-200">{rCell(r?.beneficiary_dni)}</td>
+                          <td className="px-3 py-2 whitespace-nowrap text-slate-600 dark:text-slate-300">{rCell(r?.beneficiary_dni_type)}</td>
+                          <td className="px-3 py-2 whitespace-nowrap text-slate-700 dark:text-slate-200">{rCell(r?.beneficiary_country_name)}</td>
+                          <td className="px-3 py-2 whitespace-nowrap font-bold text-sky-700 dark:text-sky-400">{c.remesa || '—'}</td>
+                          <td className="px-3 py-2 whitespace-nowrap text-slate-600 dark:text-slate-300">{r?.customer_id ? String(r.customer_id) : idInterno(c)}</td>
+                          <td className="px-3 py-2 max-w-[200px] truncate text-slate-600 dark:text-slate-300" title={correoCliente(c)}>{correoCliente(c)}</td>
+                          <td className="px-3 py-2 max-w-[180px] truncate text-slate-700 dark:text-slate-200" title={nombreCompleto(c)}>{nombreCompleto(c)}</td>
+                          <td className="px-3 py-2 whitespace-nowrap text-slate-700 dark:text-slate-200">{r?.origin_country || paisOrigen(c)}</td>
                           <td className="px-3 py-2 whitespace-nowrap text-slate-700 dark:text-slate-200">{rCell(r?.tipo_envio)}</td>
+                          {/* Screening del beneficiario */}
+                          <td className="px-3 py-2 whitespace-nowrap text-slate-600 dark:text-slate-300">
+                            {b ? (b.flujo === 'CL' ? '🇨🇱 Chile' : b.flujo === 'CO' ? '🇨🇴 Colombia' : '🌍 Intl') : (r ? '…' : '—')}
+                          </td>
+                          <td className={`px-3 py-2 whitespace-nowrap font-semibold ${decisionColor(b?.decision)}`} title={b?.razon}>
+                            {!b ? (r ? (benefMapLoading ? 'consultando…' : '…') : '—')
+                              : b.estado === 'error' ? 'Error'
+                              : b.estado === 'na' ? 'No aplica'
+                              : (b.decision || '—')}
+                          </td>
+                          <td className="px-3 py-2 whitespace-nowrap text-center font-bold text-slate-800 dark:text-slate-200">
+                            {hallazgos === null ? '…' : hallazgos}
+                          </td>
+                          <td className="px-3 py-2 whitespace-nowrap text-slate-500 dark:text-slate-400">{fmtFecha(c.recibidoEn)}</td>
                         </>
-                      )}
+                        );
+                      })()}
                       {activeQueue === 'ofac' && op && (
                         <>
                           {/* Columnas clave, en el orden pedido */}
@@ -1673,7 +1790,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                           <td className="px-3 py-2 whitespace-nowrap text-slate-500 dark:text-slate-400">{fmtFecha(c.recibidoEn)}</td>
                         </>
                       )}
-                      {(activeQueue === 'ofac' ? columnas.filter(k => !OFAC_PROMOVIDAS.includes(k)) : columnas).map(k => {
+                      {(activeQueue === 'ofac' ? columnas.filter(k => !OFAC_PROMOVIDAS.includes(k)) : activeQueue === 'remesa' ? columnas.filter(k => !REMESA_PROMOVIDAS.includes(k)) : columnas).map(k => {
                         const t = cellText(c.datos[k]);
                         return <td key={k} title={t} className="px-3 py-2 max-w-[220px] truncate text-slate-700 dark:text-slate-200">{t}</td>;
                       })}
@@ -1811,6 +1928,85 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                     )}
                   </div>
                 )}
+
+                {/* Screening del BENEFICIARIO de la remesa (Chile / Colombia / Internacional) */}
+                {activeQueue === 'remesa' && remesaData?.estado === 'ok' && remesaData.row && (() => {
+                  const row = remesaData.row;
+                  const flujo = flujoDeBeneficiario(row);
+                  const etiquetaFlujo = flujo === 'CL' ? '🇨🇱 Chile · Regcheq'
+                    : flujo === 'CO' ? '🇨🇴 Colombia · Inspektor'
+                    : '🌍 Internacional · listas Regcheq';
+                  const sc = benefScreen;
+                  return (
+                    <div className="mb-5 rounded-xl border border-indigo-200 dark:border-indigo-800/50 bg-indigo-50/60 dark:bg-indigo-950/30 p-4">
+                      <div className="flex items-center justify-between mb-2">
+                        <h3 className="text-sm font-black text-indigo-800 dark:text-indigo-300">
+                          ⚖️ Screening del beneficiario · {etiquetaFlujo}
+                        </h3>
+                        {benefLoading
+                          ? <span className="text-xs text-slate-500 dark:text-slate-400 animate-pulse">consultando…</span>
+                          : sc && <span className={`text-xs font-bold ${decisionColor(sc.decision)}`}>{sc.decision}</span>}
+                      </div>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-3">
+                        {nombreBeneficiario(row) || '(sin nombre)'}
+                        {row.beneficiary_dni ? ` · ${row.beneficiary_dni_type || 'DNI'} ${row.beneficiary_dni}` : ''}
+                        {row.beneficiary_country_name ? ` · ${row.beneficiary_country_name}` : ''}
+                      </p>
+
+                      {benefLoading && <p className="text-xs text-slate-500 dark:text-slate-400 animate-pulse">Consultando listas…</p>}
+
+                      {!benefLoading && sc?.estado === 'error' && (
+                        <p className="text-xs text-red-600 dark:text-red-400">Error: {sc.mensaje}</p>
+                      )}
+                      {!benefLoading && sc?.estado === 'na' && (
+                        <p className="text-xs text-slate-500 dark:text-slate-400">No se puede screenear: {sc.mensaje}</p>
+                      )}
+
+                      {/* Chile / Colombia: causas penales contra el catálogo */}
+                      {!benefLoading && sc && (sc.flujo === 'CL' || sc.flujo === 'CO') && sc.estado !== 'error' && (
+                        sc.coincidencias.length === 0
+                          ? <p className="text-xs text-emerald-600 dark:text-emerald-400">Sin causas penales.{sc.pep ? ' (marcado PEP)' : ''}</p>
+                          : (
+                            <>
+                              <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">
+                                {sc.delitosUnicos} delito(s) único(s) · {sc.coincidencias.length} coincidencia(s)
+                                {sc.pep ? ' · PEP' : ''}
+                              </p>
+                              <CoincidenciasAgrupadas co={sc.coincidencias} />
+                            </>
+                          )
+                      )}
+
+                      {/* Internacional: qué listas coinciden y de qué tipo (sin catálogo aún) */}
+                      {!benefLoading && sc?.flujo === 'INTL' && sc.estado !== 'error' && sc.estado !== 'na' && (
+                        sc.listas.length === 0
+                          ? <p className="text-xs text-emerald-600 dark:text-emerald-400">Sin coincidencias en listas.</p>
+                          : (
+                            <>
+                              <p className="text-[11px] text-amber-700 dark:text-amber-400 mb-2">
+                                Envío internacional: todavía no hay catálogo para concluir automáticamente.
+                                Estas son las listas donde coincide — la decisión la toma el analista.
+                              </p>
+                              <table className="w-full text-xs">
+                                <thead className="text-slate-500 dark:text-slate-400 text-left">
+                                  <tr><th className="py-1">Lista</th><th className="py-1">Riesgo</th><th className="py-1">Detalle</th></tr>
+                                </thead>
+                                <tbody>
+                                  {sc.listas.map(l => (
+                                    <tr key={l.clave} className="border-t border-slate-200 dark:border-slate-700/50">
+                                      <td className="py-1.5 font-bold text-slate-800 dark:text-slate-100">{l.lista}</td>
+                                      <td className="py-1.5 text-slate-600 dark:text-slate-300">{l.riesgo || '—'}</td>
+                                      <td className="py-1.5 text-slate-600 dark:text-slate-300">{l.detalle || '—'}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </>
+                          )
+                      )}
+                    </div>
+                  );
+                })()}
 
                 {/* Estado y asignación del caso */}
                 {(() => {

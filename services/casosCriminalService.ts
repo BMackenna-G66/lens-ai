@@ -68,7 +68,7 @@ async function inspektorLogin(): Promise<string> {
   return ((await resp.json()) as { token: { access_token: string } }).token.access_token;
 }
 
-async function screenColombia(nombre: string, dni: string, tipoDocumento: number): Promise<CasoScreening> {
+export async function screenColombia(nombre: string, dni: string, tipoDocumento: number): Promise<CasoScreening> {
   const token = await inspektorLogin();
   const resp = await fetch(`${INSPEKTOR_BASE}/ConsultaPrincipal`, {
     method: 'POST',
