@@ -2606,11 +2606,59 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                                 </thead>
                                 <tbody>
                                   {sc.listas.map(l => (
-                                    <tr key={l.clave} className="border-t border-slate-200 dark:border-slate-700/50">
-                                      <td className="py-1.5 font-bold text-slate-800 dark:text-slate-100">{l.lista}</td>
-                                      <td className="py-1.5 text-slate-600 dark:text-slate-300">{l.riesgo || '—'}</td>
-                                      <td className="py-1.5 text-slate-600 dark:text-slate-300">{l.detalle || '—'}</td>
-                                    </tr>
+                                    <React.Fragment key={l.clave}>
+                                      <tr className="border-t border-slate-200 dark:border-slate-700/50">
+                                        <td className="py-1.5 font-bold text-slate-800 dark:text-slate-100">{l.lista}</td>
+                                        <td className="py-1.5 text-slate-600 dark:text-slate-300">{l.riesgo || '—'}</td>
+                                        <td className="py-1.5 text-slate-600 dark:text-slate-300">
+                                          {l.detalle || '—'}{l.estadoMatch ? ` · ${l.estadoMatch}` : ''}
+                                        </td>
+                                      </tr>
+                                      {/* Los matches concretos: nombre, tipos (incluye
+                                          narcotics/terrorism/sanction), fuente y score.
+                                          Sin esto la fila decía solo el nombre de la lista. */}
+                                      {l.hits?.length ? (
+                                        <tr className="border-t border-slate-100 dark:border-slate-800/50">
+                                          <td colSpan={3} className="py-2">
+                                            {l.totalHits && l.totalHits > l.hits.length && (
+                                              <p className="text-[10px] text-slate-400 mb-1">
+                                                Mostrando {l.hits.length} de {l.totalHits} coincidencia(s) — las de mayor score.
+                                              </p>
+                                            )}
+                                            <div className="space-y-1.5">
+                                              {l.hits.map((h, i) => (
+                                                <div key={i} className="rounded-lg bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-slate-700/60 px-2 py-1.5">
+                                                  <p className="text-[11px] font-bold text-slate-800 dark:text-slate-100">
+                                                    {h.nombre || '(sin nombre)'}
+                                                    {typeof h.score === 'number' && (
+                                                      <span className="ml-1.5 font-normal text-slate-400">score {h.score.toFixed(2)}</span>
+                                                    )}
+                                                    {h.matchTypes?.length ? (
+                                                      <span className="ml-1.5 font-normal text-slate-400">· {h.matchTypes.join(', ')}</span>
+                                                    ) : null}
+                                                  </p>
+                                                  {h.tipos?.length ? (
+                                                    <div className="flex flex-wrap gap-1 mt-1">
+                                                      {h.tipos.map(t => (
+                                                        <span key={t} className={`text-[10px] px-1.5 py-0.5 rounded-full ${
+                                                          /sanction|terror|narcotic|weapon|arms/i.test(t)
+                                                            ? 'bg-red-100 text-red-700 dark:bg-red-950/50 dark:text-red-300 font-bold'
+                                                            : 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300'}`}>
+                                                          {t}
+                                                        </span>
+                                                      ))}
+                                                    </div>
+                                                  ) : null}
+                                                  {h.fuentes?.length ? (
+                                                    <p className="text-[10px] text-slate-400 mt-1">Fuente: {h.fuentes.join(' · ')}</p>
+                                                  ) : null}
+                                                </div>
+                                              ))}
+                                            </div>
+                                          </td>
+                                        </tr>
+                                      ) : null}
+                                    </React.Fragment>
                                   ))}
                                 </tbody>
                               </table>

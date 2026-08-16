@@ -26,12 +26,27 @@ const REGCHEQ_KEY = ((import.meta as unknown) as { env: Record<string, string> }
 export type FlujoRemesa = 'CL' | 'CO' | 'INTL' | 'SIN_DATO';
 export type EstadoRemesaScreening = 'ok' | 'sin_causas' | 'error' | 'na';
 
+// Un match concreto dentro de una lista (Screening Global trae varios).
+export interface HitLista {
+  nombre?: string;
+  tipos?: string[];       // adverse-media, sanction, pep, narcotics-aml-cft, …
+  fuentes?: string[];
+  score?: number;
+  matchTypes?: string[];  // name_exact, name_fuzzy, …
+}
+
 // Una lista de Regcheq con coincidencia (lo que importa en el flujo internacional).
 export interface ListaCoincidencia {
   clave: string;      // key cruda de la API
   lista: string;      // nombre legible
   riesgo?: string;    // nivel que reporta Regcheq
   detalle?: string;   // resumen del match
+  // Screening Global devuelve los matches en additionalData.hits[]: nombre, tipos
+  // (incluye cosas como narcotics-aml-cft), fuente y score. Sin esto la ficha
+  // mostraba solo "Screening Global · medium" y se perdía TODO el contenido.
+  hits?: HitLista[];
+  totalHits?: number;
+  estadoMatch?: string;   // match_status que reporta el proveedor
 }
 
 export interface RemesaScreening {
@@ -56,12 +71,50 @@ const ETIQUETA_LISTA: Record<string, string> = {
   ofacAddressResult: 'OFAC Domicilio', bicResult: 'BIC', keywordsResult: 'Palabras Clave',
   riskComments: 'Comentarios de Riesgo', internList: 'Lista Interna',
   regcheqList: 'Lista Regcheq', causasPenalesRegcheq: 'Causas Penales Chile',
+  // Faltaban: sin etiqueta la ficha mostraba la key cruda ("pepChile", etc.).
+  pepChile: 'PEP Chile', funcPublicChile: 'Función Pública Chile',
+  secondCriminalCasesChile: 'Causas Penales Chile',
 };
 
 const etiqueta = (k: string): string => ETIQUETA_LISTA[k] ?? k;
 
+// Extrae el contenido real de una lista. Screening Global —la que importa en los
+// envíos internacionales— guarda los matches en `additionalData.hits[]`; antes se
+// buscaba `data.name`, que ahí no existe, así que la ficha mostraba la lista sin
+// ningún detalle. El resto de las listas sí traen name/description.
+function detalleDeLista(data: unknown): Pick<ListaCoincidencia, 'detalle' | 'hits' | 'totalHits' | 'estadoMatch'> {
+  if (Array.isArray(data)) return { detalle: `${data.length} coincidencia(s)` };
+  const d = (data ?? {}) as Record<string, unknown>;
+  const ad = (d.additionalData ?? d) as Record<string, unknown>;
+  const crudos = Array.isArray(ad.hits) ? (ad.hits as Record<string, unknown>[]) : null;
+
+  if (crudos?.length) {
+    const hits: HitLista[] = crudos.slice(0, 10).map(h => {   // top 10: puede traer 100
+      const doc = (h.doc ?? {}) as Record<string, unknown>;
+      return {
+        nombre: limpiar(doc.name) || undefined,
+        tipos: Array.isArray(doc.types) ? (doc.types as string[]) : undefined,
+        fuentes: Array.isArray(doc.sources)
+          ? (doc.sources as Array<Record<string, unknown> | string>).map(s => limpiar(typeof s === 'string' ? s : s?.name)).filter(Boolean)
+          : undefined,
+        score: typeof h.score === 'number' ? h.score : undefined,
+        matchTypes: Array.isArray(h.match_types) ? (h.match_types as string[]) : undefined,
+      };
+    });
+    const total = Number(ad.total_matches ?? ad.total_hits ?? crudos.length);
+    return {
+      detalle: `${total} coincidencia(s)`,
+      hits, totalHits: total,
+      estadoMatch: limpiar(ad.match_status) || undefined,
+    };
+  }
+
+  const info = (d.info ?? {}) as Record<string, unknown>;
+  return { detalle: limpiar(d.name ?? d.description ?? info.name) || undefined };
+}
+
 // Las causas penales se tratan aparte (tienen su propio motor), no como "lista".
-const NO_ES_LISTA = new Set(['causasPenalesRegcheq']);
+const NO_ES_LISTA = new Set(['causasPenalesRegcheq', 'secondCriminalCasesChile']);
 
 const limpiar = (v: unknown): string => String(v ?? '').trim();
 const normalizar = (v: string): string =>
@@ -100,18 +153,26 @@ async function screenInternacional(nombre: string, dni: string, nacionalidad: st
   // Sin DNI utilizable se usa el nombre como referencia de la ficha.
   const ref = dni.replace(/[.\s-]/g, '').toUpperCase() || nombre.replace(/\s+/g, '_').toUpperCase();
 
-  // Crea/actualiza la ficha. Se guarda el resultado: si el POST falla, el GET va a
-  // dar 404 y sin este dato el error no dice nada (era el caso del 404 "misterioso").
+  // Se refresca la ficha SIEMPRE (si no, el GET devuelve lo que quedó guardado el
+  // día que se creó). Pero si YA existe se manda solo el dni + su personType: con
+  // el nombre, la API lo pisa partiéndolo en name/fatherName y destroza las
+  // razones sociales. El nombre solo va cuando la ficha se crea de cero.
   let postEstado = 0;
   let postDetalle = '';
   try {
+    let cuerpo: Record<string, string> = {
+      dni: ref, personType: 'natural',
+      name: nombre.toUpperCase(),
+      ...(nacionalidad ? { nationality: nacionalidad } : {}),
+    };
+    const previa = await fetch(`${REGCHEQ_BASE}/record/${ref}/${REGCHEQ_KEY}`);
+    if (previa.ok) {
+      const p = await previa.json().catch(() => ({})) as { personType?: string };
+      cuerpo = { dni: ref, personType: String(p.personType ?? 'natural') };
+    }
     const post = await fetch(`${REGCHEQ_BASE}/record/${REGCHEQ_KEY}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        dni: ref, personType: 'natural',
-        name: nombre.toUpperCase(),
-        ...(nacionalidad ? { nationality: nacionalidad } : {}),
-      }),
+      body: JSON.stringify(cuerpo),
     });
     postEstado = post.status;
     if (!post.ok) postDetalle = (await post.text()).slice(0, 200);
@@ -146,11 +207,11 @@ async function screenInternacional(nombre: string, dni: string, nacionalidad: st
   const listas: ListaCoincidencia[] = [];
   for (const [clave, entrada] of Object.entries(listasRaw)) {
     if (NO_ES_LISTA.has(clave) || !entrada?.coincidence) continue;
-    const data = entrada.data as Record<string, unknown> | unknown[] | undefined;
-    const detalle = Array.isArray(data)
-      ? `${data.length} coincidencia(s)`
-      : limpiar((data as Record<string, unknown>)?.['name'] ?? (data as Record<string, unknown>)?.['description']) || undefined;
-    listas.push({ clave, lista: etiqueta(clave), riesgo: limpiar(entrada.risk) || undefined, detalle });
+    listas.push({
+      clave, lista: etiqueta(clave),
+      riesgo: limpiar(entrada.risk) || undefined,
+      ...detalleDeLista(entrada.data),
+    });
   }
   // Dedup por nombre legible (la API repite claves con alias: rtp / rtpResult).
   const vistas = new Set<string>();
