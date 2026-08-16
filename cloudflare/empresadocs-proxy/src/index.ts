@@ -398,6 +398,108 @@ export default {
         { status: 200, headers: { ...cors, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
     }
 
+    // ── Admin Global66 (remesas): POST /admin/transaction-status ────────────────
+    //   Cambia el estado de una transacción replicando el script de referencia:
+    //   refresh-token → idToken, y por cada transactionId: GET del detalle, se
+    //   modifica SOLO el campo txStatus, y POST del objeto completo de vuelta.
+    //
+    //   Es una ruta APARTE de /admin/customer-status a propósito: aquella opera
+    //   sobre el CLIENTE (blacklist/compliance/last-step) y esta sobre la
+    //   TRANSACCIÓN. Comparten el secret del refresh-token y nada más.
+    //
+    //   ⚠️ ALTO IMPACTO: libera plata real. El frontend confirma antes de llamar.
+    if (url.pathname === '/admin/transaction-status') {
+      if (request.method !== 'POST') return jsonError('Método no permitido', 405, cors);
+      const refresh = env.G66_ADMIN_REFRESH_TOKEN;
+      if (!refresh) return jsonError('Falta el secret G66_ADMIN_REFRESH_TOKEN en el Worker', 500, cors);
+
+      let body: {
+        transactionIds?: (number | string)[];
+        targetStatusDB?: string; targetStatusLabel?: string;
+      };
+      try { body = await request.json(); } catch { return jsonError('Body JSON inválido', 400, cors); }
+
+      const ids = (body.transactionIds || []).map(x => String(x).trim()).filter(Boolean);
+      const targetDB = String(body.targetStatusDB || '').trim();
+      const targetLabel = String(body.targetStatusLabel || '').trim();
+      if (!ids.length) return jsonError('Faltan transactionIds', 400, cors);
+      if (!targetDB) return jsonError('Falta targetStatusDB', 400, cors);
+
+      let idToken = '';
+      try {
+        const tokRes = await fetchTimeout(`${G66_ADMIN_BASE}/admin/refresh-token`, {
+          method: 'POST',
+          headers: { 'Accept': 'application/json, text/plain, */*', 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ refreshToken: refresh }).toString(),
+        }, 20000);
+        const tokText = await tokRes.text();
+        if (!tokRes.ok) return new Response(JSON.stringify({ error: 'refresh-token de admin falló', status: tokRes.status, detalle: tokText.slice(0, 400) }),
+          { status: 502, headers: { ...cors, 'Content-Type': 'application/json' } });
+        idToken = (JSON.parse(tokText) as { idToken?: string }).idToken || '';
+        if (!idToken) return jsonError('admin no devolvió idToken', 502, cors);
+      } catch (e) {
+        return jsonError(`No se pudo obtener idToken de admin: ${e instanceof Error ? e.message : String(e)}`, 502, cors);
+      }
+
+      const authH = { 'Accept': 'application/json, text/plain, */*', 'Content-Type': 'application/json', 'Authorization': idToken };
+
+      // txStatus puede venir como objeto ({id, status, statusDB, …}) o como string.
+      // Si es objeto hay que CONSERVAR la estructura y cambiar solo las llaves de
+      // estado: mandar el string pelado no sirve (así lo resolvió el script).
+      const nuevoTxStatus = (actual: unknown): unknown => {
+        if (actual && typeof actual === 'object' && !Array.isArray(actual)) {
+          const o = { ...(actual as Record<string, unknown>) };
+          o.status = targetLabel || o.status;
+          o.statusDB = targetDB;
+          if ('label' in o) o.label = targetLabel || o.label;
+          if ('name' in o) o.name = targetLabel || o.name;
+          if ('value' in o) o.value = targetDB;
+          return o;   // se conserva el id original: no se inventan catálogos
+        }
+        return targetDB;
+      };
+      const statusDBDe = (v: unknown): string =>
+        (v && typeof v === 'object' && !Array.isArray(v))
+          ? String((v as Record<string, unknown>).statusDB ?? '')
+          : String(v ?? '');
+
+      const results: Array<Record<string, unknown>> = [];
+      for (const id of ids) {
+        try {
+          const getRes = await fetchTimeout(`${G66_ADMIN_BASE}/transaction/admin/${encodeURIComponent(id)}`,
+            { method: 'GET', headers: authH }, 30000);
+          const getText = await getRes.text();
+          if (!getRes.ok) {
+            results.push({ transactionId: id, ok: false, paso: 'GET', status: getRes.status, detalle: getText.slice(0, 300) });
+            continue;
+          }
+          const actual = JSON.parse(getText) as Record<string, unknown>;
+          const anterior = statusDBDe(actual.txStatus);
+
+          // Idempotente: si ya está en el estado objetivo no se vuelve a guardar.
+          if (anterior === targetDB) {
+            results.push({ transactionId: id, ok: true, omitido: true, estadoAnterior: anterior, estadoNuevo: anterior });
+            continue;
+          }
+
+          const actualizado = { ...actual, txStatus: nuevoTxStatus(actual.txStatus) };
+          const postRes = await fetchTimeout(`${G66_ADMIN_BASE}/transaction/admin/${encodeURIComponent(id)}`,
+            { method: 'POST', headers: authH, body: JSON.stringify(actualizado) }, 30000);
+          const postText = await postRes.text();
+          results.push({
+            transactionId: id, ok: postRes.ok, paso: 'POST', status: postRes.status,
+            estadoAnterior: anterior, estadoNuevo: targetDB,
+            detalle: postRes.ok ? undefined : postText.slice(0, 300),
+          });
+        } catch (e) {
+          results.push({ transactionId: id, ok: false, paso: 'ERROR', detalle: e instanceof Error ? e.message : String(e) });
+        }
+      }
+
+      return new Response(JSON.stringify({ ok: results.every(r => r.ok), results }),
+        { status: 200, headers: { ...cors, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+    }
+
     // ── Relay Inspektor: /inspektor/<path> → INSPEKTOR_BASE/<path> ──────────────
     if (url.pathname.startsWith('/inspektor/')) {
       const path = url.pathname.slice('/inspektor'.length); // ej: /Auth/login
