@@ -20,6 +20,27 @@ interface AdminModuleProps {
 
 type AdminTab = 'users' | 'invitations' | 'system';
 
+// MANTENEDOR de los módulos que se pueden habilitar por usuario.
+// Para sumar un módulo nuevo: agregarlo acá y a ModulePermissions
+// (services/firestoreService) — la tabla y los toggles se generan solos.
+// El launcher tiene que respetarlo: si no lo mira, el toggle no hace nada.
+type ModuleKey = 'compliance' | 'criminal' | 'generalDashboard' | 'regcheq' | 'lens360' | 'casos';
+
+const MODULOS: { key: ModuleKey; label: string }[] = [
+  { key: 'compliance',       label: 'Compliance' },
+  { key: 'criminal',         label: 'Perfiles Crim.' },
+  { key: 'generalDashboard', label: 'Dashboard Gral.' },
+  { key: 'regcheq',          label: 'Regcheq' },
+  { key: 'lens360',          label: 'Vista 360°' },
+  { key: 'casos',            label: 'Bandeja de Casos' },
+];
+
+// Default cuando el usuario no tiene el objeto `modules` guardado: todo habilitado
+// (mismo criterio que el launcher, que usa `?? true`).
+const MODULOS_DEFAULT: UserProfile['modules'] = {
+  compliance: true, criminal: true, generalDashboard: true, regcheq: true, lens360: true, casos: true,
+};
+
 // ─── Toggle switch ────────────────────────────────────────────────────────────
 const Toggle: React.FC<{ checked: boolean; onChange: () => void; disabled?: boolean }> = ({ checked, onChange, disabled }) => (
   <button
@@ -61,8 +82,9 @@ const UsersTab: React.FC<{ currentUid: string }> = ({ currentUid }) => {
     setSaving(s => ({ ...s, [uid]: false }));
   };
 
-  const handleModuleToggle = async (uid: string, key: 'compliance' | 'criminal' | 'generalDashboard' | 'regcheq' | 'lens360', currentModules: UserProfile['modules']) => {
-    const newModules = { ...currentModules, [key]: !currentModules[key] };
+  const handleModuleToggle = async (uid: string, key: ModuleKey, currentModules: UserProfile['modules']) => {
+    // `?? true` porque un módulo ausente se considera habilitado.
+    const newModules = { ...currentModules, [key]: !(currentModules?.[key] ?? true) };
     setSaving(s => ({ ...s, [`${uid}-${key}`]: true }));
     await updateUserProfile(uid, { modules: newModules });
     setUsers(prev => prev.map(u => u.uid === uid ? { ...u, modules: newModules } : u));
@@ -97,11 +119,9 @@ const UsersTab: React.FC<{ currentUid: string }> = ({ currentUid }) => {
             <tr className="border-b border-slate-700 bg-slate-800/60">
               <th className="text-left py-3 px-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Usuario</th>
               <th className="text-left py-3 px-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Rol</th>
-              <th className="text-left py-3 px-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Compliance</th>
-              <th className="text-left py-3 px-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Perfiles Crim.</th>
-              <th className="text-left py-3 px-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Dashboard Gral.</th>
-              <th className="text-left py-3 px-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Regcheq</th>
-              <th className="text-left py-3 px-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Vista 360°</th>
+              {MODULOS.map(m => (
+                <th key={m.key} className="text-left py-3 px-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">{m.label}</th>
+              ))}
               <th className="text-left py-3 px-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Acciones</th>
             </tr>
           </thead>
@@ -142,41 +162,15 @@ const UsersTab: React.FC<{ currentUid: string }> = ({ currentUid }) => {
                     <option value="Analista">Analista</option>
                   </select>
                 </td>
-                <td className="py-3 px-4">
-                  <Toggle
-                    checked={user.modules?.compliance ?? true}
-                    onChange={() => handleModuleToggle(user.uid, 'compliance', user.modules ?? { compliance: true, criminal: true, generalDashboard: true, regcheq: true, lens360: true })}
-                    disabled={!!saving[`${user.uid}-compliance`]}
-                  />
-                </td>
-                <td className="py-3 px-4">
-                  <Toggle
-                    checked={user.modules?.criminal ?? true}
-                    onChange={() => handleModuleToggle(user.uid, 'criminal', user.modules ?? { compliance: true, criminal: true, generalDashboard: true, regcheq: true, lens360: true })}
-                    disabled={!!saving[`${user.uid}-criminal`]}
-                  />
-                </td>
-                <td className="py-3 px-4">
-                  <Toggle
-                    checked={user.modules?.generalDashboard ?? true}
-                    onChange={() => handleModuleToggle(user.uid, 'generalDashboard', user.modules ?? { compliance: true, criminal: true, generalDashboard: true, regcheq: true, lens360: true })}
-                    disabled={!!saving[`${user.uid}-generalDashboard`]}
-                  />
-                </td>
-                <td className="py-3 px-4">
-                  <Toggle
-                    checked={user.modules?.regcheq ?? true}
-                    onChange={() => handleModuleToggle(user.uid, 'regcheq', user.modules ?? { compliance: true, criminal: true, generalDashboard: true, regcheq: true, lens360: true })}
-                    disabled={!!saving[`${user.uid}-regcheq`]}
-                  />
-                </td>
-                <td className="py-3 px-4">
-                  <Toggle
-                    checked={user.modules?.lens360 ?? true}
-                    onChange={() => handleModuleToggle(user.uid, 'lens360', user.modules ?? { compliance: true, criminal: true, generalDashboard: true, regcheq: true, lens360: true })}
-                    disabled={!!saving[`${user.uid}-lens360`]}
-                  />
-                </td>
+                {MODULOS.map(m => (
+                  <td key={m.key} className="py-3 px-4">
+                    <Toggle
+                      checked={user.modules?.[m.key] ?? true}
+                      onChange={() => handleModuleToggle(user.uid, m.key, user.modules ?? MODULOS_DEFAULT)}
+                      disabled={!!saving[`${user.uid}-${m.key}`]}
+                    />
+                  </td>
+                ))}
                 <td className="py-3 px-4">
                   <button
                     onClick={() => handleDisable(user.uid, !user.disabled)}

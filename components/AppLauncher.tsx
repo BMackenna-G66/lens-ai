@@ -54,7 +54,10 @@ export const AppLauncher: React.FC<AppLauncherProps> = ({ onSelect }) => {
         <p className="text-center text-slate-500 dark:text-slate-400 text-sm mb-8 font-medium">Selecciona la herramienta que deseas usar</p>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          {/* Compliance Suite */}
+          {/* Compliance Suite — respeta el permiso del Admin. Sin este gate, el
+              toggle de la pestaña Admin quedaba decorativo: el líder creía haber
+              restringido el acceso y el usuario seguía entrando. */}
+          {(userProfile?.modules?.compliance ?? true) && (
           <button
             onClick={() => onSelect('compliance')}
             className="group relative bg-white/80 dark:bg-slate-900/70 hover:bg-indigo-50 dark:hover:bg-indigo-950/80 border border-slate-200 dark:border-slate-700/50 hover:border-indigo-400 dark:hover:border-indigo-500/50 rounded-3xl p-8 text-left transition-all duration-300 hover:shadow-2xl hover:shadow-indigo-200/50 dark:hover:shadow-indigo-950/50 active:scale-[0.98]"
@@ -79,8 +82,10 @@ export const AppLauncher: React.FC<AppLauncherProps> = ({ onSelect }) => {
               ))}
             </div>
           </button>
+          )}
 
-          {/* Criminal Profiler */}
+          {/* Criminal Profiler — ídem: el permiso no se estaba mirando. */}
+          {(userProfile?.modules?.criminal ?? true) && (
           <button
             onClick={() => onSelect('criminal')}
             className="group relative bg-white/80 dark:bg-slate-900/70 hover:bg-red-50 dark:hover:bg-red-950/30 border border-slate-200 dark:border-slate-700/50 hover:border-red-300 dark:hover:border-red-800/50 rounded-3xl p-8 text-left transition-all duration-300 hover:shadow-2xl hover:shadow-red-100/50 dark:hover:shadow-red-950/30 active:scale-[0.98]"
@@ -105,6 +110,7 @@ export const AppLauncher: React.FC<AppLauncherProps> = ({ onSelect }) => {
               ))}
             </div>
           </button>
+          )}
         </div>
 
         {/* Regcheq card — full width below the 2-col grid */}

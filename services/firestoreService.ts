@@ -29,7 +29,9 @@ export interface ModulePermissions {
   generalDashboard: boolean;
   regcheq: boolean;
   lens360: boolean;
-  casos?: boolean;   // Bandeja de Casos (opcional; default habilitado)
+  // Opcionales: un módulo ausente se considera HABILITADO (el launcher usa
+  // `?? true`), así que los usuarios viejos no pierden acceso al sumar uno nuevo.
+  casos?: boolean;   // Bandeja de Casos
 }
 
 export interface UserProfile {
