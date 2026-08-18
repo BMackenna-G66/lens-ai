@@ -2,7 +2,7 @@
 // Authentication is handled by empresaDocsAuth.ts (same logic as the Python app).
 
 import { apiGet, getPresignedUrl as authGetPresignedUrl } from './empresaDocsAuth';
-import { EmpresaDocsSearchResult, EmpresaDocsDocument, EmpresaDocsDetail } from '../types/empresaDocs';
+import { EmpresaDocsSearchResult, EmpresaDocsDocument, EmpresaDocsDetail, EmpresaDocsCatalogos, EmpresaDocsContexto } from '../types/empresaDocs';
 
 const MAX_PAGES = 6;
 const PAGE_SIZE = 50;
@@ -167,12 +167,13 @@ export async function searchEmpresaDocs(params: {
 // ─── Company detail (documents + people) ─────────────────────────────────────
 
 export async function getEmpresaDocsCompany(companyId: string): Promise<EmpresaDocsDetail> {
-  // 4 parallel calls — mirrors Python /api/documents/{id} endpoint
-  const [companyRes, usersRes, boardRes] = await Promise.allSettled([
+  // 4 llamadas en paralelo. OJO: antes se desestructuraban solo 3 y la de
+  // `relationships` se pedía y se tiraba a la basura — es la malla societaria, que
+  // el KYB necesita para comparar la estructura de la empresa.
+  const [companyRes, usersRes, boardRes, relRes] = await Promise.allSettled([
     apiGet<CompanyBoResponse>('/company/bo', { companyIds: companyId, size: 1 }),
     apiGet<{ elements?: unknown[] }>(`/company/bo/users`, { companyId, page: 0, size: 50 }),
     apiGet<unknown>(`/company/bo/onboarding/board-member`, { companyId }),
-    // relationships fetched for completeness but not needed for batch processing
     apiGet<unknown>(`/company/bo/relationships/${companyId}`),
   ]);
 
@@ -221,6 +222,15 @@ export async function getEmpresaDocsCompany(companyId: string): Promise<EmpresaD
     }
   }
 
+  // La malla puede venir como array pelado o envuelta en content/elements.
+  const relaciones: unknown[] = relRes.status === 'fulfilled'
+    ? (Array.isArray(relRes.value)
+        ? relRes.value
+        : ((relRes.value as { content?: unknown[]; elements?: unknown[] })?.content ??
+           (relRes.value as { content?: unknown[]; elements?: unknown[] })?.elements ??
+           []))
+    : [];
+
   return {
     documents,
     ficha,
@@ -229,7 +239,54 @@ export async function getEmpresaDocsCompany(companyId: string): Promise<EmpresaD
     personas: users,
     directorio,
     adminRaw,
+    relaciones,
   };
+}
+
+// ─── Catálogos y contexto de Admin (§1.5 del plan KYB) ───────────────────────
+// Seis GET que la doc del módulo ya declaraba y que nadie llamaba. Se agregan acá
+// (servicio de LECTURA, compartido) porque el KYB los necesita: razones de rechazo
+// para tipificar la decisión, documentos obligatorios por país para saber qué
+// falta, industrias para normalizar la actividad, y T&C como freno duro.
+//
+// Cada uno va por separado y tolera el fallo: si un catálogo no responde, el
+// análisis sigue con lo que haya en vez de caerse entero.
+
+export async function getEmpresaDocsCatalogos(
+  companyId: string, pais: string,
+): Promise<EmpresaDocsCatalogos> {
+  const [razones, requeridos, industrias] = await Promise.allSettled([
+    apiGet<unknown>('/company/bo/onboarding/rejections/reasons', { companyId }),
+    apiGet<unknown>(`/route/bo/documents/${encodeURIComponent(pais)}`, { entityType: 'COMPANY' }),
+    apiGet<unknown>('/company/bo/industries', {}),
+  ]);
+  return {
+    razonesRechazo: comoLista(razones),
+    documentosRequeridos: comoLista(requeridos),
+    industrias: comoLista(industrias),
+  };
+}
+
+export async function getEmpresaDocsContexto(companyId: string): Promise<EmpresaDocsContexto> {
+  const [terminos, segmentacion, propositos] = await Promise.allSettled([
+    apiGet<unknown>('/company/bo/onboarding/terms', { companyId }),
+    apiGet<unknown>(`/company/bo/segmentation/${encodeURIComponent(companyId)}`, {}),
+    apiGet<unknown>('/company/bo/purposes/selected-company', { companyId }),
+  ]);
+  const valor = (r: PromiseSettledResult<unknown>) => (r.status === 'fulfilled' ? r.value : undefined);
+  return {
+    terminos: valor(terminos),
+    segmentacion: valor(segmentacion),
+    propositos: valor(propositos),
+  };
+}
+
+// Normaliza a lista: la API devuelve a veces array pelado y a veces envuelto.
+function comoLista(r: PromiseSettledResult<unknown>): unknown[] {
+  if (r.status !== 'fulfilled') return [];
+  const v = r.value as { content?: unknown[]; elements?: unknown[] } | unknown[];
+  if (Array.isArray(v)) return v;
+  return v?.content ?? v?.elements ?? [];
 }
 
 // ─── Presigned URL + S3 download ─────────────────────────────────────────────

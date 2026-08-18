@@ -5,12 +5,6 @@ import {
   analyzeDocumentWithGemini,
   detectCountryWithGemini,
   generateExecutiveSummary,
-  analyzeDocumentForRisks,
-  analyzeDocumentIntegrity,
-  analyzeFinancialDocumentWithGemini,
-  analyzeBankStatementWithGemini,
-  analyzeTaxFolderWithGemini,
-  analyzeCrossCheckWithGemini,
   analyzeBatchEnrichment,
   analyzeAdminComparison,
 } from './geminiService';
@@ -96,16 +90,12 @@ export async function processOneCompany(
   const prompt = GEMINI_PROMPT_TEMPLATE(combinedText, country);
   const { extractedData } = await analyzeDocumentWithGemini(prompt);
 
+  // Acá había 6 llamadas a Gemini dentro de un `allSettled` cuyo resultado NADIE
+  // leía: se pagaban y se tiraban. Se quitaron. Si el modo "completo" tiene que
+  // aportar algo más que la extracción, hay que consumir el resultado y mostrarlo;
+  // mientras eso no exista, gastar 6 llamadas por empresa no tiene sentido.
   if (mode === 'completo') {
     onPhase('Análisis de riesgos y cumplimiento...');
-    await Promise.allSettled([
-      analyzeDocumentForRisks(combinedText),
-      analyzeDocumentIntegrity(combinedText),
-      analyzeFinancialDocumentWithGemini(combinedText),
-      analyzeBankStatementWithGemini(combinedText),
-      analyzeTaxFolderWithGemini(combinedText),
-      analyzeCrossCheckWithGemini(combinedText),
-    ]);
   }
 
   onPhase('Generando resumen ejecutivo...');
