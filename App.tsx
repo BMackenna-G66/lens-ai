@@ -7,6 +7,7 @@ import { Dashboard } from './components/Dashboard';
 import { LoginPage } from './components/LoginPage';
 import { AppLauncher } from './components/AppLauncher';
 import { CriminalApp } from './components/CriminalProfiler/CriminalApp';
+import { KybQueue } from './components/KybQueue/KybQueue';
 import { GeneralDashboard } from './components/GeneralDashboard';
 import { AdminModule } from './components/AdminModule';
 import { RegcheqTool } from './components/RegcheqTool';
@@ -18,7 +19,7 @@ import { IconFiles, IconAlertTriangle, IconWallet, IconScale } from './component
 import { trackModuleVisit, ModuleKey } from './services/analyticsService';
 
 type TabKey = 'dashboard' | 'analyzer' | 'batch' | 'tools' | 'crypto' | 'compliance';
-type Suite = 'compliance' | 'criminal' | 'admin' | 'general-dashboard' | 'regcheq' | 'lens360' | 'casos' | null;
+type Suite = 'compliance' | 'criminal' | 'admin' | 'general-dashboard' | 'regcheq' | 'lens360' | 'casos' | 'kyb' | null;
 
 const AppContent: React.FC = () => {
   const { user, isLoading: authLoading, firebaseReady, profileLoading, role, userProfile } = useAuth();
@@ -106,6 +107,11 @@ const AppContent: React.FC = () => {
   } else if (activeSuite === 'criminal') {
     mainContent = (userProfile?.modules?.criminal ?? true)
       ? <CriminalApp onBack={() => setActiveSuite(null)} darkMode={darkMode} onToggleDarkMode={() => setDarkMode(d => !d)} />
+      : <AccessDenied msg="Módulo desactivado por tu administrador" />;
+
+  } else if (activeSuite === 'kyb') {
+    mainContent = (userProfile?.modules?.kyb ?? true)
+      ? <KybQueue onBack={() => setActiveSuite(null)} darkMode={darkMode} onToggleDarkMode={() => setDarkMode(d => !d)} />
       : <AccessDenied msg="Módulo desactivado por tu administrador" />;
 
   } else if (activeSuite === 'casos') {

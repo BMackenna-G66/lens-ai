@@ -20,9 +20,8 @@ import {
 } from '../../types/kybMatriz';
 import {
   normalizarRazonSocial, similitudNombre, CORTES_NOMBRE, rutValido, limpiarRut,
-  huellaDireccion, mismaFecha, fechaAIso, compararMontos, solapamiento,
+  huellaDireccion, mismaFecha, fechaAIso, compararMontos, solapamiento, canonizarFormaLegal,
 } from './kybNormalizadores';
-import { normalizarTexto } from '../casosComplianceMapper';
 
 const hay = (v: unknown): boolean =>
   v !== undefined && v !== null && (typeof v !== 'string' || v.trim() !== '') &&
@@ -200,11 +199,15 @@ const COMPARADORES: Record<string, Comparador> = {
   forma_legal: (l, a, def) => {
     const pre = estadoPorPresencia(hay(l.formaLegal), hay(a.formaLegal));
     if (pre) return base(def, pre, { valorLens: l.formaLegal, valorAdmin: a.formaLegal });
-    const nl = normalizarTexto(l.formaLegal).replace(/[.\s]/g, '');
-    const na = normalizarTexto(a.formaLegal).replace(/[.\s]/g, '');
+    // Se canoniza a sigla: "Sociedad por Acciones" y "SpA" son lo mismo, y
+    // compararlos como texto daba una discrepancia falsa.
+    const nl = canonizarFormaLegal(l.formaLegal), na = canonizarFormaLegal(a.formaLegal);
     const estado: EstadoComparacion = nl === na ? 'COINCIDE'
       : (nl.includes(na) || na.includes(nl)) ? 'PARCIAL' : 'DISCREPA';
-    return base(def, estado, { valorLens: l.formaLegal, valorAdmin: a.formaLegal });
+    return base(def, estado, {
+      valorLens: l.formaLegal, valorAdmin: a.formaLegal,
+      detalle: nl === na ? `Misma forma legal (${nl}).` : `${nl} vs ${na}.`,
+    });
   },
 
   constitucion: (l, a, def) => {

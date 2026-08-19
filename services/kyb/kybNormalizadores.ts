@@ -158,3 +158,26 @@ export function solapamiento(a: string[] | undefined, b: string[] | undefined): 
   const inter = na.filter(x => setB.has(x) || nb.some(y => y.includes(x) || x.includes(y))).length;
   return Math.round((inter / Math.max(na.length, nb.length)) * 100);
 }
+
+// ── Forma legal ──────────────────────────────────────────────────────────────
+// "Sociedad por Acciones" y "SpA" son lo MISMO, y compararlos como texto daba
+// DISCREPA — un falso positivo que hace desconfiar de toda la matriz. Se
+// canonizan a una sigla antes de comparar.
+const FORMAS_LEGALES: { sigla: string; patrones: RegExp }[] = [
+  { sigla: 'SPA',  patrones: /^(SPA|S ?P ?A|SOCIEDAD POR ACCIONES)$/ },
+  { sigla: 'SAS',  patrones: /^(SAS|S ?A ?S|SOCIEDAD POR ACCIONES SIMPLIFICADA)$/ },
+  { sigla: 'SA',   patrones: /^(SA|S ?A|SOCIEDAD ANONIMA( CERRADA| ABIERTA)?)$/ },
+  { sigla: 'LTDA', patrones: /^(LTDA|LIMITADA|SOCIEDAD (DE RESPONSABILIDAD )?LIMITADA|SRL|S ?R ?L)$/ },
+  { sigla: 'EIRL', patrones: /^(EIRL|E ?I ?R ?L|EMPRESA INDIVIDUAL DE RESPONSABILIDAD LIMITADA)$/ },
+  { sigla: 'SCOM', patrones: /^(SOCIEDAD (EN )?COMANDITA.*)$/ },
+  { sigla: 'SCOL', patrones: /^(SOCIEDAD COLECTIVA.*)$/ },
+];
+
+// Devuelve la sigla canónica, o el texto normalizado si no se reconoce (así una
+// forma nueva no se convierte en coincidencia falsa con otra).
+export function canonizarFormaLegal(v: unknown): string {
+  const t = normalizarTexto(v).replace(/[.,]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!t) return '';
+  for (const f of FORMAS_LEGALES) if (f.patrones.test(t)) return f.sigla;
+  return t;
+}

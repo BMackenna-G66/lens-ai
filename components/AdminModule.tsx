@@ -24,7 +24,7 @@ type AdminTab = 'users' | 'invitations' | 'system';
 // Para sumar un módulo nuevo: agregarlo acá y a ModulePermissions
 // (services/firestoreService) — la tabla y los toggles se generan solos.
 // El launcher tiene que respetarlo: si no lo mira, el toggle no hace nada.
-type ModuleKey = 'compliance' | 'criminal' | 'generalDashboard' | 'regcheq' | 'lens360' | 'casos';
+type ModuleKey = 'compliance' | 'criminal' | 'generalDashboard' | 'regcheq' | 'lens360' | 'casos' | 'kyb';
 
 const MODULOS: { key: ModuleKey; label: string }[] = [
   { key: 'compliance',       label: 'Compliance' },
@@ -33,12 +33,13 @@ const MODULOS: { key: ModuleKey; label: string }[] = [
   { key: 'regcheq',          label: 'Regcheq' },
   { key: 'lens360',          label: 'Vista 360°' },
   { key: 'casos',            label: 'Bandeja de Casos' },
+  { key: 'kyb',              label: 'Cola KYB' },
 ];
 
 // Default cuando el usuario no tiene el objeto `modules` guardado: todo habilitado
 // (mismo criterio que el launcher, que usa `?? true`).
 const MODULOS_DEFAULT: UserProfile['modules'] = {
-  compliance: true, criminal: true, generalDashboard: true, regcheq: true, lens360: true, casos: true,
+  compliance: true, criminal: true, generalDashboard: true, regcheq: true, lens360: true, casos: true, kyb: true,
 };
 
 // ─── Toggle switch ────────────────────────────────────────────────────────────

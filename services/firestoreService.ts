@@ -32,6 +32,7 @@ export interface ModulePermissions {
   // Opcionales: un módulo ausente se considera HABILITADO (el launcher usa
   // `?? true`), así que los usuarios viejos no pierden acceso al sumar uno nuevo.
   casos?: boolean;   // Bandeja de Casos
+  kyb?: boolean;     // Cola KYB (empresas / B2B)
 }
 
 export interface UserProfile {
