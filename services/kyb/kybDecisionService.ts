@@ -25,6 +25,9 @@ export interface NuevaDecision {
   actorNombre: string;
   actorTipo: 'USER' | 'SYSTEM';
   automatica: boolean;
+  // Contexto para el espejo analítico.
+  certidumbre?: number | null;
+  simulacion?: boolean;
 }
 
 // ¿Esta decisión necesita un segundo par de ojos?
@@ -70,6 +73,16 @@ export async function registrarDecisionKyb(companyId: string, nueva: NuevaDecisi
     // salida, no de la decisión sola.
     estadoCaso: 'DECIDIDO',
   });
+
+  // Espejo analítico. Best-effort: si falla, la decisión ya quedó en Firestore.
+  try {
+    const { logDecisionKyb } = await import('./kybLogService');
+    logDecisionKyb(snap.data() as EmpresaKyb, decision, {
+      certidumbre: nueva.certidumbre ?? null,
+      simulacion: nueva.simulacion ?? false,
+    });
+  } catch { /* espejo */ }
+
   return decision;
 }
 

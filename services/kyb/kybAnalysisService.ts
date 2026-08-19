@@ -29,7 +29,8 @@ import { compararKyb } from './kybComparador';
 import { calcularCertidumbre, coberturaComparada } from './kybCertaintyEngine';
 import { evaluarAlertas } from './kybAlertasCatalogo';
 import { guardarAnalisis } from './kybQueueService';
-import type { AnalisisKyb, EstadoAnalisisKyb, AlertaKyb } from '../../types/kyb';
+import { logAnalisisKyb } from './kybLogService';
+import type { AnalisisKyb, EstadoAnalisisKyb, AlertaKyb, EmpresaKyb } from '../../types/kyb';
 import type { LadoCanonico } from '../../types/kybCanonico';
 
 export interface ProgresoAnalisis {
@@ -40,6 +41,10 @@ export interface ProgresoAnalisis {
 export interface OpcionesAnalisis {
   // Sin key, el análisis corre igual pero solo con el lado Admin.
   hayApiKey: boolean;
+  // Para el espejo analítico. Si no viene, el análisis corre igual y solo no se
+  // registra en Redshift.
+  empresa?: EmpresaKyb;
+  actor?: { uid?: string; nombre?: string; esSistema?: boolean };
   onProgreso?: (p: ProgresoAnalisis) => void;
   // Máximo de documentos a procesar. Cada uno es descarga + OCR (CPU) + Gemini.
   maxDocumentos?: number;
@@ -216,6 +221,12 @@ export async function analizarEmpresa(
 
   onProgreso?.({ fase: 'Guardando resultado' });
   await guardarAnalisis(analisis);
+
+  // Espejo analítico. Best-effort y con buffer de reintento: si el cluster está
+  // pausado no se pierde, y si falla no rompe el análisis.
+  if (opciones.empresa) {
+    try { logAnalisisKyb(opciones.empresa, analisis, opciones.actor); } catch { /* espejo */ }
+  }
   return analisis;
 }
 
