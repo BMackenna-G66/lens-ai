@@ -179,8 +179,20 @@ GROUP BY codigo, label, severidad
 ORDER BY disparo DESC;
 
 -- Embudo por empresa: última corrida y en qué quedó.
+-- OJO: Redshift NO soporta subconsultas correlacionadas en el ON de un JOIN
+-- ("This type of correlated subquery pattern is not supported yet"), así que la
+-- última corrida y la última decisión se eligen con ROW_NUMBER() en subconsultas
+-- y después se joinea por la fila 1.
 DROP VIEW IF EXISTS colas_trabajo.v_kyb_resumen;
 CREATE VIEW colas_trabajo.v_kyb_resumen AS
+WITH ult_analisis AS (
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY company_id ORDER BY corrida_en DESC) AS rn
+    FROM colas_trabajo.kyb_analisis
+),
+ult_decision AS (
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY company_id ORDER BY decidida_en DESC) AS rn
+    FROM colas_trabajo.kyb_decision
+)
 SELECT
     e.company_id,
     e.razon_social,
@@ -200,9 +212,5 @@ SELECT
     d.maker_nombre,
     d.checker_nombre
 FROM colas_trabajo.kyb_empresa e
-LEFT JOIN colas_trabajo.kyb_analisis a
-       ON a.company_id = e.company_id
-      AND a.corrida_en = (SELECT MAX(corrida_en) FROM colas_trabajo.kyb_analisis x WHERE x.company_id = e.company_id)
-LEFT JOIN colas_trabajo.kyb_decision d
-       ON d.company_id = e.company_id
-      AND d.decidida_en = (SELECT MAX(decidida_en) FROM colas_trabajo.kyb_decision y WHERE y.company_id = e.company_id);
+LEFT JOIN ult_analisis a ON a.company_id = e.company_id AND a.rn = 1
+LEFT JOIN ult_decision d ON d.company_id = e.company_id AND d.rn = 1;
