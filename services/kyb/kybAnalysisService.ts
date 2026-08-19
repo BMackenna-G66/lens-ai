@@ -27,6 +27,7 @@ import { mapAdminALadoCanonico, mapEstadoAdmin } from './kybAdminMapper';
 import { mapLensALadoCanonico, faltantesLens } from './kybLensMapper';
 import { compararKyb } from './kybComparador';
 import { calcularCertidumbre, coberturaComparada } from './kybCertaintyEngine';
+import { evaluarAlertas } from './kybAlertasCatalogo';
 import { guardarAnalisis } from './kybQueueService';
 import type { AnalisisKyb, EstadoAnalisisKyb, AlertaKyb } from '../../types/kyb';
 import type { LadoCanonico } from '../../types/kybCanonico';
@@ -175,9 +176,15 @@ export async function analizarEmpresa(
   onProgreso?.({ fase: 'Comparando los 12 componentes' });
   const componentes = compararKyb(lens, admin);
 
-  // Las alertas del catálogo llegan en la fase siguiente del plan; hasta
-  // entonces la certidumbre sale solo de la cobertura, sin penalizaciones.
-  const alertas: AlertaKyb[] = [];
+  // Las 36 alertas del catálogo. Las que no se pueden evaluar por falta de fuente
+  // salen igual con `evaluable: false`, para que el inventario sea completo y
+  // nadie confunda "no se pudo evaluar" con "no hay hallazgos".
+  onProgreso?.({ fase: 'Evaluando alertas' });
+  const alertas: AlertaKyb[] = evaluarAlertas({
+    lens, admin, estadoAdmin, contexto, componentes, documentos,
+    // El screening criminal de la empresa y sus personas todavía no se corre acá:
+    // las alertas que dependen de él quedan no evaluables, no en silencio.
+  });
   const cert = calcularCertidumbre(componentes, alertas);
 
   // Si el análisis no está completo, el porcentaje NO se publica: `null`. Mostrar

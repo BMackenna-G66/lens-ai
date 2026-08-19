@@ -9,6 +9,7 @@ import type { AnalisisKyb, TipoDecisionKyb, EmpresaKyb } from '../../types/kyb';
 import { DECISIONES_CON_CHECKER } from '../../types/kyb';
 import type { EstadoComparacion, ResultadoComponente } from '../../types/kybMatriz';
 import { COMPONENTES_KYB } from '../../types/kybMatriz';
+import { resumenAlertas } from '../../services/kyb/kybAlertasCatalogo';
 
 // Colores por estado de comparación. DISCREPA es el único en rojo: es el caso
 // que exige acción. SOLO_* en ámbar porque falta corroborar, no hay contradicción.
@@ -182,6 +183,61 @@ export const KybFicha: React.FC<Props> = ({
           </tbody>
         </table>
       </div>
+
+      {/* Alertas. Se muestran las 36: las que no se pueden evaluar van aparte y
+          marcadas, para que "no se pudo evaluar" nunca se lea como "sin hallazgos". */}
+      {analisis && analisis.alertas.length > 0 && (() => {
+        const res = resumenAlertas(analisis.alertas);
+        const abiertas = analisis.alertas.filter(a => a.evaluable && a.estado === 'ABIERTA');
+        const noEval = analisis.alertas.filter(a => !a.evaluable);
+        const color = (s: string) => s === 'CRITICA'
+          ? 'border-red-300 dark:border-red-800/60 bg-red-50 dark:bg-red-950/30'
+          : s === 'PREVENTIVA'
+            ? 'border-amber-300 dark:border-amber-800/60 bg-amber-50 dark:bg-amber-950/30'
+            : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/40';
+        return (
+          <>
+            <h3 className="text-sm font-black text-slate-800 dark:text-slate-200 mt-5 mb-2">
+              Alertas
+              <span className="ml-2 text-xs font-semibold text-slate-500 dark:text-slate-400">
+                {res.criticas} crítica(s) · {res.preventivas} preventiva(s) · {res.informativas} informativa(s)
+                {res.noEvaluables ? ` · ${res.noEvaluables} sin poder evaluar` : ''} · {res.total} en el catálogo
+              </span>
+            </h3>
+            {abiertas.length === 0 && (
+              <p className="text-xs text-emerald-600 dark:text-emerald-400 mb-2">
+                Ninguna de las {res.total - res.noEvaluables} alertas evaluables disparó.
+              </p>
+            )}
+            <div className="space-y-1.5">
+              {abiertas.map(a => (
+                <div key={a.id} className={`rounded-xl border px-3 py-2 ${color(a.severidad)}`}>
+                  <p className="text-xs font-bold text-slate-800 dark:text-slate-100">
+                    <span className="opacity-60 font-mono mr-1.5">{a.codigo}</span>{a.label}
+                    <span className="ml-2 text-[10px] uppercase tracking-wider opacity-70">{a.severidad}</span>
+                  </p>
+                  {a.detalle && <p className="text-[11px] text-slate-600 dark:text-slate-300 mt-0.5">{a.detalle}</p>}
+                </div>
+              ))}
+            </div>
+            {noEval.length > 0 && (
+              <details className="mt-2">
+                <summary className="text-xs text-slate-500 dark:text-slate-400 cursor-pointer">
+                  {noEval.length} alerta(s) no se pudieron evaluar — por qué
+                </summary>
+                <div className="mt-1.5 space-y-1">
+                  {noEval.map(a => (
+                    <p key={a.id} className="text-[11px] text-slate-500 dark:text-slate-400">
+                      <span className="font-mono opacity-60 mr-1.5">{a.codigo}</span>{a.label}
+                      <span className="text-amber-600 dark:text-amber-400"> · {a.faltante}</span>
+                    </p>
+                  ))}
+                </div>
+              </details>
+            )}
+          </>
+        );
+      })()}
 
       {/* Decisión */}
       <h3 className="text-sm font-black text-slate-800 dark:text-slate-200 mt-5 mb-2">Decisión</h3>
