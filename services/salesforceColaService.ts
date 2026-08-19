@@ -18,7 +18,9 @@ import { doc, writeBatch, Firestore } from 'firebase/firestore';
 import { getDb } from './firebaseService';
 import { CASOS_COLLECTION, normalizeCaseNumber } from './casosService';
 
-const WORKER_BASE = 'https://empresadocs-proxy.bmackenna.workers.dev';
+// Igual que el resto de los servicios: la URL del Worker sale del env, no
+// hardcodeada. Antes este archivo era el único con el host escrito a mano.
+const WORKER_BASE = (process.env.EMPRESADOCS_PROXY_URL || '').replace(/\/$/, '');
 
 // Colas de Salesforce (Owner de tipo Queue) que alimentan la Bandeja:
 //   · "Revisión Casos LN / PEP´s" → casos "Coincidencia OFAC"

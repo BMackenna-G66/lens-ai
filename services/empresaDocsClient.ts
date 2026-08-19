@@ -2,7 +2,7 @@
 // Authentication is handled by empresaDocsAuth.ts (same logic as the Python app).
 
 import { apiGet, getPresignedUrl as authGetPresignedUrl } from './empresaDocsAuth';
-import { EmpresaDocsSearchResult, EmpresaDocsDocument, EmpresaDocsDetail } from '../types/empresaDocs';
+import { EmpresaDocsSearchResult, EmpresaDocsDocument, EmpresaDocsDetail, EmpresaDocsCatalogos, EmpresaDocsContexto } from '../types/empresaDocs';
 
 const MAX_PAGES = 6;
 const PAGE_SIZE = 50;
@@ -167,12 +167,13 @@ export async function searchEmpresaDocs(params: {
 // ─── Company detail (documents + people) ─────────────────────────────────────
 
 export async function getEmpresaDocsCompany(companyId: string): Promise<EmpresaDocsDetail> {
-  // 4 parallel calls — mirrors Python /api/documents/{id} endpoint
-  const [companyRes, usersRes, boardRes] = await Promise.allSettled([
+  // 4 llamadas en paralelo. OJO: antes se desestructuraban solo 3 y la de
+  // `relationships` se pedía y se tiraba a la basura — es la malla societaria, que
+  // el KYB necesita para comparar la estructura de la empresa.
+  const [companyRes, usersRes, boardRes, relRes] = await Promise.allSettled([
     apiGet<CompanyBoResponse>('/company/bo', { companyIds: companyId, size: 1 }),
     apiGet<{ elements?: unknown[] }>(`/company/bo/users`, { companyId, page: 0, size: 50 }),
     apiGet<unknown>(`/company/bo/onboarding/board-member`, { companyId }),
-    // relationships fetched for completeness but not needed for batch processing
     apiGet<unknown>(`/company/bo/relationships/${companyId}`),
   ]);
 
@@ -221,6 +222,19 @@ export async function getEmpresaDocsCompany(companyId: string): Promise<EmpresaD
     }
   }
 
+  // La malla puede venir como array pelado o envuelta en content/elements.
+  // OJO: cuando la empresa no tiene relaciones, la API responde HTTP 400 con
+  // "No existen relaciones con la empresa" — o sea usa un error para decir
+  // "vacío". Verificado con la empresa 2058470. La promesa queda rechazada y acá
+  // se traduce a lista vacía, que es la lectura correcta: no es un fallo.
+  const relaciones: unknown[] = relRes.status === 'fulfilled'
+    ? (Array.isArray(relRes.value)
+        ? relRes.value
+        : ((relRes.value as { content?: unknown[]; elements?: unknown[] })?.content ??
+           (relRes.value as { content?: unknown[]; elements?: unknown[] })?.elements ??
+           []))
+    : [];
+
   return {
     documents,
     ficha,
@@ -229,8 +243,75 @@ export async function getEmpresaDocsCompany(companyId: string): Promise<EmpresaD
     personas: users,
     directorio,
     adminRaw,
+    relaciones,
   };
 }
+
+// ─── Catálogos y contexto de Admin (§1.5 del plan KYB) ───────────────────────
+// Seis GET que la doc del módulo declaraba y que nadie llamaba. Todos verificados
+// contra la API con la empresa de prueba 2058470; las formas de abajo son las
+// REALES, no las que se supusieron al planificar. Dos sorpresas documentadas en
+// types/empresaDocs.ts: `rejections/reasons` no es un catálogo y
+// `route/bo/documents` no son los documentos obligatorios.
+//
+// Cada llamada tolera el fallo por separado: si un catálogo no responde, el
+// análisis sigue con lo que haya en vez de caerse entero.
+
+export async function getEmpresaDocsCatalogos(pais: string): Promise<EmpresaDocsCatalogos> {
+  const [industrias, tiposDoc] = await Promise.allSettled([
+    apiGet<unknown>('/company/bo/industries', {}),
+    apiGet<unknown>(`/route/bo/documents/${encodeURIComponent(pais)}`, { entityType: 'COMPANY' }),
+  ]);
+  return {
+    industrias: comoLista<EmpresaDocsCatalogos['industrias']>(industrias) ?? [],
+    tiposDocumentoIdentidad: comoLista<EmpresaDocsCatalogos['tiposDocumentoIdentidad']>(tiposDoc) ?? [],
+  };
+}
+
+export async function getEmpresaDocsContexto(companyId: string): Promise<EmpresaDocsContexto> {
+  const [validacion, terminos, segmentacion, propositos] = await Promise.allSettled([
+    apiGet<unknown>('/company/bo/onboarding/rejections/reasons', { companyId }),
+    apiGet<unknown>('/company/bo/onboarding/terms', { companyId }),
+    // 404 cuando la empresa no tiene segmentación asignada: es un caso normal,
+    // no un error. Queda undefined y el análisis sigue.
+    apiGet<unknown>(`/company/bo/segmentation/${encodeURIComponent(companyId)}`, {}),
+    apiGet<unknown>('/company/bo/purposes/selected-company', { companyId }),
+  ]);
+  const ok = <T>(r: PromiseSettledResult<unknown>): T | undefined =>
+    r.status === 'fulfilled' ? (r.value as T) : undefined;
+  return {
+    validacion: ok<EmpresaDocsContexto['validacion']>(validacion),
+    terminos: comoLista<EmpresaDocsContexto['terminos']>(terminos) ?? [],
+    segmentacion: ok(segmentacion),
+    propositos: ok<EmpresaDocsContexto['propositos']>(propositos),
+  };
+}
+
+// ¿Están los T&C firmados? `dateSignature` en null = pendiente. Es el freno duro
+// de términos y condiciones del flujo automático.
+export function terminosPendientes(ctx: EmpresaDocsContexto | undefined): boolean {
+  const t = ctx?.terminos ?? [];
+  return t.length === 0 || t.some(x => !x?.dateSignature);
+}
+
+// ¿Qué pasos del onboarding tienen errores? Sale de `validacion`.
+export function pasosConErrores(ctx: EmpresaDocsContexto | undefined): string[] {
+  const v = ctx?.validacion ?? {};
+  return Object.values(v)
+    .filter(p => p?.hasErrors === true)
+    .map(p => p?.step ?? '')
+    .filter(Boolean);
+}
+
+// Normaliza a lista: la API devuelve a veces array pelado y a veces envuelto en
+// content/elements.
+function comoLista<T>(r: PromiseSettledResult<unknown>): T | undefined {
+  if (r.status !== 'fulfilled') return undefined;
+  const v = r.value as { content?: unknown[]; elements?: unknown[] } | unknown[];
+  if (Array.isArray(v)) return v as T;
+  return ((v?.content ?? v?.elements ?? []) as unknown) as T;
+}
+
 
 // ─── Presigned URL + S3 download ─────────────────────────────────────────────
 
