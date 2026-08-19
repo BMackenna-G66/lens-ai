@@ -1,0 +1,15 @@
+{
+  "//": "Índices compuestos de Firestore. Se despliegan con: firebase deploy --only firestore:indexes",
+  "//kyb": "La cola KYB consulta where('enCola','==',true) + orderBy('recibidoEn','desc'). Firestore exige un índice compuesto para combinar un filtro de igualdad con un orden por OTRO campo. Sin él, onSnapshot falla con failed-precondition.",
+  "indexes": [
+    {
+      "collectionGroup": "kyb_empresas",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "enCola", "order": "ASCENDING" },
+        { "fieldPath": "recibidoEn", "order": "DESCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}
