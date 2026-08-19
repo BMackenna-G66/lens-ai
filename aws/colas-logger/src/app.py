@@ -114,6 +114,54 @@ TABLAS = {
             "actor_id": "", "actor_nombre": "", "actor_tipo": "", "ocurrido_en": "ts",
         },
     },
+    "kyb_empresa": {
+        "pk": ["company_id"],
+        "cols": {
+            "company_id": "", "razon_social": "", "identificacion": "", "pais": "",
+            "compliance_status": "", "kyc_stage1": "", "risk_level": "",
+            "institucional": "bool", "origen": "", "status_kyb": "",
+            "recibido_en": "ts", "actualizado_en": "ts",
+        },
+    },
+    "kyb_analisis": {
+        "pk": ["run_id"],
+        "cols": {
+            "run_id": "", "company_id": "", "corrida_en": "ts", "estado": "",
+            "certidumbre": "int", "cobertura": "num", "penalizacion": "num",
+            "hash_documentos": "", "documentos_total": "int",
+            "alertas_criticas": "int", "alertas_preventivas": "int",
+            "alertas_no_evaluables": "int", "faltantes": "", "mensaje_error": "",
+            "actor_id": "", "actor_nombre": "", "actor_tipo": "",
+        },
+    },
+    "kyb_componente": {
+        "pk": ["componente_id"],
+        "cols": {
+            "componente_id": "", "run_id": "", "company_id": "", "corrida_en": "ts",
+            "componente": "", "label": "", "peso": "int", "estado": "",
+            "aporte": "num", "es_identidad": "bool",
+            "valor_lens": "", "valor_admin": "", "emparejados": "int",
+            "solo_en_lens": "int", "solo_en_admin": "int", "detalle": "",
+        },
+    },
+    "kyb_alerta": {
+        "pk": ["alerta_id"],
+        "cols": {
+            "alerta_id": "", "run_id": "", "company_id": "", "corrida_en": "ts",
+            "codigo": "", "label": "", "severidad": "", "estado": "",
+            "evaluable": "bool", "faltante": "", "detalle": "",
+        },
+    },
+    "kyb_decision": {
+        "pk": ["decision_id"],
+        "cols": {
+            "decision_id": "", "company_id": "", "tipo": "", "reason_code": "",
+            "comentario": "", "automatica": "bool", "simulacion": "bool",
+            "certidumbre": "int", "maker_id": "", "maker_nombre": "",
+            "checker_id": "", "checker_nombre": "", "estado_aprobacion": "",
+            "decidida_en": "ts", "resuelta_en": "ts",
+        },
+    },
     "caso_historial": {
         "pk": ["historial_id"],
         "cols": {

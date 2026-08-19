@@ -14,6 +14,8 @@ import type { EmpresaKyb, AnalisisKyb, TipoDecisionKyb } from '../../types/kyb';
 import { DECISIONES_CON_CHECKER } from '../../types/kyb';
 import { useAuth } from '../../context/AuthContext';
 import { KybFicha } from './KybFicha';
+import { subscribeFlujoKyb, guardarFlujoKyb, FLUJO_KYB_DEFAULT, PAISES_KYB, type FlujoKybConfig } from '../../services/kyb/kybFlujoService';
+import { evaluarKybAuto, motivoKybLegible } from '../../services/kyb/flujoKybEngine';
 
 interface Props {
   onBack: () => void;
@@ -38,6 +40,13 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
   const [encolando, setEncolando] = useState(false);
   const [msg, setMsg] = useState('');
   const [filtro, setFiltro] = useState('');
+
+  // ── Mantenedor del flujo automático ──
+  const [flujo, setFlujo] = useState<FlujoKybConfig>(FLUJO_KYB_DEFAULT);
+  const [flujoDraft, setFlujoDraft] = useState<FlujoKybConfig>(FLUJO_KYB_DEFAULT);
+  const [verFlujo, setVerFlujo] = useState(false);
+  const [guardandoFlujo, setGuardandoFlujo] = useState(false);
+  useEffect(() => subscribeFlujoKyb(c => { setFlujo(c); setFlujoDraft(c); }), []);
 
   // ── Suscripción a la cola ──
   useEffect(() => {
@@ -101,8 +110,11 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
   const correrAnalisis = async (companyId: string) => {
     setAnalizando(true); setProgreso('Iniciando…');
     try {
+      const empresa = items.find(i => i.companyId === companyId);
       const a = await analizarEmpresa(companyId, {
         hayApiKey: hayGeminiKey(),
+        empresa,
+        actor: { uid: user?.uid, nombre: user?.displayName ?? user?.email ?? undefined },
         onProgreso: p => setProgreso(p.detalle ? `${p.fase} · ${p.detalle}` : p.fase),
       });
       setAnalisis(a);
@@ -126,6 +138,7 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
         actorNombre: user?.displayName ?? user?.email ?? 'system',
         actorTipo: user ? 'USER' : 'SYSTEM',
         automatica: false,
+        certidumbre: analisis?.certidumbre ?? null,
       });
       setMsg(`✅ Decisión registrada: ${tipo}${DECISIONES_CON_CHECKER.has(tipo) ? ' (pendiente de aprobación)' : ''}`);
     } catch (e) {
@@ -182,6 +195,121 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
           className="text-sm bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 ml-auto w-64"
         />
       </div>
+
+      {/* Mantenedor del flujo automático. Arranca todo apagado y en simulación:
+          prender el auto-aprobar de un KYC de empresas sin haberlo medido es un
+          incidente regulatorio, no un bug. */}
+      <div className="flex flex-wrap items-center gap-2 mb-3">
+        <button
+          onClick={() => setVerFlujo(v => !v)}
+          className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-bold border transition-colors ${
+            flujo.enabled && !flujo.simulacion
+              ? 'bg-amber-500 text-white border-amber-500'
+              : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:border-amber-300'}`}
+        >
+          <span>{verFlujo ? '▾' : '▸'}</span> ⚙️ Flujo automático
+          <span className={`px-1.5 py-0.5 rounded-full ${flujo.enabled && !flujo.simulacion ? 'bg-white/25' : 'bg-slate-100 dark:bg-slate-700'}`}>
+            {!flujo.enabled ? 'OFF'
+              : flujo.simulacion ? 'SIMULACIÓN'
+              : [flujo.autoAprobar && 'aprobar', flujo.autoRechazar && 'rechazar'].filter(Boolean).join(' + ') || 'sin dirección'}
+          </span>
+        </button>
+        {flujo.enabled && flujo.simulacion && (
+          <span className="text-[11px] text-sky-600 dark:text-sky-400">
+            En simulación: se registra qué habría hecho, sin ejecutar nada.
+          </span>
+        )}
+      </div>
+
+      {verFlujo && (() => {
+        const set = (patch: Partial<FlujoKybConfig>) => setFlujoDraft(d => ({ ...d, ...patch }));
+        const sw = (on: boolean) => `relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${on ? 'bg-amber-500' : 'bg-slate-400 dark:bg-slate-600'}`;
+        const knob = (on: boolean) => `inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${on ? 'translate-x-5' : 'translate-x-1'}`;
+        const num = 'w-20 text-sm bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1';
+        return (
+          <div className="mb-4 rounded-2xl border border-amber-200 dark:border-amber-800/50 bg-amber-50/60 dark:bg-amber-950/20 p-4">
+            <div className="flex flex-wrap gap-6">
+              <div className="space-y-2">
+                <button onClick={() => set({ enabled: !flujoDraft.enabled })} className="flex items-center gap-2">
+                  <span className={sw(flujoDraft.enabled)}><span className={knob(flujoDraft.enabled)} /></span>
+                  <span className="text-sm font-bold text-slate-800 dark:text-slate-200">Flujo automático</span>
+                </button>
+                <button onClick={() => set({ simulacion: !flujoDraft.simulacion })} className="flex items-center gap-2">
+                  <span className={sw(flujoDraft.simulacion)}><span className={knob(flujoDraft.simulacion)} /></span>
+                  <span className="text-xs text-slate-700 dark:text-slate-300">Modo simulación</span>
+                </button>
+                <button onClick={() => set({ autoAprobar: !flujoDraft.autoAprobar })} className="flex items-center gap-2">
+                  <span className={sw(flujoDraft.autoAprobar)}><span className={knob(flujoDraft.autoAprobar)} /></span>
+                  <span className="text-xs text-slate-700 dark:text-slate-300">Auto-aprobar</span>
+                </button>
+                <button onClick={() => set({ autoRechazar: !flujoDraft.autoRechazar })} className="flex items-center gap-2">
+                  <span className={sw(flujoDraft.autoRechazar)}><span className={knob(flujoDraft.autoRechazar)} /></span>
+                  <span className="text-xs text-slate-700 dark:text-slate-300">Auto-rechazar</span>
+                </button>
+              </div>
+
+              <div>
+                <p className="text-xs font-bold text-slate-600 dark:text-slate-300 mb-1.5">Países habilitados</p>
+                {PAISES_KYB.map(p => (
+                  <label key={p.code} className="flex items-center gap-1.5 text-xs text-slate-700 dark:text-slate-300 cursor-pointer mb-1">
+                    <input
+                      type="checkbox"
+                      checked={flujoDraft.paises[p.code] === true}
+                      onChange={e => set({ paises: { ...flujoDraft.paises, [p.code]: e.target.checked } })}
+                      className="accent-amber-600"
+                    />
+                    {p.label}
+                  </label>
+                ))}
+              </div>
+
+              <div className="space-y-2">
+                <label className="block text-xs text-slate-700 dark:text-slate-300">
+                  Aprueba si la certidumbre es ≥
+                  <input type="number" min={0} max={100} value={flujoDraft.umbralAprobar}
+                    onChange={e => set({ umbralAprobar: Number(e.target.value) })} className={`${num} ml-2`} />
+                </label>
+                <label className="block text-xs text-slate-700 dark:text-slate-300">
+                  Rechaza si es ≤
+                  <input type="number" min={0} max={100} value={flujoDraft.umbralRechazar}
+                    onChange={e => set({ umbralRechazar: Number(e.target.value) })} className={`${num} ml-2`} />
+                </label>
+                <label className="block text-xs text-slate-700 dark:text-slate-300">
+                  Cobertura mínima comparada
+                  <input type="number" min={0} max={100} value={flujoDraft.coberturaMinima}
+                    onChange={e => set({ coberturaMinima: Number(e.target.value) })} className={`${num} ml-2`} />
+                </label>
+              </div>
+            </div>
+
+            <p className="text-[11px] text-slate-600 dark:text-slate-400 mt-3">
+              Frenos que <b>no se pueden desactivar</b>: delito sensible, PEP, T&C sin firmar,
+              alerta crítica abierta y discrepancia de identidad. Los dos últimos frenan las dos
+              direcciones — una discrepancia de identidad significa que los datos están mal, no la empresa.
+            </p>
+
+            <div className="flex items-center gap-2 mt-3">
+              <button
+                onClick={async () => {
+                  setGuardandoFlujo(true);
+                  try {
+                    await guardarFlujoKyb(flujoDraft, user?.displayName ?? user?.email ?? undefined);
+                    setMsg('✅ Configuración del flujo guardada');
+                  } catch (e) { setMsg(`❌ ${e instanceof Error ? e.message : String(e)}`); }
+                  finally { setGuardandoFlujo(false); }
+                }}
+                disabled={guardandoFlujo}
+                className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-xs font-bold"
+              >
+                {guardandoFlujo ? 'Guardando…' : 'Guardar configuración'}
+              </button>
+              <button onClick={() => { setFlujoDraft(flujo); setVerFlujo(false); }} className="text-xs px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-600">
+                Cancelar
+              </button>
+            </div>
+          </div>
+        );
+      })()}
 
       {msg && (
         <p className={`text-xs mb-3 ${msg.startsWith('❌') ? 'text-red-600 dark:text-red-400' : 'text-emerald-600 dark:text-emerald-400'}`}>{msg}</p>
@@ -273,6 +401,26 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
             onDecidir={decidir}
             onCerrar={() => { setSelId(null); cargadoPara.current = null; }}
           />
+          {/* Por qué este caso no se cierra solo. Deja explícito qué freno aplicó,
+              que es lo que hay que poder auditar del flujo automático. */}
+          {(() => {
+            const ev = evaluarKybAuto(sel, analisis ?? undefined, flujo);
+            if (ev.automatizable) {
+              return (
+                <p className={`text-xs mt-3 ${ev.simulacion ? 'text-sky-700 dark:text-sky-400' : 'text-emerald-700 dark:text-emerald-400'}`}>
+                  {ev.simulacion ? '🧪' : '✅'} El flujo automático {ev.simulacion ? 'habría' : 'va a'} <b>{ev.decision}</b> este caso · {ev.detalle}
+                </p>
+              );
+            }
+            const duro = ['delito_sensible', 'pep', 'terminos_pendientes', 'alerta_critica', 'discrepancia_identidad'].includes(ev.motivo ?? '');
+            return (
+              <p className={`text-xs mt-3 ${duro ? 'text-red-700 dark:text-red-400 font-semibold' : 'text-slate-500 dark:text-slate-400'}`}>
+                {duro ? '🛑 ' : '⏸️ '}No se decide solo: {motivoKybLegible(ev.motivo)}
+                {ev.detalle ? ` · ${ev.detalle}` : ''}
+              </p>
+            );
+          })()}
+
           <div className="flex items-center gap-2 mt-3">
             <button
               onClick={() => setStatusKyb(sel.companyId, 'CERRADO').catch(() => {})}
