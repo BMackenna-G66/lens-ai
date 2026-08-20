@@ -337,7 +337,17 @@ async function downloadViaCloudRelay(presignedUrl: string): Promise<Blob | null>
   }
 }
 
+// ¿Vale la pena intentar el proxy local de Python? Solo si la app corre en
+// localhost. Desplegada en GitHub Pages ese proxy NUNCA existe, y el intento
+// costaba hasta 5s por documento: con 12 documentos eran 60s sin avanzar nada
+// antes de empezar a bajar de verdad.
+function proxyLocalPosible(): boolean {
+  if (typeof location === 'undefined') return false;
+  return /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
+}
+
 async function downloadViaProxy(fileKey: string): Promise<Blob | null> {
+  if (!proxyLocalPosible()) return null;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 5000);
   try {
@@ -383,7 +393,19 @@ export async function downloadEmpresaDoc(
   }
 
   try {
-    const res = await fetch(presignedUrl, { credentials: 'omit' });
+    // Con timeout: S3 desde GitHub Pages puede quedar colgado por CORS sin
+    // devolver nunca, y eso trababa el análisis completo del KYB.
+    const ctrlS3 = new AbortController();
+    const tS3 = setTimeout(() => ctrlS3.abort(), 45_000);
+    let res: Response;
+    try {
+      res = await fetch(presignedUrl, { credentials: 'omit', signal: ctrlS3.signal });
+    } catch (e) {
+      clearTimeout(tS3);
+      if (e instanceof Error && e.name === 'AbortError') throw new Error('S3 no respondió en 45s');
+      throw e;
+    }
+    clearTimeout(tS3);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const blob = await res.blob();
     return { blob, presignedUrl };
