@@ -584,6 +584,10 @@ export default {
             kycStage1: String(c.kycStage1 ?? ''),
             riskLevel: String(c.riskLevel ?? ''),
             institucional: c.institutional === true,
+            // Necesario para cortar por fecha del lado del cliente: Admin NO
+            // tiene filtro de fecha (probados 8 nombres, todos ignorados), pero
+            // el orden natural del listado ya viene de más nueva a más vieja.
+            creadoEn: String(c.createAt ?? c.recordCreatedAt ?? ''),
           })).filter(e => e.companyId);
         }
         return new Response(JSON.stringify(cuerpo), {
