@@ -16,7 +16,7 @@ import { useAuth } from '../../context/AuthContext';
 import { KybFicha } from './KybFicha';
 import { subscribeFlujoKyb, guardarFlujoKyb, FLUJO_KYB_DEFAULT, PAISES_KYB, type FlujoKybConfig } from '../../services/kyb/kybFlujoService';
 import { evaluarKybAuto, motivoKybLegible } from '../../services/kyb/flujoKybEngine';
-import { simularBarrido, barrer, barridoDisponible, detectarReingresos, TOPE_BARRIDO, type FiltrosBarrido, type ResultadoSimulacion } from '../../services/kyb/kybSweepService';
+import { simularBarrido, barrer, barrerEnVivo, barridoDisponible, detectarReingresos, TOPE_BARRIDO, PRESET_EN_VIVO, type FiltrosBarrido, type ResultadoSimulacion } from '../../services/kyb/kybSweepService';
 import { marcarReingreso } from '../../services/kyb/kybQueueService';
 
 interface Props {
@@ -58,6 +58,36 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
   const [filtros, setFiltros] = useState<FiltrosBarrido>({ kycStage1: 'REQUESTED_MANUAL', country: 'CL' });
   const [sim, setSim] = useState<ResultadoSimulacion | null>(null);
   const [barriendo, setBarriendo] = useState(false);
+  const [dias, setDias] = useState(PRESET_EN_VIVO.diasAtras);
+
+  // Preset "cola en vivo": UPLOADED_MANUAL · Chile · todos los estados menos
+  // BLOCKED y FULLY_BLOCKED · últimos N días. La exclusión de estados y el corte
+  // por fecha se hacen del lado del cliente porque Admin no los soporta.
+  const traerEnVivo = async () => {
+    setBarriendo(true); setMsg('');
+    try {
+      const r = await barrerEnVivo({ ...PRESET_EN_VIVO, diasAtras: dias });
+      if (r.empresas.length === 0) {
+        setMsg(`Sin empresas nuevas en los últimos ${dias} día(s) con ese filtro.`);
+        return;
+      }
+      const res = await encolarEmpresas(r.empresas.map(e => ({ ...e, origen: 'barrido' as const })));
+      const rein = detectarReingresos(
+        items.map(i => ({ companyId: i.companyId, statusKyb: i.statusKyb, kycStage1: i.kycStage1 })),
+        r.empresas,
+      );
+      for (const x of rein) await marcarReingreso(x.companyId, x.motivo).catch(() => {});
+      setMsg(
+        `✅ ${res.nuevas} nueva(s) y ${res.actualizadas} actualizada(s) · desde ${r.desde} · ` +
+        `${r.excluidasPorEstado} excluida(s) por estado bloqueado` +
+        (r.cortadoPorTope ? ` · cortado en el tope de ${TOPE_BARRIDO}` : '') +
+        (rein.length ? ` · ${rein.length} para reingreso` : ''),
+      );
+      setVerBarrido(false);
+    } catch (e) {
+      setMsg(`❌ ${e instanceof Error ? e.message : String(e)}`);
+    } finally { setBarriendo(false); }
+  };
 
   // ── Suscripción a la cola ──
   useEffect(() => {
@@ -344,6 +374,28 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
               está mal escrito devuelve todo sin dar error. Por eso primero se simula y recién después
               se trae — y no se trae nada si el filtro no redujo el universo.
             </p>
+            {/* Preset de uso diario. El manual de abajo queda para casos puntuales. */}
+            <div className="rounded-xl border border-violet-300 dark:border-violet-700 bg-white dark:bg-slate-900 p-3 mb-4">
+              <p className="text-xs font-bold text-slate-800 dark:text-slate-100 mb-1">🔴 Cola en vivo</p>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-2">
+                KYC I = <b>UPLOADED_MANUAL</b> · país <b>Chile</b> · todos los compliance status
+                <b> menos BLOCKED y FULLY_BLOCKED</b> · creadas en los últimos
+                <input
+                  type="number" min={1} max={365} value={dias}
+                  onChange={e => setDias(Math.max(1, Number(e.target.value) || 1))}
+                  className="mx-1.5 w-16 text-xs bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded px-1.5 py-0.5"
+                /> días.
+              </p>
+              <button
+                onClick={traerEnVivo}
+                disabled={barriendo}
+                className="px-4 py-2 rounded-xl bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white text-xs font-bold"
+              >
+                {barriendo ? 'Trayendo…' : `Traer y encolar (últimos ${dias} días)`}
+              </button>
+            </div>
+
+            <p className="text-[11px] font-bold text-slate-500 dark:text-slate-400 mb-2">Barrido manual</p>
             <div className="flex flex-wrap items-end gap-3">
               <label className="text-xs">
                 <span className="block text-slate-500 dark:text-slate-400 mb-1">kycStage1</span>

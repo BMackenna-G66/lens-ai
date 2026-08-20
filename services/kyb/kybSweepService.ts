@@ -41,6 +41,7 @@ export interface EmpresaBarrida {
   kycStage1?: string;
   riskLevel?: string;
   institucional?: boolean;
+  creadoEn?: string;
 }
 
 export interface ResultadoSimulacion {
@@ -137,4 +138,114 @@ export function detectarReingresos(
     }
   }
   return out;
+}
+
+
+// ── PRESET: la cola "en vivo" ────────────────────────────────────────────────
+//
+// Lo que se pidió: kycStage1 = UPLOADED_MANUAL · país Chile · todos los
+// complianceStatus MENOS BLOCKED y FULLY_BLOCKED · creadas en los últimos N días.
+//
+// Dos cosas NO se pueden hacer del lado de Admin, verificadas contra la API:
+//
+//   1. complianceStatus no acepta múltiples valores ni negación. Probados:
+//      "NORMAL,UNDER_COMPLIANCE_REVIEW" (error), el parámetro repetido (toma uno
+//      solo) y complianceStatusNot (ignorado). Por eso la exclusión es del lado
+//      del cliente. Se excluye en vez de listar los permitidos a propósito: hay
+//      35 empresas cuyo estado no es ninguno de los 5 conocidos, y con "todos
+//      menos dos" entran, mientras que con una lista blanca se perderían.
+//
+//   2. No hay filtro de fecha. Probados 8 nombres (createdFrom, createdAt,
+//      dateFrom, startDate, from, createdAfter…): todos ignorados. Pero el ORDEN
+//      NATURAL del listado ya viene de más nueva a más vieja (verificado: page 0
+//      = hoy, page 50 = abril, page 200 = noviembre 2024), así que se pagina
+//      desde el principio y se corta al pasarse de la fecha.
+//
+// El corte por fecha es lo que hace la cola manejable: el filtro base da 1.182
+// empresas, y 30 días son unas 200.
+
+export const ESTADOS_EXCLUIDOS = ['BLOCKED', 'FULLY_BLOCKED'] as const;
+
+export interface PresetEnVivo {
+  kycStage1: string;
+  country: string;
+  diasAtras: number;
+  estadosExcluidos: string[];
+}
+
+export const PRESET_EN_VIVO: PresetEnVivo = {
+  kycStage1: 'UPLOADED_MANUAL',
+  country: 'CL',
+  diasAtras: 30,
+  estadosExcluidos: [...ESTADOS_EXCLUIDOS],
+};
+
+export interface ResultadoEnVivo {
+  empresas: EmpresaBarrida[];
+  totalBase: number;          // lo que da el filtro antes de cortar por fecha
+  paginasLeidas: number;
+  excluidasPorEstado: number;
+  excluidasPorFecha: number;
+  cortadoPorTope: boolean;
+  desde: string;              // fecha de corte usada (ISO)
+}
+
+const TAMANO_PAGINA = 100;
+// Tope de páginas: 30 días son ~2-3 páginas de 100. Si se piden muchos días más,
+// esto evita recorrer las 72 mil empresas sin querer.
+const MAX_PAGINAS = 25;
+
+export async function barrerEnVivo(
+  preset: PresetEnVivo = PRESET_EN_VIVO,
+  tope = TOPE_BARRIDO,
+): Promise<ResultadoEnVivo> {
+  const base: FiltrosBarrido = { kycStage1: preset.kycStage1, country: preset.country };
+
+  // Se mantiene la guarda: si el filtro base no redujo el universo, no se sigue.
+  const sim = await simularBarrido(base);
+  if (!sim.filtroAplicado) {
+    throw new Error(
+      `El filtro base no redujo nada: ${sim.total} de ${sim.totalSinFiltro}. ` +
+      'Admin ignora los parámetros que no conoce, así que revisá los nombres. No se trae nada.',
+    );
+  }
+
+  const corte = new Date(Date.now() - preset.diasAtras * 24 * 60 * 60 * 1000);
+  const excluidos = new Set(preset.estadosExcluidos.map(e => e.toUpperCase()));
+
+  const empresas: EmpresaBarrida[] = [];
+  const vistos = new Set<string>();
+  let paginasLeidas = 0, excluidasPorEstado = 0, excluidasPorFecha = 0;
+  let cortadoPorTope = false;
+  let seguir = true;
+
+  for (let page = 0; page < MAX_PAGINAS && seguir; page++) {
+    const d = await pedir({ ...base, page, size: TAMANO_PAGINA }, false);
+    const lote = (d.empresas ?? []) as EmpresaBarrida[];
+    paginasLeidas++;
+    if (lote.length === 0) break;
+
+    for (const e of lote) {
+      const fecha = e.creadoEn ? new Date(e.creadoEn) : null;
+      // El listado viene de más nueva a más vieja: en cuanto aparece una anterior
+      // al corte, ya no hace falta seguir pidiendo páginas.
+      if (fecha && !Number.isNaN(fecha.getTime()) && fecha < corte) {
+        excluidasPorFecha++;
+        seguir = false;
+        continue;
+      }
+      if (excluidos.has((e.complianceStatus ?? '').toUpperCase())) { excluidasPorEstado++; continue; }
+      if (vistos.has(e.companyId)) continue;
+      vistos.add(e.companyId);
+      empresas.push(e);
+      if (empresas.length >= tope) { cortadoPorTope = true; seguir = false; break; }
+    }
+    if (lote.length < TAMANO_PAGINA) break;   // última página
+  }
+
+  return {
+    empresas, totalBase: sim.total, paginasLeidas,
+    excluidasPorEstado, excluidasPorFecha, cortadoPorTope,
+    desde: corte.toISOString().slice(0, 10),
+  };
 }
