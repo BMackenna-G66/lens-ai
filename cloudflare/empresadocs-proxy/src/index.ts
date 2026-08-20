@@ -500,6 +500,100 @@ export default {
         { status: 200, headers: { ...cors, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
     }
 
+    // ── Barrido de empresas en Admin: GET /admin/company-sweep ──────────────────
+    //   Lista empresas de `/company/bo` con filtros, para alimentar la cola KYB.
+    //   Solo LECTURA. El secreto del refresh-token queda del lado del Worker.
+    //
+    //   ⚠️ Admin IGNORA EN SILENCIO los parámetros que no conoce y devuelve el
+    //   universo completo (72.207 empresas al momento de escribir esto). Un typo
+    //   en el nombre de un filtro no da error: trae todo. Por eso:
+    //     · solo se reenvían los parámetros de la allowlist
+    //     · se devuelve también `totalSinFiltro`, para que el cliente pueda
+    //       comprobar que el filtro efectivamente filtró antes de encolar nada
+    if (url.pathname === '/admin/company-sweep') {
+      if (request.method !== 'GET') return jsonError('Método no permitido', 405, cors);
+      const refresh = env.G66_ADMIN_REFRESH_TOKEN;
+      if (!refresh) return jsonError('Falta el secret G66_ADMIN_REFRESH_TOKEN en el Worker', 500, cors);
+
+      // Allowlist: verificados contra la API. `countryCode` e `institutional`
+      // NO filtran (se ignoran del lado de Admin), así que no se aceptan para no
+      // dar una falsa sensación de filtro.
+      const PERMITIDOS = new Set(['page', 'size', 'sort', 'kycStage1', 'kycStage2', 'kycStage3',
+        'complianceStatus', 'country', 'companyIds', 'riskLevel', 'segmentationType']);
+      const filtros = new URLSearchParams();
+      const rechazados: string[] = [];
+      for (const [k, v] of url.searchParams) {
+        if (k === 'dryRun') continue;
+        if (PERMITIDOS.has(k)) filtros.set(k, v);
+        else rechazados.push(k);
+      }
+      if (!filtros.has('size')) filtros.set('size', '50');
+      if (!filtros.has('page')) filtros.set('page', '0');
+      const dryRun = url.searchParams.get('dryRun') === '1';
+
+      let idToken = '';
+      try {
+        const tokRes = await fetchTimeout(`${G66_ADMIN_BASE}/admin/refresh-token`, {
+          method: 'POST',
+          headers: { 'Accept': 'application/json, text/plain, */*', 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ refreshToken: refresh }).toString(),
+        }, 20000);
+        const t = await tokRes.text();
+        if (!tokRes.ok) return jsonError(`refresh-token de admin falló: ${t.slice(0, 300)}`, 502, cors);
+        idToken = (JSON.parse(t) as { idToken?: string }).idToken || '';
+        if (!idToken) return jsonError('admin no devolvió idToken', 502, cors);
+      } catch (e) {
+        return jsonError(`No se pudo obtener idToken: ${e instanceof Error ? e.message : String(e)}`, 502, cors);
+      }
+
+      const authH = { 'Accept': 'application/json', 'Authorization': idToken };
+      const pedir = async (qs: string) => {
+        const r = await fetchTimeout(`${G66_ADMIN_BASE}/company/bo?${qs}`, { headers: authH }, 30000);
+        const t = await r.text();
+        if (!r.ok) throw new Error(`HTTP ${r.status}: ${t.slice(0, 200)}`);
+        return JSON.parse(t) as { elements?: unknown[]; totalElements?: number };
+      };
+
+      try {
+        // El universo sin filtros, para poder detectar un filtro que no filtró.
+        const control = await pedir('size=1&page=0');
+        const totalSinFiltro = Number(control.totalElements ?? 0);
+
+        const datos = await pedir(filtros.toString());
+        const total = Number(datos.totalElements ?? 0);
+        const elementos = (datos.elements ?? []) as Record<string, unknown>[];
+
+        // En dryRun no se devuelven las empresas, solo el conteo: sirve para
+        // confirmar que el filtro funciona antes de traer nada.
+        const cuerpo: Record<string, unknown> = {
+          total,
+          totalSinFiltro,
+          filtroAplicado: total !== totalSinFiltro,
+          filtros: Object.fromEntries(filtros),
+          parametrosIgnorados: rechazados,
+          dryRun,
+        };
+        if (!dryRun) {
+          // Solo los campos que la cola necesita: el resto es ruido y peso.
+          cuerpo.empresas = elementos.map(c => ({
+            companyId: String(c.id ?? ''),
+            razonSocial: String(c.name ?? ''),
+            identificacion: String(c.identificationNumber ?? ''),
+            pais: String((c.addressCountry as Record<string, unknown> | undefined)?.name ?? c.country__c ?? ''),
+            complianceStatus: String(c.complianceStatus ?? ''),
+            kycStage1: String(c.kycStage1 ?? ''),
+            riskLevel: String(c.riskLevel ?? ''),
+            institucional: c.institutional === true,
+          })).filter(e => e.companyId);
+        }
+        return new Response(JSON.stringify(cuerpo), {
+          headers: { ...cors, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+        });
+      } catch (e) {
+        return jsonError(`Barrido falló: ${e instanceof Error ? e.message : String(e)}`, 502, cors);
+      }
+    }
+
     // ── Relay Inspektor: /inspektor/<path> → INSPEKTOR_BASE/<path> ──────────────
     if (url.pathname.startsWith('/inspektor/')) {
       const path = url.pathname.slice('/inspektor'.length); // ej: /Auth/login

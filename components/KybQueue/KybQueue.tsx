@@ -16,6 +16,8 @@ import { useAuth } from '../../context/AuthContext';
 import { KybFicha } from './KybFicha';
 import { subscribeFlujoKyb, guardarFlujoKyb, FLUJO_KYB_DEFAULT, PAISES_KYB, type FlujoKybConfig } from '../../services/kyb/kybFlujoService';
 import { evaluarKybAuto, motivoKybLegible } from '../../services/kyb/flujoKybEngine';
+import { simularBarrido, barrer, barridoDisponible, detectarReingresos, TOPE_BARRIDO, type FiltrosBarrido, type ResultadoSimulacion } from '../../services/kyb/kybSweepService';
+import { marcarReingreso } from '../../services/kyb/kybQueueService';
 
 interface Props {
   onBack: () => void;
@@ -47,6 +49,15 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
   const [verFlujo, setVerFlujo] = useState(false);
   const [guardandoFlujo, setGuardandoFlujo] = useState(false);
   useEffect(() => subscribeFlujoKyb(c => { setFlujo(c); setFlujoDraft(c); }), []);
+
+  // ── Barrido de Admin ──
+  // Dos pasos obligatorios: simular y recién después traer. Admin ignora en
+  // silencio los filtros que no conoce y devuelve las 72 mil empresas, así que
+  // sin la simulación un typo encolaría todo.
+  const [verBarrido, setVerBarrido] = useState(false);
+  const [filtros, setFiltros] = useState<FiltrosBarrido>({ kycStage1: 'REQUESTED_MANUAL', country: 'CL' });
+  const [sim, setSim] = useState<ResultadoSimulacion | null>(null);
+  const [barriendo, setBarriendo] = useState(false);
 
   // ── Suscripción a la cola ──
   useEffect(() => {
@@ -307,6 +318,107 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
                 Cancelar
               </button>
             </div>
+          </div>
+        );
+      })()}
+
+      {/* Barrido de Admin */}
+      {barridoDisponible() && (
+        <div className="flex flex-wrap items-center gap-2 mb-3">
+          <button
+            onClick={() => { setVerBarrido(v => !v); setSim(null); }}
+            className="flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-bold border bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:border-violet-300"
+          >
+            <span>{verBarrido ? '▾' : '▸'}</span> 🧹 Barrer Admin
+          </button>
+        </div>
+      )}
+
+      {verBarrido && (() => {
+        const inp = 'text-sm bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1.5';
+        const set = (p: Partial<FiltrosBarrido>) => { setFiltros(f => ({ ...f, ...p })); setSim(null); };
+        return (
+          <div className="mb-4 rounded-2xl border border-violet-200 dark:border-violet-800/50 bg-violet-50/60 dark:bg-violet-950/20 p-4">
+            <p className="text-xs text-slate-600 dark:text-slate-300 mb-3">
+              Admin tiene <b>72.207</b> empresas y <b>ignora los filtros que no conoce</b>: si un nombre
+              está mal escrito devuelve todo sin dar error. Por eso primero se simula y recién después
+              se trae — y no se trae nada si el filtro no redujo el universo.
+            </p>
+            <div className="flex flex-wrap items-end gap-3">
+              <label className="text-xs">
+                <span className="block text-slate-500 dark:text-slate-400 mb-1">kycStage1</span>
+                <input value={filtros.kycStage1 ?? ''} onChange={e => set({ kycStage1: e.target.value })} className={inp} placeholder="REQUESTED_MANUAL" />
+              </label>
+              <label className="text-xs">
+                <span className="block text-slate-500 dark:text-slate-400 mb-1">complianceStatus</span>
+                <input value={filtros.complianceStatus ?? ''} onChange={e => set({ complianceStatus: e.target.value })} className={inp} placeholder="NORMAL" />
+              </label>
+              <label className="text-xs">
+                <span className="block text-slate-500 dark:text-slate-400 mb-1">country</span>
+                <input value={filtros.country ?? ''} onChange={e => set({ country: e.target.value })} className={`${inp} w-20`} placeholder="CL" />
+              </label>
+              <button
+                onClick={async () => {
+                  setBarriendo(true); setMsg('');
+                  try { setSim(await simularBarrido(filtros)); }
+                  catch (e) { setMsg(`❌ ${e instanceof Error ? e.message : String(e)}`); }
+                  finally { setBarriendo(false); }
+                }}
+                disabled={barriendo}
+                className="px-4 py-2 rounded-xl bg-white dark:bg-slate-800 border border-violet-300 dark:border-violet-700 text-xs font-bold disabled:opacity-50"
+              >
+                {barriendo ? 'Simulando…' : 'Simular'}
+              </button>
+            </div>
+
+            {sim && (
+              <div className={`mt-3 rounded-xl border p-3 ${sim.filtroAplicado
+                ? 'border-emerald-200 dark:border-emerald-800/50 bg-emerald-50 dark:bg-emerald-950/30'
+                : 'border-red-200 dark:border-red-800/50 bg-red-50 dark:bg-red-950/30'}`}>
+                <p className="text-xs text-slate-700 dark:text-slate-200">
+                  <b>{sim.total.toLocaleString('es-CL')}</b> de {sim.totalSinFiltro.toLocaleString('es-CL')} empresas
+                  {sim.filtroAplicado
+                    ? ` · el filtro redujo el universo`
+                    : ' · ⚠️ el filtro NO redujo nada: probablemente haya un nombre mal escrito'}
+                </p>
+                {sim.parametrosIgnorados.length > 0 && (
+                  <p className="text-[11px] text-red-700 dark:text-red-400 mt-1">
+                    Parámetros rechazados: {sim.parametrosIgnorados.join(', ')}
+                  </p>
+                )}
+                {sim.filtroAplicado && sim.total > TOPE_BARRIDO && (
+                  <p className="text-[11px] text-amber-700 dark:text-amber-400 mt-1">
+                    Supera el tope de {TOPE_BARRIDO}: afiná el filtro antes de traer.
+                  </p>
+                )}
+                {sim.filtroAplicado && sim.total <= TOPE_BARRIDO && sim.total > 0 && (
+                  <button
+                    onClick={async () => {
+                      setBarriendo(true); setMsg('');
+                      try {
+                        const r = await barrer(filtros);
+                        const res = await encolarEmpresas(r.empresas.map(e => ({ ...e, origen: 'barrido' as const })));
+                        // Reingresos: una empresa cerrada cuyo kycStage cambió NO
+                        // se reabre sola; se marca y se avisa.
+                        const rein = detectarReingresos(
+                          items.map(i => ({ companyId: i.companyId, statusKyb: i.statusKyb, kycStage1: i.kycStage1 })),
+                          r.empresas,
+                        );
+                        for (const x of rein) await marcarReingreso(x.companyId, x.motivo).catch(() => {});
+                        setMsg(`✅ ${res.nuevas} nueva(s) y ${res.actualizadas} actualizada(s)` +
+                          (rein.length ? ` · ${rein.length} marcada(s) para reingreso` : ''));
+                        setSim(null); setVerBarrido(false);
+                      } catch (e) { setMsg(`❌ ${e instanceof Error ? e.message : String(e)}`); }
+                      finally { setBarriendo(false); }
+                    }}
+                    disabled={barriendo}
+                    className="mt-2 px-4 py-2 rounded-xl bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white text-xs font-bold"
+                  >
+                    {barriendo ? 'Encolando…' : `Encolar ${sim.total} empresa(s)`}
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         );
       })()}
