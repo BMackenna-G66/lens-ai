@@ -120,6 +120,18 @@ function estadoPersonas(e: Emparejamiento): { estado: EstadoComparacion; detalle
 
 const nombres = (ps: PersonaCanonica[]): string[] => ps.map(p => p.nombre || p.documento).filter(Boolean);
 
+// Texto para la celda de la matriz: nombres con su documento, no un conteo.
+// Antes decía solo "1" y no se podía saber a quién se había comparado.
+const listaNombres = (ps: PersonaCanonica[] | undefined): string | undefined => {
+  const l = ps ?? [];
+  if (l.length === 0) return undefined;
+  return l.map(p => {
+    const n = p.nombre || '(sin nombre)';
+    const pct = p.participacionPct !== null && p.participacionPct !== undefined ? ` ${p.participacionPct}%` : '';
+    return p.documento ? `${n} (${p.documento})${pct}` : `${n}${pct}`;
+  }).join(' · ');
+};
+
 // ── Comparadores por componente ──────────────────────────────────────────────
 type Comparador = (lens: LadoCanonico, admin: LadoCanonico, def: DefinicionComponente) => ResultadoComponente;
 
@@ -172,7 +184,9 @@ const COMPARADORES: Record<string, Comparador> = {
     return base(def, estado, {
       detalle, emparejados: e.pares.length,
       soloEnLens: nombres(e.soloLens), soloEnAdmin: nombres(e.soloAdmin),
-      valorLens: `${(l.representantesLegales ?? []).length}`, valorAdmin: `${(a.representantesLegales ?? []).length}`,
+      // Se muestran los NOMBRES, no un conteo. Un "1" en la matriz no dice nada:
+      // el analista necesita ver a quién se comparó.
+      valorLens: listaNombres(l.representantesLegales), valorAdmin: listaNombres(a.representantesLegales),
     });
   },
 
@@ -182,7 +196,7 @@ const COMPARADORES: Record<string, Comparador> = {
     return base(def, estado, {
       detalle, emparejados: e.pares.length,
       soloEnLens: nombres(e.soloLens), soloEnAdmin: nombres(e.soloAdmin),
-      valorLens: `${(l.accionistas ?? []).length}`, valorAdmin: `${(a.accionistas ?? []).length}`,
+      valorLens: listaNombres(l.accionistas), valorAdmin: listaNombres(a.accionistas),
     });
   },
 
@@ -192,7 +206,7 @@ const COMPARADORES: Record<string, Comparador> = {
     return base(def, estado, {
       detalle, emparejados: e.pares.length,
       soloEnLens: nombres(e.soloLens), soloEnAdmin: nombres(e.soloAdmin),
-      valorLens: `${(l.directorio ?? []).length}`, valorAdmin: `${(a.directorio ?? []).length}`,
+      valorLens: listaNombres(l.directorio), valorAdmin: listaNombres(a.directorio),
     });
   },
 
