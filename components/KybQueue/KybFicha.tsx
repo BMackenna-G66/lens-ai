@@ -10,6 +10,7 @@ import { DECISIONES_CON_CHECKER } from '../../types/kyb';
 import type { EstadoComparacion, ResultadoComponente } from '../../types/kybMatriz';
 import { COMPONENTES_KYB } from '../../types/kybMatriz';
 import { resumenAlertas } from '../../services/kyb/kybAlertasCatalogo';
+import type { ResultadoScreeningKyb, SujetoScreening } from '../../services/kyb/kybScreeningService';
 
 // Colores por estado de comparación. DISCREPA es el único en rojo: es el caso
 // que exige acción. SOLO_* en ámbar porque falta corroborar, no hay contradicción.
@@ -183,6 +184,101 @@ export const KybFicha: React.FC<Props> = ({
           </tbody>
         </table>
       </div>
+
+      {/* Screening criminal. Lo importante acá es que el caso LIMPIO se afirme
+          explícitamente: "pasó screening y no arrojó coincidencias" no puede
+          verse igual que "no se consultó". */}
+      {analisis?.screening ? (() => {
+        const scr = analisis.screening as ResultadoScreeningKyb;
+        const color = (e: SujetoScreening['estado']) => ({
+          SIN_COINCIDENCIAS: 'text-emerald-700 dark:text-emerald-400',
+          CON_COINCIDENCIAS: 'text-red-700 dark:text-red-400 font-bold',
+          SOLO_PEP: 'text-amber-700 dark:text-amber-400',
+          SIN_DOCUMENTO: 'text-slate-500 dark:text-slate-400',
+          ERROR: 'text-red-600 dark:text-red-400',
+        }[e]);
+        const etiqueta = (e: SujetoScreening['estado']) => ({
+          SIN_COINCIDENCIAS: '✓ sin coincidencias',
+          CON_COINCIDENCIAS: 'con causas penales',
+          SOLO_PEP: 'PEP, sin causas',
+          SIN_DOCUMENTO: 'sin documento',
+          ERROR: '⚠️ error del proveedor',
+        }[e]);
+        return (
+          <>
+            <h3 className="text-sm font-black text-slate-800 dark:text-slate-200 mt-5 mb-2">
+              Screening criminal
+              <span className="ml-2 text-xs font-semibold text-slate-500 dark:text-slate-400">
+                catálogo de delitos de Chile · sugerencia del motor: <b>{scr.sugerenciaGlobal}</b>
+              </span>
+            </h3>
+
+            {/* La afirmación fuerte, cuando corresponde */}
+            {scr.limpioVerificado ? (
+              <div className="rounded-xl border border-emerald-200 dark:border-emerald-800/50 bg-emerald-50 dark:bg-emerald-950/30 px-3 py-2 mb-2">
+                <p className="text-xs font-bold text-emerald-800 dark:text-emerald-300">
+                  ✓ La empresa y sus {scr.totalConsultados - 1} relacionado(s) pasaron por screening y no arrojaron coincidencias.
+                </p>
+                {scr.sinDocumento > 0 && (
+                  <p className="text-[11px] text-emerald-700 dark:text-emerald-400 mt-0.5">
+                    {scr.sinDocumento} sin documento, no se pudieron consultar.
+                  </p>
+                )}
+              </div>
+            ) : scr.conError > 0 ? (
+              <div className="rounded-xl border border-red-200 dark:border-red-800/50 bg-red-50 dark:bg-red-950/30 px-3 py-2 mb-2">
+                <p className="text-xs font-bold text-red-800 dark:text-red-300">
+                  ⚠️ {scr.conError} consulta(s) fallaron: no se puede afirmar que esté limpio.
+                </p>
+              </div>
+            ) : null}
+
+            <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-700">
+              <table className="w-full text-xs">
+                <thead className="bg-slate-50 dark:bg-slate-800/60 text-slate-500 dark:text-slate-400 text-left">
+                  <tr>
+                    <th className="py-2 px-3 font-semibold">Sujeto</th>
+                    <th className="py-2 px-3 font-semibold">Rol</th>
+                    <th className="py-2 px-3 font-semibold">Documento</th>
+                    <th className="py-2 px-3 font-semibold">Resultado</th>
+                    <th className="py-2 px-3 font-semibold">Sugerencia del motor</th>
+                    <th className="py-2 px-3 font-semibold">Delitos</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {scr.sujetos.map((s2, i) => (
+                    <tr key={i} className="border-t border-slate-100 dark:border-slate-800">
+                      <td className="py-2 px-3 font-bold text-slate-800 dark:text-slate-100">{s2.nombre || '—'}</td>
+                      <td className="py-2 px-3 text-slate-500 dark:text-slate-400">{s2.tipo.toLowerCase()}</td>
+                      <td className="py-2 px-3 text-slate-600 dark:text-slate-300">{s2.documento || '—'}</td>
+                      <td className={`py-2 px-3 ${color(s2.estado)}`}>{etiqueta(s2.estado)}</td>
+                      <td className="py-2 px-3 font-semibold text-slate-700 dark:text-slate-200">
+                        {s2.sugerencia || '—'}
+                        {s2.pep && <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 dark:bg-amber-950/50 dark:text-amber-300">PEP</span>}
+                      </td>
+                      <td className="py-2 px-3 text-slate-500 dark:text-slate-400">
+                        {s2.delitos.length === 0 ? '—' : `${s2.delitosUnicos} único(s)`}
+                        {s2.categoriasSensibles.length > 0 && (
+                          <span className="block text-[10px] text-red-600 dark:text-red-400 font-bold">
+                            🛑 {s2.categoriasSensibles.join(', ')}
+                          </span>
+                        )}
+                        {s2.delitos.slice(0, 3).map((d, j) => (
+                          <span key={j} className="block text-[10px]">{d.tipo}{d.estado ? ` · ${d.estado}` : ''}</span>
+                        ))}
+                        {s2.otrasListas.length > 0 && (
+                          <span className="block text-[10px] text-amber-600 dark:text-amber-400">Listas: {s2.otrasListas.join(', ')}</span>
+                        )}
+                        {s2.mensaje && <span className="block text-[10px] text-red-500">{s2.mensaje}</span>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        );
+      })() : null}
 
       {/* Alertas. Se muestran las 36: las que no se pueden evaluar van aparte y
           marcadas, para que "no se pudo evaluar" nunca se lea como "sin hallazgos". */}

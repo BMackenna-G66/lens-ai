@@ -510,6 +510,7 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
                     <th className="py-3 px-4 font-semibold">Identificación</th>
                     <th className="py-3 px-4 font-semibold">Compliance</th>
                     <th className="py-3 px-4 font-semibold">Certidumbre</th>
+                    <th className="py-3 px-4 font-semibold">Screening criminal</th>
                     <th className="py-3 px-4 font-semibold">Análisis</th>
                     <th className="py-3 px-4 font-semibold">Decisión</th>
                     <th className="py-3 px-4 font-semibold">Recibido</th>
@@ -530,6 +531,22 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
                         {/* Nunca 0%: sin análisis va guion. */}
                         {i.ultimoAnalisis?.certidumbre === null || i.ultimoAnalisis?.certidumbre === undefined
                           ? '—' : `${i.ultimoAnalisis.certidumbre}%`}
+                      </td>
+                      {/* La columna que pidió el negocio: si pasó screening y no
+                          arrojó nada, hay que poder verlo — no puede quedar igual
+                          que "no se consultó". */}
+                      <td className="py-3 px-4 text-xs">
+                        {!i.ultimoAnalisis?.screeningResumen ? (
+                          <span className="text-slate-400">Sin screening</span>
+                        ) : (
+                          <span className={
+                            i.ultimoAnalisis.screeningLimpio ? 'text-emerald-700 dark:text-emerald-400 font-semibold'
+                              : /error/i.test(i.ultimoAnalisis.screeningResumen) ? 'text-red-600 dark:text-red-400'
+                              : 'text-amber-700 dark:text-amber-400 font-semibold'
+                          }>
+                            {i.ultimoAnalisis.screeningResumen}
+                          </span>
+                        )}
                       </td>
                       <td className="py-3 px-4 text-xs text-slate-500 dark:text-slate-400">
                         {i.ultimoAnalisis?.estado ?? 'SIN_ANALIZAR'}

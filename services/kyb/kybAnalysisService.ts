@@ -28,6 +28,7 @@ import { mapLensALadoCanonico, faltantesLens } from './kybLensMapper';
 import { compararKyb } from './kybComparador';
 import { calcularCertidumbre, coberturaComparada } from './kybCertaintyEngine';
 import { evaluarAlertas } from './kybAlertasCatalogo';
+import { screenearEmpresaKyb, aScreeningPersonas, type ResultadoScreeningKyb } from './kybScreeningService';
 import { guardarAnalisis } from './kybQueueService';
 import { logAnalisisKyb } from './kybLogService';
 import type { AnalisisKyb, EstadoAnalisisKyb, AlertaKyb, EmpresaKyb } from '../../types/kyb';
@@ -177,6 +178,19 @@ export async function analizarEmpresa(
     }
   }
 
+  // ── 2b. Screening criminal de la empresa y sus relacionados ──
+  // Mismo motor y mismo catálogo de delitos de Chile que la cola de Salesforce.
+  // Si falla, el análisis sigue: el screening queda undefined y las alertas que
+  // dependen de él vuelven a salir como no evaluables, que es lo correcto —
+  // nunca como "sin hallazgos".
+  let screening: ResultadoScreeningKyb | undefined;
+  try {
+    screening = await screenearEmpresaKyb(admin, lens, (hechos, total, nombre) =>
+      onProgreso?.({ fase: 'Screening criminal', detalle: `${hechos}/${total} · ${nombre}`.slice(0, 80) }));
+  } catch (e) {
+    faltantes.push(`Screening criminal no disponible: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
   // ── 3 y 4. Comparación y certidumbre (puros) ──
   onProgreso?.({ fase: 'Comparando los 12 componentes' });
   const componentes = compararKyb(lens, admin);
@@ -187,8 +201,9 @@ export async function analizarEmpresa(
   onProgreso?.({ fase: 'Evaluando alertas' });
   const alertas: AlertaKyb[] = evaluarAlertas({
     lens, admin, estadoAdmin, contexto, componentes, documentos,
-    // El screening criminal de la empresa y sus personas todavía no se corre acá:
-    // las alertas que dependen de él quedan no evaluables, no en silencio.
+    // Con esto DOC_007 (delito sensible), DOC_008 (PEP) y DOC_009 (coincidencia
+    // en listas) pasan de "no evaluables" a evaluadas.
+    screeningPersonas: aScreeningPersonas(screening),
   });
   const cert = calcularCertidumbre(componentes, alertas);
 
@@ -215,6 +230,7 @@ export async function analizarEmpresa(
     lens,
     admin,
     estadoAdmin,
+    screening,
     faltantes: faltantes.length ? faltantes : undefined,
     mensajeError,
   };
