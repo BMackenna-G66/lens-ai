@@ -18,8 +18,7 @@ import { getPresignedUrl } from '../../services/empresaDocsClient';
 import { runPool } from '../../services/casosCriminalService';
 import type { DocumentoKyb } from '../../types/kyb';
 import { subscribeFlujoKyb, guardarFlujoKyb, FLUJO_KYB_DEFAULT, PAISES_KYB, type FlujoKybConfig } from '../../services/kyb/kybFlujoService';
-import { simularBarrido, barrer, barrerEnVivo, barridoDisponible, detectarReingresos, TOPE_BARRIDO, PRESET_EN_VIVO, type FiltrosBarrido, type ResultadoSimulacion } from '../../services/kyb/kybSweepService';
-import { marcarReingreso } from '../../services/kyb/kybQueueService';
+import { simularBarrido, barrer, barrerEnVivo, barridoDisponible, TOPE_BARRIDO, PRESET_EN_VIVO, type FiltrosBarrido, type ResultadoSimulacion } from '../../services/kyb/kybSweepService';
 import { ordenarYFiltrar, sugerenciasPresentes, estadosPresentes, type ColumnaOrden } from '../../services/kyb/kybOrdenCola';
 
 interface Props {
@@ -147,16 +146,15 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
         origen: 'barrido' as const,
         snapshot: e.crudo ? detalleDesdeCrudo(e.crudo) : undefined,
       })));
-      const rein = detectarReingresos(
-        items.map(i => ({ companyId: i.companyId, statusKyb: i.statusKyb, kycStage1: i.kycStage1 })),
-        r.empresas,
-      );
-      for (const x of rein) await marcarReingreso(x.companyId, x.motivo).catch(() => {});
+      // El reingreso lo detecta `encolarEmpresas`, que es donde se lee el estado
+      // anterior de cada empresa. La detección vieja solo miraba las visibles en
+      // la cola, y una cerrada justamente NO está ahí: nunca se disparaba.
       setMsg(
         `✅ ${res.nuevas} nueva(s) y ${res.actualizadas} actualizada(s) · desde ${r.desde} · ` +
         `${r.excluidasPorEstado} excluida(s) por estado bloqueado` +
+        (res.fueraPorCerradas ? ` · ${res.fueraPorCerradas} ya cerrada(s) NO vuelven a la cola` : '') +
         (r.cortadoPorTope ? ` · cortado en el tope de ${TOPE_BARRIDO}` : '') +
-        (rein.length ? ` · ${rein.length} para reingreso` : ''),
+        (res.reingresos.length ? ` · ${res.reingresos.length} marcada(s) para reingreso` : ''),
       );
       setVerBarrido(false);
     } catch (e) {
@@ -621,23 +619,16 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
                       setBarriendo(true); setMsg('');
                       try {
                         const r = await barrer(filtros);
-                        // El barrido ya trajo el registro completo de cada empresa: se convierte en
-      // snapshot acá para poder abrir la ficha sin analizar. Es un snapshot con
-      // fecha, no la fuente del análisis.
-      const res = await encolarEmpresas(r.empresas.map(e => ({
-        ...e,
-        origen: 'barrido' as const,
-        snapshot: e.crudo ? detalleDesdeCrudo(e.crudo) : undefined,
-      })));
-                        // Reingresos: una empresa cerrada cuyo kycStage cambió NO
-                        // se reabre sola; se marca y se avisa.
-                        const rein = detectarReingresos(
-                          items.map(i => ({ companyId: i.companyId, statusKyb: i.statusKyb, kycStage1: i.kycStage1 })),
-                          r.empresas,
-                        );
-                        for (const x of rein) await marcarReingreso(x.companyId, x.motivo).catch(() => {});
+                        // El registro completo que ya trajo el barrido se guarda
+                        // como snapshot, para poder abrir la ficha sin analizar.
+                        const res = await encolarEmpresas(r.empresas.map(e => ({
+                          ...e,
+                          origen: 'barrido' as const,
+                          snapshot: e.crudo ? detalleDesdeCrudo(e.crudo) : undefined,
+                        })));
                         setMsg(`✅ ${res.nuevas} nueva(s) y ${res.actualizadas} actualizada(s)` +
-                          (rein.length ? ` · ${rein.length} marcada(s) para reingreso` : ''));
+                          (res.fueraPorCerradas ? ` · ${res.fueraPorCerradas} ya cerrada(s) NO vuelven a la cola` : '') +
+                          (res.reingresos.length ? ` · ${res.reingresos.length} marcada(s) para reingreso` : ''));
                         setSim(null); setVerBarrido(false);
                       } catch (e) { setMsg(`❌ ${e instanceof Error ? e.message : String(e)}`); }
                       finally { setBarriendo(false); }

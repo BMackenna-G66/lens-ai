@@ -21,6 +21,7 @@ import { getDb } from '../firebaseService';
 import { KYB_COLLECTION, type EmpresaKyb, type AnalisisKyb, type StatusKyb } from '../../types/kyb';
 import { mapDatosGenerales, mapAdminALadoCanonico } from './kybAdminMapper';
 import type { EmpresaDocsDetail } from '../../types/empresaDocs';
+import { decidirEncolado } from './kybReencolado';
 
 export const kybDisponible = (): boolean => !!getDb();
 
@@ -112,7 +113,11 @@ export function subscribeColaKyb(
 // ── Encolado ────────────────────────────────────────────────────────────────
 // Upsert por companyId con merge: si la empresa ya estaba, NO se pisa el trabajo
 // del analista (decisión, análisis, asignación). Solo se refrescan los campos de
-// ingesta y se vuelve a poner en cola.
+// ingesta.
+//
+// Una empresa CERRADA no vuelve a la cola: se actualizan sus datos y, si cambió
+// algo relevante, se marca para reingreso — pero reabrirla es decisión de una
+// persona. Ver `kybReencolado.ts`.
 export interface EmpresaAEncolar {
   companyId: string;
   razonSocial: string;
@@ -129,10 +134,21 @@ export interface EmpresaAEncolar {
   snapshot?: EmpresaDocsDetail;
 }
 
-export async function encolarEmpresas(items: EmpresaAEncolar[]): Promise<{ nuevas: number; actualizadas: number }> {
+export interface ResultadoEncolado {
+  nuevas: number;
+  actualizadas: number;
+  // Ya trabajadas y cerradas: se actualizan sus datos pero NO vuelven a la cola.
+  fueraPorCerradas: number;
+  // Cerradas en las que cambió algo relevante: quedan marcadas para que alguien
+  // decida si se reabren.
+  reingresos: { companyId: string; motivo: string }[];
+}
+
+export async function encolarEmpresas(items: EmpresaAEncolar[]): Promise<ResultadoEncolado> {
   const db = getDb() as Firestore | null;
-  if (!db || items.length === 0) return { nuevas: 0, actualizadas: 0 };
-  let nuevas = 0, actualizadas = 0;
+  if (!db || items.length === 0) return { nuevas: 0, actualizadas: 0, fueraPorCerradas: 0, reingresos: [] };
+  let nuevas = 0, actualizadas = 0, fueraPorCerradas = 0;
+  const reingresos: { companyId: string; motivo: string }[] = [];
 
   for (let i = 0; i < items.length; i += 450) {   // límite de 500 por batch
     const batch = writeBatch(db);
@@ -145,6 +161,19 @@ export async function encolarEmpresas(items: EmpresaAEncolar[]): Promise<{ nueva
     tanda.forEach((it, idx) => {
       const yaEsta = existentes[idx]?.exists() === true;
       yaEsta ? actualizadas++ : nuevas++;
+      const previo = existentes[idx]?.data() as Record<string, unknown> | undefined;
+      const d = decidirEncolado(
+        {
+          existe: yaEsta,
+          statusKyb: previo?.statusKyb as string | undefined,
+          kycStage1: previo?.kycStage1 as string | undefined,
+          complianceStatus: previo?.complianceStatus as string | undefined,
+        },
+        { kycStage1: it.kycStage1, complianceStatus: it.complianceStatus },
+      );
+      if (d.quedaFuera) fueraPorCerradas++;
+      if (d.reingreso) reingresos.push({ companyId: it.companyId, motivo: d.reingreso });
+
       const campos: Record<string, unknown> = {
         companyId: it.companyId,
         razonSocial: it.razonSocial,
@@ -154,9 +183,17 @@ export async function encolarEmpresas(items: EmpresaAEncolar[]): Promise<{ nueva
         kycStage1: it.kycStage1 ?? null,
         riskLevel: it.riskLevel ?? null,
         institucional: it.institucional ?? null,
-        enCola: true,
         origen: it.origen ?? 'manual',
       };
+      // `enCola` solo se escribe cuando corresponde: dejarlo en `true` fijo
+      // resucitaba en cada barrido todo lo ya trabajado.
+      if (d.enCola !== undefined) campos.enCola = d.enCola;
+      if (d.statusKyb) campos.statusKyb = d.statusKyb;
+      if (d.recibidoEn) campos.recibidoEn = new Date().toISOString();
+      if (d.reingreso) {
+        campos.reingresoPendiente = true;
+        campos.reingresoMotivo = d.reingreso;
+      }
       // Snapshot de Admin, si el barrido trajo el crudo. Se guarda con su fecha
       // para que la ficha lo muestre como lo que es. NO reemplaza al análisis.
       // El snapshot NO va en el doc padre: la cola se suscribe a todos los docs
@@ -170,15 +207,11 @@ export async function encolarEmpresas(items: EmpresaAEncolar[]): Promise<{ nueva
           paraFirestore(snapshotDesdeDetalle(it.snapshot, tomadoEn)),
         );
       }
-      if (!yaEsta) {
-        campos.recibidoEn = new Date().toISOString();
-        campos.statusKyb = 'ABIERTO';
-      }
       batch.set(doc(db, KYB_COLLECTION, it.companyId), paraFirestore(campos), { merge: true });
     });
     await batch.commit();
   }
-  return { nuevas, actualizadas };
+  return { nuevas, actualizadas, fueraPorCerradas, reingresos };
 }
 
 // ── Análisis (subcolección) ─────────────────────────────────────────────────
