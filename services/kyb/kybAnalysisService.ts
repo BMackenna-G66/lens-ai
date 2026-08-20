@@ -20,6 +20,7 @@
 
 import { getEmpresaDocsCompany, getEmpresaDocsContexto, downloadEmpresaDoc } from '../empresaDocsClient';
 import { processOneCompany } from '../batchProcessor';
+import { runPool } from '../casosCriminalService';
 import type { BatchCompanyInput, BatchDocumentInput } from '../../types/batch';
 import type { ExtractedField } from '../../types';
 import type { EmpresaDocsDocument, EmpresaDocsContexto } from '../../types/empresaDocs';
@@ -68,6 +69,27 @@ export function hashDocumentos(docs: { fileName?: string; date?: string; link?: 
   return h.toString(16).padStart(8, '0');
 }
 
+// Tope por fase. Cualquier paso que no vuelva en su tiempo corta con un mensaje
+// que dice QUÉ fase falló, en vez de dejar el análisis colgado sin avanzar.
+async function conTope<T>(fase: string, ms: number, tarea: Promise<T>): Promise<T> {
+  let t: ReturnType<typeof setTimeout> | undefined;
+  const limite = new Promise<never>((_, rechazar) => {
+    t = setTimeout(() => rechazar(new Error(`${fase}: no respondió en ${Math.round(ms / 1000)}s`)), ms);
+  });
+  try {
+    return await Promise.race([tarea, limite]);
+  } finally {
+    if (t) clearTimeout(t);
+  }
+}
+
+const TOPES_MS = {
+  admin: 45_000,
+  contexto: 30_000,
+  documentos: 240_000,   // descarga + OCR + Gemini de varios documentos
+  screening: 180_000,    // una consulta a Regcheq por sujeto
+} as const;
+
 const runId = (hash: string): string => `${new Date().toISOString().replace(/[:.]/g, '-')}_${hash}`;
 
 // ── Descarga de documentos ───────────────────────────────────────────────────
@@ -77,11 +99,13 @@ async function aDocumentosDePipeline(
   docs: EmpresaDocsDocument[],
   onProgreso?: (p: ProgresoAnalisis) => void,
 ): Promise<BatchDocumentInput[]> {
-  const salida: BatchDocumentInput[] = [];
-  let i = 0;
-  for (const d of docs) {
-    i++;
-    onProgreso?.({ fase: 'Descargando documentos', detalle: `${i}/${docs.length} · ${d.fileName ?? ''}` });
+  // En PARALELO con concurrencia acotada. Antes era un for secuencial: con 12
+  // documentos, uno lento retrasaba a todos y uno colgado trababa el análisis.
+  const salida: BatchDocumentInput[] = new Array(docs.length);
+  let hechos = 0;
+  await runPool(docs.map((d, idx) => ({ d, idx })), async ({ d, idx }) => {
+    const i = idx + 1;
+    onProgreso?.({ fase: 'Descargando documentos', detalle: `${hechos}/${docs.length} · ${d.fileName ?? ''}` });
     const entrada: BatchDocumentInput = {
       id: String(d.link || `doc-${i}`),
       fileName: String(d.fileName ?? `documento-${i}`),
@@ -101,9 +125,10 @@ async function aDocumentosDePipeline(
     } catch (e) {
       entrada.error = e instanceof Error ? e.message : String(e);
     }
-    salida.push(entrada);
-  }
-  return salida;
+    salida[idx] = entrada;
+    hechos++;
+  }, 4);
+  return salida.filter(Boolean);
 }
 
 // ── Entrada principal ───────────────────────────────────────────────────────
@@ -116,7 +141,7 @@ export async function analizarEmpresa(
 
   // ── 1. Admin ──
   onProgreso?.({ fase: 'Consultando Admin' });
-  const detalle = await getEmpresaDocsCompany(companyId);
+  const detalle = await conTope('Consultando Admin', TOPES_MS.admin, getEmpresaDocsCompany(companyId));
   const admin: LadoCanonico = mapAdminALadoCanonico(detalle);
   const estadoAdmin = mapEstadoAdmin(companyId, detalle);
 
@@ -125,7 +150,7 @@ export async function analizarEmpresa(
   let contexto: EmpresaDocsContexto | undefined;
   try {
     onProgreso?.({ fase: 'Consultando contexto de Admin' });
-    contexto = await getEmpresaDocsContexto(companyId);
+    contexto = await conTope('Contexto de Admin', TOPES_MS.contexto, getEmpresaDocsContexto(companyId));
   } catch { faltantes.push('Contexto de Admin (T&C, segmentación)'); }
   // Los T&C sin firmar son un freno duro del flujo automático: se registra acá
   // para que la decisión no dependa de volver a consultar Admin.
@@ -159,10 +184,11 @@ export async function analizarEmpresa(
         source: 'empresa_docs',
         documents: entradas,
       };
-      const resultado = await processOneCompany(entrada, 'individual', {
-        onDocOcr: () => {},
-        onPhase: (label) => onProgreso?.({ fase: label }),
-      });
+      const resultado = await conTope('Lectura de documentos', TOPES_MS.documentos,
+        processOneCompany(entrada, 'individual', {
+          onDocOcr: () => {},
+          onPhase: (label) => onProgreso?.({ fase: label }),
+        }));
       lens = mapLensALadoCanonico(resultado.extractedData as ExtractedField[]);
       const faltaLens = faltantesLens(lens);
       if (faltaLens.length > 0) {
@@ -185,8 +211,9 @@ export async function analizarEmpresa(
   // nunca como "sin hallazgos".
   let screening: ResultadoScreeningKyb | undefined;
   try {
-    screening = await screenearEmpresaKyb(admin, lens, (hechos, total, nombre) =>
-      onProgreso?.({ fase: 'Screening criminal', detalle: `${hechos}/${total} · ${nombre}`.slice(0, 80) }));
+    screening = await conTope('Screening criminal', TOPES_MS.screening,
+      screenearEmpresaKyb(admin, lens, (hechos, total, nombre) =>
+        onProgreso?.({ fase: 'Screening criminal', detalle: `${hechos}/${total} · ${nombre}`.slice(0, 80) })));
   } catch (e) {
     faltantes.push(`Screening criminal no disponible: ${e instanceof Error ? e.message : String(e)}`);
   }

@@ -9,6 +9,10 @@
 
 const BASE_URL = 'https://api.global66.com';
 
+// Toda request a Admin tiene tope. Un cuelgue sin timeout es peor que un error:
+// el llamador no puede distinguir "lento" de "nunca va a volver".
+const API_TIMEOUT_MS = 30_000;
+
 const LS_SSO   = 'empresadocs_sso_refresh_token';
 const LS_BASIC = 'empresadocs_basic_refresh_token';
 
@@ -91,14 +95,30 @@ export async function apiGet<T = unknown>(
     Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, String(v)));
   }
 
-  const doRequest = async (token: string): Promise<Response> =>
-    fetch(url.toString(), {
-      headers: {
-        Accept: 'application/json, text/plain, */*',
-        'Content-Type': 'application/json',
-        Authorization: token, // no 'Bearer' prefix — matches Python implementation
-      },
-    });
+  // Con timeout: sin esto una request colgada deja al llamador esperando para
+  // siempre. Le pasó al análisis del KYB, que se quedaba en "Consultando Admin"
+  // sin avanzar ni fallar.
+  const doRequest = async (token: string): Promise<Response> => {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), API_TIMEOUT_MS);
+    try {
+      return await fetch(url.toString(), {
+        headers: {
+          Accept: 'application/json, text/plain, */*',
+          'Content-Type': 'application/json',
+          Authorization: token, // no 'Bearer' prefix — matches Python implementation
+        },
+        signal: ctrl.signal,
+      });
+    } catch (e) {
+      if (e instanceof Error && e.name === 'AbortError') {
+        throw new Error(`Admin no respondió en ${API_TIMEOUT_MS / 1000}s (${path})`);
+      }
+      throw e;
+    } finally {
+      clearTimeout(t);
+    }
+  };
 
   let token = await getIdToken();
   let res = await doRequest(token);
