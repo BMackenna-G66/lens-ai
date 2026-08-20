@@ -44,10 +44,50 @@ export interface MontoCanonico {
 // ── Domicilio ────────────────────────────────────────────────────────────────
 export interface DomicilioCanonico {
   pais?: string;
+  // Admin devuelve `addressCountry` como OBJETO con el desglose completo:
+  // {country, state, city, street, number, complementAddress, district, postalCode}.
+  // El mapper leía `.name`, que no existe, así que el domicilio salía SIEMPRE
+  // vacío del lado de Admin. Verificado contra la API.
+  region?: string;          // state
+  ciudad?: string;          // city
+  calle?: string;           // street
+  numero?: string;
+  complemento?: string;     // complementAddress
   textoCompleto?: string;
   // Huella normalizada (vía + número, sin sinónimos ni abreviaturas) para poder
   // comparar "Av. Providencia 1234" con "Avenida Providencia N° 1234".
   huella?: string;
+}
+
+// Datos generales de la empresa, en el orden en que se muestran en la ficha.
+// Es la vista "quién es este cliente" antes de cualquier comparación.
+export interface DatosGeneralesEmpresa {
+  nombre?: string;
+  pais?: string;
+  tipoIdentificacion?: string;
+  numeroIdentificacion?: string;
+  tributacionInternacional?: boolean | null;
+  region?: string;
+  ciudad?: string;
+  calle?: string;
+  numero?: string;
+  direccionComplementaria?: string;
+  administracionConjunta?: boolean | null;
+  institucional?: boolean | null;
+  paginaWeb?: string;
+  relacionContractual?: string;
+  industria?: string;
+  actividad?: string;             // "código - nombre"
+  facturacionAnualEstimada?: string;   // es un RANGO de texto, no un número
+  montosEnviosEsperados?: string;
+  frecuenciaEnviosEsperada?: string;
+  segmentacion?: string;
+  nivelRiesgoPartner?: string;    // riskLevelRegcheq
+  nivelRiesgoGlobal66?: string;   // riskLevel
+  telefono?: string;
+  formaLegal?: string;
+  fechaConstitucion?: string;
+  creadoEn?: string;
 }
 
 // ── Un lado de la comparación ────────────────────────────────────────────────
@@ -102,6 +142,11 @@ export interface LadoCanonico {
   // Perfil transaccional declarado (solo Admin).
   montosEnvio?: string;
   frecuenciaEnvio?: string;
+
+  // Los montos de Admin vienen como RANGO DE TEXTO, no como número
+  // ("Entre USD 100,000 y USD 1MM"). Se guardan tal cual para mostrarlos; el
+  // comparador numérico no puede usarlos y el componente queda de fuente única.
+  facturacionTexto?: string;
 
   // Estructura societaria (malla). Solo Admin.
   relaciones?: RelacionCanonica[];

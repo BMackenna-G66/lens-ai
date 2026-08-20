@@ -16,7 +16,7 @@
 import type { EmpresaDocsDetail } from '../../types/empresaDocs';
 import type {
   LadoCanonico, PersonaCanonica, MontoCanonico, DomicilioCanonico,
-  EstadoAdminEmpresa, RelacionCanonica,
+  EstadoAdminEmpresa, RelacionCanonica, DatosGeneralesEmpresa,
 } from '../../types/kybCanonico';
 import { normalizarTexto } from '../casosComplianceMapper';
 
@@ -138,8 +138,14 @@ export function mapAccionistas(shareholders: unknown): PersonaCanonica[] {
 // Admin la reparte en cinco campos distintos. Se unifican en una lista sin
 // duplicados, porque el comparador compara conjuntos, no campos.
 function mapActividades(c: Crudo): string[] {
+  // `indActivity` es el bueno: {id, name, code, industry:{id,name}}. Se arma
+  // "código - nombre" porque así se lee en Admin ("960200 - Peluquería...").
+  const ind = (c.indActivity ?? {}) as Crudo;
+  const actividadInd = txt(ind.name)
+    ? [txt(ind.code), txt(ind.name)].filter(Boolean).join(' - ')
+    : '';
   const crudas: unknown[] = [
-    c.activity, c.indActivity, c.nosisActivity, c.companyFinancialActivity,
+    actividadInd, c.activity, c.nosisActivity, c.companyFinancialActivity,
   ];
   const vistas = new Set<string>();
   const out: string[] = [];
@@ -151,6 +157,15 @@ function mapActividades(c: Crudo): string[] {
     out.push(v);
   }
   return out;
+}
+
+// OJO: el campo `industries` de la empresa trae SOLO ids ([{id:20, activities:[588]}]),
+// sin nombre, así que por sí solo no sirve. El nombre legible está anidado en
+// `indActivity.industry.name`. Verificado contra la API.
+function mapIndustriaDesdeActividad(c: Crudo): string[] {
+  const ind = (c.indActivity ?? {}) as Crudo;
+  const nombre = txt((ind.industry as Crudo | undefined)?.name);
+  return nombre ? [nombre] : [];
 }
 
 // `industries` puede venir como lista de objetos {id, name} o de strings.
@@ -170,13 +185,37 @@ function mapIndustrias(v: unknown): string[] {
   return out;
 }
 
+// `addressCountry` es un OBJETO con el desglose completo:
+//   {country, state, city, street, number, complementAddress, district, postalCode}
+// El mapper anterior leía `.name`, que NO existe, así que el domicilio salía
+// siempre vacío del lado de Admin y el componente daba SOLO_LENS o SIN_DATOS.
+// Verificado contra la API con empresas reales.
 function mapDomicilio(c: Crudo): DomicilioCanonico | undefined {
-  // `addressCountry` puede ser objeto {name} o string.
   const ac = c.addressCountry;
-  const pais = txt(typeof ac === 'object' && ac !== null ? (ac as Crudo).name ?? '' : ac);
-  const texto = primero(c, 'address', 'fullAddress', 'addressLine');
+  if (typeof ac === 'string') {
+    const t = txt(ac);
+    return t ? { pais: t } : undefined;
+  }
+  const o = (ac ?? {}) as Crudo;
+  const pais = txt(o.country);
+  const region = txt(o.state);
+  const ciudad = txt(o.city);
+  const calle = txt(o.street);
+  const numero = txt(o.number);
+  const complemento = [txt(o.complementAddress), txt(o.district), txt(o.floor), txt(o.apt)]
+    .filter(Boolean).join(' ');
+  // El texto completo se arma con lo que haya, en orden de lectura humana.
+  const texto = [calle, numero, complemento, ciudad, region].filter(Boolean).join(', ');
   if (!pais && !texto) return undefined;
-  return { pais: pais || undefined, textoCompleto: texto || undefined };
+  return {
+    pais: pais || undefined,
+    region: region || undefined,
+    ciudad: ciudad || undefined,
+    calle: calle || undefined,
+    numero: numero || undefined,
+    complemento: complemento || undefined,
+    textoCompleto: texto || undefined,
+  };
 }
 
 function mapFacultades(c: Crudo): string[] {
@@ -236,12 +275,18 @@ export function mapAdminALadoCanonico(detalle: EmpresaDocsDetail): LadoCanonico 
     usuarios: dedupPersonas((detalle.personas ?? []).map(p => mapPersona(p as Crudo))),
 
     actividades: mapActividades(c),
-    industrias: mapIndustrias(c.industries),
+    // Primero la industria con nombre (de indActivity.industry); `industries` de
+    // la empresa solo trae ids y queda como respaldo.
+    industrias: [...new Set([...mapIndustriaDesdeActividad(c), ...mapIndustrias(c.industries)])],
 
     administracionConjunta: typeof c.hasJointAdministration === 'boolean' ? c.hasJointAdministration : null,
     facultades: mapFacultades(c),
 
+    // Admin devuelve un RANGO DE TEXTO ("Entre USD 100,000 y USD 1MM"), no un
+    // número. Se intenta como número y, si no lo es, se guarda el texto para
+    // poder mostrarlo — antes se perdía en silencio.
     facturacionAnualEstimada: monto(c.estimatedAnnualBillings),
+    facturacionTexto: txt(c.estimatedAnnualBillings) || undefined,
     ingresoMensual: monto(c.monthlyIncome),
     egresoMensual: monto(c.monthlyExpenses),
     activosTotales: monto(c.totalAssets),
@@ -272,6 +317,53 @@ export function mapEstadoAdmin(companyId: string, detalle: EmpresaDocsDetail): E
     proposito: txt(c.purposeUse) || txt(c.purposeUsePlatform) || undefined,
     crs: c.crs,
     fatca: c.fatca,
+    creadoEn: txt(c.createAt) || txt(c.recordCreatedAt) || undefined,
+  };
+}
+
+
+// ── Datos generales de la empresa ────────────────────────────────────────────
+// La vista "quién es este cliente", en el orden en que se lee en la ficha. Sale
+// TODO de Admin: es la fuente oficial. Los nombres de campo están verificados
+// contra la respuesta real, no contra documentación.
+export function mapDatosGenerales(detalle: EmpresaDocsDetail): DatosGeneralesEmpresa {
+  const c = (detalle.adminRaw ?? {}) as Crudo;
+  const ac = (c.addressCountry ?? {}) as Crudo;
+  const ind = (c.indActivity ?? {}) as Crudo;
+  const reps = (detalle.repLegales ?? []) as Crudo[];
+
+  return {
+    nombre: txt(c.name) || undefined,
+    pais: txt(ac.country) || undefined,
+    tipoIdentificacion: txt(c.identificationType) || undefined,
+    numeroIdentificacion: txt(c.identificationNumber) || undefined,
+    // La tributación internacional viene por persona (`internationalTaxation`),
+    // no a nivel empresa: se marca true si CUALQUIER representante la declara.
+    tributacionInternacional: reps.length
+      ? reps.some(r => r?.internationalTaxation === true)
+      : null,
+    region: txt(ac.state) || undefined,
+    ciudad: txt(ac.city) || undefined,
+    calle: txt(ac.street) || undefined,
+    numero: txt(ac.number) || undefined,
+    direccionComplementaria: txt(ac.complementAddress) || undefined,
+    administracionConjunta: typeof c.hasJointAdministration === 'boolean' ? c.hasJointAdministration : null,
+    institucional: typeof c.institutional === 'boolean' ? c.institutional : null,
+    paginaWeb: txt(c.companyWebsite) || undefined,
+    // La relación contractual también es por persona (`companyRelationship`).
+    relacionContractual: reps.map(r => txt(r?.companyRelationship)).find(Boolean) || undefined,
+    industria: txt((ind.industry as Crudo | undefined)?.name) || undefined,
+    actividad: txt(ind.name) ? [txt(ind.code), txt(ind.name)].filter(Boolean).join(' - ') : undefined,
+    facturacionAnualEstimada: txt(c.estimatedAnnualBillings) || undefined,
+    montosEnviosEsperados: txt(c.shipmentAmounts) || undefined,
+    frecuenciaEnviosEsperada: txt(c.shipmentFrequency) || undefined,
+    segmentacion: txt(c.segmentationType) || undefined,
+    // Dos niveles de riesgo distintos: el del partner (Regcheq) y el de Global66.
+    nivelRiesgoPartner: txt(c.riskLevelRegcheq) || undefined,
+    nivelRiesgoGlobal66: txt(c.riskLevel) || undefined,
+    telefono: [txt(c.phoneCountryCode), txt(c.phoneNumber)].filter(Boolean).join(' ') || undefined,
+    formaLegal: txt(c.legalForm) || undefined,
+    fechaConstitucion: txt(c.constitutionDate) || undefined,
     creadoEn: txt(c.createAt) || txt(c.recordCreatedAt) || undefined,
   };
 }
