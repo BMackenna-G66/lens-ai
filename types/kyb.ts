@@ -72,6 +72,10 @@ export interface AnalisisKyb {
   lens?: LadoCanonico;
   admin?: LadoCanonico;
   estadoAdmin?: EstadoAdminEmpresa;
+  // Screening criminal de la empresa y sus relacionados, con el catálogo de
+  // delitos de Chile (el mismo que usa la cola de Salesforce). Se guarda completo
+  // porque su ausencia y su resultado limpio NO son lo mismo.
+  screening?: unknown;
   // Qué faltó, cuando el estado es INCOMPLETO. Es lo que impide decidir a ciegas.
   faltantes?: string[];
   mensajeError?: string;
@@ -140,6 +144,11 @@ export interface EmpresaKyb {
     certidumbre: number | null;
     alertasCriticas: number;
     hashDocumentos?: string;
+    // Sugerencia del motor criminal y si el screening quedó verificado limpio.
+    // Van en el doc padre para poder mostrarlos en la cola sin abrir la ficha.
+    sugerenciaCriminal?: string;
+    screeningLimpio?: boolean;
+    screeningResumen?: string;
   };
 
   decision?: DecisionKyb;

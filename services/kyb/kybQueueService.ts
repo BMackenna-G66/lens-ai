@@ -142,6 +142,9 @@ export async function guardarAnalisis(analisis: AnalisisKyb): Promise<void> {
 
   await setDoc(doc(db, KYB_COLLECTION, companyId, SUBCOL_ANALISIS, runId), paraFirestore(analisis));
 
+  const scr = analisis.screening as { sugerenciaGlobal?: string; limpioVerificado?: boolean } | undefined;
+  const { resumenScreeningLegible } = await import('./kybScreeningService');
+
   await updateDoc(doc(db, KYB_COLLECTION, companyId), {
     ultimoAnalisis: paraFirestore({
       runId,
@@ -150,6 +153,10 @@ export async function guardarAnalisis(analisis: AnalisisKyb): Promise<void> {
       certidumbre: analisis.certidumbre,
       alertasCriticas: analisis.alertas.filter(a => a.severidad === 'CRITICA' && a.estado === 'ABIERTA').length,
       hashDocumentos: analisis.hashDocumentos ?? null,
+      // En el padre para poder mostrarlo en la cola sin abrir cada ficha.
+      sugerenciaCriminal: scr?.sugerenciaGlobal ?? null,
+      screeningLimpio: scr?.limpioVerificado ?? null,
+      screeningResumen: resumenScreeningLegible(analisis.screening as never) ?? null,
     }),
   });
 }
