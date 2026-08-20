@@ -44,10 +44,77 @@ export interface MontoCanonico {
 // ── Domicilio ────────────────────────────────────────────────────────────────
 export interface DomicilioCanonico {
   pais?: string;
+  // Admin devuelve `addressCountry` como OBJETO con el desglose completo:
+  // {country, state, city, street, number, complementAddress, district, postalCode}.
+  // El mapper leía `.name`, que no existe, así que el domicilio salía SIEMPRE
+  // vacío del lado de Admin. Verificado contra la API.
+  region?: string;          // state
+  ciudad?: string;          // city
+  calle?: string;           // street
+  numero?: string;
+  complemento?: string;     // complementAddress
   textoCompleto?: string;
   // Huella normalizada (vía + número, sin sinónimos ni abreviaturas) para poder
   // comparar "Av. Providencia 1234" con "Avenida Providencia N° 1234".
   huella?: string;
+}
+
+// Datos generales de la empresa, en el orden en que se muestran en la ficha.
+// Es la vista "quién es este cliente" antes de cualquier comparación.
+export interface DatosGeneralesEmpresa {
+  nombre?: string;
+  pais?: string;
+  tipoIdentificacion?: string;
+  numeroIdentificacion?: string;
+  tributacionInternacional?: boolean | null;
+  region?: string;
+  ciudad?: string;
+  calle?: string;
+  numero?: string;
+  direccionComplementaria?: string;
+  administracionConjunta?: boolean | null;
+  institucional?: boolean | null;
+  paginaWeb?: string;
+  relacionContractual?: string;
+  industria?: string;
+  actividad?: string;             // "código - nombre"
+  facturacionAnualEstimada?: string;   // es un RANGO de texto, no un número
+  montosEnviosEsperados?: string;
+  frecuenciaEnviosEsperada?: string;
+  segmentacion?: string;
+  nivelRiesgoPartner?: string;    // riskLevelRegcheq
+  nivelRiesgoGlobal66?: string;   // riskLevel
+  telefono?: string;
+  formaLegal?: string;
+  fechaConstitucion?: string;
+  creadoEn?: string;
+
+  // ── Campos que Admin SÍ trae y antes no se leían ──────────────────────────
+  // Verificado contra `/company/bo` (56 claves). OJO: NO existe un campo de
+  // "última validación del partner": lo más cercano son las fechas del ciclo
+  // KYC de abajo, que son de Global66, no del partner.
+  inicioActividades?: string;          // activityStartDate
+  paisTributacion?: string;            // companyTaxCountry
+  fatca?: boolean | null;
+  crs?: boolean | null;
+  multiActividad?: boolean | null;     // multiActivityEnabled
+  propositoUso?: string;               // purposeUse / purposes / purposePlatform
+  // Ciclo KYC: en qué etapa está y cuándo pasó por cada una. Es lo que explica
+  // por qué la empresa está en la cola.
+  kycEtapa1?: string;
+  kycEtapa2?: string;
+  kycEtapa3?: string;
+  kycSubidoManualEn?: string;          // kycStage1UploadedManualDate
+  kycAprobadoEn?: string;              // kycStage1ApprovedDate
+  kycRechazadoEn?: string;             // kycStage1RejectedDate
+  // Comentarios del operador. Son texto libre pero son la única traza de por qué
+  // alguien dejó la cuenta en ese estado.
+  comentarioCompliance?: string;
+  comentarioKyc?: string;
+  // Conteo DECLARADO de representantes vs los efectivamente cargados. Si no
+  // cuadran, Admin está incompleto y el dato hay que buscarlo en la escritura.
+  representantesDeclarados?: number | null;
+  representantesCargados?: number | null;
 }
 
 // ── Un lado de la comparación ────────────────────────────────────────────────
@@ -102,6 +169,11 @@ export interface LadoCanonico {
   // Perfil transaccional declarado (solo Admin).
   montosEnvio?: string;
   frecuenciaEnvio?: string;
+
+  // Los montos de Admin vienen como RANGO DE TEXTO, no como número
+  // ("Entre USD 100,000 y USD 1MM"). Se guardan tal cual para mostrarlos; el
+  // comparador numérico no puede usarlos y el componente queda de fuente única.
+  facturacionTexto?: string;
 
   // Estructura societaria (malla). Solo Admin.
   relaciones?: RelacionCanonica[];

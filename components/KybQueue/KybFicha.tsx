@@ -8,7 +8,7 @@ import React, { useState } from 'react';
 import type { AnalisisKyb, TipoDecisionKyb, EmpresaKyb } from '../../types/kyb';
 import { DECISIONES_CON_CHECKER } from '../../types/kyb';
 import type { EstadoComparacion, ResultadoComponente } from '../../types/kybMatriz';
-import { COMPONENTES_KYB } from '../../types/kybMatriz';
+import { COMPONENTES_KYB, FACTOR_ESTADO } from '../../types/kybMatriz';
 import { resumenAlertas } from '../../services/kyb/kybAlertasCatalogo';
 import type { ResultadoScreeningKyb, SujetoScreening } from '../../services/kyb/kybScreeningService';
 
@@ -44,10 +44,13 @@ interface Props {
   onAnalizar: () => void;
   onDecidir: (tipo: TipoDecisionKyb, comentario: string) => void;
   onCerrar: () => void;
+  // Cuando va embebida en la ficha flotante, la identidad ya la muestra la barra
+  // de arriba: repetirla acá sería ruido.
+  sinCabecera?: boolean;
 }
 
 export const KybFicha: React.FC<Props> = ({
-  empresa, analisis, analizando, progreso, onAnalizar, onDecidir, onCerrar,
+  empresa, analisis, analizando, progreso, onAnalizar, onDecidir, onCerrar, sinCabecera,
 }) => {
   const [verRazones, setVerRazones] = useState(false);
   const [decisionSel, setDecisionSel] = useState<TipoDecisionKyb | ''>('');
@@ -57,8 +60,9 @@ export const KybFicha: React.FC<Props> = ({
   const incompleto = analisis && analisis.estado !== 'COMPLETO';
 
   return (
-    <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-5">
+    <div className={sinCabecera ? '' : 'rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-5'}>
       {/* Cabecera */}
+      {!sinCabecera && (
       <div className="flex items-start justify-between gap-4 mb-4">
         <div className="min-w-0">
           <h2 className="text-xl font-black text-slate-900 dark:text-white truncate">{empresa.razonSocial}</h2>
@@ -73,6 +77,7 @@ export const KybFicha: React.FC<Props> = ({
           Cerrar
         </button>
       </div>
+      )}
 
       {/* Certidumbre. Sin análisis muestra "—", NUNCA 0%: un 0 diría que está
           todo mal, y lo que pasa es que no se sabe todavía. */}
@@ -148,17 +153,27 @@ export const KybFicha: React.FC<Props> = ({
         </div>
       )}
 
-      {/* Matriz de los 12 */}
-      <h3 className="text-sm font-black text-slate-800 dark:text-slate-200 mb-2">Matriz de 12 componentes</h3>
+      {/* Matriz de los 12. Las tres lecturas van una al lado de la otra en la
+          MISMA fila: Admin (la fuente de verdad operativa), lo que Lens sacó de
+          los documentos, y el resultado de cruzarlas. Separarlas en tres tablas
+          obligaría a saltar entre ellas para comparar un solo campo. */}
+      <div className="flex items-baseline justify-between gap-3 mb-2">
+        <h3 className="text-sm font-black text-slate-800 dark:text-slate-200">
+          Matriz de 12 componentes — Admin · Lens · resultado
+        </h3>
+        <span className="text-[10px] text-slate-400 dark:text-slate-500">
+          el denominador es fijo (100): un componente sin dato NO se redistribuye
+        </span>
+      </div>
       <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-700">
         <table className="w-full text-xs">
           <thead className="bg-slate-50 dark:bg-slate-800/60 text-slate-500 dark:text-slate-400 text-left">
             <tr>
               <th className="py-2 px-3 font-semibold">Componente</th>
               <th className="py-2 px-3 font-semibold">Peso</th>
-              <th className="py-2 px-3 font-semibold">Estado</th>
-              <th className="py-2 px-3 font-semibold">Documentos</th>
-              <th className="py-2 px-3 font-semibold">Admin</th>
+              <th className="py-2 px-3 font-semibold bg-sky-50/60 dark:bg-sky-950/30">Admin</th>
+              <th className="py-2 px-3 font-semibold bg-violet-50/60 dark:bg-violet-950/30">Lens (documentos)</th>
+              <th className="py-2 px-3 font-semibold">Resultado</th>
               <th className="py-2 px-3 font-semibold">Detalle</th>
             </tr>
           </thead>
@@ -167,13 +182,20 @@ export const KybFicha: React.FC<Props> = ({
               <tr key={c.id} className="border-t border-slate-100 dark:border-slate-800">
                 <td className="py-2 px-3 font-bold text-slate-800 dark:text-slate-100">{c.label}</td>
                 <td className="py-2 px-3 tabular-nums text-slate-500 dark:text-slate-400">{c.peso}</td>
+                <td className="py-2 px-3 text-slate-700 dark:text-slate-200 max-w-[200px] bg-sky-50/40 dark:bg-sky-950/20" title={c.valorAdmin}>
+                  {c.valorAdmin || '—'}
+                </td>
+                <td className="py-2 px-3 text-slate-700 dark:text-slate-200 max-w-[200px] bg-violet-50/40 dark:bg-violet-950/20" title={c.valorLens}>
+                  {c.valorLens || '—'}
+                </td>
                 <td className="py-2 px-3">
                   <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${COLOR_ESTADO[c.estado]}`}>
                     {ETIQUETA_ESTADO[c.estado]}
                   </span>
+                  <span className="block text-[10px] text-slate-400 dark:text-slate-500 tabular-nums mt-0.5">
+                    aporta {(c.peso * FACTOR_ESTADO[c.estado]).toFixed(1)} de {c.peso}
+                  </span>
                 </td>
-                <td className="py-2 px-3 text-slate-600 dark:text-slate-300 max-w-[180px] truncate" title={c.valorLens}>{c.valorLens || '—'}</td>
-                <td className="py-2 px-3 text-slate-600 dark:text-slate-300 max-w-[180px] truncate" title={c.valorAdmin}>{c.valorAdmin || '—'}</td>
                 <td className="py-2 px-3 text-slate-500 dark:text-slate-400">
                   {c.detalle || '—'}
                   {c.soloEnLens?.length ? <span className="block text-[10px] text-amber-600 dark:text-amber-400">Solo docs: {c.soloEnLens.join(', ')}</span> : null}
