@@ -20,6 +20,7 @@ import type { DocumentoKyb } from '../../types/kyb';
 import { subscribeFlujoKyb, guardarFlujoKyb, FLUJO_KYB_DEFAULT, PAISES_KYB, type FlujoKybConfig } from '../../services/kyb/kybFlujoService';
 import { simularBarrido, barrer, barrerEnVivo, barridoDisponible, detectarReingresos, TOPE_BARRIDO, PRESET_EN_VIVO, type FiltrosBarrido, type ResultadoSimulacion } from '../../services/kyb/kybSweepService';
 import { marcarReingreso } from '../../services/kyb/kybQueueService';
+import { ordenarYFiltrar, sugerenciasPresentes, estadosPresentes, type ColumnaOrden } from '../../services/kyb/kybOrdenCola';
 
 interface Props {
   onBack: () => void;
@@ -45,6 +46,12 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
   const [encolando, setEncolando] = useState(false);
   const [msg, setMsg] = useState('');
   const [filtro, setFiltro] = useState('');
+  // Orden de la tabla. Arranca por fecha de recepción descendente: lo más nuevo
+  // primero, que es cómo se trabaja una cola.
+  const [orden, setOrden] = useState<ColumnaOrden>('recibidoEn');
+  const [ordenAsc, setOrdenAsc] = useState(false);
+  const [fSugerencia, setFSugerencia] = useState('');
+  const [fAnalisis, setFAnalisis] = useState('');
 
   // ── Mantenedor del flujo automático ──
   const [flujo, setFlujo] = useState<FlujoKybConfig>(FLUJO_KYB_DEFAULT);
@@ -289,16 +296,36 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
     if (e) { setSelId(e.companyId); cargadoPara.current = null; }
   };
 
-  const filtrados = useMemo(() => {
-    const f = filtro.trim().toLowerCase();
-    if (!f) return items;
-    return items.filter(i =>
-      i.razonSocial.toLowerCase().includes(f) ||
-      i.companyId.includes(f) ||
-      (i.identificacion ?? '').includes(f));
-  }, [items, filtro]);
+  const filtrados = useMemo(
+    () => ordenarYFiltrar(items, {
+      texto: filtro, sugerencia: fSugerencia, estadoAnalisis: fAnalisis,
+      orden, asc: ordenAsc,
+    }),
+    [items, filtro, fSugerencia, fAnalisis, orden, ordenAsc],
+  );
+
+  const sugerenciasEnCola = useMemo(() => sugerenciasPresentes(items), [items]);
+  const estadosEnCola = useMemo(() => estadosPresentes(items), [items]);
 
   const indiceSel = useMemo(() => filtrados.findIndex(i => i.companyId === selId), [filtrados, selId]);
+
+  // Encabezado ordenable. Un clic ordena por esa columna; el segundo invierte.
+  // Al cambiar de columna se arranca descendente, que es lo que se quiere mirar
+  // primero en una cola de riesgo (lo más grave / lo más nuevo arriba).
+  const Th: React.FC<{ col: ColumnaOrden; children: React.ReactNode }> = ({ col, children }) => (
+    <th className="py-3 px-4 font-semibold">
+      <button
+        onClick={() => { orden === col ? setOrdenAsc(a => !a) : (setOrden(col), setOrdenAsc(false)); }}
+        className={`flex items-center gap-1 hover:text-violet-700 dark:hover:text-violet-400 ${
+          orden === col ? 'text-violet-700 dark:text-violet-400' : ''
+        }`}
+        title="Ordenar por esta columna"
+      >
+        {children}
+        <span className="text-[9px] opacity-70">{orden === col ? (ordenAsc ? '▲' : '▼') : '⇅'}</span>
+      </button>
+    </th>
+  );
 
   // PDF con todo lo de la ficha. Se genera desde el análisis guardado, sin
   // re-consultar nada.
@@ -345,12 +372,41 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
         >
           {encolando ? 'Encolando…' : 'Encolar empresa'}
         </button>
+        {/* Buscador y filtros. Los desplegables solo ofrecen valores que están
+            en la cola: un filtro que no puede filtrar nada es ruido. */}
         <input
           value={filtro}
           onChange={e => setFiltro(e.target.value)}
-          placeholder="Filtrar por nombre, ID o RUT"
-          className="text-sm bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 ml-auto w-64"
+          placeholder="Buscar por nombre, Company ID o RUT"
+          className="text-sm bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 ml-auto w-72"
         />
+        <select
+          value={fSugerencia}
+          onChange={e => setFSugerencia(e.target.value)}
+          className="text-sm bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2"
+          title="Sugerencia del motor criminal"
+        >
+          <option value="">Sugerencia: todas</option>
+          {sugerenciasEnCola.map(x => <option key={x} value={x}>{x}</option>)}
+          <option value="SIN">— sin screening —</option>
+        </select>
+        <select
+          value={fAnalisis}
+          onChange={e => setFAnalisis(e.target.value)}
+          className="text-sm bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2"
+          title="Estado del análisis"
+        >
+          <option value="">Análisis: todos</option>
+          {estadosEnCola.map(x => <option key={x} value={x}>{x}</option>)}
+        </select>
+        {(filtro || fSugerencia || fAnalisis) && (
+          <button
+            onClick={() => { setFiltro(''); setFSugerencia(''); setFAnalisis(''); }}
+            className="text-xs text-slate-500 dark:text-slate-400 hover:underline"
+          >
+            Limpiar filtros
+          </button>
+        )}
       </div>
 
       {/* Mantenedor del flujo automático. Arranca todo apagado y en simulación:
@@ -618,9 +674,19 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
       {(
         <>
           {cargando && <p className="text-sm text-slate-400 py-10 text-center animate-pulse">Cargando cola…</p>}
+          {/* Vacío por filtro y vacío de verdad NO son lo mismo: si el mensaje
+              dice "la cola está vacía" con un filtro puesto, se busca el
+              problema donde no está. */}
           {!cargando && !error && filtrados.length === 0 && (
             <p className="text-sm text-slate-400 py-10 text-center">
-              La cola está vacía. Encolá una empresa con su Company ID de Admin.
+              {items.length === 0
+                ? 'La cola está vacía. Encolá una empresa con su Company ID de Admin.'
+                : `Ninguna de las ${items.length} empresas de la cola coincide con el filtro.`}
+            </p>
+          )}
+          {!cargando && !error && filtrados.length > 0 && filtrados.length !== items.length && (
+            <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">
+              Mostrando <b>{filtrados.length}</b> de {items.length} · filtro activo
             </p>
           )}
           {seleccion.size > 0 && (
@@ -668,16 +734,16 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
                         title="Seleccionar todas las visibles"
                       />
                     </th>
-                    <th className="py-3 px-4 font-semibold">Empresa</th>
-                    <th className="py-3 px-4 font-semibold">Company ID</th>
-                    <th className="py-3 px-4 font-semibold">Identificación</th>
-                    <th className="py-3 px-4 font-semibold">Compliance</th>
-                    <th className="py-3 px-4 font-semibold">Certidumbre</th>
+                    <Th col="razonSocial">Empresa</Th>
+                    <Th col="companyId">Company ID</Th>
+                    <Th col="identificacion">Identificación</Th>
+                    <Th col="complianceStatus">Compliance</Th>
+                    <Th col="certidumbre">Certidumbre</Th>
                     <th className="py-3 px-4 font-semibold">Screening criminal</th>
-                    <th className="py-3 px-4 font-semibold">Sugerencia del motor</th>
-                    <th className="py-3 px-4 font-semibold">Análisis</th>
-                    <th className="py-3 px-4 font-semibold">Decisión</th>
-                    <th className="py-3 px-4 font-semibold">Recibido</th>
+                    <Th col="sugerencia">Sugerencia del motor</Th>
+                    <Th col="estado">Análisis</Th>
+                    <Th col="decision">Decisión</Th>
+                    <Th col="recibidoEn">Recibido</Th>
                   </tr>
                 </thead>
                 <tbody>
