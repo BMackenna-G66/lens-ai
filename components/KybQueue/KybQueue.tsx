@@ -13,9 +13,11 @@ import { mapEstadoAdmin } from '../../services/kyb/kybAdminMapper';
 import type { EmpresaKyb, AnalisisKyb, TipoDecisionKyb } from '../../types/kyb';
 import { DECISIONES_CON_CHECKER } from '../../types/kyb';
 import { useAuth } from '../../context/AuthContext';
-import { KybFicha } from './KybFicha';
+import { KybFichaFlotante } from './KybFichaFlotante';
+import { getPresignedUrl } from '../../services/empresaDocsClient';
+import { runPool } from '../../services/casosCriminalService';
+import type { DocumentoKyb } from '../../types/kyb';
 import { subscribeFlujoKyb, guardarFlujoKyb, FLUJO_KYB_DEFAULT, PAISES_KYB, type FlujoKybConfig } from '../../services/kyb/kybFlujoService';
-import { evaluarKybAuto, motivoKybLegible } from '../../services/kyb/flujoKybEngine';
 import { simularBarrido, barrer, barrerEnVivo, barridoDisponible, detectarReingresos, TOPE_BARRIDO, PRESET_EN_VIVO, type FiltrosBarrido, type ResultadoSimulacion } from '../../services/kyb/kybSweepService';
 import { marcarReingreso } from '../../services/kyb/kybQueueService';
 
@@ -59,6 +61,46 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
   const [sim, setSim] = useState<ResultadoSimulacion | null>(null);
   const [barriendo, setBarriendo] = useState(false);
   const [dias, setDias] = useState(PRESET_EN_VIVO.diasAtras);
+
+  // ── Selección y análisis masivo ──
+  // Es lo que convierte la cola en una cola de casos: se analizan muchas de una
+  // y después el analista solo entra a ver resultados.
+  const [seleccion, setSeleccion] = useState<Set<string>>(new Set());
+  const [masivo, setMasivo] = useState<{ hechas: number; total: number; actual: string } | null>(null);
+
+  const toggleSel = (id: string) => setSeleccion(s2 => {
+    const n = new Set(s2);
+    n.has(id) ? n.delete(id) : n.add(id);
+    return n;
+  });
+
+  const analizarSeleccionadas = async () => {
+    const ids = [...seleccion];
+    if (ids.length === 0) return;
+    setMasivo({ hechas: 0, total: ids.length, actual: '' });
+    let ok = 0, err = 0;
+    // Concurrencia 2: cada empresa son N descargas + OCR (CPU) + varias llamadas
+    // a Gemini + N consultas a Regcheq. Más paralelo no va más rápido, satura.
+    await runPool(ids, async id => {
+      const emp = items.find(i => i.companyId === id);
+      setMasivo(m => m ? { ...m, actual: emp?.razonSocial ?? id } : m);
+      try {
+        await analizarEmpresa(id, {
+          hayApiKey: hayGeminiKey(),
+          empresa: emp,
+          actor: { uid: user?.uid, nombre: user?.displayName ?? user?.email ?? undefined },
+        });
+        ok++;
+      } catch { err++; }
+      setMasivo(m => m ? { ...m, hechas: m.hechas + 1 } : m);
+    }, 2);
+    setMasivo(null);
+    setSeleccion(new Set());
+    // Si quedó una ficha abierta, se fuerza la recarga: puede haber sido una de
+    // las analizadas y mostraría la corrida anterior.
+    cargadoPara.current = null;
+    setMsg(`✅ ${ok} analizada(s)${err ? ` · ${err} con error` : ''}`);
+  };
 
   // Preset "cola en vivo": UPLOADED_MANUAL · Chile · todos los estados menos
   // BLOCKED y FULLY_BLOCKED · últimos N días. La exclusión de estados y el corte
@@ -187,6 +229,32 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
     }
   };
 
+  const abrirDocumento = async (d: DocumentoKyb) => {
+    if (!d.link) { setMsg('❌ El documento no tiene clave para abrirlo'); return; }
+    try {
+      // La URL firmada se pide al momento: si se guardara, expiraría.
+      const url = await getPresignedUrl(d.link);
+      if (url) window.open(url, '_blank', 'noopener');
+      else setMsg('❌ Admin no devolvió la URL del documento');
+    } catch (e) {
+      setMsg(`❌ ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const eliminarDeCola = async (companyId: string) => {
+    try {
+      await setStatusKyb(companyId, 'CERRADO');
+      setSelId(null); cargadoPara.current = null;
+      setMsg('✅ Empresa sacada de la cola (el histórico se conserva)');
+    } catch (e) { setMsg(`❌ ${e instanceof Error ? e.message : String(e)}`); }
+  };
+
+  // Navegación dentro de la ficha: pasar a la empresa siguiente sin cerrarla.
+  const irA = (idx: number) => {
+    const e = filtrados[idx];
+    if (e) { setSelId(e.companyId); cargadoPara.current = null; }
+  };
+
   const filtrados = useMemo(() => {
     const f = filtro.trim().toLowerCase();
     if (!f) return items;
@@ -195,6 +263,20 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
       i.companyId.includes(f) ||
       (i.identificacion ?? '').includes(f));
   }, [items, filtro]);
+
+  const indiceSel = useMemo(() => filtrados.findIndex(i => i.companyId === selId), [filtrados, selId]);
+
+  // PDF con todo lo de la ficha. Se genera desde el análisis guardado, sin
+  // re-consultar nada.
+  const descargarPdf = async (e: EmpresaKyb) => {
+    if (!analisis) { setMsg('❌ Primero hay que analizar la empresa'); return; }
+    try {
+      const { generarPdfKyb } = await import('../../services/kyb/kybPdfService');
+      await generarPdfKyb(e, analisis);
+    } catch (err) {
+      setMsg(`❌ PDF: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-950 p-4 md:p-6 transition-colors">
@@ -492,7 +574,7 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
         </div>
       )}
 
-      {!sel && (
+      {(
         <>
           {cargando && <p className="text-sm text-slate-400 py-10 text-center animate-pulse">Cargando cola…</p>}
           {!cargando && !error && filtrados.length === 0 && (
@@ -500,17 +582,46 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
               La cola está vacía. Encolá una empresa con su Company ID de Admin.
             </p>
           )}
+          {seleccion.size > 0 && (
+            <div className="flex flex-wrap items-center gap-3 mb-3 bg-violet-50 dark:bg-violet-950/40 border border-violet-200 dark:border-violet-800/50 rounded-xl px-4 py-2 text-sm">
+              <span className="font-semibold text-violet-800 dark:text-violet-300">{seleccion.size} seleccionada(s)</span>
+              <button
+                onClick={analizarSeleccionadas}
+                disabled={!!masivo}
+                className="px-4 py-1.5 rounded-xl bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white text-xs font-bold"
+              >
+                {masivo ? `Analizando ${masivo.hechas}/${masivo.total}…` : `Analizar ${seleccion.size}`}
+              </button>
+              {masivo?.actual && (
+                <span className="text-xs text-violet-700 dark:text-violet-400 truncate">{masivo.actual}</span>
+              )}
+              <button onClick={() => setSeleccion(new Set())} className="ml-auto text-xs text-slate-500 dark:text-slate-400 hover:underline">
+                Limpiar selección
+              </button>
+            </div>
+          )}
+
           {filtrados.length > 0 && (
             <div className="overflow-x-auto rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900">
               <table className="w-full text-sm">
                 <thead className="bg-slate-50 dark:bg-slate-800/60 text-slate-500 dark:text-slate-400 text-left text-xs">
                   <tr>
+                    <th className="py-3 px-2">
+                      <input
+                        type="checkbox"
+                        checked={filtrados.length > 0 && filtrados.every(i => seleccion.has(i.companyId))}
+                        onChange={e => setSeleccion(e.target.checked ? new Set(filtrados.map(i => i.companyId)) : new Set())}
+                        className="accent-violet-600"
+                        title="Seleccionar todas las visibles"
+                      />
+                    </th>
                     <th className="py-3 px-4 font-semibold">Empresa</th>
                     <th className="py-3 px-4 font-semibold">Company ID</th>
                     <th className="py-3 px-4 font-semibold">Identificación</th>
                     <th className="py-3 px-4 font-semibold">Compliance</th>
                     <th className="py-3 px-4 font-semibold">Certidumbre</th>
                     <th className="py-3 px-4 font-semibold">Screening criminal</th>
+                    <th className="py-3 px-4 font-semibold">Sugerencia del motor</th>
                     <th className="py-3 px-4 font-semibold">Análisis</th>
                     <th className="py-3 px-4 font-semibold">Decisión</th>
                     <th className="py-3 px-4 font-semibold">Recibido</th>
@@ -523,6 +634,14 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
                       onClick={() => setSelId(i.companyId)}
                       className="border-t border-slate-100 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/40 cursor-pointer"
                     >
+                      <td className="py-3 px-2" onClick={e => e.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          checked={seleccion.has(i.companyId)}
+                          onChange={() => toggleSel(i.companyId)}
+                          className="accent-violet-600"
+                        />
+                      </td>
                       <td className="py-3 px-4 font-bold text-slate-800 dark:text-slate-100">{i.razonSocial}</td>
                       <td className="py-3 px-4 text-slate-600 dark:text-slate-300">{i.companyId}</td>
                       <td className="py-3 px-4 text-slate-600 dark:text-slate-300">{i.identificacion || '—'}</td>
@@ -548,6 +667,19 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
                           </span>
                         )}
                       </td>
+                      {/* Sugerencia del catálogo de delitos de Chile, en su propia
+                          columna: es lo que el analista compara contra su decisión. */}
+                      <td className="py-3 px-4 text-xs">
+                        {i.ultimoAnalisis?.sugerenciaCriminal
+                          ? <span className={/blocked|ucr|compliance/i.test(i.ultimoAnalisis.sugerenciaCriminal)
+                              ? 'text-red-600 dark:text-red-400 font-bold'
+                              : /revisar/i.test(i.ultimoAnalisis.sugerenciaCriminal)
+                                ? 'text-amber-700 dark:text-amber-400 font-semibold'
+                                : 'text-emerald-700 dark:text-emerald-400 font-semibold'}>
+                              {i.ultimoAnalisis.sugerenciaCriminal}
+                            </span>
+                          : <span className="text-slate-400">—</span>}
+                      </td>
                       <td className="py-3 px-4 text-xs text-slate-500 dark:text-slate-400">
                         {i.ultimoAnalisis?.estado ?? 'SIN_ANALIZAR'}
                       </td>
@@ -569,54 +701,25 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
         </>
       )}
 
+      {/* Ficha FLOTANTE: se abre encima de la cola, así al cerrar no hay que
+          retroceder ni volver a buscar la empresa. */}
       {sel && (
-        <>
-          {/* Si el análisis guardado quedó viejo respecto de los documentos
-              actuales, se avisa en vez de mostrar un número desactualizado. */}
-          <KybFicha
-            empresa={sel}
-            analisis={analisis}
-            analizando={analizando}
-            progreso={progreso}
-            onAnalizar={() => correrAnalisis(sel.companyId)}
-            onDecidir={decidir}
-            onCerrar={() => { setSelId(null); cargadoPara.current = null; }}
-          />
-          {/* Por qué este caso no se cierra solo. Deja explícito qué freno aplicó,
-              que es lo que hay que poder auditar del flujo automático. */}
-          {(() => {
-            const ev = evaluarKybAuto(sel, analisis ?? undefined, flujo);
-            if (ev.automatizable) {
-              return (
-                <p className={`text-xs mt-3 ${ev.simulacion ? 'text-sky-700 dark:text-sky-400' : 'text-emerald-700 dark:text-emerald-400'}`}>
-                  {ev.simulacion ? '🧪' : '✅'} El flujo automático {ev.simulacion ? 'habría' : 'va a'} <b>{ev.decision}</b> este caso · {ev.detalle}
-                </p>
-              );
-            }
-            const duro = ['delito_sensible', 'pep', 'terminos_pendientes', 'alerta_critica', 'discrepancia_identidad'].includes(ev.motivo ?? '');
-            return (
-              <p className={`text-xs mt-3 ${duro ? 'text-red-700 dark:text-red-400 font-semibold' : 'text-slate-500 dark:text-slate-400'}`}>
-                {duro ? '🛑 ' : '⏸️ '}No se decide solo: {motivoKybLegible(ev.motivo)}
-                {ev.detalle ? ` · ${ev.detalle}` : ''}
-              </p>
-            );
-          })()}
-
-          <div className="flex items-center gap-2 mt-3">
-            <button
-              onClick={() => setStatusKyb(sel.companyId, 'CERRADO').catch(() => {})}
-              className="text-xs px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-600"
-              title="Saca la empresa de la cola sin borrar el histórico"
-            >
-              Sacar de la cola
-            </button>
-            {!hayGeminiKey() && (
-              <span className="text-[11px] text-amber-600 dark:text-amber-400">
-                Sin API key de Gemini: el análisis va a correr solo con el lado de Admin.
-              </span>
-            )}
-          </div>
-        </>
+        <KybFichaFlotante
+          empresa={sel}
+          analisis={analisis}
+          analizando={analizando}
+          progreso={progreso}
+          onAnalizar={() => correrAnalisis(sel.companyId)}
+          onDecidir={decidir}
+          onEliminar={() => eliminarDeCola(sel.companyId)}
+          onAbrirDocumento={abrirDocumento}
+          onDescargarPdf={() => descargarPdf(sel)}
+          onCerrar={() => { setSelId(null); cargadoPara.current = null; }}
+          onAnterior={indiceSel > 0 ? () => irA(indiceSel - 1) : undefined}
+          onSiguiente={indiceSel >= 0 && indiceSel < filtrados.length - 1 ? () => irA(indiceSel + 1) : undefined}
+          posicion={indiceSel >= 0 ? `${indiceSel + 1} / ${filtrados.length}` : undefined}
+          flujo={flujo}
+        />
       )}
     </div>
   );

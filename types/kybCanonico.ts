@@ -88,6 +88,33 @@ export interface DatosGeneralesEmpresa {
   formaLegal?: string;
   fechaConstitucion?: string;
   creadoEn?: string;
+
+  // ── Campos que Admin SÍ trae y antes no se leían ──────────────────────────
+  // Verificado contra `/company/bo` (56 claves). OJO: NO existe un campo de
+  // "última validación del partner": lo más cercano son las fechas del ciclo
+  // KYC de abajo, que son de Global66, no del partner.
+  inicioActividades?: string;          // activityStartDate
+  paisTributacion?: string;            // companyTaxCountry
+  fatca?: boolean | null;
+  crs?: boolean | null;
+  multiActividad?: boolean | null;     // multiActivityEnabled
+  propositoUso?: string;               // purposeUse / purposes / purposePlatform
+  // Ciclo KYC: en qué etapa está y cuándo pasó por cada una. Es lo que explica
+  // por qué la empresa está en la cola.
+  kycEtapa1?: string;
+  kycEtapa2?: string;
+  kycEtapa3?: string;
+  kycSubidoManualEn?: string;          // kycStage1UploadedManualDate
+  kycAprobadoEn?: string;              // kycStage1ApprovedDate
+  kycRechazadoEn?: string;             // kycStage1RejectedDate
+  // Comentarios del operador. Son texto libre pero son la única traza de por qué
+  // alguien dejó la cuenta en ese estado.
+  comentarioCompliance?: string;
+  comentarioKyc?: string;
+  // Conteo DECLARADO de representantes vs los efectivamente cargados. Si no
+  // cuadran, Admin está incompleto y el dato hay que buscarlo en la escritura.
+  representantesDeclarados?: number | null;
+  representantesCargados?: number | null;
 }
 
 // ── Un lado de la comparación ────────────────────────────────────────────────

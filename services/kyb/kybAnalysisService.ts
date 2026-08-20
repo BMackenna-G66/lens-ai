@@ -24,7 +24,7 @@ import { runPool } from '../casosCriminalService';
 import type { BatchCompanyInput, BatchDocumentInput } from '../../types/batch';
 import type { ExtractedField } from '../../types';
 import type { EmpresaDocsDocument, EmpresaDocsContexto } from '../../types/empresaDocs';
-import { mapAdminALadoCanonico, mapEstadoAdmin } from './kybAdminMapper';
+import { mapAdminALadoCanonico, mapEstadoAdmin, mapDatosGenerales } from './kybAdminMapper';
 import { mapLensALadoCanonico, faltantesLens } from './kybLensMapper';
 import { compararKyb } from './kybComparador';
 import { calcularCertidumbre, coberturaComparada } from './kybCertaintyEngine';
@@ -32,7 +32,7 @@ import { evaluarAlertas } from './kybAlertasCatalogo';
 import { screenearEmpresaKyb, aScreeningPersonas, type ResultadoScreeningKyb } from './kybScreeningService';
 import { guardarAnalisis } from './kybQueueService';
 import { logAnalisisKyb } from './kybLogService';
-import type { AnalisisKyb, EstadoAnalisisKyb, AlertaKyb, EmpresaKyb } from '../../types/kyb';
+import type { AnalisisKyb, EstadoAnalisisKyb, AlertaKyb, EmpresaKyb, DocumentoKyb } from '../../types/kyb';
 import type { LadoCanonico } from '../../types/kybCanonico';
 
 export interface ProgresoAnalisis {
@@ -258,6 +258,17 @@ export async function analizarEmpresa(
     admin,
     estadoAdmin,
     screening,
+    datosGenerales: mapDatosGenerales(detalle),
+    // Inventario completo, marcando cuáles entraron en esta corrida: si la empresa
+    // tiene más documentos que el tope, hay que poder verlo.
+    documentos: documentos.map((d, i): DocumentoKyb => ({
+      nombre: String(d.fileName ?? `documento-${i + 1}`),
+      link: String(d.link ?? ''),
+      slot: d.slot,
+      estado: d.status,
+      fecha: d.date,
+      analizado: i < maxDocumentos && hayApiKey,
+    })),
     faltantes: faltantes.length ? faltantes : undefined,
     mensajeError,
   };

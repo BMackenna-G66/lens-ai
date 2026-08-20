@@ -365,5 +365,35 @@ export function mapDatosGenerales(detalle: EmpresaDocsDetail): DatosGeneralesEmp
     formaLegal: txt(c.legalForm) || undefined,
     fechaConstitucion: txt(c.constitutionDate) || undefined,
     creadoEn: txt(c.createAt) || txt(c.recordCreatedAt) || undefined,
+
+    // Campos que Admin SÍ trae y antes no se leían. Verificado contra
+    // `/company/bo`: son 56 claves y estas 12 quedaban afuera. OJO: NO existe un
+    // campo de "última validación del partner" — lo más cercano son las fechas
+    // del ciclo KYC, que son de Global66, no del partner.
+    inicioActividades: txt(c.activityStartDate) || undefined,
+    paisTributacion: txt(c.companyTaxCountry) || undefined,
+    fatca: typeof c.fatca === 'boolean' ? c.fatca : null,
+    crs: typeof c.crs === 'boolean' ? c.crs : null,
+    multiActividad: typeof c.multiActivityEnabled === 'boolean' ? c.multiActivityEnabled : null,
+    // `purposes` es una lista; `purposeUse` y `purposeUsePlatform` son sueltos.
+    // Se juntan porque en la práctica cada empresa llena uno u otro.
+    propositoUso: [
+      txt(c.purposeUse),
+      txt(c.purposeUsePlatform),
+      Array.isArray(c.purposes) ? c.purposes.map(x => txt(x)).filter(Boolean).join(', ') : '',
+    ].filter(Boolean).join(' · ') || undefined,
+    kycEtapa1: txt(c.kycStage1) || undefined,
+    kycEtapa2: txt(c.kycStage2) || undefined,
+    kycEtapa3: txt(c.kycStage3) || undefined,
+    kycSubidoManualEn: txt(c.kycStage1UploadedManualDate) || undefined,
+    kycAprobadoEn: txt(c.kycStage1ApprovedDate) || undefined,
+    kycRechazadoEn: txt(c.kycStage1RejectedDate) || undefined,
+    comentarioCompliance: txt(c.complianceStatusComment) || undefined,
+    comentarioKyc: [txt(c.kycStage1Comment), txt(c.kycStage2Comment), txt(c.kycStage3Comment)]
+      .filter(Boolean).join(' · ') || undefined,
+    // Conteo DECLARADO vs efectivamente cargados. Si no cuadran, Admin está
+    // incompleto y el dato hay que buscarlo en la escritura.
+    representantesDeclarados: typeof c.legalRepresentativesCount === 'number' ? c.legalRepresentativesCount : null,
+    representantesCargados: reps.length,
   };
 }

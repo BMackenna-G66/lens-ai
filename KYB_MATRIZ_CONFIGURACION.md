@@ -109,7 +109,38 @@ El objeto del representante legal tiene `politicallyExposedPerson`, `pepType` y
 cruzar el PEP declarado en Admin contra el que devuelve el screening de Regcheq: si
 Admin dice que no es PEP y Regcheq dice que sí, eso es un hallazgo.
 
-### 5.4 Capital social **no existe** en Admin
+### 5.4 No existe "última validación del partner" ✅ verificado
+
+`/company/bo` devuelve **56 claves** y ninguna es una fecha de validación del
+partner. Lo más cercano es el ciclo KYC de Global66, que ahora sí se extrae:
+`kycStage1UploadedManualDate`, `kycStage1ApprovedDate`, `kycStage1RejectedDate`.
+Son fechas **nuestras**, no del partner — la ficha lo dice así para que nadie las
+lea como si fueran de Regcheq.
+
+### 5.5 12 campos de Admin que antes no se leían — ya se extraen ✅
+
+Estaban en la respuesta y se descartaban. Ahora salen en Datos generales:
+
+| Campo de Admin | En la ficha |
+|---|---|
+| `activityStartDate` | Inicio de actividades |
+| `companyTaxCountry` | País de tributación |
+| `fatca` / `crs` | FATCA · CRS |
+| `multiActivityEnabled` | Multi-actividad |
+| `purposeUse` + `purposeUsePlatform` + `purposes` | Propósito de uso |
+| `kycStage1/2/3` + sus 3 fechas | Ciclo KYC |
+| `complianceStatusComment` | Comentario de compliance |
+| `kycStage1/2/3Comment` | Comentario KYC |
+| `legalRepresentativesCount` | contraste con los cargados (ver abajo) |
+
+**`legalRepresentativesCount` vs `legalRepresentatives.length`**: Admin declara un
+número y además trae la lista. Cuando no cuadran, la ficha y el PDF lo avisan: es
+Admin incompleto, y el dato hay que sacarlo de la escritura.
+
+Ninguno de estos entra hoy en la matriz de 12 — son contexto para el analista. Si
+alguno debe pesar, va en la revisión de pesos que quedó pendiente.
+
+### 5.6 Capital social **no existe** en Admin
 
 Confirmado. Queda como **fuente única** desde la escritura: se valida que esté, no
 se compara.
@@ -144,6 +175,8 @@ dice en la columna Detalle:
 | Penalización por alertas y topes | `services/kyb/kybCertaintyEngine.ts` |
 | Las 36 alertas y sus umbrales | `services/kyb/kybAlertasCatalogo.ts` |
 | Cortes del flujo automático | `services/kyb/flujoKybEngine.ts` |
+| Campos y orden de Datos generales en la ficha | `components/KybQueue/KybFichaFlotante.tsx` (`CAMPOS_GENERALES`) |
+| Campos y orden de Datos generales en el PDF | `services/kyb/kybPdfService.ts` (`CAMPOS`) |
 | Filtros del barrido y el preset en vivo | `services/kyb/kybSweepService.ts` |
 
 Todos son mantenedores: se edita el archivo y el resto lo toma solo.

@@ -76,6 +76,11 @@ export interface AnalisisKyb {
   // delitos de Chile (el mismo que usa la cola de Salesforce). Se guarda completo
   // porque su ausencia y su resultado limpio NO son lo mismo.
   screening?: unknown;
+  // Datos generales tal como los tiene Admin: la vista "quién es este cliente",
+  // que es lo primero que mira el analista antes de cualquier comparación.
+  datosGenerales?: unknown;
+  // Inventario de documentos, con la clave para poder abrirlos.
+  documentos?: DocumentoKyb[];
   // Qué faltó, cuando el estado es INCOMPLETO. Es lo que impide decidir a ciegas.
   faltantes?: string[];
   mensajeError?: string;
@@ -165,6 +170,17 @@ export interface EmpresaKyb {
   // acá y se notifica, para que la reapertura sea una decisión de alguien.
   reingresoPendiente?: boolean;
   reingresoMotivo?: string | null;
+}
+
+// Un documento de la empresa en Admin. `link` es el fileKey de S3: la URL firmada
+// se genera al momento de abrirlo, porque expira.
+export interface DocumentoKyb {
+  nombre: string;
+  link: string;
+  slot?: string;
+  estado?: string;
+  fecha?: string;
+  analizado: boolean;   // si entró en la corrida (se procesan hasta N por empresa)
 }
 
 export interface EstadoCanalKyb {
