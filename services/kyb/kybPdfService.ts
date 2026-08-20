@@ -9,6 +9,7 @@ import autoTable from 'jspdf-autotable';
 import type { AnalisisKyb, EmpresaKyb } from '../../types/kyb';
 import type { DatosGeneralesEmpresa, PersonaCanonica } from '../../types/kybCanonico';
 import type { ResultadoScreeningKyb } from './kybScreeningService';
+import { datosGeneralesDesdeLado } from './kybAdminMapper';
 
 const CAMPOS: { clave: keyof DatosGeneralesEmpresa; label: string }[] = [
   { clave: 'nombre', label: 'Nombre' },
@@ -104,7 +105,12 @@ const finY = (doc: jsPDF, fallback: number): number => {
 
 export async function generarPdfKyb(empresa: EmpresaKyb, a: AnalisisKyb): Promise<void> {
   const doc = new jsPDF({ unit: 'mm', format: 'a4' });
-  const g = (a.datosGenerales ?? {}) as DatosGeneralesEmpresa;
+  // Igual que la ficha: si la corrida es anterior al bloque de datos generales,
+  // se rescata lo guardado del cruce con Admin y el PDF lo dice — un PDF con 38
+  // guiones se lee como "Admin no tiene nada", que es falso.
+  const guardados = a.datosGenerales as DatosGeneralesEmpresa | undefined;
+  const g: DatosGeneralesEmpresa = guardados ?? datosGeneralesDesdeLado(a.admin);
+  const corridaSinBloque = !guardados;
   const scr = a.screening as ResultadoScreeningKyb | undefined;
 
   // ── Cabecera ──────────────────────────────────────────────────────────────
@@ -134,6 +140,13 @@ export async function generarPdfKyb(empresa: EmpresaKyb, a: AnalisisKyb): Promis
 
   // ── 1. Datos generales ────────────────────────────────────────────────────
   y = seccion(doc, y, '1 · Datos generales (Admin)');
+  if (corridaSinBloque) {
+    autoTable(doc, {
+      startY: y, theme: 'plain', styles: { fontSize: 8, textColor: [180, 83, 9] },
+      body: [['Corrida anterior al bloque de datos generales: abajo va solo lo que quedó guardado del cruce con Admin. Los campos vacíos NO se extrajeron en esa corrida — no significa que Admin no los tenga.']],
+    });
+    y = finY(doc, y) - 3;
+  }
   autoTable(doc, {
     startY: y, theme: 'grid', styles: { fontSize: 8, cellPadding: 1.5 },
     headStyles: { fillColor: [124, 58, 237] },

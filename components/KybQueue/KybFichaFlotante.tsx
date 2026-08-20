@@ -17,6 +17,7 @@
 import React, { useState } from 'react';
 import type { AnalisisKyb, EmpresaKyb, TipoDecisionKyb, DocumentoKyb } from '../../types/kyb';
 import type { DatosGeneralesEmpresa, PersonaCanonica } from '../../types/kybCanonico';
+import { datosGeneralesDesdeLado } from '../../services/kyb/kybAdminMapper';
 import { KybFicha } from './KybFicha';
 import { evaluarKybAuto, motivoKybLegible } from '../../services/kyb/flujoKybEngine';
 import type { FlujoKybConfig } from '../../services/kyb/kybFlujoService';
@@ -151,9 +152,19 @@ export const KybFichaFlotante: React.FC<Props> = ({
   onAnterior, onSiguiente, posicion, flujo,
 }) => {
   const [confirmaBorrado, setConfirmaBorrado] = useState(false);
-  const g = (analisis?.datosGenerales ?? {}) as DatosGeneralesEmpresa;
   const admin = analisis?.admin;
   const docs = analisis?.documentos ?? [];
+
+  // Las corridas anteriores a este bloque no guardaron `datosGenerales`. Mostrar
+  // 38 guiones se lee como "Admin no tiene nada", que es falso y es lo peor que
+  // puede decir una ficha de compliance. Así que se distingue el caso y se
+  // rellena con lo que el LadoCanonico sí tiene guardado.
+  const guardados = analisis?.datosGenerales as DatosGeneralesEmpresa | undefined;
+  const corridaSinBloque = !!analisis && !guardados;
+  const g: DatosGeneralesEmpresa = guardados ?? datosGeneralesDesdeLado(admin);
+  // Distinto de lo anterior: el bloque SÍ está pero vino vacío, o sea Admin no
+  // devolvió el detalle de la empresa en esa corrida.
+  const adminSinDetalle = !!guardados && !guardados.nombre && !guardados.numeroIdentificacion;
 
   return (
     // Overlay: la cola queda detrás, así al cerrar no hay que retroceder.
@@ -209,6 +220,29 @@ export const KybFichaFlotante: React.FC<Props> = ({
                 Sin analizar. Corré el análisis para traer los datos de Admin.
               </p>
             ) : (
+              <>
+              {corridaSinBloque && (
+                <div className="mb-3 flex flex-wrap items-center gap-3 rounded-xl border border-amber-300 dark:border-amber-700/60 bg-amber-50 dark:bg-amber-950/30 px-4 py-2.5">
+                  <p className="text-xs text-amber-800 dark:text-amber-300 flex-1 min-w-[16rem]">
+                    <b>Esta corrida es anterior al bloque de datos generales.</b> Abajo va solo
+                    lo que quedó guardado del cruce con Admin; el resto de los campos no se
+                    extrajo en esa corrida — <b>no</b> significa que Admin no los tenga.
+                  </p>
+                  <button
+                    onClick={onAnalizar}
+                    disabled={analizando}
+                    className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-xs font-bold"
+                  >
+                    {analizando ? 'Analizando…' : 'Volver a analizar'}
+                  </button>
+                </div>
+              )}
+              {adminSinDetalle && (
+                <p className="mb-3 text-xs text-red-700 dark:text-red-400 font-semibold rounded-xl border border-red-300 dark:border-red-800/60 bg-red-50 dark:bg-red-950/30 px-4 py-2.5">
+                  ⚠️ Admin no devolvió el detalle de esta empresa en la corrida. No es que los
+                  datos no existan: la consulta no los trajo. Volvé a analizar.
+                </p>
+              )}
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-1.5 rounded-xl border border-slate-200 dark:border-slate-700 p-4">
                 {CAMPOS_GENERALES.map(c => (
                   <div key={c.clave} className="flex items-baseline justify-between gap-2 text-xs border-b border-slate-100 dark:border-slate-800/60 py-1">
@@ -219,6 +253,7 @@ export const KybFichaFlotante: React.FC<Props> = ({
                   </div>
                 ))}
               </div>
+              </>
             )}
           </Seccion>
 

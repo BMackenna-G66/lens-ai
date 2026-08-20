@@ -397,3 +397,28 @@ export function mapDatosGenerales(detalle: EmpresaDocsDetail): DatosGeneralesEmp
     representantesCargados: reps.length,
   };
 }
+
+// Rescate para corridas anteriores al bloque de datos generales: el
+// `LadoCanonico` de Admin sí se guardaba, y trae ~14 de los 38 campos. Es menos
+// que una corrida nueva, pero es dato real — y evita que la ficha muestre "—" en
+// el nombre de una empresa cuyo nombre está guardado.
+export function datosGeneralesDesdeLado(admin: LadoCanonico | undefined): DatosGeneralesEmpresa {
+  if (!admin) return {};
+  const d = admin.domicilio;
+  return {
+    nombre: admin.razonSocial,
+    tipoIdentificacion: admin.identificacionTipo,
+    numeroIdentificacion: admin.identificacionNumero,
+    formaLegal: admin.formaLegal,
+    fechaConstitucion: admin.fechaConstitucion,
+    pais: d?.pais,
+    region: d?.region,
+    ciudad: d?.ciudad,
+    calle: d?.calle,
+    numero: d?.numero,
+    direccionComplementaria: d?.complemento,
+    paisTributacion: admin.paisTributario,
+    paginaWeb: admin.sitioWeb,
+    telefono: admin.telefono,
+  };
+}
