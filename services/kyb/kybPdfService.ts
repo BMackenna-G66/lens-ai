@@ -84,8 +84,12 @@ function personasAFilas(ps: PersonaCanonica[] | undefined): string[][] {
     p.documento || '—',
     p.rol || (p.esRepresentanteLegal ? 'Representante legal' : '—'),
     p.participacionPct != null ? `${p.participacionPct}%` : '—',
+    // PEP declarado en Admin (no es el screening) + sujeto obligado.
+    (p.pepDeclarado === true ? `Sí${p.pepTipo ? ` (${p.pepTipo})` : ''}` : p.pepDeclarado === false ? 'No' : '—')
+      + (p.sujetoObligado === true ? ' · sujeto obligado' : ''),
+    p.nivelRiesgo || '—',
+    p.ocupacion || '—',
     p.email || '—',
-    p.estado || '—',
   ]);
 }
 
@@ -170,10 +174,12 @@ export async function generarPdfKyb(empresa: EmpresaKyb, a: AnalisisKyb): Promis
     const filas = personasAFilas(gr.personas);
     y = seccion(doc, y, `${gr.titulo} (${filas.length})`);
     autoTable(doc, {
-      startY: y, theme: 'grid', styles: { fontSize: 8, cellPadding: 1.5 },
+      startY: y, theme: 'grid',
+      // 8 columnas en A4: cuerpo más chico y con corte de línea.
+      styles: { fontSize: 7, cellPadding: 1.2, overflow: 'linebreak' },
       headStyles: { fillColor: [71, 85, 105] },
-      head: [['Nombre', 'Documento', 'Rol', '%', 'Email', 'Estado']],
-      body: filas.length ? filas : [['Sin datos', '', '', '', '', '']],
+      head: [['Nombre', 'Documento', 'Rol', '%', 'PEP (Admin)', 'Riesgo', 'Ocupación', 'Email']],
+      body: filas.length ? filas : [['Sin datos', '', '', '', '', '', '', '']],
     });
     y = finY(doc, y);
 

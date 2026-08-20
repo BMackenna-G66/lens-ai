@@ -6,9 +6,9 @@
 // orquesta estado de UI.
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { subscribeColaKyb, encolarEmpresas, leerUltimoAnalisis, kybDisponible, setStatusKyb } from '../../services/kyb/kybQueueService';
+import { subscribeColaKyb, encolarEmpresas, leerUltimoAnalisis, kybDisponible, setStatusKyb, sacarDeColaMasivo, leerSnapshot, type SnapshotAdmin } from '../../services/kyb/kybQueueService';
 import { analizarEmpresa, analisisVigente } from '../../services/kyb/kybAnalysisService';
-import { getEmpresaDocsCompany } from '../../services/empresaDocsClient';
+import { getEmpresaDocsCompany, detalleDesdeCrudo } from '../../services/empresaDocsClient';
 import { mapEstadoAdmin } from '../../services/kyb/kybAdminMapper';
 import type { EmpresaKyb, AnalisisKyb, TipoDecisionKyb } from '../../types/kyb';
 import { DECISIONES_CON_CHECKER } from '../../types/kyb';
@@ -37,6 +37,7 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
 
   const [selId, setSelId] = useState<string | null>(null);
   const [analisis, setAnalisis] = useState<AnalisisKyb | null>(null);
+  const [snapshot, setSnapshot] = useState<SnapshotAdmin | null>(null);
   const [analizando, setAnalizando] = useState(false);
   const [progreso, setProgreso] = useState('');
 
@@ -68,11 +69,29 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
   const [seleccion, setSeleccion] = useState<Set<string>>(new Set());
   const [masivo, setMasivo] = useState<{ hechas: number; total: number; actual: string } | null>(null);
 
-  const toggleSel = (id: string) => setSeleccion(s2 => {
+  const toggleSel = (id: string) => (setConfirmaSalida(false), setSeleccion(s2 => {
     const n = new Set(s2);
     n.has(id) ? n.delete(id) : n.add(id);
     return n;
-  });
+  }));
+
+  // Salida masiva de la cola. Pide confirmación porque son N casos de una: el
+  // botón cambia a "Confirmar (N)" en vez de abrir un diálogo del navegador,
+  // que en un flujo de cola se clickea sin leer.
+  const [confirmaSalida, setConfirmaSalida] = useState(false);
+
+  const sacarSeleccionadas = async () => {
+    const ids = [...seleccion];
+    if (ids.length === 0) return;
+    if (!confirmaSalida) { setConfirmaSalida(true); return; }
+    setConfirmaSalida(false);
+    const r = await sacarDeColaMasivo(ids);
+    setSeleccion(new Set());
+    if (sel && ids.includes(sel.companyId)) { setSelId(null); cargadoPara.current = null; }
+    setMsg(r.error
+      ? `⚠️ Salieron ${r.sacados} de ${ids.length} · se cortó en: ${r.error}`
+      : `✅ ${r.sacados} caso(s) fuera de la cola (el histórico se conserva)`);
+  };
 
   const analizarSeleccionadas = async () => {
     const ids = [...seleccion];
@@ -113,7 +132,14 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
         setMsg(`Sin empresas nuevas en los últimos ${dias} día(s) con ese filtro.`);
         return;
       }
-      const res = await encolarEmpresas(r.empresas.map(e => ({ ...e, origen: 'barrido' as const })));
+      // El barrido ya trajo el registro completo de cada empresa: se convierte en
+      // snapshot acá para poder abrir la ficha sin analizar. Es un snapshot con
+      // fecha, no la fuente del análisis.
+      const res = await encolarEmpresas(r.empresas.map(e => ({
+        ...e,
+        origen: 'barrido' as const,
+        snapshot: e.crudo ? detalleDesdeCrudo(e.crudo) : undefined,
+      })));
       const rein = detectarReingresos(
         items.map(i => ({ companyId: i.companyId, statusKyb: i.statusKyb, kycStage1: i.kycStage1 })),
         r.empresas,
@@ -155,7 +181,14 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
     if (!selId || cargadoPara.current === selId) return;
     cargadoPara.current = selId;
     setAnalisis(null);
-    leerUltimoAnalisis(selId).then(a => setAnalisis(a)).catch(() => {});
+    setSnapshot(null);
+    leerUltimoAnalisis(selId).then(a => {
+      setAnalisis(a);
+      // El snapshot del barrido se lee SOLO si no hay análisis: es para poder
+      // abrir la ficha con datos mientras no se analizó. Vive en la subcolección
+      // para no engordar la cola, así que se pide acá y no en la suscripción.
+      if (!a) leerSnapshot(selId).then(setSnapshot).catch(() => {});
+    }).catch(() => {});
   }, [selId]);
 
   // ── Encolar por Company ID ──
@@ -179,6 +212,7 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
         riskLevel: est.riskLevel,
         institucional: est.institucional,
         origen: 'manual',
+        snapshot: detalle,
       }]);
       setMsg(`✅ ${razonSocial} · ${r.nuevas ? 'encolada' : 'ya estaba, actualizada'}`);
       setCompanyIdNuevo('');
@@ -531,7 +565,14 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
                       setBarriendo(true); setMsg('');
                       try {
                         const r = await barrer(filtros);
-                        const res = await encolarEmpresas(r.empresas.map(e => ({ ...e, origen: 'barrido' as const })));
+                        // El barrido ya trajo el registro completo de cada empresa: se convierte en
+      // snapshot acá para poder abrir la ficha sin analizar. Es un snapshot con
+      // fecha, no la fuente del análisis.
+      const res = await encolarEmpresas(r.empresas.map(e => ({
+        ...e,
+        origen: 'barrido' as const,
+        snapshot: e.crudo ? detalleDesdeCrudo(e.crudo) : undefined,
+      })));
                         // Reingresos: una empresa cerrada cuyo kycStage cambió NO
                         // se reabre sola; se marca y se avisa.
                         const rein = detectarReingresos(
@@ -595,7 +636,19 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
               {masivo?.actual && (
                 <span className="text-xs text-violet-700 dark:text-violet-400 truncate">{masivo.actual}</span>
               )}
-              <button onClick={() => setSeleccion(new Set())} className="ml-auto text-xs text-slate-500 dark:text-slate-400 hover:underline">
+              <button
+                onClick={sacarSeleccionadas}
+                disabled={!!masivo}
+                className={`px-4 py-1.5 rounded-xl text-xs font-bold border disabled:opacity-50 ${
+                  confirmaSalida
+                    ? 'bg-red-600 hover:bg-red-700 text-white border-red-600'
+                    : 'border-red-300 dark:border-red-800 text-red-700 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40'
+                }`}
+                title="Saca los casos de la cola. El documento y su histórico se conservan."
+              >
+                {confirmaSalida ? `Confirmar: sacar ${seleccion.size}` : `Sacar de la cola (${seleccion.size})`}
+              </button>
+              <button onClick={() => { setConfirmaSalida(false); setSeleccion(new Set()); }} className="ml-auto text-xs text-slate-500 dark:text-slate-400 hover:underline">
                 Limpiar selección
               </button>
             </div>
@@ -718,6 +771,7 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
           onAnterior={indiceSel > 0 ? () => irA(indiceSel - 1) : undefined}
           onSiguiente={indiceSel >= 0 && indiceSel < filtrados.length - 1 ? () => irA(indiceSel + 1) : undefined}
           posicion={indiceSel >= 0 ? `${indiceSel + 1} / ${filtrados.length}` : undefined}
+          snapshot={snapshot}
           flujo={flujo}
         />
       )}

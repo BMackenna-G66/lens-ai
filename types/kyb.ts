@@ -156,6 +156,21 @@ export interface EmpresaKyb {
     screeningResumen?: string;
   };
 
+  // Snapshot de Admin del momento del barrido: permite abrir la ficha con datos
+  // antes de analizar. NUNCA alimenta la matriz ni una decisión — para eso el
+  // análisis vuelve a consultar.
+  //
+  // En el doc padre va SOLO la fecha, porque la cola se suscribe a todos los
+  // docs y el bloque completo la encarecería. El bloque vive en
+  // `kyb_empresas/{id}/snapshot/admin` y se lee al abrir la ficha.
+  snapshotEn?: string;             // ISO
+  snapshotAdmin?: {
+    tomadoEn: string;              // ISO
+    datosGenerales?: unknown;
+    admin?: unknown;               // LadoCanonico
+    documentos?: DocumentoKyb[];
+  };
+
   decision?: DecisionKyb;
 
   // Salidas: qué canales se aplicaron. `no_aplica` para los que no corresponden

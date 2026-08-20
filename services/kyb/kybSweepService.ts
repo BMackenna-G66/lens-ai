@@ -42,6 +42,10 @@ export interface EmpresaBarrida {
   riskLevel?: string;
   institucional?: boolean;
   creadoEn?: string;
+  // Registro crudo de Admin tal como vino en el listado. Es un SNAPSHOT con la
+  // fecha del barrido, no una fuente de verdad: sirve para poder abrir la ficha
+  // sin analizar. El análisis siempre re-consulta.
+  crudo?: Record<string, unknown>;
 }
 
 export interface ResultadoSimulacion {

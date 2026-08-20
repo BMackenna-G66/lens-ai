@@ -105,6 +105,16 @@ export function mapPersona(o: Crudo, rolPorDefecto?: string): PersonaCanonica {
     participacionPct: aNumero(o.participationPercentage ?? o.participacion ?? o.percentage),
     estado: primero(o, 'status', 'state') || undefined,
     nivelKyc: primero(o, 'level', 'kycStage1') || undefined,
+
+    // Compliance declarado en Admin por persona. Verificado contra la API: el
+    // objeto del representante trae 38 campos y estos venían descartándose.
+    pepDeclarado: typeof o.politicallyExposedPerson === 'boolean' ? o.politicallyExposedPerson : null,
+    pepTipo: primero(o, 'pepType') || undefined,
+    nivelRiesgo: primero(o, 'riskLevel') || undefined,
+    sujetoObligado: typeof o.obligatedSubject === 'boolean' ? o.obligatedSubject : null,
+    ocupacion: primero(o, 'occupation') || undefined,
+    actividadEconomica: primero(o, 'economicActivity') || undefined,
+    paisNacimiento: primero(o, 'birthCountry') || undefined,
   };
 }
 

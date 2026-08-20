@@ -32,6 +32,19 @@ export interface PersonaCanonica {
   participacionPct?: number | null;
   estado?: string;
   nivelKyc?: string;
+
+  // ── Compliance por persona ────────────────────────────────────────────────
+  // Admin trae esto en CADA representante y accionista (38 campos, verificado
+  // contra la API) y no se estaba leyendo. `pep` es lo DECLARADO en Admin: no es
+  // el resultado del screening, y justamente por eso sirve — si Admin dice que
+  // no y el proveedor dice que sí, eso es un hallazgo.
+  pepDeclarado?: boolean | null;
+  pepTipo?: string;
+  nivelRiesgo?: string;
+  sujetoObligado?: boolean | null;   // obligatedSubject
+  ocupacion?: string;
+  actividadEconomica?: string;
+  paisNacimiento?: string;
 }
 
 // ── Monto con moneda ─────────────────────────────────────────────────────────

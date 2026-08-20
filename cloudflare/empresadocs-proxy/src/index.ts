@@ -574,8 +574,19 @@ export default {
           dryRun,
         };
         if (!dryRun) {
-          // Solo los campos que la cola necesita: el resto es ruido y peso.
+          // Los campos que la fila de la cola necesita, MÁS el registro crudo.
+          //
+          // El crudo se devuelve porque esta llamada ya trajo el objeto completo
+          // de la empresa (56 claves, con representantes, socios y documentos):
+          // recortarlo obligaba al análisis a volver a pedir lo mismo por
+          // empresa. Con el crudo, la ficha se puede abrir con datos apenas la
+          // empresa entra a la cola, sin analizar nada.
+          //
+          // Es un SNAPSHOT con fecha, no una fuente de verdad: el análisis
+          // siempre re-consulta. Decidir sobre datos de hace días es justo el
+          // problema que ya tuvimos con las fichas del proveedor.
           cuerpo.empresas = elementos.map(c => ({
+            crudo: c,
             companyId: String(c.id ?? ''),
             razonSocial: String(c.name ?? ''),
             identificacion: String(c.identificationNumber ?? ''),

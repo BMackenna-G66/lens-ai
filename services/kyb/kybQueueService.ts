@@ -19,10 +19,40 @@ import {
 } from 'firebase/firestore';
 import { getDb } from '../firebaseService';
 import { KYB_COLLECTION, type EmpresaKyb, type AnalisisKyb, type StatusKyb } from '../../types/kyb';
+import { mapDatosGenerales, mapAdminALadoCanonico } from './kybAdminMapper';
+import type { EmpresaDocsDetail } from '../../types/empresaDocs';
 
 export const kybDisponible = (): boolean => !!getDb();
 
 const SUBCOL_ANALISIS = 'analisis';
+const SUBCOL_SNAPSHOT = 'snapshot';
+
+// Snapshot de Admin del momento del barrido, ya mapeado. Se guarda mapeado y no
+// crudo para que la ficha no tenga que conocer nombres de campo del proveedor.
+export type SnapshotAdmin = NonNullable<EmpresaKyb['snapshotAdmin']>;
+
+function snapshotDesdeDetalle(detalle: EmpresaDocsDetail, tomadoEn: string): SnapshotAdmin {
+  return {
+    tomadoEn,
+    datosGenerales: mapDatosGenerales(detalle),
+    admin: mapAdminALadoCanonico(detalle),
+    documentos: (detalle.documents ?? []).map((d, i) => ({
+      nombre: String(d.fileName ?? `documento-${i + 1}`),
+      link: String(d.link ?? ''),
+      slot: d.slot,
+      estado: d.status,
+      fecha: d.date,
+      analizado: false,   // el snapshot lista documentos, no los lee
+    })),
+  };
+}
+
+export async function leerSnapshot(companyId: string): Promise<SnapshotAdmin | null> {
+  const db = getDb() as Firestore | null;
+  if (!db) return null;
+  const d = await getDoc(doc(db, KYB_COLLECTION, companyId, SUBCOL_SNAPSHOT, 'admin'));
+  return d.exists() ? (d.data() as SnapshotAdmin) : null;
+}
 
 // Firestore rechaza `undefined`; el round-trip por JSON descarta esas claves.
 const paraFirestore = <T>(v: T): T => JSON.parse(JSON.stringify(v));
@@ -50,6 +80,8 @@ function docToEmpresa(id: string, d: Record<string, unknown>): EmpresaKyb {
     canales: (d.canales ?? undefined) as EmpresaKyb['canales'],
     reingresoPendiente: d.reingresoPendiente === true || undefined,
     reingresoMotivo: (d.reingresoMotivo ?? null) as string | null,
+    // Solo la fecha: el bloque vive en la subcolección.
+    snapshotEn: (d.snapshotEn ?? undefined) as string | undefined,
   };
 }
 
@@ -91,6 +123,10 @@ export interface EmpresaAEncolar {
   riskLevel?: string;
   institucional?: boolean | null;
   origen?: EmpresaKyb['origen'];
+  // Detalle de Admin ya armado, si quien encola lo tiene a mano. Se convierte en
+  // el snapshot que permite abrir la ficha sin analizar. El barrido lo saca del
+  // crudo del listado; el alta manual, de la consulta que ya hizo.
+  snapshot?: EmpresaDocsDetail;
 }
 
 export async function encolarEmpresas(items: EmpresaAEncolar[]): Promise<{ nuevas: number; actualizadas: number }> {
@@ -121,6 +157,19 @@ export async function encolarEmpresas(items: EmpresaAEncolar[]): Promise<{ nueva
         enCola: true,
         origen: it.origen ?? 'manual',
       };
+      // Snapshot de Admin, si el barrido trajo el crudo. Se guarda con su fecha
+      // para que la ficha lo muestre como lo que es. NO reemplaza al análisis.
+      // El snapshot NO va en el doc padre: la cola se suscribe a todos los docs
+      // y sumarle ~6 KB por empresa encarece cada carga de la lista. En el padre
+      // queda solo la fecha; el bloque va a la subcolección y se lee al abrir.
+      if (it.snapshot) {
+        const tomadoEn = new Date().toISOString();
+        campos.snapshotEn = tomadoEn;
+        batch.set(
+          doc(db, KYB_COLLECTION, it.companyId, SUBCOL_SNAPSHOT, 'admin'),
+          paraFirestore(snapshotDesdeDetalle(it.snapshot, tomadoEn)),
+        );
+      }
       if (!yaEsta) {
         campos.recibidoEn = new Date().toISOString();
         campos.statusKyb = 'ABIERTO';
@@ -195,6 +244,34 @@ export async function setStatusKyb(companyId: string, status: StatusKyb): Promis
     statusKyb: status,
     enCola: status !== 'CERRADO',
   });
+}
+
+// Salida masiva. Mismo criterio que la individual: el documento NO se borra,
+// solo sale de la vista. Firestore topa en 500 escrituras por batch, así que se
+// parte; si un lote falla, los anteriores YA se aplicaron y se informa cuántos
+// alcanzaron a salir en vez de decir que no pasó nada.
+export async function sacarDeColaMasivo(
+  companyIds: string[],
+): Promise<{ sacados: number; error?: string }> {
+  const db = getDb() as Firestore | null;
+  if (!db) throw new Error('Firestore no está configurado.');
+  const TOPE_BATCH = 450;   // margen bajo el límite de 500 de Firestore
+  let sacados = 0;
+  for (let i = 0; i < companyIds.length; i += TOPE_BATCH) {
+    const lote = companyIds.slice(i, i + TOPE_BATCH);
+    const batch = writeBatch(db);
+    lote.forEach(id => batch.update(doc(db, KYB_COLLECTION, id), {
+      statusKyb: 'CERRADO' as StatusKyb,
+      enCola: false,
+    }));
+    try {
+      await batch.commit();
+      sacados += lote.length;
+    } catch (e) {
+      return { sacados, error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+  return { sacados };
 }
 
 // Reingreso: si cambia el kycStage de una empresa cerrada NO se reabre sola. Se

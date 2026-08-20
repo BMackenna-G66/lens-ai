@@ -44,7 +44,14 @@ function parseDocs(rawDocuments: Record<string, RawFile[]> | unknown): EmpresaDo
 
     result.push({
       link: file.link,
-      fileName: file.link.split('/').pop() ?? slot,
+      // El archivo trae `fileName` propio (verificado contra la API), que es el
+      // nombre real y no el hash del fileKey. Se usa SOLO si trae extensión: el
+      // batch construye un File con este nombre y la extensión decide cómo se
+      // procesa (PDF vs imagen). Sin extensión, se mantiene el último segmento
+      // del link, que es el comportamiento anterior.
+      fileName: (typeof file.fileName === 'string' && /\.[a-z0-9]{2,5}$/i.test(file.fileName.trim()))
+        ? file.fileName.trim()
+        : (file.link.split('/').pop() ?? slot),
       slot,
       status: typeof file.state === 'string' ? file.state : undefined,
       date: file.uploadedDateMillis
@@ -244,6 +251,41 @@ export async function getEmpresaDocsCompany(companyId: string): Promise<EmpresaD
     directorio,
     adminRaw,
     relaciones,
+  };
+}
+
+// Detalle armado desde el registro crudo que el barrido ya trajo, SIN llamar a
+// la API. El barrido pide `/company/bo` y ese objeto tiene 56 claves, incluidos
+// representantes, socios y documentos: recortarlo obligaba a pedir lo mismo de
+// nuevo por empresa.
+//
+// Reusa el mismo `parseDocs` que la ruta con red, así los documentos se leen
+// igual en los dos caminos. Lo que NO puede traer, porque son endpoints
+// distintos, queda vacío: usuarios, directorio y la malla societaria.
+//
+// Es un SNAPSHOT: sirve para mostrar, no para decidir. El análisis re-consulta.
+export function detalleDesdeCrudo(crudo: Record<string, unknown>): EmpresaDocsDetail {
+  const c = crudo as RawCompany & Record<string, unknown>;
+  const adminRaw: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(c)) {
+    if (k === 'documents') continue;
+    adminRaw[k] = v;
+  }
+  return {
+    documents: parseDocs(c.documents ?? {}),
+    ficha: {
+      complianceStatus: c.complianceStatus,
+      kycStage1: c.kycStage1,
+      riskLevel: c.riskLevel,
+    },
+    repLegales: (c.legalRepresentatives ?? []) as unknown[],
+    benFinales: c.shareholders
+      ? Object.values(c.shareholders as Record<string, unknown[]>).flat()
+      : [],
+    personas: [],
+    directorio: [],
+    adminRaw,
+    relaciones: [],
   };
 }
 
