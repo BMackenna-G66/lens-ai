@@ -62,6 +62,10 @@ function personaDeTexto(texto: string, rol?: string): PersonaCanonica | null {
     .replace(/\b(RUT|NIT|RUC|CC|CI|DNI)\b/gi, ' ')
     .replace(/[,;:]/g, ' ').replace(/\s+/g, ' ').trim();
   if (!nombre && !documento) return null;
+  // Defensa en profundidad: sin documento, un texto largo es prosa, no un
+  // nombre. Un nombre completo llega a 6-7 palabras; una cláusula, a 20.
+  // Con documento se acepta igual: ahí el RUT confirma que hay una persona.
+  if (!documento && nombre.split(/\s+/).length > 8) return null;
   return {
     nombre, documento, tipoDocumento: '',
     clave: clavePersona(nombre, documento),
@@ -71,6 +75,13 @@ function personaDeTexto(texto: string, rol?: string): PersonaCanonica | null {
 
 // Los campos de personas no se resuelven con las REGLAS porque pueden venir
 // varios y con roles distintos.
+// Campos que CONTIENEN una palabra de persona pero no traen personas. "Juntas de
+// Accionistas" es uno de los 18 campos que devuelve el extractor y trae prosa
+// sobre cómo se convocan las juntas; caía en la regla de accionistas y cada
+// oración se parseaba como un socio. Verificado: generaba 1-2 socios fantasma
+// por empresa en el componente de peso 11.
+const NO_SON_PERSONAS = /JUNTA(S)? (DE|GENERAL|ORDINARIA|EXTRAORDINARIA)|RESOLUCION DE CONFLICTOS|DISTRIBUCION DE UTILIDADES|MEDIO DE COMUNICACION/;
+
 const PATRONES_PERSONAS: { destino: 'representantesLegales' | 'accionistas' | 'directorio'; patron: RegExp; rol: string }[] = [
   { destino: 'representantesLegales', patron: /REPRESENTANTE(S)? LEGAL/, rol: 'Representante legal' },
   { destino: 'accionistas', patron: /ACCIONISTA|SOCIO|BENEFICIARIO (FINAL|EFECTIVO)|CONFORMACION (DE LA )?SOCIEDAD/, rol: 'Accionista' },
@@ -98,8 +109,11 @@ export function mapLensALadoCanonico(campos: ExtractedField[] | undefined): Lado
     const nombreCampo = normalizarTexto(f?.field);
 
     // Personas primero: un campo "Representante legal" no debe caer en la regla
-    // genérica de nombre.
-    const reglaPersona = PATRONES_PERSONAS.find(p => p.patron.test(nombreCampo));
+    // genérica de nombre. Pero antes se descartan los campos que mencionan una
+    // palabra de persona sin traer personas.
+    const reglaPersona = NO_SON_PERSONAS.test(nombreCampo)
+      ? undefined
+      : PATRONES_PERSONAS.find(p => p.patron.test(nombreCampo));
     if (reglaPersona) {
       for (const trozo of partir(valor)) {
         const p = personaDeTexto(trozo, reglaPersona.rol);
