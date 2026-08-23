@@ -81,7 +81,13 @@ Si el SHA desplegado coincide con `main` y dice `success`, el cambio está arrib
 - Redshift, esquema `colas_trabajo`, **solo SELECT**:
   `v_caso_resumen`, `v_cierres_automaticos`, `v_gestion_por_analista`,
   más las vistas de `004_liberacion_remesa.sql` y `005_kyb.sql`.
-- Conteos de Firestore: `casos_sf`, `kyb_empresas`.
+- Firestore, **lectura completa**: puede abrir documentos de `casos_sf` y
+  `kyb_empresas`, no solo contarlos. Autorizado por Benjamín el 23-08-2026:
+  sin abrir un documento no se puede verificar que una decisión quedó bien
+  guardada ni que un snapshot tiene los campos que dice.
+  Ojo: esos documentos tienen datos personales de clientes reales — el punto 14
+  aplica más que antes, no menos. Antes el límite lo ponía el acceso; ahora lo
+  pone el criterio de quien lee.
 - Un `dryRun` del barrido si necesita el universo de Admin
   (`/admin/company-sweep?...&dryRun=1`): devuelve conteos, no encola nada.
 
