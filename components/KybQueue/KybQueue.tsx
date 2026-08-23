@@ -680,6 +680,27 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
               Mostrando <b>{filtrados.length}</b> de {items.length} · filtro activo
             </p>
           )}
+          {/* Reintentar lo que falló por infraestructura, sin volver a pagar las
+              que ya salieron bien. Es la diferencia entre 30 análisis y 79. */}
+          {items.some(i => i.ultimoAnalisis?.estado === 'ERROR') && (
+            <div className="flex flex-wrap items-center gap-3 mb-3 bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800/50 rounded-xl px-4 py-2 text-sm">
+              <span className="font-semibold text-red-800 dark:text-red-300">
+                {items.filter(i => i.ultimoAnalisis?.estado === 'ERROR').length} análisis con error
+              </span>
+              <span className="text-xs text-red-700 dark:text-red-400">
+                no es que falten datos del cliente: la corrida no se pudo completar
+              </span>
+              <button
+                onClick={() => setSeleccion(new Set(
+                  items.filter(i => i.ultimoAnalisis?.estado === 'ERROR').map(i => i.companyId),
+                ))}
+                className="ml-auto px-3 py-1.5 rounded-lg border border-red-300 dark:border-red-800 text-red-700 dark:text-red-400 text-xs font-bold hover:bg-red-100 dark:hover:bg-red-950/50"
+              >
+                Seleccionar para reintentar
+              </button>
+            </div>
+          )}
+
           {seleccion.size > 0 && (
             <div className="flex flex-wrap items-center gap-3 mb-3 bg-violet-50 dark:bg-violet-950/40 border border-violet-200 dark:border-violet-800/50 rounded-xl px-4 py-2 text-sm">
               <span className="font-semibold text-violet-800 dark:text-violet-300">{seleccion.size} seleccionada(s)</span>
@@ -790,8 +811,19 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
                             </span>
                           : <span className="text-slate-400">—</span>}
                       </td>
-                      <td className="py-3 px-4 text-xs text-slate-500 dark:text-slate-400">
-                        {i.ultimoAnalisis?.estado ?? 'SIN_ANALIZAR'}
+                      {/* ERROR se separa a la vista: es el único estado que
+                          significa "volvé a correrlo". INCOMPLETO es un análisis
+                          que sí ocurrió y le faltan datos del cliente. */}
+                      <td className="py-3 px-4 text-xs">
+                        {i.ultimoAnalisis?.estado === 'ERROR' ? (
+                          <span className="font-bold text-red-600 dark:text-red-400">
+                            ERROR · reintentar
+                          </span>
+                        ) : (
+                          <span className="text-slate-500 dark:text-slate-400">
+                            {i.ultimoAnalisis?.estado ?? 'SIN_ANALIZAR'}
+                          </span>
+                        )}
                       </td>
                       <td className="py-3 px-4 text-xs text-slate-600 dark:text-slate-300">
                         {i.decision?.tipo ?? '—'}

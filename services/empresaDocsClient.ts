@@ -173,12 +173,36 @@ export async function searchEmpresaDocs(params: {
 
 // ─── Company detail (documents + people) ─────────────────────────────────────
 
+// La llamada a `/company/bo` es la columna vertebral del detalle: de ahí salen
+// la razón social, el RUT, los representantes, los socios y los documentos. Si
+// falla, todo lo demás queda vacío, así que se reintenta con backoff en vez de
+// darla por perdida en el primer rechazo.
+//
+// Es la que se cayó en 30 de 79 empresas de un barrido masivo, y el análisis
+// tradujo esos vacíos a "la empresa no tiene documentos cargados". Un fallo de
+// infraestructura no puede parecer una característica del cliente.
+async function pedirCompanyConReintento(companyId: string, intentos = 3): Promise<CompanyBoResponse> {
+  let ultimo: unknown;
+  for (let i = 0; i < intentos; i++) {
+    try {
+      return await apiGet<CompanyBoResponse>('/company/bo', { companyIds: companyId, size: 1 });
+    } catch (e) {
+      ultimo = e;
+      // Backoff creciente: 400 ms y 1.6 s (400·n²). Bajo concurrencia, un
+      // throttling momentáneo se resuelve esperando; insistir al instante no.
+      // Peor caso 2 s extra por empresa, dentro del tope de 45 s de la fase.
+      if (i < intentos - 1) await new Promise(r => setTimeout(r, 400 * (i + 1) * (i + 1)));
+    }
+  }
+  throw ultimo instanceof Error ? ultimo : new Error(String(ultimo));
+}
+
 export async function getEmpresaDocsCompany(companyId: string): Promise<EmpresaDocsDetail> {
   // 4 llamadas en paralelo. OJO: antes se desestructuraban solo 3 y la de
   // `relationships` se pedía y se tiraba a la basura — es la malla societaria, que
   // el KYB necesita para comparar la estructura de la empresa.
   const [companyRes, usersRes, boardRes, relRes] = await Promise.allSettled([
-    apiGet<CompanyBoResponse>('/company/bo', { companyIds: companyId, size: 1 }),
+    pedirCompanyConReintento(companyId),
     apiGet<{ elements?: unknown[] }>(`/company/bo/users`, { companyId, page: 0, size: 50 }),
     apiGet<unknown>(`/company/bo/onboarding/board-member`, { companyId }),
     apiGet<unknown>(`/company/bo/relationships/${companyId}`),
@@ -188,6 +212,14 @@ export async function getEmpresaDocsCompany(companyId: string): Promise<EmpresaD
     companyRes.status === 'fulfilled'
       ? (companyRes.value.elements ?? [])[0]
       : undefined;
+
+  // Se distingue "Admin contestó y no la tiene" de "la llamada falló". Las dos
+  // dejan `company` en undefined, pero significan cosas opuestas: la primera es
+  // un dato sobre el cliente, la segunda es un problema nuestro que hay que
+  // reintentar. Sin esta marca, quien lee el resultado no puede diferenciarlas.
+  const fallaAdmin = companyRes.status === 'rejected'
+    ? (companyRes.reason instanceof Error ? companyRes.reason.message : String(companyRes.reason))
+    : undefined;
 
   const documents = parseDocs(company?.documents ?? {});
 
@@ -251,6 +283,7 @@ export async function getEmpresaDocsCompany(companyId: string): Promise<EmpresaD
     directorio,
     adminRaw,
     relaciones,
+    fallaAdmin,
   };
 }
 

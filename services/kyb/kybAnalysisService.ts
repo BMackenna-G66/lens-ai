@@ -141,18 +141,31 @@ export async function analizarEmpresa(
 
   // ── 1. Admin ──
   onProgreso?.({ fase: 'Consultando Admin' });
+  // true = la corrida falló por algo nuestro, no por los datos del cliente.
+  let reintentable = false;
   const detalle = await conTope('Consultando Admin', TOPES_MS.admin, getEmpresaDocsCompany(companyId));
   const admin: LadoCanonico = mapAdminALadoCanonico(detalle);
   const estadoAdmin = mapEstadoAdmin(companyId, detalle);
 
-  // Admin devolvió la empresa, o no. Cuando `/company/bo?companyIds=X` no la
-  // encuentra, `getEmpresaDocsCompany` no falla: devuelve un detalle vacío. Sin
-  // este chequeo, la empresa termina reportada como "no tiene documentos
-  // cargados", que manda a mirar los documentos de un cliente cuyo registro no
-  // se pudo leer. Son dos problemas distintos y se arreglan en lugares distintos.
+  // Tres situaciones distintas que antes se veían iguales:
+  //
+  //   · la llamada FALLÓ (después de reintentar)  → la corrida no vale, hay que
+  //     reintentarla. Medido: le pasó a 30 de 79 empresas en un masivo, y el
+  //     análisis lo reportó como "el cliente no tiene documentos". En compliance
+  //     eso es lo peor: alguien puede decidir sobre "no presentó documentación"
+  //     cuando la documentación estaba y no se pudo leer.
+  //   · Admin contestó y NO tiene la empresa → dato sobre el registro.
+  //   · Admin contestó con la empresa → normal.
+  //
+  // El primero va a ERROR y no a INCOMPLETO a propósito: INCOMPLETO es "se
+  // analizó y faltan cosas", y acá no se analizó nada. ERROR es el estado que
+  // dice "volvé a correrlo".
   const adminRespondio = Object.keys((detalle.adminRaw ?? {}) as Record<string, unknown>).length > 0;
-  if (!adminRespondio) {
-    faltantes.push('Admin no devolvió el registro de esta empresa: no es que falten datos, no se pudo leer');
+  if (detalle.fallaAdmin) {
+    reintentable = true;
+    faltantes.push(`Admin no respondió: ${detalle.fallaAdmin}. La corrida no es válida — hay que reintentarla.`);
+  } else if (!adminRespondio) {
+    faltantes.push('Admin contestó pero no tiene el registro de esta empresa. No es un problema de documentos.');
   }
 
   // Contexto: T&C y segmentación. No entra en la matriz pero alimenta los frenos
@@ -245,6 +258,13 @@ export async function analizarEmpresa(
     // en listas) pasan de "no evaluables" a evaluadas.
     screeningPersonas: aScreeningPersonas(screening),
   });
+  // Un fallo de infraestructura invalida la corrida entera: no es un análisis
+  // con huecos, es un análisis que no ocurrió.
+  if (reintentable) {
+    estado = 'ERROR';
+    mensajeError = mensajeError ?? 'Admin no respondió. Reintentar: los datos del cliente no se pudieron leer.';
+  }
+
   const cert = calcularCertidumbre(componentes, alertas);
 
   // Si el análisis no está completo, el porcentaje NO se publica: `null`. Mostrar

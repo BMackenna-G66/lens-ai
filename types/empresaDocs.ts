@@ -27,6 +27,10 @@ export interface EmpresaDocsDetail {
   personas?: unknown[];
   directorio?: unknown[];
   adminRaw?: Record<string, unknown>;   // registro oficial completo (sin 'documents')
+  // Mensaje del fallo si la llamada a `/company/bo` no pudo completarse, después
+  // de reintentar. `undefined` = Admin contestó (con o sin la empresa). Sirve
+  // para no confundir "no se pudo leer" con "el cliente no tiene datos".
+  fallaAdmin?: string;
   // Malla societaria (GET /company/bo/relationships/{id}). Se pedía y se
   // descartaba; es la fuente del componente de estructura societaria del KYB.
   relaciones?: unknown[];
