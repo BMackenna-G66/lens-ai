@@ -13,7 +13,7 @@ import type { ExtractedField } from '../../types';
 import type { LadoCanonico, PersonaCanonica } from '../../types/kybCanonico';
 import { normalizarTexto } from '../casosComplianceMapper';
 import { aNumero, clavePersona, normalizarDocumento, dedupPersonas } from './kybAdminMapper';
-import { fechaAIso, huellaDireccion, formaLegalDesdeRazonSocial
+import { fechaAIso, huellaDireccion, formaLegalDesdeRazonSocial, rutValido
 } from './kybNormalizadores';
 
 // Reglas de reconocimiento. La PRIMERA que matchea gana, así que lo más
@@ -50,22 +50,41 @@ const partir = (v: string): string[] =>
     .map(s => s.trim()).filter(Boolean);
 
 // De un texto tipo "Juan Pérez, RUT 11.111.111-1" saca nombre y documento.
+// Un nombre de persona completo, con apellidos compuestos y partículas, llega a
+// 7 u 8 palabras. Una cláusula de escritura arranca en 13.
+const MAX_PALABRAS_NOMBRE = 8;
+
 function personaDeTexto(texto: string, rol?: string): PersonaCanonica | null {
   const limpio = texto.replace(/\s+/g, ' ').trim();
   if (!limpio) return null;
   // El dígito verificador es OPCIONAL: la cédula colombiana suele venir sin él
   // ("44.444.444") y con el patrón anterior no matcheaba, así que el número
   // quedaba pegado al nombre y la persona no se podía emparejar por documento.
-  const mDoc = limpio.match(/\b(?:RUT|NIT|RUC|CC|CI|DNI)?\s*[:.]?\s*(\d{1,3}(?:[.\s]\d{3})+(?:[-–][\dkK])?|\d{7,12}(?:[-–][\dkK])?)\b/i);
-  const documento = mDoc ? normalizarDocumento(mDoc[1]) : '';
+  // El prefijo se CAPTURA (antes era no-capturante): saber si el número venía
+  // rotulado es lo que distingue un documento de un monto suelto.
+  const mDoc = limpio.match(/\b(RUT|NIT|RUC|CC|CI|DNI)?\s*[:.]?\s*(\d{1,3}(?:[.\s]\d{3})+(?:[-–][\dkK])?|\d{7,12}(?:[-–][\dkK])?)\b/i);
+  const documento = mDoc ? normalizarDocumento(mDoc[2]) : '';
+  const rotulado = !!mDoc?.[1];
   const nombre = (mDoc ? limpio.replace(mDoc[0], ' ') : limpio)
     .replace(/\b(RUT|NIT|RUC|CC|CI|DNI)\b/gi, ' ')
     .replace(/[,;:]/g, ' ').replace(/\s+/g, ' ').trim();
   if (!nombre && !documento) return null;
-  // Defensa en profundidad: sin documento, un texto largo es prosa, no un
-  // nombre. Un nombre completo llega a 6-7 palabras; una cláusula, a 20.
-  // Con documento se acepta igual: ahí el RUT confirma que hay una persona.
-  if (!documento && nombre.split(/\s+/).length > 8) return null;
+
+  // Una cláusula no es una persona. El umbral de palabras se aplica SIEMPRE, y
+  // lo único que permite saltearlo es un documento que CONFIRME que hay alguien:
+  // un RUT que valida por módulo 11, o un número que venía rotulado como
+  // documento en el texto.
+  //
+  // La versión anterior salteaba el umbral con cualquier `documento` presente, y
+  // eso dejaba entrar justo lo que quería filtrar: `personaDeTexto` agarra
+  // cualquier número de la prosa —un monto, un número de artículo— y lo guarda
+  // como documento. Medido: cláusulas de 13 a 18 palabras pasaban con
+  // "documentos" 1000000, 25000000, 2058. El ruido traía su propia llave.
+  //
+  // Un nombre corto pasa igual con documento basura: es una persona real cuyo
+  // documento se leyó mal, y perderla es peor que arrastrar un documento sucio.
+  const confirma = documento !== '' && (rotulado || rutValido(documento));
+  if (!confirma && nombre.split(/\s+/).length > MAX_PALABRAS_NOMBRE) return null;
   return {
     nombre, documento, tipoDocumento: '',
     clave: clavePersona(nombre, documento),
