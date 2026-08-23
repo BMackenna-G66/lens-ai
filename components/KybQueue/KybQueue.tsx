@@ -6,7 +6,7 @@
 // orquesta estado de UI.
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { subscribeColaKyb, encolarEmpresas, leerUltimoAnalisis, kybDisponible, setStatusKyb, sacarDeColaMasivo, leerSnapshot, type SnapshotAdmin } from '../../services/kyb/kybQueueService';
+import { subscribeColaKyb, encolarEmpresas, leerUltimoAnalisis, kybDisponible, setStatusKyb, sacarDeColaMasivo, reabrirMasivo, leerSnapshot, type SnapshotAdmin } from '../../services/kyb/kybQueueService';
 import { analizarEmpresa, analisisVigente } from '../../services/kyb/kybAnalysisService';
 import { getEmpresaDocsCompany, detalleDesdeCrudo } from '../../services/empresaDocsClient';
 import { mapEstadoAdmin } from '../../services/kyb/kybAdminMapper';
@@ -51,6 +51,9 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
   const [ordenAsc, setOrdenAsc] = useState(false);
   const [fSugerencia, setFSugerencia] = useState('');
   const [fAnalisis, setFAnalisis] = useState('');
+  // Cerradas que el último barrido encontró y dejó afuera. Se ofrecen para
+  // reabrir: sin esto, la única salida es escribir cada Company ID a mano.
+  const [cerradasDelBarrido, setCerradasDelBarrido] = useState<string[]>([]);
 
   // ── Mantenedor del flujo automático ──
   const [flujo, setFlujo] = useState<FlujoKybConfig>(FLUJO_KYB_DEFAULT);
@@ -149,6 +152,7 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
       // El reingreso lo detecta `encolarEmpresas`, que es donde se lee el estado
       // anterior de cada empresa. La detección vieja solo miraba las visibles en
       // la cola, y una cerrada justamente NO está ahí: nunca se disparaba.
+      setCerradasDelBarrido(res.idsCerradas);
       setMsg(
         `✅ ${res.nuevas} nueva(s) y ${res.actualizadas} actualizada(s) · desde ${r.desde} · ` +
         `${r.excluidasPorEstado} excluida(s) por estado bloqueado` +
@@ -629,6 +633,7 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
                           origen: 'barrido' as const,
                           snapshot: e.crudo ? detalleDesdeCrudo(e.crudo) : undefined,
                         })));
+                        setCerradasDelBarrido(res.idsCerradas);
                         setMsg(`✅ ${res.nuevas} nueva(s) y ${res.actualizadas} actualizada(s)` +
                           (res.fueraPorCerradas ? ` · ${res.fueraPorCerradas} ya cerrada(s) NO vuelven a la cola` : '') +
                           (res.reingresos.length ? ` · ${res.reingresos.length} marcada(s) para reingreso` : ''));
@@ -683,6 +688,39 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
               Mostrando <b>{filtrados.length}</b> de {items.length} · filtro activo
             </p>
           )}
+          {/* El barrido no reabre nada por diseño: no sabe qué se trabajó. Pero si
+              encontró empresas cerradas que siguen calzando con el filtro, se
+              ofrece reabrirlas — decidirlo es de una persona, y hacerlo de a una
+              por Company ID no es viable con decenas. */}
+          {cerradasDelBarrido.length > 0 && (
+            <div className="flex flex-wrap items-center gap-3 mb-3 bg-sky-50 dark:bg-sky-950/30 border border-sky-200 dark:border-sky-800/50 rounded-xl px-4 py-2 text-sm">
+              <span className="font-semibold text-sky-900 dark:text-sky-300">
+                {cerradasDelBarrido.length} empresa(s) cerrada(s) siguen calzando con el filtro
+              </span>
+              <span className="text-xs text-sky-800 dark:text-sky-400">
+                el barrido no las reabre solo
+              </span>
+              <button
+                onClick={async () => {
+                  const r = await reabrirMasivo(cerradasDelBarrido);
+                  setMsg(r.error
+                    ? `⚠️ Se reabrieron ${r.reabiertas} y se cortó en: ${r.error}`
+                    : `✅ ${r.reabiertas} empresa(s) de vuelta en la cola`);
+                  setCerradasDelBarrido([]);
+                }}
+                className="ml-auto px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-xs font-bold"
+              >
+                Reabrir las {cerradasDelBarrido.length}
+              </button>
+              <button
+                onClick={() => setCerradasDelBarrido([])}
+                className="text-xs text-slate-500 dark:text-slate-400 hover:underline"
+              >
+                Dejarlas cerradas
+              </button>
+            </div>
+          )}
+
           {/* Reintentar lo que falló por infraestructura, sin volver a pagar las
               que ya salieron bien. Es la diferencia entre 30 análisis y 79. */}
           {items.some(i => i.ultimoAnalisis?.estado === 'ERROR') && (

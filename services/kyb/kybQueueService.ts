@@ -142,6 +142,9 @@ export interface ResultadoEncolado {
   actualizadas: number;
   // Ya trabajadas y cerradas: se actualizan sus datos pero NO vuelven a la cola.
   fueraPorCerradas: number;
+  // Cuáles fueron, para poder ofrecer reabrirlas sin volver a barrer. Sin esto,
+  // la única salida es escribir cada Company ID a mano.
+  idsCerradas: string[];
   // Cerradas en las que cambió algo relevante: quedan marcadas para que alguien
   // decida si se reabren.
   reingresos: { companyId: string; motivo: string }[];
@@ -149,9 +152,10 @@ export interface ResultadoEncolado {
 
 export async function encolarEmpresas(items: EmpresaAEncolar[]): Promise<ResultadoEncolado> {
   const db = getDb() as Firestore | null;
-  if (!db || items.length === 0) return { nuevas: 0, actualizadas: 0, fueraPorCerradas: 0, reingresos: [] };
+  if (!db || items.length === 0) return { nuevas: 0, actualizadas: 0, fueraPorCerradas: 0, reingresos: [], idsCerradas: [] };
   let nuevas = 0, actualizadas = 0, fueraPorCerradas = 0;
   const reingresos: { companyId: string; motivo: string }[] = [];
+  const idsCerradas: string[] = [];
 
   for (let i = 0; i < items.length; i += 450) {   // límite de 500 por batch
     const batch = writeBatch(db);
@@ -174,7 +178,7 @@ export async function encolarEmpresas(items: EmpresaAEncolar[]): Promise<Resulta
         },
         { kycStage1: it.kycStage1, complianceStatus: it.complianceStatus, reaperturaManual: it.reaperturaManual },
       );
-      if (d.quedaFuera) fueraPorCerradas++;
+      if (d.quedaFuera) { fueraPorCerradas++; idsCerradas.push(it.companyId); }
       if (d.reingreso) reingresos.push({ companyId: it.companyId, motivo: d.reingreso });
 
       const campos: Record<string, unknown> = {
@@ -214,7 +218,7 @@ export async function encolarEmpresas(items: EmpresaAEncolar[]): Promise<Resulta
     });
     await batch.commit();
   }
-  return { nuevas, actualizadas, fueraPorCerradas, reingresos };
+  return { nuevas, actualizadas, fueraPorCerradas, reingresos, idsCerradas };
 }
 
 // ── Análisis (subcolección) ─────────────────────────────────────────────────
@@ -308,6 +312,34 @@ export async function sacarDeColaMasivo(
     }
   }
   return { sacados };
+}
+
+// Reapertura masiva. Contraparte de `sacarDeColaMasivo`: si se puede cerrar en
+// bloque, se tiene que poder reabrir en bloque. Reabrir es siempre una acción
+// explícita de una persona, nunca del barrido.
+export async function reabrirMasivo(
+  companyIds: string[],
+): Promise<{ reabiertas: number; error?: string }> {
+  const db = getDb() as Firestore | null;
+  if (!db) throw new Error('Firestore no está configurado.');
+  const TOPE_BATCH = 450;
+  let reabiertas = 0;
+  for (let i = 0; i < companyIds.length; i += TOPE_BATCH) {
+    const lote = companyIds.slice(i, i + TOPE_BATCH);
+    const batch = writeBatch(db);
+    lote.forEach(id => batch.update(doc(db, KYB_COLLECTION, id), {
+      statusKyb: 'ABIERTO' as StatusKyb,
+      enCola: true,
+      // Fecha nueva: es un caso que entra hoy, no uno viejo que reaparece.
+      recibidoEn: new Date().toISOString(),
+      // La marca de reingreso pierde sentido una vez que se reabrió.
+      reingresoPendiente: false,
+      reingresoMotivo: null,
+    }));
+    try { await batch.commit(); reabiertas += lote.length; }
+    catch (e) { return { reabiertas, error: e instanceof Error ? e.message : String(e) }; }
+  }
+  return { reabiertas };
 }
 
 // Reingreso: si cambia el kycStage de una empresa cerrada NO se reabre sola. Se
