@@ -13,7 +13,8 @@ import type { ExtractedField } from '../../types';
 import type { LadoCanonico, PersonaCanonica } from '../../types/kybCanonico';
 import { normalizarTexto } from '../casosComplianceMapper';
 import { aNumero, clavePersona, normalizarDocumento, dedupPersonas } from './kybAdminMapper';
-import { fechaAIso, huellaDireccion } from './kybNormalizadores';
+import { fechaAIso, huellaDireccion, formaLegalDesdeRazonSocial
+} from './kybNormalizadores';
 
 // Reglas de reconocimiento. La PRIMERA que matchea gana, así que lo más
 // específico va antes (ej. "capital social" antes que "capital").
@@ -147,6 +148,18 @@ export function mapLensALadoCanonico(campos: ExtractedField[] | undefined): Lado
         const k = regla.campo as keyof LadoCanonico;
         if (!(k in lado)) (lado as Record<string, unknown>)[k] = { valor: n, moneda: monedaDe(valor) };
       }
+    }
+  }
+
+  // La forma legal casi nunca viene rotulada en una escritura: va dentro del
+  // nombre. Si la regla por etiqueta no la encontró, se deriva del sufijo de la
+  // razón social — que es el documento diciéndolo, no una suposición nuestra.
+  // Se marca como derivada para que la matriz lo muestre.
+  if (!lado.formaLegal && lado.razonSocial) {
+    const derivada = formaLegalDesdeRazonSocial(lado.razonSocial);
+    if (derivada) {
+      lado.formaLegal = derivada;
+      lado.formaLegalDerivada = true;
     }
   }
 

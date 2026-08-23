@@ -218,9 +218,12 @@ const COMPARADORES: Record<string, Comparador> = {
     const nl = canonizarFormaLegal(l.formaLegal), na = canonizarFormaLegal(a.formaLegal);
     const estado: EstadoComparacion = nl === na ? 'COINCIDE'
       : (nl.includes(na) || na.includes(nl)) ? 'PARCIAL' : 'DISCREPA';
+    // Si la forma del lado documentos se dedujo del sufijo de la razón social,
+    // se dice: una coincidencia derivada no es lo mismo que una declarada.
+    const origen = l.formaLegalDerivada ? ' Deducida del sufijo de la razón social.' : '';
     return base(def, estado, {
       valorLens: l.formaLegal, valorAdmin: a.formaLegal,
-      detalle: nl === na ? `Misma forma legal (${nl}).` : `${nl} vs ${na}.`,
+      detalle: (nl === na ? `Misma forma legal (${nl}).` : `${nl} vs ${na}.`) + origen,
     });
   },
 

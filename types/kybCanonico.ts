@@ -139,6 +139,10 @@ export interface LadoCanonico {
   identificacionNumero?: string;
   identificacionTipo?: string;
   formaLegal?: string;
+  // true = no venía rotulada en el documento; se dedujo del sufijo de la razón
+  // social. Se marca para que la matriz lo diga y no se lea como un campo que
+  // el documento declaraba explícitamente.
+  formaLegalDerivada?: boolean;
 
   // Constitución
   fechaConstitucion?: string;        // ISO

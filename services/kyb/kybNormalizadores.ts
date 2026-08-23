@@ -173,6 +173,29 @@ const FORMAS_LEGALES: { sigla: string; patrones: RegExp }[] = [
   { sigla: 'SCOL', patrones: /^(SOCIEDAD COLECTIVA.*)$/ },
 ];
 
+// La forma legal DESDE la razón social. En una escritura chilena no existe un
+// campo rotulado "Forma legal": el tipo societario va dentro del nombre
+// ("TURISMO CENTINELA LIMITADA") o en prosa. Buscar la etiqueta es buscar algo
+// que el documento no tiene.
+//
+// No es una suposición: si el nombre termina en LIMITADA, el documento está
+// diciendo que la sociedad es una limitada. Se devuelve '' cuando el sufijo no
+// se reconoce, para no inventar una forma.
+export function formaLegalDesdeRazonSocial(v: unknown): string {
+  const t = normalizarTexto(v).replace(/[.,]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!t) return '';
+  // Los sufijos ya están ordenados de más largo a más corto, así que
+  // "SOCIEDAD ANONIMA CERRADA" gana antes que "SA".
+  for (const suf of SUFIJOS_SOCIETARIOS) {
+    if (t === suf || t.endsWith(' ' + suf)) {
+      const sigla = canonizarFormaLegal(suf);
+      // Solo si se reconoce como forma conocida; si no, no se afirma nada.
+      return FORMAS_LEGALES.some(f => f.sigla === sigla) ? sigla : '';
+    }
+  }
+  return '';
+}
+
 // Devuelve la sigla canónica, o el texto normalizado si no se reconoce (así una
 // forma nueva no se convierte en coincidencia falsa con otra).
 export function canonizarFormaLegal(v: unknown): string {
