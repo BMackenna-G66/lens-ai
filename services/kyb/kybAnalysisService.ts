@@ -145,6 +145,16 @@ export async function analizarEmpresa(
   const admin: LadoCanonico = mapAdminALadoCanonico(detalle);
   const estadoAdmin = mapEstadoAdmin(companyId, detalle);
 
+  // Admin devolvió la empresa, o no. Cuando `/company/bo?companyIds=X` no la
+  // encuentra, `getEmpresaDocsCompany` no falla: devuelve un detalle vacío. Sin
+  // este chequeo, la empresa termina reportada como "no tiene documentos
+  // cargados", que manda a mirar los documentos de un cliente cuyo registro no
+  // se pudo leer. Son dos problemas distintos y se arreglan en lugares distintos.
+  const adminRespondio = Object.keys((detalle.adminRaw ?? {}) as Record<string, unknown>).length > 0;
+  if (!adminRespondio) {
+    faltantes.push('Admin no devolvió el registro de esta empresa: no es que falten datos, no se pudo leer');
+  }
+
   // Contexto: T&C y segmentación. No entra en la matriz pero alimenta los frenos
   // duros del flujo automático. Si falla, el análisis sigue.
   let contexto: EmpresaDocsContexto | undefined;
@@ -171,7 +181,10 @@ export async function analizarEmpresa(
     faltantes.push('Sin API key de Gemini: no se pudieron leer los documentos');
   } else if (documentos.length === 0) {
     estado = 'INCOMPLETO';
-    faltantes.push('La empresa no tiene documentos cargados en Admin');
+    // Solo se afirma que no tiene documentos si Admin efectivamente contestó.
+    if (adminRespondio) {
+      faltantes.push('La empresa no tiene documentos cargados en Admin');
+    }
   } else {
     try {
       const entradas = await aDocumentosDePipeline(documentos.slice(0, maxDocumentos), onProgreso);
