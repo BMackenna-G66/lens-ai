@@ -17,6 +17,16 @@ export interface EstadoPrevio {
 export interface Entrante {
   kycStage1?: string;
   complianceStatus?: string;
+  // true = alguien pidió ESTA empresa a mano, por su Company ID. Reabre aunque
+  // esté cerrada.
+  //
+  // La regla de "una cerrada no vuelve" existe para que el BARRIDO no deshaga el
+  // trabajo del analista: trae cientos de empresas de una y no sabe qué se
+  // trabajó. Una persona escribiendo un Company ID es lo contrario — es una
+  // decisión explícita sobre una empresa concreta, que es justamente lo que la
+  // regla quería preservar. Sin esta salida, cerrar es irreversible y el módulo
+  // queda con una puerta de una sola dirección.
+  reaperturaManual?: boolean;
 }
 
 export interface DecisionEncolado {
@@ -35,6 +45,12 @@ export interface DecisionEncolado {
 export function decidirEncolado(previo: EstadoPrevio, nuevo: Entrante): DecisionEncolado {
   if (!previo.existe) {
     return { enCola: true, statusKyb: 'ABIERTO', recibidoEn: true, esNueva: true, quedaFuera: false };
+  }
+
+  // Reapertura pedida a mano: vuelve, y con `recibidoEn` nuevo — es un caso que
+  // entra hoy a la cola, no uno viejo que reaparece.
+  if (previo.statusKyb === 'CERRADO' && nuevo.reaperturaManual) {
+    return { enCola: true, statusKyb: 'ABIERTO', recibidoEn: true, esNueva: false, quedaFuera: false };
   }
 
   // Cerrada: se actualizan sus datos, pero NO vuelve a la cola. Si volviera,

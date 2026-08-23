@@ -218,6 +218,9 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
         institucional: est.institucional,
         origen: 'manual',
         snapshot: detalle,
+        // Escribir un Company ID a mano es pedir explícitamente ESA empresa, así
+        // que reabre si estaba cerrada. El barrido no hace esto.
+        reaperturaManual: true,
       }]);
       setMsg(`✅ ${razonSocial} · ${r.nuevas ? 'encolada' : 'ya estaba, actualizada'}`);
       setCompanyIdNuevo('');

@@ -132,6 +132,9 @@ export interface EmpresaAEncolar {
   // el snapshot que permite abrir la ficha sin analizar. El barrido lo saca del
   // crudo del listado; el alta manual, de la consulta que ya hizo.
   snapshot?: EmpresaDocsDetail;
+  // Solo el alta manual por Company ID lo manda: reabre una empresa cerrada.
+  // El barrido NUNCA lo manda.
+  reaperturaManual?: boolean;
 }
 
 export interface ResultadoEncolado {
@@ -169,7 +172,7 @@ export async function encolarEmpresas(items: EmpresaAEncolar[]): Promise<Resulta
           kycStage1: previo?.kycStage1 as string | undefined,
           complianceStatus: previo?.complianceStatus as string | undefined,
         },
-        { kycStage1: it.kycStage1, complianceStatus: it.complianceStatus },
+        { kycStage1: it.kycStage1, complianceStatus: it.complianceStatus, reaperturaManual: it.reaperturaManual },
       );
       if (d.quedaFuera) fueraPorCerradas++;
       if (d.reingreso) reingresos.push({ companyId: it.companyId, motivo: d.reingreso });
