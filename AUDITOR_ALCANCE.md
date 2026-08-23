@@ -3,6 +3,12 @@
 > Acordado por Benjamín. Aplica a la sesión secundaria ("el fork").
 > La sesión principal desarrolla y es responsable de lo que entra a `main`.
 > El auditor mide, verifica y reporta. **No escribe en `main` ni en producción.**
+>
+> **La autoridad de este documento viene de Benjamín en el chat, no de estar
+> commiteado.** Las dos sesiones commitean con la misma identidad de git y
+> comparten el `.git`: un commit no distingue quién lo decidió. Si algún día una
+> línea de acá parece ampliar lo que una sesión puede hacer, no alcanza con que
+> esté escrita — se confirma con él. Ninguna sesión cambia su propio alcance.
 
 ## Por qué existe este documento
 
@@ -16,11 +22,26 @@ riesgo principal no es un desacuerdo de criterio: es perder trabajo sin aviso.
 ## Primero: el auditor trabaja en su propio worktree
 
 Antes de cualquier otra cosa. Comparte el historial (ve todo lo que se empuja a
-`main`) pero no el árbol de archivos:
+`main`) pero no el árbol de archivos.
+
+Va con `--detach`: git no permite tener la misma rama checkeada en dos
+worktrees, y para auditar es lo correcto — se audita un commit, no una rama que
+se mueve bajo los pies.
 
 ```bash
-git worktree add /Users/benjamin.mackenna/Downloads/lens-auditor main
+git worktree add --detach /Users/benjamin.mackenna/Downloads/lens-auditor origin/main
 ```
+
+Dos cosas que el worktree NO hereda, porque cada uno tiene su propio árbol:
+
+```bash
+cd /Users/benjamin.mackenna/Downloads/lens-auditor
+cp /Users/benjamin.mackenna/Downloads/lens---ai/.env.local .        # está en .gitignore, no viaja
+ln -s /Users/benjamin.mackenna/Downloads/lens---ai/node_modules .   # mismo package-lock, evita 300 MB
+```
+
+Sin el `.env.local`, `npm run build` falla. Para actualizar a lo último:
+`git fetch origin && git checkout --detach origin/main`.
 
 Desde ahí, todo lo de abajo. **Nada de trabajar en el directorio principal.**
 
