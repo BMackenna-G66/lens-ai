@@ -88,6 +88,17 @@ Si el SHA desplegado coincide con `main` y dice `success`, el cambio está arrib
   Ojo: esos documentos tienen datos personales de clientes reales — el punto 14
   aplica más que antes, no menos. Antes el límite lo ponía el acceso; ahora lo
   pone el criterio de quien lee.
+
+  **Cómo se lee, verificado:** no hay credenciales de Firebase en el entorno
+  local (0 variables `FIREBASE_*` en `.env.local`, 0 service accounts en el
+  repo; la app las recibe en el build desde los GitHub Secrets). El único camino
+  es el CLI de firebase, autenticado con la cuenta corporativa de Benjamín. O
+  sea que **toda lectura va con su identidad y contra el proyecto real** — no
+  hay emulador ni réplica. Él lo autorizó así el 23-08-2026.
+
+  De ahí el criterio, que aplica a las dos sesiones: **lecturas puntuales para
+  responder una pregunta concreta, no barridos exploratorios de colecciones
+  enteras.** Si hace falta algo más amplio, se le pregunta antes.
 - Un `dryRun` del barrido si necesita el universo de Admin
   (`/admin/company-sweep?...&dryRun=1`): devuelve conteos, no encola nada.
 
