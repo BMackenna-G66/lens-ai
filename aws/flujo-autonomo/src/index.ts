@@ -29,6 +29,12 @@ import { TIPOS_CIERRE, camposDeCierre } from '../../../services/cierreTipos';
 import { TIPOS_CIERRE_ADMIN, ADMIN_ASSIGNEE_DEFAULT, PEP_PROVIDER_DEFAULT, ofacFlagPara } from '../../../services/cierreAdminTipos';
 import { sendCaseUpdate } from '../../../services/salesforceCaseService';
 import { enviarCierreAdmin } from '../../../services/adminCierreService';
+import { evaluarRemesaAuto, extraerRemesa, clasificarCola } from '../../../services/flujoDecision';
+import type { FlujoRemesaConfig } from '../../../services/flujoDecision';
+import { TIPOS_CIERRE_REMESA, camposDeCierreRemesa } from '../../../services/cierreRemesaTipos';
+import { enviarCierreRemesaAdmin } from '../../../services/remesaAdminService';
+import { buscarRemesas } from '../../../services/remesasService';
+import { screenBeneficiario } from '../../../services/remesaScreeningService';
 import type { CasoSF } from '../../../services/casosService';
 
 // ── Configuración de la corrida ─────────────────────────────────────────────
@@ -215,6 +221,82 @@ async function procesar(caso: CasoSF, cfg: FlujoOfacConfig): Promise<ResultadoCa
   return out;
 }
 
+// ── Un caso de la cola REMESA ───────────────────────────────────────────────
+// El recorrido es distinto del de OFAC: hay que traer la fila de la transacción
+// (que trae al beneficiario) antes de poder screenearlo, y lo que se libera es la
+// TRANSACCIÓN en Admin, no el cliente.
+//
+// La decisión y sus frenos son los mismos que en la app —incluido que PEP NO
+// retiene una remesa— porque es la misma función.
+async function procesarRemesa(
+  caso: CasoSF,
+  fila: unknown,
+  cfg: FlujoRemesaConfig,
+): Promise<ResultadoCaso> {
+  const base = { caseId: caso.id, numeroCaso: caso.numeroCaso };
+
+  if (!fila) return { ...base, accion: 'sin_screening', motivo: 'no se encontró la transacción' };
+
+  // Screening del beneficiario, cacheado igual que el de OFAC.
+  let screening = caso.screeningBeneficiario as Record<string, unknown> | undefined;
+  if (!screeningVigente(screening)) {
+    try {
+      screening = (await screenBeneficiario(fila as never)) as unknown as Record<string, unknown>;
+      await db().collection(COLECCION).doc(caso.id).set({
+        screeningBeneficiario: { ...screening, schemaVersion: SCREENING_SCHEMA, screenedAt: new Date().toISOString() },
+      }, { merge: true });
+    } catch (e) {
+      return { ...base, accion: 'error', motivo: `screening beneficiario: ${(e as Error).message}` };
+    }
+  }
+
+  const ev = evaluarRemesaAuto(caso, screening as never, cfg);
+  if (!ev.automatizable || !ev.tipologia) return { ...base, accion: 'retenido', motivo: ev.motivo };
+
+  const out: ResultadoCaso = { ...base, accion: 'error', tipologia: ev.tipologia, sf: 'omitido', admin: 'omitido' };
+  const tipo = TIPOS_CIERRE_REMESA.find(t => t.id === ev.tipologia);
+  if (!tipo) return { ...out, motivo: `tipología de remesa desconocida: ${ev.tipologia}` };
+
+  // Admin PRIMERO: es el canal que mueve la plata. Si Salesforce falla, el caso
+  // queda abierto con la transacción liberada, que es recuperable; al revés
+  // quedaría cerrado en Salesforce con la plata retenida, que no se ve.
+  if (cfg.cerrarAdmin) {
+    const tx = extraerRemesa(caso.asunto);
+    if (caso.cierres?.admin?.ok === true) out.admin = 'ya_cerrado';
+    else if (!tx) out.admin = 'sin_transaccion';
+    else {
+      try {
+        const r = await enviarCierreRemesaAdmin({
+          transactionIds: [tx], targetStatusDB: tipo.statusDB, targetStatusLabel: tipo.statusLabel,
+          requestedBy: 'flujo-autonomo',
+        } as never);
+        out.admin = r.ok ? 'ok' : 'error';
+        if (!r.ok) out.motivo = r.error ?? 'Admin rechazó la liberación';
+        await guardarCierre(caso.id, 'admin', !!r.ok, ev.tipologia, out.motivo);
+      } catch (e) { out.admin = 'error'; out.motivo = (e as Error).message; }
+    }
+  }
+
+  if (cfg.cerrarSF) {
+    if (caso.cierres?.sf?.ok === true) out.sf = 'ya_cerrado';
+    else {
+      try {
+        const r = await sendCaseUpdate({ CaseNumber: caso.numeroCaso, ...camposDeCierreRemesa(tipo, caso.pais) } as never);
+        out.sf = r.ok ? 'ok' : 'error';
+        if (!r.ok) out.motivo = out.motivo ?? (r.errors?.join('; ') ?? `HTTP ${r.status ?? 0}`);
+        await guardarCierre(caso.id, 'sf', !!r.ok, ev.tipologia, out.motivo);
+      } catch (e) { out.sf = 'error'; out.motivo = out.motivo ?? (e as Error).message; }
+    }
+  }
+
+  const canales = [cfg.cerrarSF ? out.sf : null, cfg.cerrarAdmin ? out.admin : null]
+    .filter((v): v is string => v !== null);
+  const algunoOk = canales.some(c => c === 'ok' || c === 'ya_cerrado');
+  out.accion = canales.length === 0 ? 'retenido' : algunoOk ? 'cerrado' : 'error';
+  if (canales.length === 0) out.motivo = 'sin canales de cierre habilitados';
+  return out;
+}
+
 // ── Handler ─────────────────────────────────────────────────────────────────
 export async function handler(): Promise<Record<string, unknown>> {
   const arranque = Date.now();
@@ -232,8 +314,14 @@ export async function handler(): Promise<Record<string, unknown>> {
   // de remesa sería ruido que enseña a ignorar el aviso.
   const camposAusentes = conf.camposAusentes.filter(c => c.startsWith('ofac.'));
 
-  const casos = await leerCasosAbiertos();
+  const abiertos = await leerCasosAbiertos();
+  // El ASUNTO manda en qué cola va cada caso y las colas no se mezclan: misma
+  // regla que la app, misma función.
+  const casos = abiertos.filter(c => clasificarCola(c.asunto) === 'ofac');
+  const remesas = abiertos.filter(c => clasificarCola(c.asunto) === 'remesa');
+
   const resultados: ResultadoCaso[] = [];
+  const resultadosRemesa: ResultadoCaso[] = [];
   let cortadoPorTiempo = false;
   let apagadoEnVuelo = false;
 
@@ -253,7 +341,36 @@ export async function handler(): Promise<Record<string, unknown>> {
     resultados.push(...hechos);
   }
 
-  const cuenta = (a: ResultadoCaso['accion']) => resultados.filter(r => r.accion === a).length;
+  // ── Cola REMESA ───────────────────────────────────────────────────────────
+  // Switch propio: prender OFAC no prende remesas. Se procesa después porque
+  // necesita traer las filas de las transacciones, que es una consulta aparte.
+  if (!cortadoPorTiempo && !apagadoEnVuelo && conf?.cfg.remesa.enabled && remesas.length > 0) {
+    // Las filas se traen TODAS de una: es una sola consulta para N casos.
+    let filas: Record<string, unknown> = {};
+    try {
+      const txs = remesas.map(c => extraerRemesa(c.asunto)).filter(Boolean);
+      if (txs.length) filas = await buscarRemesas(txs) as unknown as Record<string, unknown>;
+    } catch (e) {
+      resultadosRemesa.push({ caseId: '—', accion: 'error', motivo: `filas de transacción: ${(e as Error).message}` });
+    }
+
+    for (let i = 0; i < remesas.length; i += LOTE) {
+      if (restante() <= 0) { cortadoPorTiempo = true; break; }
+      conf = await leerConfig();
+      if (!conf?.cfg.remesa.enabled) { apagadoEnVuelo = true; break; }
+
+      const lote = remesas.slice(i, i + LOTE);
+      const hechos = await Promise.all(lote.map(c =>
+        procesarRemesa(c, filas[extraerRemesa(c.asunto)], conf!.cfg.remesa).catch(e => ({
+          caseId: c.id, numeroCaso: c.numeroCaso, accion: 'error' as const, motivo: (e as Error).message,
+        }))));
+      resultadosRemesa.push(...hechos);
+    }
+  }
+
+  const contar = (rs: ResultadoCaso[]) => (a: ResultadoCaso['accion']) => rs.filter(r => r.accion === a).length;
+  const cuenta = contar(resultados);
+  const cuentaR = contar(resultadosRemesa);
   const resumen = {
     corrio: true,
     casosEnCola: casos.length,
@@ -262,6 +379,22 @@ export async function handler(): Promise<Record<string, unknown>> {
     retenidos: cuenta('retenido'),
     errores: cuenta('error'),
     sinScreening: cuenta('sin_screening'),
+    // Las dos colas se cuentan separadas: mezclarlas escondería que una anduvo y
+    // la otra no.
+    remesa: {
+      enCola: remesas.length,
+      procesadas: resultadosRemesa.length,
+      cerradas: cuentaR('cerrado'),
+      retenidas: cuentaR('retenido'),
+      errores: cuentaR('error'),
+      motivosRetencion: resultadosRemesa.filter(r => r.accion === 'retenido')
+        .reduce<Record<string, number>>((acc, r) => {
+          const k = r.motivo ?? 'sin_motivo';
+          acc[k] = (acc[k] ?? 0) + 1;
+          return acc;
+        }, {}),
+      detalle: resultadosRemesa,
+    },
     cortadoPorTiempo,
     apagadoEnVuelo,
     // Vacío = el doc de config estaba completo. Con algo adentro, esos campos se

@@ -237,3 +237,105 @@ export const motivosRetencion = (screening: ScreeningParaAuto | undefined): stri
   ...categoriasSensibles(screening?.coincidencias),
   ...(screening?.pep === true ? ['PEP'] : []),
 ];
+
+// ── Decisión de la cola REMESA ──────────────────────────────────────────────
+// Aparte de la de OFAC a propósito: acá se libera la TRANSACCIÓN, no se toca al
+// cliente, y los frenos no son los mismos.
+//
+// La diferencia que más importa: **PEP NO retiene la remesa.** En OFAC un cliente
+// PEP no se libera solo porque lo que corresponde es el bloqueo preventivo más el
+// formulario PEP. Acá se libera una transacción puntual, no se vincula a un
+// cliente, así que por decisión de negocio la marca PEP del beneficiario no frena.
+// Está acá abajo escrito una sola vez, igual que el resto: si el Lambda lo
+// reimplementara, ese matiz es justo el que se perdería.
+
+// EN QUÉ COLA VA UN CASO. El asunto es lo que manda y las colas no se mezclan:
+// es una regla de negocio explícita, no una heurística de presentación. Vive acá
+// porque el flujo desatendido tiene que separar las dos colas igual que la app —
+// si clasificara distinto, un caso de remesa podría entrar al flujo de OFAC y
+// cerrarse con la tipología equivocada.
+export type ColaCaso = 'ofac' | 'remesa' | 'otros';
+
+export function clasificarCola(asunto: string | undefined): ColaCaso {
+  const a = (asunto || '').trim();
+  if (a.toLowerCase() === 'coincidencia ofac') return 'ofac';
+  if (/DETIENE\s+TX/i.test(a)) return 'remesa';
+  return 'otros';
+}
+
+// El número de transacción sale del ASUNTO del caso. Vive acá porque el flujo
+// desatendido necesita exactamente la misma extracción: si cambia el formato del
+// asunto y esto está escrito en dos lados, uno de los dos deja de encontrar la TX
+// y los casos se quedan sin liberar sin motivo visible.
+export function extraerRemesa(asunto: string | undefined): string {
+  const m = (asunto || '').match(/TX\s*(\d+)/i);
+  return m ? m[1] : '';
+}
+
+export type MotivoNoAutoRemesa =
+  | 'flujo_apagado'
+  | 'ya_cerrado'
+  | 'sin_screening'
+  | 'sin_nacionalidad'
+  | 'delito_sensible'
+  | 'con_coincidencias';
+
+export interface EvaluacionRemesa {
+  automatizable: boolean;
+  motivo?: MotivoNoAutoRemesa;
+  tipologia?: string;
+  categorias?: string[];
+}
+
+// Forma mínima del screening del beneficiario que necesita la decisión.
+export interface ScreeningRemesaParaAuto {
+  estado?: string;    // ok | sin_causas | error | na
+  flujo?: string;     // CL | CO | INTL | SIN_DATO
+  decision?: string;
+  pep?: boolean;      // se ignora a propósito (ver arriba)
+  coincidencias?: Array<{ tipo?: string; detalle?: string }>;
+  listas?: Array<{ lista?: string }>;
+}
+
+export function evaluarRemesaAuto(
+  caso: CasoSF,
+  screening: ScreeningRemesaParaAuto | undefined,
+  cfg: FlujoRemesaConfig,
+): EvaluacionRemesa {
+  if (!cfg.enabled) return { automatizable: false, motivo: 'flujo_apagado' };
+  if (statusDeCaso(caso) === 'CERRADO') return { automatizable: false, motivo: 'ya_cerrado' };
+
+  // Sin screening resuelto no se libera nada. Incluye el caso en que el proveedor
+  // devolvió error: un fallo de la API NO puede leerse como "sin hallazgos".
+  if (!screening || screening.estado === 'error' || screening.estado === 'loading') {
+    return { automatizable: false, motivo: 'sin_screening' };
+  }
+  if (screening.flujo === 'SIN_DATO' || screening.estado === 'na') {
+    return { automatizable: false, motivo: 'sin_nacionalidad' };
+  }
+
+  // Freno duro por delito sensible, antes de mirar cualquier conclusión.
+  const categorias = categoriasSensibles(screening.coincidencias);
+  if (categorias.length > 0) return { automatizable: false, motivo: 'delito_sensible', categorias };
+
+  // OJO: acá NO va el freno por PEP. Es deliberado (ver arriba).
+
+  // Cualquier otra coincidencia —causa penal no sensible o lista internacional—
+  // la revisa el analista.
+  if ((screening.coincidencias?.length ?? 0) > 0) return { automatizable: false, motivo: 'con_coincidencias' };
+  if ((screening.listas?.length ?? 0) > 0) return { automatizable: false, motivo: 'con_coincidencias' };
+
+  return { automatizable: true, tipologia: cfg.tipoLiberar };
+}
+
+export const retenidoPorDelitoRemesa = (s: ScreeningRemesaParaAuto | undefined): string[] =>
+  categoriasSensibles(s?.coincidencias);
+
+export const motivoRemesaLegible = (m: MotivoNoAutoRemesa | undefined): string => ({
+  flujo_apagado: 'Flujo automático apagado',
+  ya_cerrado: 'El caso ya está cerrado',
+  sin_screening: 'Sin screening resuelto (o el proveedor falló)',
+  sin_nacionalidad: 'El beneficiario no trae nacionalidad',
+  delito_sensible: 'Retenido por delito sensible',
+  con_coincidencias: 'Tiene coincidencias: lo revisa el analista',
+}[m ?? 'sin_screening'] ?? '—');

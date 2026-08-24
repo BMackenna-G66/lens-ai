@@ -25,6 +25,8 @@ import type { Notificacion } from '../services/notificacionesService';
 import { statusDeCaso, setStatusCaso, registrarCierreCanal, STATUS_CASO_VALORES } from '../services/caseStatusService';
 import type { StatusCaso } from '../services/caseStatusService';
 import { subscribeFlujoConfig, guardarFlujoConfig, flujoConfigDisponible, FLUJO_CONFIG_DEFAULT, PAISES_FLUJO } from '../services/flujoAutomaticoService';
+// La extracción de la TX del asunto es compartida con el flujo desatendido.
+import { extraerRemesa, clasificarCola } from '../services/flujoDecision';
 import { CATEGORIAS_SENSIBLES } from '../services/delitosSensibles';
 import type { FlujoConfig } from '../services/flujoAutomaticoService';
 import { procesarCasoAuto, evaluarCasoAuto, motivosRetencion, retenidoPorDelito } from '../services/flujoAutomaticoEngine';
@@ -691,17 +693,9 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   // ── Clasificación en colas por asunto ──────────────────────────────────────
   // OFAC: asunto = "Coincidencia OFAC" (exacto). Remesa: asunto del bot que
   // detiene una TX ("...DETIENE TX <n>..."). Resto → "Otros" (no se pierde nada).
-  const clasificar = (c: QueuedCaso): QueueKey => {
-    const a = (c.asunto || '').trim();
-    if (a.toLowerCase() === 'coincidencia ofac') return 'ofac';
-    if (/DETIENE\s+TX/i.test(a)) return 'remesa';
-    return 'otros';
-  };
-  // Extrae SOLO el número de la TX del asunto para la columna "remesa".
-  const extraerRemesa = (asunto: string): string => {
-    const m = (asunto || '').match(/TX\s*(\d+)/i);
-    return m ? m[1] : '';
-  };
+  // La clasificación por asunto es compartida con el flujo desatendido: las dos
+  // colas no se pueden mezclar y la regla tiene que ser una sola.
+  const clasificar = (c: QueuedCaso): QueueKey => clasificarCola(c.asunto) as QueueKey;
 
   // Agrupa en colas y ordena cada una por fecha de llegada (asc = FIFO).
   // Los casos CERRADOS salen de la cola (status del caso); `verCerrados` permite

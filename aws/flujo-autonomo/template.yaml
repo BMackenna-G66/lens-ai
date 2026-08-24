@@ -1,13 +1,14 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: >
-  Flujo automático DESATENDIDO de la Bandeja de Casos (OFAC). Consulta en listas,
-  cruza con el catálogo, decide Liberar / Liberar UCR / Fully Blocked y cierra en
-  Salesforce y en Admin, sin navegador. Stack INDEPENDIENTE del receptor de
-  casos, del logger y del sync diario.
+  Flujo automático DESATENDIDO de la Bandeja de Casos: las colas OFAC y REMESA.
+  Consulta en listas, cruza con el catálogo, decide, y cierra en Salesforce y en
+  Admin, sin navegador. Stack INDEPENDIENTE del receptor de casos, del logger y
+  del sync diario.
 
-  El switch `config/flujoAutomatico` de Firestore manda: si `ofac.enabled` no es
-  exactamente true, la corrida termina sin tocar nada.
+  El switch `config/flujoAutomatico` de Firestore manda, y cada cola tiene el
+  suyo: `ofac.enabled` y `remesa.enabled`. Prender una no prende la otra. Si el de
+  la cola no es exactamente true, esa cola no se toca.
 
 Parameters:
   FirebaseSaB64:
@@ -64,7 +65,7 @@ Resources:
   FlujoAutonomoFunction:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: lens-flujo-autonomo-ofac
+      FunctionName: lens-flujo-autonomo
       Handler: index.handler
       CodeUri: dist/
       Description: >
@@ -87,8 +88,8 @@ Resources:
           Type: Schedule
           Properties:
             Schedule: !Ref Horario
-            Name: lens-flujo-autonomo-ofac
-            Description: Procesa la cola de OFAC sin intervención.
+            Name: lens-flujo-autonomo
+            Description: Procesa las colas de OFAC y remesas sin intervención.
             Enabled: !If [CronHabilitado, true, false]
 
 Conditions:
@@ -105,6 +106,6 @@ Outputs:
     Value: !Ref Habilitada
   Aviso:
     Value: >
-      Dos interruptores: este cron y `config/flujoAutomatico.ofac.enabled` en
-      Firestore. Apagar el de Firestore frena también la corrida en curso, porque
-      se relee entre lotes.
+      Tres interruptores: este cron, `config/flujoAutomatico.ofac.enabled` y
+      `config/flujoAutomatico.remesa.enabled`. Los de Firestore frenan también la
+      corrida en curso, porque se releen entre lotes.

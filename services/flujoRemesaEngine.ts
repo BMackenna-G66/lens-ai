@@ -21,8 +21,6 @@
 
 import type { CasoSF } from './casosService';
 import type { FlujoRemesaConfig } from './flujoAutomaticoService';
-import { categoriasSensibles } from './delitosSensibles';
-import { statusDeCaso } from './caseStatusService';
 import { camposDeCierreRemesa, tipoRemesaPorId } from './cierreRemesaTipos';
 import { enviarResolucion } from './caseResolutionService';
 import { sfUpdateDisponible, type SFCaseUpdate } from './salesforceCaseService';
@@ -31,75 +29,15 @@ import { registrarCierreCanal } from './caseStatusService';
 import { logCierre, logLiberacionRemesa } from './colasLogService';
 import type { Actor } from './caseWorkflowService';
 
-export type MotivoNoAutoRemesa =
-  | 'flujo_apagado'
-  | 'ya_cerrado'
-  | 'sin_screening'
-  | 'sin_nacionalidad'
-  | 'delito_sensible'
-  | 'con_coincidencias';
-
-export interface EvaluacionRemesa {
-  automatizable: boolean;
-  motivo?: MotivoNoAutoRemesa;
-  tipologia?: string;
-  categorias?: string[];   // categorías sensibles detectadas (si retuvo por eso)
-}
-
-// Forma mínima del screening del beneficiario que necesita el motor.
-export interface ScreeningRemesaParaAuto {
-  estado?: string;    // ok | sin_causas | error | na
-  flujo?: string;     // CL | CO | INTL | SIN_DATO
-  decision?: string;
-  pep?: boolean;      // se ignora a propósito (ver cabecera)
-  coincidencias?: Array<{ tipo?: string; detalle?: string }>;
-  listas?: Array<{ lista?: string }>;
-}
-
-export function evaluarRemesaAuto(
-  caso: CasoSF,
-  screening: ScreeningRemesaParaAuto | undefined,
-  cfg: FlujoRemesaConfig,
-): EvaluacionRemesa {
-  if (!cfg.enabled) return { automatizable: false, motivo: 'flujo_apagado' };
-  if (statusDeCaso(caso) === 'CERRADO') return { automatizable: false, motivo: 'ya_cerrado' };
-
-  // Sin screening resuelto no se libera nada. Incluye el caso en que el proveedor
-  // devolvió error: un fallo de la API NO puede leerse como "sin hallazgos".
-  if (!screening || screening.estado === 'error' || screening.estado === 'loading') {
-    return { automatizable: false, motivo: 'sin_screening' };
-  }
-  if (screening.flujo === 'SIN_DATO' || screening.estado === 'na') {
-    return { automatizable: false, motivo: 'sin_nacionalidad' };
-  }
-
-  // Freno duro por delito sensible, antes de mirar cualquier conclusión.
-  const categorias = categoriasSensibles(screening.coincidencias);
-  if (categorias.length > 0) return { automatizable: false, motivo: 'delito_sensible', categorias };
-
-  // OJO: acá NO va el freno por PEP. Es deliberado (ver cabecera del archivo).
-
-  // Cualquier otra coincidencia —causa penal no sensible o lista internacional—
-  // la revisa el analista.
-  if ((screening.coincidencias?.length ?? 0) > 0) return { automatizable: false, motivo: 'con_coincidencias' };
-  if ((screening.listas?.length ?? 0) > 0) return { automatizable: false, motivo: 'con_coincidencias' };
-
-  return { automatizable: true, tipologia: cfg.tipoLiberar };
-}
-
-// Categorías sensibles del screening de un beneficiario (para marcar la fila).
-export const retenidoPorDelitoRemesa = (s: ScreeningRemesaParaAuto | undefined): string[] =>
-  categoriasSensibles(s?.coincidencias);
-
-// Texto corto del motivo, para la cola y la ficha.
-export const motivoRemesaLegible = (m: MotivoNoAutoRemesa | undefined): string => ({
-  flujo_apagado: 'Flujo automático apagado',
-  ya_cerrado: 'El caso ya está cerrado',
-  sin_screening: 'Sin screening resuelto (o el proveedor falló)',
-  sin_nacionalidad: 'El beneficiario no trae nacionalidad',
-  delito_sensible: 'Retenido por delito sensible',
-  con_coincidencias: 'Tiene coincidencias: lo revisa el analista',
-}[m ?? 'sin_screening'] ?? '—');
+// La DECISIÓN vive en `flujoDecision.ts`, el mismo módulo que importa el Lambda
+// desatendido: incluido el matiz de que PEP no retiene la remesa, que es justo lo
+// que se perdería si se reimplementara del otro lado. Acá queda la EJECUCIÓN.
+export {
+  evaluarRemesaAuto, retenidoPorDelitoRemesa, motivoRemesaLegible,
+} from './flujoDecision';
+export type { MotivoNoAutoRemesa, EvaluacionRemesa, ScreeningRemesaParaAuto } from './flujoDecision';
+import { evaluarRemesaAuto } from './flujoDecision';
+import type { ScreeningRemesaParaAuto } from './flujoDecision';
 
 // ── Ejecución ────────────────────────────────────────────────────────────────
 // Cierra el caso en Salesforce y libera la transacción en Admin, según config.
