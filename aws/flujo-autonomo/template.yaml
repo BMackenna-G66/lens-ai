@@ -29,11 +29,18 @@ Parameters:
     Default: casos_sf
   Horario:
     Type: String
-    Default: 'cron(0/30 11-23 * * ? *)'
+    Default: 'cron(0/30 11-22 * * ? *)'
     Description: >
-      UTC. Default: cada 30 min entre 11:00 y 23:59 UTC (07:00-19:59 hora Chile).
-      Los casos llegan durante el día hábil, así que correr de noche solo
-      agregaría espera. Para 24x7, poner 'cron(0/30 * * * ? *)'.
+      UTC. Default: cada 30 min entre 11:00 y 22:29 UTC (07:00-18:29 hora Chile).
+
+      El corte a las 18:30 Chile NO es arbitrario: el cluster de Redshift pausa a
+      esa hora y la cola de REMESAS necesita consultarlo para traer la fila de la
+      transacción. Corriendo después, las remesas quedan todas en error hasta la
+      mañana. OFAC no depende de Redshift, pero no vale la pena una corrida que
+      solo puede hacer la mitad.
+
+      Para 24x7, poner 'cron(0/30 * * * ? *)' — y asumir que las remesas de la
+      noche esperan a la primera corrida del día.
   Habilitada:
     Type: String
     Default: 'DISABLED'

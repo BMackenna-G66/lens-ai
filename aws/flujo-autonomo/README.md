@@ -107,6 +107,11 @@ Dos frenos difieren de OFAC, y son decisiones de negocio:
 Y sin screening resuelto no se libera nada. Si el proveedor falló, el caso queda
 como estaba: un error de la API no se lee como "sin hallazgos".
 
+**El horario del cron está atado a Redshift.** El cluster pausa a las 18:30 hora
+Chile y la fila de la transacción sale de ahí, así que el cron corre hasta las
+18:29. Si igual se corre después, las remesas salen como error reintentable —no
+como "la transacción no existe"— y el resumen lo avisa en `avisos`.
+
 ## Lo que queda pendiente
 
 - **Colombia.** El screening de Inspektor no tiene muestra suficiente para

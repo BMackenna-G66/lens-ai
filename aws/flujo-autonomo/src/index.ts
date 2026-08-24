@@ -239,10 +239,20 @@ async function procesarRemesa(
   caso: CasoSF,
   fila: unknown,
   cfg: FlujoRemesaConfig,
+  baseCaida: boolean,
 ): Promise<ResultadoCaso> {
   const base = { caseId: caso.id, numeroCaso: caso.numeroCaso };
 
-  if (!fila) return { ...base, accion: 'sin_screening', motivo: 'no se encontró la transacción' };
+  if (!fila) {
+    // Ojo con el motivo: si el cluster de Redshift estaba pausado, `buscarRemesas`
+    // devuelve vacío sin lanzar error, y decir "no se encontró la transacción"
+    // sería afirmar algo sobre el caso cuando el problema es nuestro. Es el mismo
+    // error que corregimos en KYB: un fallo de infraestructura presentado como un
+    // dato del cliente. `baseCaida` lo distingue.
+    return baseCaida
+      ? { ...base, accion: 'error', motivo: 'la base de transacciones no respondió (cluster pausado o caído): reintentar' }
+      : { ...base, accion: 'sin_screening', motivo: 'la transacción no está en la base' };
+  }
 
   // Screening del beneficiario, cacheado igual que el de OFAC.
   let screening = caso.screeningBeneficiario as Record<string, unknown> | undefined;
@@ -321,6 +331,7 @@ export async function handler(): Promise<Record<string, unknown>> {
   // de remesa sería ruido que enseña a ignorar el aviso.
   const camposAusentes = conf.camposAusentes.filter(c => c.startsWith('ofac.'));
 
+  const log: string[] = [];
   const abiertos = await leerCasosAbiertos();
   // El ASUNTO manda en qué cola va cada caso y las colas no se mezclan: misma
   // regla que la app, misma función.
@@ -354,12 +365,18 @@ export async function handler(): Promise<Record<string, unknown>> {
   if (!cortadoPorTiempo && !apagadoEnVuelo && conf?.cfg.remesa.enabled && remesas.length > 0) {
     // Las filas se traen TODAS de una: es una sola consulta para N casos.
     let filas: Record<string, unknown> = {};
+    let baseCaida = false;
+    const txs = remesas.map(c => extraerRemesa(c.asunto)).filter(Boolean);
     try {
-      const txs = remesas.map(c => extraerRemesa(c.asunto)).filter(Boolean);
       if (txs.length) filas = await buscarRemesas(txs) as unknown as Record<string, unknown>;
-    } catch (e) {
-      resultadosRemesa.push({ caseId: '—', accion: 'error', motivo: `filas de transacción: ${(e as Error).message}` });
+      // `buscarRemesas` se traga los errores del lote y devuelve vacío. Si se
+      // pidieron transacciones y no volvió NINGUNA, la base no estaba: el cluster
+      // de Redshift pausa todas las noches. No es que las transacciones no existan.
+      if (txs.length > 0 && Object.keys(filas).length === 0) baseCaida = true;
+    } catch {
+      baseCaida = true;
     }
+    if (baseCaida) log.push('la base de transacciones no respondió: las remesas quedan para la próxima corrida');
 
     for (let i = 0; i < remesas.length; i += LOTE) {
       if (restante() <= 0) { cortadoPorTiempo = true; break; }
@@ -368,7 +385,7 @@ export async function handler(): Promise<Record<string, unknown>> {
 
       const lote = remesas.slice(i, i + LOTE);
       const hechos = await Promise.all(lote.map(c =>
-        procesarRemesa(c, filas[extraerRemesa(c.asunto)], conf!.cfg.remesa).catch(e => ({
+        procesarRemesa(c, filas[extraerRemesa(c.asunto)], conf!.cfg.remesa, baseCaida).catch(e => ({
           caseId: c.id, numeroCaso: c.numeroCaso, accion: 'error' as const, motivo: (e as Error).message,
         }))));
       resultadosRemesa.push(...hechos);
@@ -380,6 +397,8 @@ export async function handler(): Promise<Record<string, unknown>> {
   const cuentaR = contar(resultadosRemesa);
   const resumen = {
     corrio: true,
+    // Avisos de la corrida que no son de un caso puntual.
+    avisos: log,
     casosEnCola: casos.length,
     procesados: resultados.length,
     cerrados: cuenta('cerrado'),
@@ -394,6 +413,9 @@ export async function handler(): Promise<Record<string, unknown>> {
       cerradas: cuentaR('cerrado'),
       retenidas: cuentaR('retenido'),
       errores: cuentaR('error'),
+      // Faltaba y escondía trabajo: 21 casos procesados salían como 0/0/0 porque
+      // `sin_screening` no se contaba en ningún lado.
+      sinScreening: cuentaR('sin_screening'),
       motivosRetencion: resultadosRemesa.filter(r => r.accion === 'retenido')
         .reduce<Record<string, number>>((acc, r) => {
           const k = r.motivo ?? 'sin_motivo';
