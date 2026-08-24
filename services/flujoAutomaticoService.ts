@@ -29,61 +29,21 @@ import type { FlujoOfacConfig, FlujoRemesaConfig } from './flujoDecision';
 export { PAISES_FLUJO, paisCodigo, paisHabilitado, tipologiaParaDecision };
 export type { FlujoOfacConfig, FlujoRemesaConfig };
 
-export interface FlujoConfig {
-  ofac: FlujoOfacConfig;
-  remesa: FlujoRemesaConfig;
-  actualizadoEn?: string | null;
-  actualizadoPor?: string | null;
-}
+// El tipo, los defaults y la normalización viven en `flujoDecision.ts`: el Lambda
+// desatendido usa exactamente los mismos. Antes cada lado normalizaba a su manera
+// y con los `tipo*` ausentes decidían distinto — la decisión no podía divergir
+// pero su input sí.
+export { FLUJO_CONFIG_DEFAULT, normalizarFlujoConfig } from './flujoDecision';
+export type { FlujoConfig, ConfigNormalizada } from './flujoDecision';
 
-// Por pedido explícito: ambos flujos arrancan APAGADOS.
-export const FLUJO_CONFIG_DEFAULT: FlujoConfig = {
-  ofac: {
-    enabled: false,
-    paises: { CL: false, CO: false },   // por pedido explícito: todos apagados
-    cerrarSF: true,
-    cerrarAdmin: true,
-    tipoLiberarNormal: 'liberar_normal',
-    tipoLiberarUcr: 'liberar_ucr',
-    tipoBloquear: 'fully_blocked',
-  },
-  remesa: {
-    enabled: false,          // por pedido explícito: arranca APAGADO
-    cerrarSF: true,
-    cerrarAdmin: true,
-    tipoLiberar: 'liberar',
-  },
-  actualizadoEn: null,
-  actualizadoPor: null,
-};
+import { FLUJO_CONFIG_DEFAULT, normalizarFlujoConfig } from './flujoDecision';
+import type { FlujoConfig } from './flujoDecision';
 
 export const flujoConfigDisponible = (): boolean => !!getDb();
 
-// Normaliza lo que venga de Firestore contra los defaults (tolera docs viejos).
-function normalizar(raw: Record<string, unknown> | undefined): FlujoConfig {
-  const ofacRaw = (raw?.ofac ?? {}) as Partial<FlujoOfacConfig>;
-  const remesaRaw = (raw?.remesa ?? {}) as Partial<FlujoRemesaConfig>;
-  const d = FLUJO_CONFIG_DEFAULT;
-  return {
-    ofac: {
-      enabled: ofacRaw.enabled === true,                       // default OFF
-      paises: Object.fromEntries(PAISES_FLUJO.map(p => [p.code, (ofacRaw.paises ?? {})[p.code] === true])), // default OFF
-      cerrarSF: ofacRaw.cerrarSF !== false,
-      cerrarAdmin: ofacRaw.cerrarAdmin !== false,
-      tipoLiberarNormal: ofacRaw.tipoLiberarNormal || d.ofac.tipoLiberarNormal,
-      tipoLiberarUcr: ofacRaw.tipoLiberarUcr || d.ofac.tipoLiberarUcr,
-      tipoBloquear: ofacRaw.tipoBloquear || d.ofac.tipoBloquear,
-    },
-    remesa: {
-      enabled: remesaRaw.enabled === true,                     // default OFF
-      cerrarSF: remesaRaw.cerrarSF !== false,
-      cerrarAdmin: remesaRaw.cerrarAdmin !== false,
-      tipoLiberar: remesaRaw.tipoLiberar || d.remesa.tipoLiberar,
-    },
-    actualizadoEn: (raw?.actualizadoEn as string | undefined) ?? null,
-    actualizadoPor: (raw?.actualizadoPor as string | undefined) ?? null,
-  };
-}
+// Compat: el resto de la app llama `normalizar(raw)` y espera solo la config.
+const normalizar = (raw: Record<string, unknown> | undefined): FlujoConfig =>
+  normalizarFlujoConfig(raw).cfg;
 
 // Suscripción en vivo a la config (se comparte entre analistas).
 export function subscribeFlujoConfig(

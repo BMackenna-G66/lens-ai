@@ -23,8 +23,8 @@ import { initializeApp, cert, type App } from 'firebase-admin/app';
 import { getFirestore, type Firestore } from 'firebase-admin/firestore';
 
 import { screenCaso, esScreenable } from '../../../services/casosCriminalService';
-import { evaluarCasoAuto, statusDeCaso } from '../../../services/flujoDecision';
-import type { FlujoOfacConfig } from '../../../services/flujoDecision';
+import { evaluarCasoAuto, statusDeCaso, normalizarFlujoConfig } from '../../../services/flujoDecision';
+import type { FlujoOfacConfig, ConfigNormalizada } from '../../../services/flujoDecision';
 import { TIPOS_CIERRE, camposDeCierre } from '../../../services/cierreTipos';
 import { TIPOS_CIERRE_ADMIN, ADMIN_ASSIGNEE_DEFAULT, PEP_PROVIDER_DEFAULT, ofacFlagPara } from '../../../services/cierreAdminTipos';
 import { sendCaseUpdate } from '../../../services/salesforceCaseService';
@@ -58,29 +58,19 @@ function db(): Firestore {
 }
 
 // ── Config del flujo ────────────────────────────────────────────────────────
+// La normalización es LA MISMA función que usa la app (`normalizarFlujoConfig`).
+// Antes esto normalizaba por su cuenta y con los `tipo*` ausentes el Lambda
+// decidía `sin_conclusion` donde la app decidía `liberar_normal`: la decisión no
+// podía divergir, pero su input sí. Lo encontró la auditoría comparando los dos
+// caminos sobre 512 combinaciones de config.
+//
 // Se relee ENTRE LOTES, no una sola vez al arranque: el switch es el cortafuegos
 // y tiene que frenar la corrida en curso, no la siguiente.
-async function leerConfig(): Promise<{ ofac: FlujoOfacConfig; remesa: { enabled: boolean } } | null> {
+async function leerConfig(): Promise<ConfigNormalizada | null> {
   const [col, id] = CONFIG_DOC.split('/');
   const snap = await db().collection(col).doc(id).get();
   if (!snap.exists) return null;      // sin doc = nunca se configuró = apagado
-  const d = snap.data() as Record<string, unknown>;
-  const ofac = (d.ofac ?? {}) as Partial<FlujoOfacConfig>;
-  const remesa = (d.remesa ?? {}) as { enabled?: boolean };
-  // Todo lo que no esté explícitamente en true se toma como apagado. Un campo
-  // faltante NO puede habilitar un cierre automático.
-  return {
-    ofac: {
-      enabled: ofac.enabled === true,
-      paises: (ofac.paises ?? {}) as Record<string, boolean>,
-      cerrarSF: ofac.cerrarSF === true,
-      cerrarAdmin: ofac.cerrarAdmin === true,
-      tipoLiberarNormal: String(ofac.tipoLiberarNormal ?? ''),
-      tipoLiberarUcr: String(ofac.tipoLiberarUcr ?? ''),
-      tipoBloquear: String(ofac.tipoBloquear ?? ''),
-    },
-    remesa: { enabled: remesa.enabled === true },
-  };
+  return normalizarFlujoConfig(snap.data() as Record<string, unknown>);
 }
 
 const screeningVigente = (s: unknown): boolean =>
@@ -230,11 +220,17 @@ export async function handler(): Promise<Record<string, unknown>> {
   const arranque = Date.now();
   const restante = () => PRESUPUESTO_MS - (Date.now() - arranque);
 
-  let cfg = await leerConfig();
-  if (!cfg?.ofac.enabled) {
+  let conf = await leerConfig();
+  if (!conf?.cfg.ofac.enabled) {
     // Apagado no es un error: es el cortafuegos funcionando.
     return { corrio: false, motivo: 'flujo OFAC apagado' };
   }
+  // Qué campos se leyeron por defecto. Un proceso desatendido no puede degradarse
+  // en silencio: si el doc de config quedó incompleto, tiene que decirlo.
+  //
+  // Se filtra a `ofac.*`: esta función no toca remesas, así que reportar campos
+  // de remesa sería ruido que enseña a ignorar el aviso.
+  const camposAusentes = conf.camposAusentes.filter(c => c.startsWith('ofac.'));
 
   const casos = await leerCasosAbiertos();
   const resultados: ResultadoCaso[] = [];
@@ -246,12 +242,12 @@ export async function handler(): Promise<Record<string, unknown>> {
 
     // El switch se relee ENTRE LOTES: si alguien apaga a mitad de una corrida
     // de 200 casos, la corrida frena acá y no al final.
-    cfg = await leerConfig();
-    if (!cfg?.ofac.enabled) { apagadoEnVuelo = true; break; }
+    conf = await leerConfig();
+    if (!conf?.cfg.ofac.enabled) { apagadoEnVuelo = true; break; }
 
     const lote = casos.slice(i, i + LOTE);
     const hechos = await Promise.all(lote.map(c =>
-      procesar(c, cfg!.ofac).catch(e => ({
+      procesar(c, conf!.cfg.ofac).catch(e => ({
         caseId: c.id, numeroCaso: c.numeroCaso, accion: 'error' as const, motivo: (e as Error).message,
       }))));
     resultados.push(...hechos);
@@ -268,6 +264,9 @@ export async function handler(): Promise<Record<string, unknown>> {
     sinScreening: cuenta('sin_screening'),
     cortadoPorTiempo,
     apagadoEnVuelo,
+    // Vacío = el doc de config estaba completo. Con algo adentro, esos campos se
+    // resolvieron con el default y conviene revisarlos.
+    camposAusentes,
     // Por qué se retuvo cada uno, agregado. Es lo que hay que poder auditar de un
     // proceso que corre sin nadie mirando.
     motivosRetencion: resultados.filter(r => r.accion === 'retenido')

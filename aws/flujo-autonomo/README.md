@@ -23,8 +23,21 @@ cada caso de la cola lo consulta en listas, cruza con el catálogo, decide
 | `config/flujoAutomatico.ofac.enabled` | Firestore | Si no es exactamente `true`, la corrida termina sin tocar nada. Se **relee entre lotes**, así que apagarlo frena la corrida en curso. |
 | `Habilitada` del stack | CloudFormation | Habilita o deshabilita el cron. Arranca en `DISABLED`. |
 
-Cualquier campo ausente en la config se lee como apagado. Un campo faltante no
-puede habilitar un cierre automático.
+`ofac.enabled` y los países arrancan apagados si el campo falta: un campo ausente
+no puede habilitar un cierre automático. Los canales y las tipologías sí caen a
+su default, igual que en la app — de lo contrario un doc recreado dejaría de
+funcionar en silencio.
+
+La normalización de la config es **la misma función** que usa la app
+(`normalizarFlujoConfig`). Antes cada lado normalizaba a su manera y con los
+`tipo*` ausentes el Lambda decidía `sin_conclusion` donde la app decidía
+`liberar_normal`. Lo encontró la auditoría comparando los dos caminos sobre 512
+combinaciones de config.
+
+Y cuando algún campo se resuelve por defecto, la corrida lo dice en
+`camposAusentes` del resumen. Un proceso desatendido no puede degradarse en
+silencio: `sin_conclusion` es un motivo legítimo y sin este aviso no habría forma
+de distinguir "no había nada que hacer" de "la config quedó incompleta".
 
 ## Por reloj, no por cantidad
 

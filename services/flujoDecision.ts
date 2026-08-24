@@ -37,6 +37,34 @@ export interface FlujoRemesaConfig {
   tipoLiberar: string;    // id de la tipología que se aplica
 }
 
+export interface FlujoConfig {
+  ofac: FlujoOfacConfig;
+  remesa: FlujoRemesaConfig;
+  actualizadoEn?: string | null;
+  actualizadoPor?: string | null;
+}
+
+// Por pedido explícito: ambos flujos arrancan APAGADOS.
+export const FLUJO_CONFIG_DEFAULT: FlujoConfig = {
+  ofac: {
+    enabled: false,
+    paises: { CL: false, CO: false },   // por pedido explícito: todos apagados
+    cerrarSF: true,
+    cerrarAdmin: true,
+    tipoLiberarNormal: 'liberar_normal',
+    tipoLiberarUcr: 'liberar_ucr',
+    tipoBloquear: 'fully_blocked',
+  },
+  remesa: {
+    enabled: false,          // por pedido explícito: arranca APAGADO
+    cerrarSF: true,
+    cerrarAdmin: true,
+    tipoLiberar: 'liberar',
+  },
+  actualizadoEn: null,
+  actualizadoPor: null,
+};
+
 // Chile (Regcheq) y Colombia (Inspektor). Para sumar otro, agregarlo acá.
 export const PAISES_FLUJO: { code: string; label: string }[] = [
   { code: 'CL', label: 'Chile' },
@@ -55,6 +83,69 @@ export function paisCodigo(pais: string): string {
 export function paisHabilitado(pais: string, cfg: FlujoOfacConfig): boolean {
   const code = paisCodigo(pais);
   return !!code && cfg.paises?.[code] === true;
+}
+
+// ── Normalización de la config ──────────────────────────────────────────────
+// Va acá, junto a la decisión, por el mismo motivo que la decisión: si cada lado
+// normaliza a su manera, la decisión no puede divergir pero su INPUT sí, y el
+// modo de fallo es el mismo una capa más abajo.
+//
+// Lo encontró la auditoría comparando app vs Lambda: con los tres `tipo*`
+// ausentes, la app caía a sus defaults y el Lambda a `''`, así que el Lambda
+// dejaba de liberar. La dirección era segura —liberaba de menos— pero silenciosa:
+// cada caso salía `sin_conclusion`, que es un motivo legítimo, y no había forma
+// de distinguirlo de "no había nada que hacer".
+//
+// `camposAusentes` es la respuesta a eso: quien corre desatendido puede decir en
+// su resumen qué campos leyó por defecto, en vez de degradarse en silencio.
+export interface ConfigNormalizada {
+  cfg: FlujoConfig;
+  camposAusentes: string[];
+}
+
+export function normalizarFlujoConfig(raw: Record<string, unknown> | undefined): ConfigNormalizada {
+  const ofacRaw = (raw?.ofac ?? {}) as Partial<FlujoOfacConfig>;
+  const remesaRaw = (raw?.remesa ?? {}) as Partial<FlujoRemesaConfig>;
+  const d = FLUJO_CONFIG_DEFAULT;
+  const ausentes: string[] = [];
+  const marcar = (nombre: string, v: unknown) => { if (v === undefined || v === null || v === '') ausentes.push(nombre); };
+
+  marcar('ofac.enabled', ofacRaw.enabled);
+  marcar('ofac.paises', ofacRaw.paises);
+  marcar('ofac.cerrarSF', ofacRaw.cerrarSF);
+  marcar('ofac.cerrarAdmin', ofacRaw.cerrarAdmin);
+  marcar('ofac.tipoLiberarNormal', ofacRaw.tipoLiberarNormal);
+  marcar('ofac.tipoLiberarUcr', ofacRaw.tipoLiberarUcr);
+  marcar('ofac.tipoBloquear', ofacRaw.tipoBloquear);
+  marcar('remesa.enabled', remesaRaw.enabled);
+  marcar('remesa.tipoLiberar', remesaRaw.tipoLiberar);
+
+  return {
+    camposAusentes: ausentes,
+    cfg: {
+      ofac: {
+        // `enabled` y los países SIEMPRE por defecto apagados: un campo ausente no
+        // puede prender un cierre automático.
+        enabled: ofacRaw.enabled === true,
+        paises: Object.fromEntries(PAISES_FLUJO.map(p => [p.code, (ofacRaw.paises ?? {})[p.code] === true])),
+        // Los canales y las tipologías sí caen al default, que es lo que la app ya
+        // hacía: sin esto un doc viejo o recreado dejaría de funcionar.
+        cerrarSF: ofacRaw.cerrarSF !== false,
+        cerrarAdmin: ofacRaw.cerrarAdmin !== false,
+        tipoLiberarNormal: ofacRaw.tipoLiberarNormal || d.ofac.tipoLiberarNormal,
+        tipoLiberarUcr: ofacRaw.tipoLiberarUcr || d.ofac.tipoLiberarUcr,
+        tipoBloquear: ofacRaw.tipoBloquear || d.ofac.tipoBloquear,
+      },
+      remesa: {
+        enabled: remesaRaw.enabled === true,
+        cerrarSF: remesaRaw.cerrarSF !== false,
+        cerrarAdmin: remesaRaw.cerrarAdmin !== false,
+        tipoLiberar: remesaRaw.tipoLiberar || d.remesa.tipoLiberar,
+      },
+      actualizadoEn: (raw?.actualizadoEn as string | undefined) ?? null,
+      actualizadoPor: (raw?.actualizadoPor as string | undefined) ?? null,
+    },
+  };
 }
 
 // ── Clasificador: conclusión del screening → id de tipología ────────────────
