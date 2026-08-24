@@ -1,0 +1,110 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Flujo automático DESATENDIDO de la Bandeja de Casos (OFAC). Consulta en listas,
+  cruza con el catálogo, decide Liberar / Liberar UCR / Fully Blocked y cierra en
+  Salesforce y en Admin, sin navegador. Stack INDEPENDIENTE del receptor de
+  casos, del logger y del sync diario.
+
+  El switch `config/flujoAutomatico` de Firestore manda: si `ofac.enabled` no es
+  exactamente true, la corrida termina sin tocar nada.
+
+Parameters:
+  FirebaseSaB64:
+    Type: String
+    NoEcho: true
+    Description: Service account de Firebase (JSON) en base64.
+  ProxyUrl:
+    Type: String
+    Description: >
+      URL del Worker empresadocs-proxy. Es por donde salen los cierres a
+      Salesforce y a Admin; sin esto la función no puede cerrar nada.
+  RegcheqApiKey:
+    Type: String
+    NoEcho: true
+    Description: API key de Regcheq (screening de Chile).
+  FirestoreCollection:
+    Type: String
+    Default: casos_sf
+  Horario:
+    Type: String
+    Default: 'cron(0/30 11-23 * * ? *)'
+    Description: >
+      UTC. Default: cada 30 min entre 11:00 y 23:59 UTC (07:00-19:59 hora Chile).
+      Los casos llegan durante el día hábil, así que correr de noche solo
+      agregaría espera. Para 24x7, poner 'cron(0/30 * * * ? *)'.
+  Habilitada:
+    Type: String
+    Default: 'DISABLED'
+    AllowedValues: ['ENABLED', 'DISABLED']
+    Description: >
+      Estado del cron. Arranca DISABLED a propósito: el stack se despliega y
+      recién se habilita cuando se decide. Es el segundo interruptor, además del
+      de Firestore.
+  Lote:
+    Type: String
+    Default: '4'
+    Description: Consultas al proveedor en paralelo. Igual que la app.
+  PresupuestoMs:
+    Type: String
+    Default: '780000'
+    Description: >
+      13 de los 15 minutos. Se corta por RELOJ y no por cantidad: Regcheq tiene
+      p90 de ~47 s por consulta, así que "N casos" no acota la corrida. Lo que
+      queda se toma en la próxima; el screening queda cacheado y no se re-paga.
+
+Globals:
+  Function:
+    Runtime: nodejs24.x
+    Timeout: 900          # 15 min, el techo de Lambda
+    MemorySize: 1024
+    Architectures: [arm64]
+
+Resources:
+  FlujoAutonomoFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: lens-flujo-autonomo-ofac
+      Handler: index.handler
+      CodeUri: dist/
+      Description: >
+        Corre el flujo automático de OFAC sin navegador. Importa el screening, la
+        decisión y los cierres del mismo código que usa la app (ver build.sh).
+      Environment:
+        Variables:
+          FIREBASE_SA_JSON: !Ref FirebaseSaB64
+          EMPRESADOCS_PROXY_URL: !Ref ProxyUrl
+          # El nombre lleva el prefijo VITE_ porque el código compartido lo lee
+          # así (en el navegador lo sustituye Vite). El build redefine
+          # `import.meta.env` a `process.env`, así que acá llega por este nombre.
+          VITE_REGCHEQ_API_KEY: !Ref RegcheqApiKey
+          FIRESTORE_COLLECTION: !Ref FirestoreCollection
+          LOTE: !Ref Lote
+          PRESUPUESTO_MS: !Ref PresupuestoMs
+          SCREENING_SCHEMA: '3'
+      Events:
+        Periodico:
+          Type: Schedule
+          Properties:
+            Schedule: !Ref Horario
+            Name: lens-flujo-autonomo-ofac
+            Description: Procesa la cola de OFAC sin intervención.
+            Enabled: !If [CronHabilitado, true, false]
+
+Conditions:
+  CronHabilitado: !Equals [!Ref Habilitada, 'ENABLED']
+
+Outputs:
+  FunctionName:
+    Value: !Ref FlujoAutonomoFunction
+  LogGroup:
+    Value: !Sub '/aws/lambda/${FlujoAutonomoFunction}'
+  Horario:
+    Value: !Ref Horario
+  EstadoCron:
+    Value: !Ref Habilitada
+  Aviso:
+    Value: >
+      Dos interruptores: este cron y `config/flujoAutomatico.ofac.enabled` en
+      Firestore. Apagar el de Firestore frena también la corrida en curso, porque
+      se relee entre lotes.

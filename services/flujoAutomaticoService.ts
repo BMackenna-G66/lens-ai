@@ -17,39 +17,17 @@ export const FLUJO_COLLECTION = 'config';
 export const FLUJO_DOC = 'flujoAutomatico';
 
 // Países donde se puede prender el automático. Son los que tienen screening:
-// Chile (Regcheq) y Colombia (Inspektor). Para sumar otro, agregarlo acá.
-export const PAISES_FLUJO: { code: string; label: string }[] = [
-  { code: 'CL', label: 'Chile' },
-  { code: 'CO', label: 'Colombia' },
-];
+// Los tipos, el catálogo de países y las funciones que DECIDEN viven en
+// `flujoDecision.ts`, que no depende de Firestore ni del navegador: el Lambda
+// desatendido importa exactamente las mismas. Acá se reexportan para no cambiar
+// ni un import del resto de la app.
+import {
+  PAISES_FLUJO, paisCodigo, paisHabilitado, tipologiaParaDecision,
+} from './flujoDecision';
+import type { FlujoOfacConfig, FlujoRemesaConfig } from './flujoDecision';
 
-// País del caso → código del catálogo. '' = país sin screening/no soportado, que
-// nunca entra al flujo automático.
-export function paisCodigo(pais: string): string {
-  const p = (pais || '').trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
-  if (/^cl$|chile/.test(p)) return 'CL';
-  if (/^co$|colombia/.test(p)) return 'CO';
-  return '';
-}
-
-export interface FlujoOfacConfig {
-  enabled: boolean;
-  paises: Record<string, boolean>; // por país: { CL: false, CO: false } — todos OFF
-  cerrarSF: boolean;        // ejecutar el cierre en Salesforce
-  cerrarAdmin: boolean;     // ejecutar el cierre en Admin (bloqueo/desbloqueo)
-  tipoLiberarNormal: string; // id de tipología para "Liberar"
-  tipoLiberarUcr: string;    // id de tipología para "Liberar UCR"
-  tipoBloquear: string;      // id de tipología para "Fully Blocked"
-}
-
-// Cola Remesa: prendido/apagado + qué cierres ejecuta + tipología activa.
-// Hoy la única tipología es "Liberar" (ver cierreRemesaTipos.ts).
-export interface FlujoRemesaConfig {
-  enabled: boolean;
-  cerrarSF: boolean;      // ejecutar el cierre en Salesforce
-  cerrarAdmin: boolean;   // liberar la transacción en Admin
-  tipoLiberar: string;    // id de la tipología que se aplica
-}
+export { PAISES_FLUJO, paisCodigo, paisHabilitado, tipologiaParaDecision };
+export type { FlujoOfacConfig, FlujoRemesaConfig };
 
 export interface FlujoConfig {
   ofac: FlujoOfacConfig;
@@ -132,21 +110,4 @@ export async function guardarFlujoConfig(cfg: FlujoConfig, actor?: Actor): Promi
   }, { merge: true });
 }
 
-// ¿El país del caso tiene el automático prendido?
-export function paisHabilitado(pais: string, cfg: FlujoOfacConfig): boolean {
-  const code = paisCodigo(pais);
-  return !!code && cfg.paises?.[code] === true;
-}
 
-// ── Clasificador PURO: conclusión del screening → id de tipología ───────────────
-// Devuelve null cuando la conclusión NO se automatiza (revisión manual, vacía…).
-// El orden importa: "Liberar + UCR" tiene que caer en UCR, no en Liberar normal.
-export function tipologiaParaDecision(decision: string | undefined, cfg: FlujoOfacConfig): string | null {
-  const d = (decision ?? '').trim().toUpperCase();
-  if (!d) return null;
-  if (/REVIS/.test(d)) return null;                              // revisión → analista
-  if (/BLOCK|BLOQ/.test(d)) return cfg.tipoBloquear;             // Fully Blocked
-  if (/UCR|UNDER[_ ]COMPLIANCE/.test(d)) return cfg.tipoLiberarUcr;
-  if (/LIBERAR|SIN CAUSAS|SIN RIESGO/.test(d)) return cfg.tipoLiberarNormal;
-  return null;
-}

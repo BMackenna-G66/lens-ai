@@ -33,3 +33,8 @@ aws/**/.aws-sam/
 # Python
 __pycache__/
 *.pyc
+
+# Artefactos del Lambda del flujo autónomo (se generan con build.sh)
+aws/flujo-autonomo/dist/
+aws/flujo-autonomo/node_modules/
+aws/flujo-autonomo/.aws-sam/

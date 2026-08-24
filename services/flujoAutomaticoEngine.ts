@@ -11,12 +11,10 @@ import { TIPOS_CIERRE_ADMIN, ADMIN_ASSIGNEE_DEFAULT, PEP_PROVIDER_DEFAULT, ofacF
 import { enviarResolucion } from './caseResolutionService';
 import { enviarCierreAdmin, adminCierreDisponible } from './adminCierreService';
 import { sfUpdateDisponible } from './salesforceCaseService';
-import { registrarCierreCanal, statusDeCaso } from './caseStatusService';
+import { registrarCierreCanal } from './caseStatusService';
 import { registrarAuditoria } from './caseAuditService';
 import { logCierre, ACTOR_SISTEMA } from './colasLogService';
-import { tipologiaParaDecision, paisHabilitado } from './flujoAutomaticoService';
 import type { FlujoOfacConfig } from './flujoAutomaticoService';
-import { categoriasSensibles } from './delitosSensibles';
 import type { CasoSF } from './casosService';
 import type { SFCaseUpdate } from './salesforceCaseService';
 import type { Actor } from './caseWorkflowService';
@@ -34,64 +32,17 @@ export interface ResultadoAuto {
 
 const paisCC = (p: string): string => (/colombia|^co$/i.test(p) ? 'CO' : 'CL');
 
-export type MotivoNoAuto =
-  | 'flujo_apagado'
-  | 'pais_apagado'
-  | 'ya_cerrado'
-  | 'sin_conclusion'      // screening sin resolver, o conclusión de revisión
-  | 'delito_sensible'     // freno duro: tráfico/defraudaciones/armas/lavado/terrorismo
-  | 'pep';                // freno duro: coincidencia PEP
+// La DECISIÓN vive en `flujoDecision.ts`: es el mismo módulo que importa el
+// Lambda desatendido, así que las reglas no pueden divergir entre el camino del
+// navegador y el del servidor. Acá queda solo la EJECUCIÓN de los cierres, que
+// sí depende de servicios con red y Firestore.
+export {
+  evaluarCasoAuto, retenidoPorDelito, motivosRetencion,
+} from './flujoDecision';
+export type { MotivoNoAuto, EvaluacionAuto, ScreeningParaAuto } from './flujoDecision';
+import { evaluarCasoAuto } from './flujoDecision';
+import type { ScreeningParaAuto } from './flujoDecision';
 
-export interface EvaluacionAuto {
-  automatizable: boolean;
-  tipologia?: string;
-  motivo?: MotivoNoAuto;
-  categorias?: string[];  // categorías sensibles que retuvieron el caso
-}
-
-// Screening mínimo que necesita la evaluación.
-export interface ScreeningParaAuto {
-  decision?: string;
-  pep?: boolean;
-  coincidencias?: Array<{ tipo?: string; detalle?: string }>;
-}
-
-// ¿Este caso se puede cerrar automáticamente? PURO, sin efectos.
-// El orden de los cortes importa: el freno por delito sensible se evalúa SIEMPRE,
-// incluso si la conclusión dice "Liberar".
-export function evaluarCasoAuto(caso: CasoSF, screening: ScreeningParaAuto | undefined, cfg: FlujoOfacConfig): EvaluacionAuto {
-  if (!cfg.enabled) return { automatizable: false, motivo: 'flujo_apagado' };
-  if (!paisHabilitado(caso.pais, cfg)) return { automatizable: false, motivo: 'pais_apagado' };
-  if (statusDeCaso(caso) === 'CERRADO') return { automatizable: false, motivo: 'ya_cerrado' };
-
-  // Freno duro por delito sensible (antes de mirar la conclusión).
-  const categorias = categoriasSensibles(screening?.coincidencias);
-  if (categorias.length > 0) return { automatizable: false, motivo: 'delito_sensible', categorias };
-
-  // Freno duro por PEP: un cliente PEP NO se libera solo. Su tratamiento correcto
-  // es el bloqueo preventivo + formulario PEP, que hoy no está automatizado, así
-  // que el caso queda entero para el analista (tampoco se bloquea solo).
-  if (screening?.pep === true) return { automatizable: false, motivo: 'pep', categorias: ['PEP'] };
-
-  const tipologia = tipologiaParaDecision(screening?.decision, cfg);
-  if (!tipologia) return { automatizable: false, motivo: 'sin_conclusion' };
-  return { automatizable: true, tipologia };
-}
-
-// Retención por delito sensible, independiente de la config (para mostrarla en la
-// UI aunque el flujo esté apagado).
-export const retenidoPorDelito = (screening: ScreeningParaAuto | undefined): string[] =>
-  categoriasSensibles(screening?.coincidencias);
-
-// TODOS los motivos por los que un caso queda fuera del automático (delitos + PEP).
-// Es lo que muestra la UI: al analista le importa que está retenido y por qué.
-export const motivosRetencion = (screening: ScreeningParaAuto | undefined): string[] => [
-  ...categoriasSensibles(screening?.coincidencias),
-  ...(screening?.pep === true ? ['PEP'] : []),
-];
-
-// Cierra un caso automáticamente. Devuelve null si no era candidato (flujo o país
-// apagado, ya cerrado, conclusión no automatizable, o retenido por delito sensible).
 export async function procesarCasoAuto(
   caso: CasoSF,
   screening: ScreeningParaAuto | undefined,

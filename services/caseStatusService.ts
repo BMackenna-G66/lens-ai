@@ -13,7 +13,7 @@
 import { doc, runTransaction, updateDoc, Firestore } from 'firebase/firestore';
 import { getDb } from './firebaseService';
 import { CASOS_COLLECTION } from './casosService';
-import type { CasoSF, CierreCanal } from './casosService';
+import type { CierreCanal } from './casosService';
 import { registrarAuditoria } from './caseAuditService';
 import type { Actor } from './caseWorkflowService';
 
@@ -26,18 +26,9 @@ const esStatus = (v: string): v is StatusCaso =>
 
 // Status del caso. Si hay uno persistido, ese manda; si no (casos anteriores a
 // este cambio), se deriva de los cierres y la asignación.
-export function statusDeCaso(c: CasoSF): StatusCaso {
-  const guardado = (c.statusCaso ?? '').toUpperCase();
-  if (esStatus(guardado)) return guardado;
-  const sfOk = c.cierres?.sf?.ok === true;
-  const adminOk = c.cierres?.admin?.ok === true;
-  if (sfOk && adminOk) return 'CERRADO';
-  if (sfOk || adminOk || c.asignacion?.analistaId) return 'GESTIONANDO';
-  return 'ABIERTO';
-}
-
-// ¿El caso sigue en la cola de trabajo?
-export const sigueEnCola = (c: CasoSF): boolean => statusDeCaso(c) !== 'CERRADO';
+// Viven en `flujoDecision.ts` porque el Lambda desatendido las necesita y ese
+// módulo no arrastra Firestore. Se reexportan para no cambiar los imports.
+export { statusDeCaso, sigueEnCola } from './flujoDecision';
 
 // Registra el resultado de un canal de cierre (Salesforce o Admin) y recalcula el
 // status. Si los DOS canales quedaron OK, el caso pasa a CERRADO y sale de la cola.

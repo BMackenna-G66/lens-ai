@@ -1,0 +1,10 @@
+{
+  "name": "lens-flujo-autonomo",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Flujo automatico desatendido de la Bandeja de Casos (OFAC).",
+  "dependencies": {
+    "firebase-admin": "^12.7.0"
+  }
+}
