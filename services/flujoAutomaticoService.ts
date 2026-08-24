@@ -41,21 +41,25 @@ import type { FlujoConfig } from './flujoDecision';
 
 export const flujoConfigDisponible = (): boolean => !!getDb();
 
-// Compat: el resto de la app llama `normalizar(raw)` y espera solo la config.
-const normalizar = (raw: Record<string, unknown> | undefined): FlujoConfig =>
-  normalizarFlujoConfig(raw).cfg;
-
 // Suscripción en vivo a la config (se comparte entre analistas).
+// `onData` recibe además qué campos se resolvieron con el default. Es un segundo
+// argumento opcional, así que los llamadores que solo quieren la config no
+// cambian. Sirve para avisar en el mantenedor que el doc quedó incompleto: el
+// flujo desatendido lo reporta en su corrida, pero ese documento no lo mira
+// nadie, y un aviso solo sirve donde está quien puede arreglarlo.
 export function subscribeFlujoConfig(
-  onData: (cfg: FlujoConfig) => void,
+  onData: (cfg: FlujoConfig, camposAusentes?: string[]) => void,
   onError?: (msg: string) => void,
 ): () => void {
   const db = getDb() as Firestore | null;
-  if (!db) { onData(FLUJO_CONFIG_DEFAULT); return () => {}; }
+  if (!db) { onData(FLUJO_CONFIG_DEFAULT, []); return () => {}; }
   return onSnapshot(
     doc(db, FLUJO_COLLECTION, FLUJO_DOC),
-    snap => onData(normalizar(snap.data() as Record<string, unknown> | undefined)),
-    err => { onError?.(err.message); onData(FLUJO_CONFIG_DEFAULT); },
+    snap => {
+      const n = normalizarFlujoConfig(snap.data() as Record<string, unknown> | undefined);
+      onData(n.cfg, n.camposAusentes);
+    },
+    err => { onError?.(err.message); onData(FLUJO_CONFIG_DEFAULT, []); },
   );
 }
 

@@ -540,7 +540,13 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   const autoRunning = useRef(false);          // evita corridas superpuestas
   const autoHechos = useRef<Set<string>>(new Set()); // casos ya procesados en esta sesión
 
-  useEffect(() => subscribeFlujoConfig(cfg => { setFlujoCfg(cfg); setFlujoDraft(cfg); }), []);
+  // `camposAusentes`: qué campos de la config están cayendo al default. El flujo
+  // desatendido los reporta en el resumen de su corrida, pero ese documento no lo
+  // mira nadie — un aviso solo sirve donde está quien puede arreglarlo.
+  const [flujoCamposAusentes, setFlujoCamposAusentes] = useState<string[]>([]);
+  useEffect(() => subscribeFlujoConfig((cfg, ausentes) => {
+    setFlujoCfg(cfg); setFlujoDraft(cfg); setFlujoCamposAusentes(ausentes ?? []);
+  }), []);
 
   // Usuarios de Lens: sirven para asignar casos y como diccionario de analistas en
   // Redshift (para poder leer los logs por nombre/correo).
@@ -1848,6 +1854,17 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
 
             {!flujoConfigDisponible() && (
               <p className="text-xs text-red-600 dark:text-red-400 mb-3">Firestore no está configurado: la config no se puede guardar en esta instancia.</p>
+            )}
+
+            {/* Campos que se están resolviendo con el default. Importa porque el
+                flujo desatendido corre sin nadie mirando: si el doc quedó
+                incompleto, acá se ve, que es donde está quien puede arreglarlo.
+                Guardar completa el doc y el aviso desaparece. */}
+            {flujoCamposAusentes.length > 0 && (
+              <p className="text-xs text-amber-800 dark:text-amber-300 mb-3 bg-amber-100/70 dark:bg-amber-900/30 border border-amber-300 dark:border-amber-700/60 rounded-lg px-3 py-2">
+                ⚠️ Estos campos no están en la configuración guardada y se están usando por defecto:{' '}
+                <b>{flujoCamposAusentes.join(', ')}</b>. Guardá la config para dejarlos explícitos.
+              </p>
             )}
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
