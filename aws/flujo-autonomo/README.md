@@ -51,28 +51,29 @@ siguiente. El screening queda cacheado, así que no se vuelve a pagar.
 
 ## Desplegar
 
+Una sola vez, guardar la key de Regcheq en un archivo:
+
+```bash
+printf '%s' 'LA-KEY' > ~/.lens-regcheq-key && chmod 600 ~/.lens-regcheq-key
+```
+
+Y después, siempre:
+
 ```bash
 cd aws/flujo-autonomo
-./build.sh
-sam deploy --guided \
-  --parameter-overrides \
-    FirebaseSaB64=<service-account-en-base64> \
-    ProxyUrl=https://empresadocs-proxy.bmackenna.workers.dev \
-    RegcheqApiKey=<api-key> \
-    Habilitada=DISABLED
+./deploy.sh              # despliega con el cron ACTIVO
+./deploy.sh DISABLED     # o apagado, para probar primero
 ```
 
-Se despliega **deshabilitado**. Para la primera corrida, invocarla a mano y leer
-el resumen antes de habilitar el cron:
+El script lee los dos secretos de archivos, así que **no pasan por la línea de
+comandos ni quedan en el historial de la shell**. Y rechaza el deploy si el
+archivo de la key todavía tiene un placeholder, que es el error fácil de cometer.
+
+Para ver qué haría el flujo ahora mismo, sin esperar al cron:
 
 ```bash
-aws lambda invoke --function-name lens-flujo-autonomo-ofac /dev/stdout
-```
-
-Y después, cuando el resultado convenza:
-
-```bash
-sam deploy --parameter-overrides Habilitada=ENABLED ...
+aws lambda invoke --profile compliance-admin --region us-east-1 \
+  --function-name lens-flujo-autonomo --cli-read-timeout 900 /tmp/lens-run.json
 ```
 
 ## Qué deja registrado

@@ -38,3 +38,9 @@ __pycache__/
 aws/flujo-autonomo/dist/
 aws/flujo-autonomo/node_modules/
 aws/flujo-autonomo/.aws-sam/
+
+
+# Secretos locales del flujo autónomo (nunca al repo)
+.lens-regcheq-key
+*.lens-regcheq-key
+*firebase-adminsdk*.json
