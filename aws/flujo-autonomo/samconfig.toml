@@ -1,0 +1,12 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "lens-flujo-autonomo"
+resolve_s3 = true
+s3_prefix = "lens-flujo-autonomo"
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = false
+profile = "compliance-admin"
+# Los secretos NO se guardan acá. Se pasan en el deploy:
+#   --parameter-overrides "FirebaseSaB64=$(base64 -i <ruta-al-json>) RegcheqApiKey=<key>"

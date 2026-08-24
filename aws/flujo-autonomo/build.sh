@@ -39,4 +39,10 @@ cat > dist/package.json <<'JSON'
 }
 JSON
 
+# Las dependencias van DENTRO del paquete. `sam deploy` zipea `dist/` tal cual y
+# no instala nada, así que sin esto la función arranca y muere con
+# "Cannot find package 'firebase-admin'".
+( cd dist && npm install --omit=dev --no-audit --no-fund --silent )
+
 echo "dist/index.mjs  $(wc -c < dist/index.mjs) bytes"
+echo "dist/node_modules  $(du -sh dist/node_modules 2>/dev/null | cut -f1)"

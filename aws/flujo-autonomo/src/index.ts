@@ -94,10 +94,17 @@ async function leerCasosAbiertos(): Promise<CasoSF[]> {
 // ── Persistencia ────────────────────────────────────────────────────────────
 // Lo único que este archivo implementa por su cuenta: el SDK del navegador no
 // corre acá. La forma de los documentos es la misma que escribe la app.
+//
+// El SDK de servidor RECHAZA `undefined` con un error, no lo ignora como el del
+// navegador. La app resuelve esto con un round-trip por JSON antes de escribir
+// (`paraFirestore` en casosService) y acá hace falta lo mismo: sin esto, un
+// screening con cualquier campo opcional vacío tira la escritura entera. Apareció
+// en la primera corrida real, con `screeningBeneficiario.mensaje` en undefined.
+const limpio = <T>(v: T): T => JSON.parse(JSON.stringify(v));
 async function guardarScreening(caseId: string, screening: unknown): Promise<void> {
-  await db().collection(COLECCION).doc(caseId).set({
+  await db().collection(COLECCION).doc(caseId).set(limpio({
     screening: { ...(screening as object), schemaVersion: SCREENING_SCHEMA, screenedAt: new Date().toISOString() },
-  }, { merge: true });
+  }), { merge: true });
 }
 
 async function guardarCierre(
@@ -107,18 +114,18 @@ async function guardarCierre(
   tipologia: string,
   detalle?: string,
 ): Promise<void> {
-  await db().collection(COLECCION).doc(caseId).set({
+  await db().collection(COLECCION).doc(caseId).set(limpio({
     cierres: { [canal]: { ok, tipologia, en: new Date().toISOString(), detalle: detalle ?? null, por: 'flujo-autonomo' } },
-  }, { merge: true });
+  }), { merge: true });
 }
 
 // Traza de la corrida. Un proceso que cierra casos de compliance sin nadie
 // mirando tiene que dejar por qué hizo cada cosa, incluidas las retenciones.
 async function registrarCorrida(resumen: Record<string, unknown>): Promise<void> {
-  await db().collection('flujo_autonomo_corridas').add({
+  await db().collection('flujo_autonomo_corridas').add(limpio({
     ...resumen,
     en: new Date().toISOString(),
-  });
+  }));
 }
 
 // ── Un caso ─────────────────────────────────────────────────────────────────
@@ -242,9 +249,9 @@ async function procesarRemesa(
   if (!screeningVigente(screening)) {
     try {
       screening = (await screenBeneficiario(fila as never)) as unknown as Record<string, unknown>;
-      await db().collection(COLECCION).doc(caso.id).set({
+      await db().collection(COLECCION).doc(caso.id).set(limpio({
         screeningBeneficiario: { ...screening, schemaVersion: SCREENING_SCHEMA, screenedAt: new Date().toISOString() },
-      }, { merge: true });
+      }), { merge: true });
     } catch (e) {
       return { ...base, accion: 'error', motivo: `screening beneficiario: ${(e as Error).message}` };
     }
