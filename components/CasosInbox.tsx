@@ -1443,7 +1443,16 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   const conAccion = async (fn: () => Promise<void>) => {
     if (!actor) { setAccionMsg('Sesión no disponible.'); return; }
     setAccionEnCurso(true); setAccionMsg(null);
-    try { await fn(); } catch (e) { setAccionMsg((e as Error).message); }
+    try { await fn(); }
+    catch (e) {
+      // "Ya lo tiene otro analista" no es un error del sistema: es el resultado
+      // de la reserva funcionando. Se muestra distinto para que no se lea como
+      // una falla y se reintente.
+      const err = e as Error;
+      setAccionMsg(err.name === 'CasoYaTomado'
+        ? `🔒 ${err.message}. Refrescá para ver quién lo tiene.`
+        : err.message);
+    }
     finally { setAccionEnCurso(false); }
   };
   const doTomar = (c: QueuedCaso) => conAccion(() => tomarCaso({ id: c.id, estadoCaso: vistaOp(c).estado, versionCaso: vistaOp(c).versionCaso }, actor!));

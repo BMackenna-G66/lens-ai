@@ -184,6 +184,7 @@ export type MotivoNoAuto =
   | 'flujo_apagado'
   | 'pais_apagado'
   | 'ya_cerrado'
+  | 'asignado'
   | 'delito_sensible'
   | 'pep'
   | 'sin_conclusion';
@@ -212,6 +213,13 @@ export function evaluarCasoAuto(
   if (!cfg.enabled) return { automatizable: false, motivo: 'flujo_apagado' };
   if (!paisHabilitado(caso.pais, cfg)) return { automatizable: false, motivo: 'pais_apagado' };
   if (statusDeCaso(caso) === 'CERRADO') return { automatizable: false, motivo: 'ya_cerrado' };
+
+  // Un caso con dueño no se cierra solo. Es el caso mixto: un caso NO sensible
+  // que un analista abrió para revisar hoy podía ser cerrado por el flujo
+  // mientras lo miraba, y el analista perdía el trabajo sin enterarse.
+  //
+  // Quien lo tomó lo cierra, o lo libera y entonces el flujo lo agarra.
+  if (caso.asignacion?.analistaId) return { automatizable: false, motivo: 'asignado' };
 
   // Freno duro por delito sensible.
   const categorias = categoriasSensibles(screening?.coincidencias);
@@ -275,6 +283,7 @@ export function extraerRemesa(asunto: string | undefined): string {
 export type MotivoNoAutoRemesa =
   | 'flujo_apagado'
   | 'ya_cerrado'
+  | 'asignado'
   | 'sin_screening'
   | 'sin_nacionalidad'
   | 'delito_sensible'
@@ -304,6 +313,8 @@ export function evaluarRemesaAuto(
 ): EvaluacionRemesa {
   if (!cfg.enabled) return { automatizable: false, motivo: 'flujo_apagado' };
   if (statusDeCaso(caso) === 'CERRADO') return { automatizable: false, motivo: 'ya_cerrado' };
+  // Igual que en OFAC: un caso con dueño lo trabaja su dueño.
+  if (caso.asignacion?.analistaId) return { automatizable: false, motivo: 'asignado' };
 
   // Sin screening resuelto no se libera nada. Incluye el caso en que el proveedor
   // devolvió error: un fallo de la API NO puede leerse como "sin hallazgos".
@@ -334,6 +345,7 @@ export const retenidoPorDelitoRemesa = (s: ScreeningRemesaParaAuto | undefined):
 export const motivoRemesaLegible = (m: MotivoNoAutoRemesa | undefined): string => ({
   flujo_apagado: 'Flujo automático apagado',
   ya_cerrado: 'El caso ya está cerrado',
+  asignado: 'Lo tiene un analista asignado',
   sin_screening: 'Sin screening resuelto (o el proveedor falló)',
   sin_nacionalidad: 'El beneficiario no trae nacionalidad',
   delito_sensible: 'Retenido por delito sensible',
