@@ -617,6 +617,20 @@ async function correr(
   };
 
   resumen.duracionMs = Date.now() - arranque;
+
+  // El resumen también va al log de CloudWatch, no solo a Firestore. Sirve para
+  // poder auditar una corrida cuando Firestore no se puede leer —pasó: la cuota
+  // de lectura del proyecto se agotó y no había forma de saber qué hizo el flujo,
+  // teniendo el dato adentro de la función.
+  //
+  // Va sin el detalle por caso: los conteos y los motivos alcanzan, y el detalle
+  // llevaría identificadores de clientes a un log.
+  const { detalle: _d, remesa: rem, ...cuentas } = resumen as Record<string, unknown> & {
+    detalle?: unknown; remesa?: Record<string, unknown>;
+  };
+  const { detalle: _dr, ...remCuentas } = (rem ?? {}) as Record<string, unknown> & { detalle?: unknown };
+  console.log('RESUMEN_CORRIDA ' + JSON.stringify({ ...cuentas, remesa: remCuentas }));
+
   await registrarCorrida(resumen).catch(() => {});
   return resumen;
 }
