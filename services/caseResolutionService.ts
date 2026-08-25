@@ -57,7 +57,15 @@ export async function enviarResolucion(caseId: string, payload: SFCaseUpdate, ac
   // 1) Guard de idempotencia / doble-envío (transacción).
   const permitido = await runTransaction(db, async tx => {
     const prev = ((await tx.get(ref)).data() ?? {}).respuestaSalesforce as RespuestaSalesforce | undefined;
-    if (prev?.estado === 'ENVIANDO') return false;                      // envío en curso
+    // ENVIANDO VENCE a los 15 min. Antes era definitivo: si el envío se cortaba
+    // entre la reserva y la respuesta —pestaña cerrada, red caída— el caso quedaba
+    // en ENVIANDO para siempre y NUNCA se podía volver a cerrar, ni a mano ni por
+    // el flujo. Es la causa de los casos que quedan "pegados".
+    if (prev?.estado === 'ENVIANDO') {
+      const desde = prev.ultimoIntentoEn ? new Date(prev.ultimoIntentoEn).getTime() : 0;
+      const vencido = desde > 0 && (Date.now() - desde) > 15 * 60 * 1000;
+      if (!vencido) return false;                                       // envío en curso
+    }
     if (prev?.estado === 'ENVIADA' && prev.idempotencyKey === firma) return false; // mismo payload ya enviado
     tx.set(ref, {
       respuestaSalesforce: {

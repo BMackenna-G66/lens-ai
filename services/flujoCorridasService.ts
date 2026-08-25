@@ -43,20 +43,27 @@ export interface ResumenCorrida {
   };
 }
 
-// Dispara una corrida AHORA. El candado del Lambda se encarga de que no se pise
-// con una del cron: si hay una en curso, devuelve `corrio: false` con el motivo.
-export async function correrFlujoAhora(): Promise<ResumenCorrida> {
+// Dispara una corrida AHORA y vuelve enseguida, sin esperar el resultado.
+//
+// Antes esperaba la respuesta y con Colombia prendida eso daba 524 siempre:
+// Cloudflare corta a los ~100 s y las corridas pasaron a durar 220-316 s, porque
+// cada caso colombiano dispara una consulta a Inspektor de ~13 s.
+//
+// El resultado no se pierde: la corrida escribe su resumen en
+// `flujo_autonomo_corridas` y la suscripción de la barra lo muestra cuando llega.
+// El candado del Lambda sigue evitando que dos corridas se pisen.
+export async function correrFlujoAhora(): Promise<{ disparada: boolean; mensaje?: string }> {
   if (!PROXY) throw new Error('Proxy no configurado: no se puede disparar la corrida.');
   const res = await fetch(`${PROXY}/flujo/correr`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
   });
   const texto = await res.text();
-  let data: ResumenCorrida & { error?: string };
-  try { data = JSON.parse(texto) as ResumenCorrida & { error?: string }; }
+  let data: { disparada?: boolean; mensaje?: string; error?: string };
+  try { data = JSON.parse(texto) as typeof data; }
   catch { throw new Error(texto.slice(0, 200) || `HTTP ${res.status}`); }
   if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
-  return data;
+  return { disparada: data.disparada === true, mensaje: data.mensaje };
 }
 
 // Las últimas corridas, en vivo. Existe porque el resumen no se veía en ninguna

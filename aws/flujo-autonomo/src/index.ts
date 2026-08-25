@@ -257,13 +257,29 @@ function hashCorto(s: string): string {
 
 // Devuelve null si NO hay que enviar (ya se envió lo mismo, o hay un envío en
 // curso). Devuelve la firma si hay que enviar.
+// Cuánto vale un ENVIANDO antes de considerarlo abandonado. Es el techo de
+// Lambda: más que eso y la corrida que lo tomó ya no existe.
+const ENVIANDO_TTL_MS = 15 * 60 * 1000;
+
 async function reservarEnvioSF(caseId: string, payload: unknown): Promise<string | null> {
   const firma = hashCorto(`${caseId}|${JSON.stringify(payload)}`);
   const ref = db().collection(COLECCION).doc(caseId);
   return db().runTransaction(async tx => {
     const prev = ((await tx.get(ref)).data() ?? {}).respuestaSalesforce as
-      { estado?: string; idempotencyKey?: string; intentos?: number } | undefined;
-    if (prev?.estado === 'ENVIANDO') return null;
+      { estado?: string; idempotencyKey?: string; intentos?: number; ultimoIntentoEn?: string } | undefined;
+    // ENVIANDO VENCE. Si una corrida murió entre reservar y enviar —timeout, OOM,
+    // el Lambda cortado— el caso quedaba en ENVIANDO para siempre y NUNCA volvía a
+    // poder cerrarse: el guard lo rechazaba en cada corrida. Es la causa de los
+    // casos que quedan "pegados".
+    //
+    // Pasado el techo de Lambda, el ENVIANDO ya no puede ser de una corrida viva,
+    // así que se ignora y se reintenta.
+    if (prev?.estado === 'ENVIANDO') {
+      const desde = prev.ultimoIntentoEn ? new Date(prev.ultimoIntentoEn).getTime() : 0;
+      const vencido = desde > 0 && (Date.now() - desde) > ENVIANDO_TTL_MS;
+      if (!vencido) return null;
+      // Vencido: sigue de largo y vuelve a reservar.
+    }
     if (prev?.estado === 'ENVIADA' && prev.idempotencyKey === firma) return null;
     tx.set(ref, limpio({
       respuestaSalesforce: {

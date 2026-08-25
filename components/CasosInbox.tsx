@@ -555,12 +555,13 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   const correrAhora = async () => {
     setCorriendoFlujo(true); setAutoMsg(null);
     try {
+      // Dispara y vuelve: el resultado llega por la suscripción a las corridas,
+      // no por esta respuesta. Con Colombia prendida una corrida tarda minutos y
+      // esperarla daba 524 desde Cloudflare.
       const r = await correrFlujoAhora();
-      if (r.corrio === false) { setAutoMsg(`⏸️ No corrió: ${r.motivo ?? 'sin motivo'}`); return; }
-      const ofac = `OFAC ${r.cerrados ?? 0} cerrado(s) de ${r.casosEnCola ?? 0}`;
-      const rem = r.remesa ? ` · remesas ${r.remesa.cerradas ?? 0} liberada(s) de ${r.remesa.enCola ?? 0}` : '';
-      const errs = (r.errores ?? 0) + (r.remesa?.errores ?? 0);
-      setAutoMsg(`✅ ${ofac}${rem}${errs ? ` · ${errs} con error` : ''} · ${Math.round((r.duracionMs ?? 0)/1000)}s`);
+      setAutoMsg(r.disparada
+        ? '🚀 Corrida arrancada. El resultado aparece acá abajo cuando termine (puede tardar unos minutos).'
+        : '⏸️ No se pudo disparar la corrida.');
     } catch (e) {
       setAutoMsg(`❌ ${(e as Error).message}`);
     } finally { setCorriendoFlujo(false); }

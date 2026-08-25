@@ -85,7 +85,7 @@ async function fetchTimeout(url: string, init: RequestInit, ms: number): Promise
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const origin = request.headers.get('Origin') || '';
     const cors = corsHeaders(origin);
 
@@ -155,24 +155,33 @@ export default {
       if (!destino || !secreto) {
         return jsonError('Disparador no configurado (FLUJO_TRIGGER_URL / FLUJO_TRIGGER_SECRET)', 500, cors);
       }
-      try {
-        // 180 s: una corrida típica tarda menos de 1 min, pero puede estirarse.
-        // Si el timeout gana, la corrida SIGUE en el Lambda — solo se pierde la
-        // respuesta, así que se avisa en vez de decir que falló.
-        const upstream = await fetchTimeout(destino, {
+      // DISPARA Y VUELVE. No se espera el resultado, a propósito.
+      //
+      // Cloudflare corta la conexión a los ~100 s con un 524. Al prender Colombia
+      // las corridas pasaron de 8-27 s a 220-316 s —cada caso colombiano dispara
+      // una consulta a Inspektor de ~13 s— así que esperar la respuesta devolvía
+      // 524 SIEMPRE, aunque la corrida terminara bien por detrás.
+      //
+      // El techo del botón era el del Worker (100 s), no el del Lambda (13 min).
+      // Con esto el techo pasa a ser el del Lambda y el 524 desaparece por diseño.
+      //
+      // `ctx.waitUntil` mantiene la invocación viva después de responder: sin eso
+      // Cloudflare mata el fetch pendiente al cerrar la respuesta y la corrida no
+      // arrancaría.
+      ctx.waitUntil(
+        fetch(destino, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'x-lens-trigger': secreto },
           body: '{}',
-        }, 180000);
-        const texto = await upstream.text();
-        return new Response(texto, {
-          status: upstream.status,
-          headers: { ...cors, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
-        });
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        return jsonError(`La corrida se disparó pero no se pudo leer el resultado: ${msg}`, 504, cors);
-      }
+        }).catch(() => { /* el resultado se lee en flujo_autonomo_corridas */ }),
+      );
+      return new Response(JSON.stringify({
+        disparada: true,
+        mensaje: 'La corrida arrancó. El resultado aparece en la barra del flujo cuando termina.',
+      }), {
+        status: 202,
+        headers: { ...cors, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+      });
     }
 
     if (url.pathname === '/colas/log') {
