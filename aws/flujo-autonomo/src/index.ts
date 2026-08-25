@@ -482,6 +482,9 @@ async function correr(
 
   const resultados: ResultadoCaso[] = [];
   const resultadosRemesa: ResultadoCaso[] = [];
+  // Cuántas remesas no se miraron porque la base de transacciones estaba pausada.
+  // No son errores: es una ventana conocida y se retoman solas.
+  let remesasOmitidas = 0;
   let cortadoPorTiempo = false;
   let apagadoEnVuelo = false;
 
@@ -518,9 +521,16 @@ async function correr(
     } catch {
       baseCaida = true;
     }
-    if (baseCaida) log.push('la base de transacciones no respondió: las remesas quedan para la próxima corrida');
+    if (baseCaida) {
+      // La base pausa todas las noches (18:30–04:00 Chile) y el cron corre 24/7.
+      // Marcar cada caso como error dejaría ~114 corridas por noche con decenas
+      // de errores cada una, y el aviso dejaría de significar algo. Se omite el
+      // paso completo con UN aviso y los casos se retoman cuando la base vuelve.
+      log.push(`la base de transacciones no respondió: ${remesas.length} remesa(s) omitida(s), se retoman en la próxima corrida`);
+      remesasOmitidas = remesas.length;
+    }
 
-    for (let i = 0; i < remesas.length; i += LOTE) {
+    for (let i = 0; !baseCaida && i < remesas.length; i += LOTE) {
       if (restante() <= 0) { cortadoPorTiempo = true; break; }
       conf = await leerConfig();
       if (!conf?.cfg.remesa.enabled) { apagadoEnVuelo = true; break; }
@@ -563,6 +573,9 @@ async function correr(
       // Faltaba y escondía trabajo: 21 casos procesados salían como 0/0/0 porque
       // `sin_screening` no se contaba en ningún lado.
       sinScreening: cuentaR('sin_screening'),
+      // Omitidas por la ventana en que Redshift está pausado. Separadas de los
+      // errores a propósito: no hay nada que arreglar.
+      omitidas: remesasOmitidas,
       motivosRetencion: resultadosRemesa.filter(r => r.accion === 'retenido')
         .reduce<Record<string, number>>((acc, r) => {
           const k = r.motivo ?? 'sin_motivo';

@@ -108,11 +108,19 @@ Resources:
             # El corte NO es arbitrario: el cluster de Redshift pausa 18:30 Chile y
             # la cola de REMESAS necesita consultarlo para traer la fila de la
             # transacción. Corriendo después, las remesas quedan todas en error.
-            # Cada 5 min entre 11:00 y 22:29 UTC = 07:00 a 18:29 hora Chile.
-            # Las corridas medidas tardan entre 16 y 59 segundos, así que a 5 min
-            # queda más de 4 de margen — y el candado impide que se pisen si un día
-            # una se estira.
-            Schedule: 'cron(0/5 11-22 * * ? *)'
+            # Cada 5 minutos, 24/7. Los casos llegan a cualquier hora —el receptor
+            # es un Lambda y Salesforce le escribe directo— así que esperar a la
+            # mañana solo agrega demora.
+            #
+            # OFAC no depende de Redshift y funciona a toda hora. La cola de
+            # REMESAS sí lo necesita para traer la fila de la transacción, y el
+            # cluster pausa 18:30–04:00 hora Chile: en esa ventana el paso de
+            # remesas se OMITE con un aviso, no marca cada caso como error. Se
+            # retoman solos cuando el cluster vuelve.
+            #
+            # Las corridas medidas tardan de 13 a 59 s, así que a 5 min queda más
+            # de 4 de margen, y el candado impide que se pisen si una se estira.
+            Schedule: 'cron(0/5 * * * ? *)'
             Name: lens-flujo-autonomo
             Description: Procesa las colas de OFAC y remesas sin intervención.
             Enabled: !If [CronHabilitado, true, false]
@@ -126,7 +134,7 @@ Outputs:
   LogGroup:
     Value: !Sub '/aws/lambda/${FlujoAutonomoFunction}'
   Horario:
-    Value: 'cron(0/5 11-22 * * ? *) — cada 5 min, 07:00 a 18:29 Chile'
+    Value: 'cron(0/5 * * * ? *) — cada 5 min, 24/7'
   UrlDisparador:
     Description: Pegar en el secret FLUJO_TRIGGER_URL del Worker.
     Value: !GetAtt FlujoAutonomoFunctionUrl.FunctionUrl

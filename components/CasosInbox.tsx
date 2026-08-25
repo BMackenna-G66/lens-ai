@@ -2037,6 +2037,9 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                   {seg ? ` · ${seg}s` : ''}
                   {' · '}OFAC {ultimaCorrida.cerrados ?? 0}/{ultimaCorrida.casosEnCola ?? 0} cerrado(s)
                   {ultimaCorrida.remesa ? ` · remesas ${ultimaCorrida.remesa.cerradas ?? 0}/${ultimaCorrida.remesa.enCola ?? 0}` : ''}
+                  {(ultimaCorrida.remesa?.omitidas ?? 0) > 0
+                    ? ` (${ultimaCorrida.remesa?.omitidas} en espera: la base de transacciones pausa de 18:30 a 04:00)`
+                    : ''}
                 </span>
                 {problema && (
                   <span className="font-semibold text-amber-800 dark:text-amber-300">⚠️ {problema}</span>

@@ -153,10 +153,18 @@ Dos frenos difieren de OFAC, y son decisiones de negocio:
 Y sin screening resuelto no se libera nada. Si el proveedor falló, el caso queda
 como estaba: un error de la API no se lee como "sin hallazgos".
 
-**El horario del cron está atado a Redshift.** El cluster pausa a las 18:30 hora
-Chile y la fila de la transacción sale de ahí, así que el cron corre hasta las
-18:29. Si igual se corre después, las remesas salen como error reintentable —no
-como "la transacción no existe"— y el resumen lo avisa en `avisos`.
+**El cron corre 24/7** y la cola de remesas convive con la pausa de Redshift. El
+cluster pausa 18:30–04:00 hora Chile y la fila de la transacción sale de ahí, así
+que en esa ventana el paso de remesas se **omite** con un aviso: no se marca cada
+caso como error.
+
+La distinción importa. Con el cron a 5 minutos son ~114 corridas por noche: si
+cada una marcara decenas de errores, el aviso dejaría de significar algo y nadie
+mirararía el siguiente que sí importe. Las remesas omitidas se retoman solas
+cuando el cluster vuelve, y la barra de la app lo dice —"N en espera"— en vez de
+pintarse de ámbar toda la noche.
+
+OFAC no depende de Redshift: funciona a toda hora.
 
 ## Lo que queda pendiente
 

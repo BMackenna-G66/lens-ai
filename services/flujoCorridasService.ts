@@ -38,7 +38,8 @@ export interface ResumenCorrida {
   motivosRetencion?: Record<string, number>;
   remesa?: {
     enCola?: number; procesadas?: number; cerradas?: number; retenidas?: number;
-    errores?: number; sinScreening?: number; motivosRetencion?: Record<string, number>;
+    errores?: number; sinScreening?: number; omitidas?: number;
+    motivosRetencion?: Record<string, number>;
   };
 }
 
@@ -83,7 +84,12 @@ export function corridaConProblema(c: ResumenCorrida | undefined): string | null
   if (c.corrio === false && c.motivo) return c.motivo;
   if ((c.errores ?? 0) > 0) return `${c.errores} caso(s) con error`;
   if ((c.remesa?.errores ?? 0) > 0) return `${c.remesa?.errores} remesa(s) con error`;
-  if (c.avisos?.length) return c.avisos[0];
+  // El aviso de que la base de transacciones está pausada NO es un problema: es
+  // una ventana conocida (18:30–04:00) y las remesas se retoman solas. Si contara
+  // como problema, la barra quedaría en ámbar toda la noche y dejaría de avisar
+  // nada.
+  const avisosReales = (c.avisos ?? []).filter(a => !/base de transacciones/.test(a));
+  if (avisosReales.length) return avisosReales[0];
   if (c.camposAusentes?.length) return `config incompleta: ${c.camposAusentes.join(', ')}`;
   if (c.cortadoPorTiempo) return 'la corrida se cortó por tiempo: quedaron casos sin procesar';
   return null;
