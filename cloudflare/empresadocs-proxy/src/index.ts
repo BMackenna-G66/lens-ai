@@ -17,6 +17,11 @@
  *    este disparo; por eso se usa la interna con el token de sesión.
  */
 
+// El contexto de ejecución de Cloudflare. Se declara acá y no se importa de
+// `@cloudflare/workers-types` porque el tsconfig de la app también compila este
+// archivo y ahí ese tipo no existe. Solo se usa `waitUntil`.
+interface CtxWorker { waitUntil(p: Promise<unknown>): void }
+
 interface Env {
   REGCHEQ_SESSION_TOKEN?: string;
   // Salesforce (case-update): OAuth client_credentials + PATCH Apex REST.
@@ -85,7 +90,7 @@ async function fetchTimeout(url: string, init: RequestInit, ms: number): Promise
 }
 
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: CtxWorker): Promise<Response> {
     const origin = request.headers.get('Origin') || '';
     const cors = corsHeaders(origin);
 
