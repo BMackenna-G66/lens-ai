@@ -29,11 +29,16 @@ esac
 
 ./build.sh
 
+# El horario NO se pasa por acá: está fijo en el template. Un valor con espacios
+# en --parameter-overrides llega partido y EventBridge lo rechaza.
 sam deploy --parameter-overrides \
-  "FirebaseSaB64=$(base64 -i "$SA" | tr -d '\n') ProxyUrl=$PROXY RegcheqApiKey=$KEY Habilitada=$ESTADO"
+  "FirebaseSaB64=$(base64 -i "$SA" | tr -d '\n')" \
+  "ProxyUrl=$PROXY" \
+  "RegcheqApiKey=$KEY" \
+  "Habilitada=$ESTADO"
 
 echo
-echo "✅ Desplegado con el cron en $ESTADO."
+echo "✅ Desplegado con el cron en $ESTADO (horario fijo en template.yaml)"
 echo "   Para ver qué haría ahora mismo:"
 echo "     aws lambda invoke --profile compliance-admin --region us-east-1 \\"
 echo "       --function-name lens-flujo-autonomo --cli-read-timeout 900 /tmp/lens-run.json"

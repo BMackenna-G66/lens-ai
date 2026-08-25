@@ -27,20 +27,6 @@ Parameters:
   FirestoreCollection:
     Type: String
     Default: casos_sf
-  Horario:
-    Type: String
-    Default: 'cron(0/30 11-22 * * ? *)'
-    Description: >
-      UTC. Default: cada 30 min entre 11:00 y 22:29 UTC (07:00-18:29 hora Chile).
-
-      El corte a las 18:30 Chile NO es arbitrario: el cluster de Redshift pausa a
-      esa hora y la cola de REMESAS necesita consultarlo para traer la fila de la
-      transacción. Corriendo después, las remesas quedan todas en error hasta la
-      mañana. OFAC no depende de Redshift, pero no vale la pena una corrida que
-      solo puede hacer la mitad.
-
-      Para 24x7, poner 'cron(0/30 * * * ? *)' — y asumir que las remesas de la
-      noche esperan a la primera corrida del día.
   Habilitada:
     Type: String
     Default: 'DISABLED'
@@ -94,7 +80,16 @@ Resources:
         Periodico:
           Type: Schedule
           Properties:
-            Schedule: !Ref Horario
+            # FIJO, no parametrizado. Un valor con espacios pasado por
+            # --parameter-overrides llega partido y EventBridge lo rechaza con
+            # "ScheduleExpression is not valid" (probado: rollback dos veces).
+            # Y además conviene que un cambio de horario se vea en un diff.
+            #
+            # Cada 30 min entre 11:00 y 22:29 UTC = 07:00 a 18:29 hora Chile.
+            # El corte NO es arbitrario: el cluster de Redshift pausa 18:30 Chile y
+            # la cola de REMESAS necesita consultarlo para traer la fila de la
+            # transacción. Corriendo después, las remesas quedan todas en error.
+            Schedule: 'cron(0/30 11-22 * * ? *)'
             Name: lens-flujo-autonomo
             Description: Procesa las colas de OFAC y remesas sin intervención.
             Enabled: !If [CronHabilitado, true, false]
@@ -108,7 +103,7 @@ Outputs:
   LogGroup:
     Value: !Sub '/aws/lambda/${FlujoAutonomoFunction}'
   Horario:
-    Value: !Ref Horario
+    Value: 'cron(0/30 11-22 * * ? *) — 07:00 a 18:29 Chile'
   EstadoCron:
     Value: !Ref Habilitada
   Aviso:
