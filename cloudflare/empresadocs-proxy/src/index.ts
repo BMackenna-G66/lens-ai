@@ -30,6 +30,10 @@ interface Env {
   // El Worker guarda la URL y el secreto para que NO viajen al navegador.
   COLAS_LOGGER_URL?: string;
   COLAS_LOGGER_SECRET?: string;
+  // Function URL del Lambda del flujo autónomo, y el secreto que exige. El
+  // navegador nunca los ve: pega en /flujo/correr y el Worker los agrega.
+  FLUJO_TRIGGER_URL?: string;
+  FLUJO_TRIGGER_SECRET?: string;
 }
 
 const ALLOWED_ORIGINS = [
@@ -135,6 +139,42 @@ export default {
     //   escribe en Redshift (schema colas_trabajo). El Worker pone el header
     //   x-api-secret: así el secreto NO queda en el bundle público del frontend.
     //   Es un relay de solo-escritura de auditoría; no devuelve datos del negocio.
+    // ── Disparar una corrida del flujo autónomo: POST /flujo/correr ────────────
+    //   El botón «Correr ahora» de la cola pega acá y el Worker agrega el secreto.
+    //   Así el secreto NO queda en el bundle público del frontend, igual que con
+    //   el logger.
+    //
+    //   No hace falta autorizar más que esto: una corrida disparada a mano no
+    //   puede cerrar nada que el cron no cerraría igual — los dos switches de
+    //   Firestore y todos los frenos se evalúan lo mismo. Lo que se protege es el
+    //   gasto, no la decisión.
+    if (url.pathname === '/flujo/correr') {
+      if (request.method !== 'POST') return jsonError('Método no permitido', 405, cors);
+      const destino = (env.FLUJO_TRIGGER_URL || '').replace(/\/$/, '');
+      const secreto = env.FLUJO_TRIGGER_SECRET || '';
+      if (!destino || !secreto) {
+        return jsonError('Disparador no configurado (FLUJO_TRIGGER_URL / FLUJO_TRIGGER_SECRET)', 500, cors);
+      }
+      try {
+        // 180 s: una corrida típica tarda menos de 1 min, pero puede estirarse.
+        // Si el timeout gana, la corrida SIGUE en el Lambda — solo se pierde la
+        // respuesta, así que se avisa en vez de decir que falló.
+        const upstream = await fetchTimeout(destino, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-lens-trigger': secreto },
+          body: '{}',
+        }, 180000);
+        const texto = await upstream.text();
+        return new Response(texto, {
+          status: upstream.status,
+          headers: { ...cors, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+        });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return jsonError(`La corrida se disparó pero no se pudo leer el resultado: ${msg}`, 504, cors);
+      }
+    }
+
     if (url.pathname === '/colas/log') {
       if (request.method !== 'POST') return jsonError('Método no permitido', 405, cors);
       const destino = (env.COLAS_LOGGER_URL || '').replace(/\/$/, '');

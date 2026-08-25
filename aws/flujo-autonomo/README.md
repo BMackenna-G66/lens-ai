@@ -18,6 +18,28 @@ cada caso de la cola lo consulta en listas, cruza con el catálogo, decide
   la misma función que la app— y cada cola tiene su propio switch. Prender OFAC no
   prende remesas.
 
+## Un solo ejecutor
+
+La app **no cierra casos automáticamente**. Los muestra, y con el botón «Correr
+ahora» dispara una corrida. El Lambda es el único que ejecuta.
+
+Por qué: cuando los dos ejecutaban hubo **69 casos con cierre automático
+duplicado** entre el 16 y el 25 de agosto, separados por 0,1 a 9,6 segundos. Eran
+dos pestañas de la app —el guard era un ref por pestaña y no podía verse a sí
+mismo entre ventanas—.
+
+**Ninguno de los 69 mandó dos updates a Salesforce**: el guard de idempotencia de
+`caseResolutionService` frenó los 69 segundos envíos. Verificado — los 69 tienen
+un solo `RESPUESTA_SF_COMPLETADA`. El duplicado quedaba en la auditoría, no en
+producción.
+
+Ese guard vivía solo en el camino de la app. Este Lambda usaba `sendCaseUpdate`
+directo y **no lo tenía**, así que habría sido el primer camino capaz de mandar el
+update dos veces de verdad. Ahora lo tiene, con la misma semántica.
+
+El cierre MANUAL de un caso sigue en la app y no puede chocar: el Lambda saltea
+los casos asignados, y tomar un caso lo reserva en transacción.
+
 ## Los dos interruptores
 
 | Interruptor | Dónde | Efecto |
@@ -42,12 +64,36 @@ Y cuando algún campo se resuelve por defecto, la corrida lo dice en
 silencio: `sin_conclusion` es un motivo legítimo y sin este aviso no habría forma
 de distinguir "no había nada que hacer" de "la config quedó incompleta".
 
+## Candado de corrida
+
+Una corrida a la vez. Con el cron a 30 min era imposible que se pisaran; a 5 min
+deja de serlo, y el botón «Correr ahora» puede caer justo encima de una del cron.
+
+El candado vive en `config/flujoAutonomoLock` y **vence solo a los 15 minutos**,
+el techo de Lambda: si una corrida muere sin liberarlo, la siguiente lo toma en
+vez de quedar bloqueada para siempre.
+
+## El botón «Correr ahora»
+
+Va por el Worker (`POST /flujo/correr`), que agrega el secreto que la Function URL
+exige. El navegador nunca lo ve.
+
+La Function URL es `AuthType: NONE` porque el navegador no puede firmar IAM; la
+autorización la hace el handler con el header `x-lens-trigger`. El riesgo está
+acotado por diseño: **disparar una corrida no puede cerrar nada que el cron no
+cerraría igual** — los dos switches y todos los frenos se evalúan lo mismo. Lo que
+se protege es el gasto, no la decisión.
+
 ## Por reloj, no por cantidad
 
 Regcheq tiene mediana de ~4 s por consulta, **p90 de ~47 s y máximo observado de
 104 s** (medido sobre 286 screenings). Con esa dispersión, "N casos por corrida"
 no acota nada: la corrida se corta a los 13 minutos y lo que queda se toma en la
 siguiente. El screening queda cacheado, así que no se vuelve a pagar.
+
+Cada corrida registra su `duracionMs`. Antes no se guardaba y hubo que inferirlo
+de los timestamps; con el cron a 5 minutos es el dato que avisa si las corridas se
+acercan al límite. Las medidas hasta ahora tardan entre 16 y 59 segundos.
 
 ## Desplegar
 

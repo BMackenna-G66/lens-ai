@@ -3,7 +3,8 @@ import { screeningVigente, SCREENING_SCHEMA, subscribeCasos, isCasosAvailable, g
 import { traerCasosCola, importarCasos, CasoSFRemoto } from '../services/salesforceColaService';
 import { TIPOS_CIERRE_REMESA, tipoRemesaPorId, camposDeCierreRemesa } from '../services/cierreRemesaTipos';
 import { enviarCierreRemesaAdmin, remesaAdminDisponible, resumenRemesaAdmin } from '../services/remesaAdminService';
-import { evaluarRemesaAuto, procesarRemesaAuto, retenidoPorDelitoRemesa, motivoRemesaLegible } from '../services/flujoRemesaEngine';
+// Solo lo que MUESTRA la decisión: ejecutar es del Lambda.
+import { evaluarRemesaAuto, retenidoPorDelitoRemesa, motivoRemesaLegible } from '../services/flujoRemesaEngine';
 import {
   sfUpdateDisponible, SFCaseUpdate, SFUpdateResult,
 } from '../services/salesforceCaseService';
@@ -29,7 +30,8 @@ import { subscribeFlujoConfig, guardarFlujoConfig, flujoConfigDisponible, FLUJO_
 import { extraerRemesa, clasificarCola } from '../services/flujoDecision';
 import { CATEGORIAS_SENSIBLES } from '../services/delitosSensibles';
 import type { FlujoConfig } from '../services/flujoAutomaticoService';
-import { procesarCasoAuto, evaluarCasoAuto, motivosRetencion, retenidoPorDelito } from '../services/flujoAutomaticoEngine';
+import { evaluarCasoAuto, motivosRetencion, retenidoPorDelito } from '../services/flujoAutomaticoEngine';
+import { correrFlujoAhora, subscribeUltimasCorridas, disparadorDisponible, corridaConProblema, type ResumenCorrida } from '../services/flujoCorridasService';
 import { guardarInvestigacion } from '../services/caseInvestigationService';
 import { enviarResolucion, conclusionAStatus } from '../services/caseResolutionService';
 import { TIPOS_CIERRE, camposDeCierre } from '../services/cierreTipos';
@@ -538,9 +540,31 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   const [flujoDraft, setFlujoDraft] = useState<FlujoConfig>(FLUJO_CONFIG_DEFAULT);
   const [flujoSaving, setFlujoSaving] = useState(false);
   const [flujoMsg, setFlujoMsg] = useState<string | null>(null);
+  // Mensaje del disparador manual y resumen de la última corrida del Lambda. Los
+  // dos refs que había acá (`autoRunning`, `autoHechos`) desaparecieron con el
+  // ejecutor: eran guardas POR PESTAÑA, y por eso no podían evitar que dos
+  // pestañas cerraran el mismo caso.
   const [autoMsg, setAutoMsg] = useState<string | null>(null);
-  const autoRunning = useRef(false);          // evita corridas superpuestas
-  const autoHechos = useRef<Set<string>>(new Set()); // casos ya procesados en esta sesión
+  const [corriendoFlujo, setCorriendoFlujo] = useState(false);
+  const [ultimaCorrida, setUltimaCorrida] = useState<ResumenCorrida | null>(null);
+  useEffect(() => subscribeUltimasCorridas(cs => setUltimaCorrida(cs[0] ?? null), 1), []);
+
+  // Dispara una corrida del Lambda ahora, sin esperar el próximo tick del cron.
+  // El candado del Lambda impide que se pise con una del cron: si hay una en
+  // curso, vuelve con `corrio: false` y el motivo.
+  const correrAhora = async () => {
+    setCorriendoFlujo(true); setAutoMsg(null);
+    try {
+      const r = await correrFlujoAhora();
+      if (r.corrio === false) { setAutoMsg(`⏸️ No corrió: ${r.motivo ?? 'sin motivo'}`); return; }
+      const ofac = `OFAC ${r.cerrados ?? 0} cerrado(s) de ${r.casosEnCola ?? 0}`;
+      const rem = r.remesa ? ` · remesas ${r.remesa.cerradas ?? 0} liberada(s) de ${r.remesa.enCola ?? 0}` : '';
+      const errs = (r.errores ?? 0) + (r.remesa?.errores ?? 0);
+      setAutoMsg(`✅ ${ofac}${rem}${errs ? ` · ${errs} con error` : ''} · ${Math.round((r.duracionMs ?? 0)/1000)}s`);
+    } catch (e) {
+      setAutoMsg(`❌ ${(e as Error).message}`);
+    } finally { setCorriendoFlujo(false); }
+  };
 
   // `camposAusentes`: qué campos de la config están cayendo al default. El flujo
   // desatendido los reporta en el resumen de su corrida, pero ese documento no lo
@@ -1054,47 +1078,12 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeQueue, benefTriggerKey, benefMap]);
 
-  // ── Runner del flujo automático (cola REMESA) ───────────────────────────────
-  // Mismo patrón que el de OFAC, pero acá se libera la TRANSACCIÓN. Los frenos
-  // los decide flujoRemesaEngine: delito sensible detiene el caso; la marca PEP
-  // del beneficiario NO (decisión de negocio: es una transacción, no una
-  // vinculación). Corre solo si el mantenedor está prendido.
-  const autoRemesaRunning = useRef(false);
-  const autoRemesaHechos = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    if (!flujoCfg.remesa.enabled) return;
-    let cancelado = false;
-    const correr = async () => {
-      if (autoRemesaRunning.current || cancelado) return;
-      const candidatos = colas.remesa.filter(c => {
-        if (autoRemesaHechos.current.has(c.id)) return false;
-        const sc = benefMap[c.id];
-        if (!sc) return false;                       // screening todavía sin resolver
-        return evaluarRemesaAuto(c, sc, flujoCfg.remesa).automatizable;
-      });
-      if (candidatos.length === 0) return;
-      autoRemesaRunning.current = true;
-      let ok = 0, err = 0;
-      try {
-        for (const c of candidatos) {
-          if (cancelado) break;
-          autoRemesaHechos.current.add(c.id);
-          try {
-            const r = await procesarRemesaAuto(c, c.remesa, benefMap[c.id], flujoCfg.remesa, actor ?? undefined);
-            if (!r) continue;
-            if (r.sf === 'error' || r.admin === 'error') err++; else ok++;
-          } catch { err++; }
-        }
-      } finally {
-        autoRemesaRunning.current = false;
-        if (ok || err) setAutoMsg(`Flujo automático (remesas): ${ok} liberada(s)${err ? `, ${err} con error` : ''}`);
-      }
-    };
-    correr();
-    const t = setInterval(correr, 30000);
-    return () => { cancelado = true; clearInterval(t); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [flujoCfg, remesaIdsKey, benefMap]);
+  // ── El flujo automático de REMESAS tampoco corre acá ────────────────────────
+  // Se movió al mismo Lambda, por los mismos dos motivos que el de OFAC (ver el
+  // comentario más abajo). Las reglas siguen siendo las mismas funciones —
+  // `evaluarRemesaAuto` de `services/flujoDecision.ts`— incluido que la marca PEP
+  // del beneficiario NO retiene una remesa, que es la diferencia con OFAC y lo que
+  // se habría perdido si el Lambda las reimplementara.
 
   // ── Recuperación de la cola desde Salesforce ────────────────────────────────
   // El receptor solo empuja: si la Bandeja se vacía, los casos que siguen abiertos
@@ -1351,48 +1340,25 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeQueue, ofacIdsKey, ofacRun]);
 
-  // ── Runner del flujo automático (cola OFAC) ─────────────────────────────────
-  // Corre SOLO si el mantenedor está prendido. Toma los casos de la cola cuya
-  // conclusión de screening ya está resuelta y le aplica la tipología que
-  // corresponde (Liberar / Liberar UCR / Fully Blocked). Las conclusiones de
-  // revisión no se automatizan: quedan para el analista.
-  // Guardas: una corrida a la vez, y cada caso se intenta una sola vez por sesión.
-  useEffect(() => {
-    if (!flujoCfg.ofac.enabled) return;
-    let cancelado = false;
-    const correr = async () => {
-      if (autoRunning.current || cancelado) return;
-      const candidatos = colas.ofac.filter(c => {
-        if (autoHechos.current.has(c.id)) return false;
-        const sc = screenMap[c.id];
-        if (!sc || sc.estado === 'loading') return false;   // screening aún sin resolver
-        return evaluarCasoAuto(c, sc, flujoCfg.ofac).automatizable;
-      });
-      if (candidatos.length === 0) return;
-      autoRunning.current = true;
-      let ok = 0, err = 0;
-      try {
-        for (const c of candidatos) {
-          if (cancelado) break;
-          autoHechos.current.add(c.id);
-          const sc = screenMap[c.id];
-          try {
-            const r = await procesarCasoAuto(c, sc, flujoCfg.ofac, actor ?? undefined);
-            if (!r) continue;
-            const fallo = r.sf === 'error' || r.admin === 'error';
-            if (fallo) err++; else ok++;
-          } catch { err++; }
-        }
-      } finally {
-        autoRunning.current = false;
-        if (ok || err) setAutoMsg(`Flujo automático: ${ok} caso(s) cerrado(s)${err ? `, ${err} con error` : ''}`);
-      }
-    };
-    correr();
-    const t = setInterval(correr, 30000);   // revisa cada 30s por casos nuevos
-    return () => { cancelado = true; clearInterval(t); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [flujoCfg, ofacIdsKey, screenMap]);
+  // ── El flujo automático de OFAC ya NO corre acá ─────────────────────────────
+  // Antes vivía en este archivo, en un `useEffect` con un intervalo de 30 s. Se
+  // movió al Lambda `lens-flujo-autonomo` por dos razones:
+  //
+  //   1. Solo corría con la pestaña abierta. Los casos llegaban igual —el receptor
+  //      es un Lambda— y se acumulaban hasta que alguien entraba a la app.
+  //   2. Y cuando SÍ había pestañas abiertas, había más de un ejecutor. Medido en
+  //      producción: 61 casos cerrados dos veces entre el 16 y el 25 de agosto,
+  //      separados por 0,1 a 9,6 segundos. Los dos mandaron su update a
+  //      Salesforce. El guard era un ref por pestaña, así que no podía verlo.
+  //
+  // Un solo ejecutor elimina eso por diseño, sin candados que puedan fallar. Las
+  // reglas son las mismas: el Lambda importa `evaluarCasoAuto` de
+  // `services/flujoDecision.ts`, el mismo módulo que usa esta pantalla para
+  // mostrar qué haría el flujo con cada caso.
+  //
+  // Lo que la app conserva: mostrar la decisión, el botón «Correr ahora» para no
+  // esperar el próximo tick, y el cierre MANUAL de un caso tomado — que no puede
+  // chocar con el Lambda, porque el Lambda saltea los casos asignados.
 
   // Reconsulta manual de un caso (fuerza volver a pegarle a la lista).
   const reconsultar = async (c: QueuedCaso) => {
@@ -2048,6 +2014,48 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
         <div className="mb-4 flex items-center gap-3 rounded-xl border border-emerald-200 dark:border-emerald-800/50 bg-emerald-50 dark:bg-emerald-950/30 px-4 py-2 text-sm text-emerald-800 dark:text-emerald-300">
           <span className="font-semibold">🤖 {autoMsg}</span>
           <button onClick={() => setAutoMsg(null)} className="ml-auto text-xs underline opacity-80">ocultar</button>
+        </div>
+      )}
+
+      {/* El flujo automático corre en el Lambda, no acá. Esta barra es lo único
+          que lo hace visible: qué pasó en la última corrida y un botón para
+          disparar una ahora sin esperar el tick del cron.
+          Sin esto los resúmenes quedan en Firestore y no los mira nadie — el aviso
+          de que las remesas fallaron por el cluster pausado quedó enterrado ahí. */}
+      {!loading && !error && (
+        <div className="mb-4 flex flex-wrap items-center gap-3 rounded-xl border border-indigo-200 dark:border-indigo-800/50 bg-indigo-50/60 dark:bg-indigo-950/30 px-4 py-2 text-xs">
+          <span className="font-bold text-indigo-800 dark:text-indigo-300">Flujo automático</span>
+          {ultimaCorrida ? (() => {
+            const problema = corridaConProblema(ultimaCorrida);
+            const cuando = ultimaCorrida.en ? new Date(ultimaCorrida.en).toLocaleString('es-CL') : '—';
+            const seg = Math.round((ultimaCorrida.duracionMs ?? 0) / 1000);
+            return (
+              <>
+                <span className="text-slate-600 dark:text-slate-300">
+                  última corrida {cuando}
+                  {ultimaCorrida.origen ? ` (${ultimaCorrida.origen})` : ''}
+                  {seg ? ` · ${seg}s` : ''}
+                  {' · '}OFAC {ultimaCorrida.cerrados ?? 0}/{ultimaCorrida.casosEnCola ?? 0} cerrado(s)
+                  {ultimaCorrida.remesa ? ` · remesas ${ultimaCorrida.remesa.cerradas ?? 0}/${ultimaCorrida.remesa.enCola ?? 0}` : ''}
+                </span>
+                {problema && (
+                  <span className="font-semibold text-amber-800 dark:text-amber-300">⚠️ {problema}</span>
+                )}
+              </>
+            );
+          })() : (
+            <span className="text-slate-500 dark:text-slate-400">sin corridas registradas todavía</span>
+          )}
+          <button
+            onClick={correrAhora}
+            disabled={corriendoFlujo || !disparadorDisponible()}
+            title={disparadorDisponible()
+              ? 'Corre el flujo ahora, sin esperar el próximo tick del cron'
+              : 'Falta configurar el proxy'}
+            className="ml-auto px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-bold"
+          >
+            {corriendoFlujo ? 'Corriendo…' : 'Correr ahora'}
+          </button>
         </div>
       )}
 
@@ -2851,6 +2859,41 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                             )}
                           <OtrasListas listas={sc.otrasListas} />
                         </>
+                      );
+                    })()}
+
+                    {/* Qué va a hacer el flujo automático con este caso. Antes no
+                        hacía falta mostrarlo porque la app misma lo ejecutaba y se
+                        veía al instante; ahora ejecuta el Lambda, así que esto es
+                        lo único que dice de antemano si el caso se va a cerrar solo
+                        o si queda para el analista. Usa la MISMA función que el
+                        Lambda, así que no puede decir una cosa y hacer otra. */}
+                    {(() => {
+                      const sc2 = screenMap[sel.id];
+                      if (!sc2 || sc2.estado === 'loading') return null;
+                      const ev = evaluarCasoAuto(sel, sc2, flujoCfg.ofac);
+                      if (ev.automatizable) {
+                        return (
+                          <p className="text-[11px] text-emerald-700 dark:text-emerald-400 mt-3 pt-3 border-t border-indigo-200 dark:border-indigo-800/50">
+                            ✅ El flujo automático va a cerrar este caso con la tipología <b>{ev.tipologia}</b>.
+                          </p>
+                        );
+                      }
+                      const duro = ev.motivo === 'delito_sensible' || ev.motivo === 'pep';
+                      const texto: Record<string, string> = {
+                        flujo_apagado: 'el flujo automático está apagado',
+                        pais_apagado: 'el país está apagado en el mantenedor',
+                        ya_cerrado: 'el caso ya está cerrado',
+                        asignado: 'lo tiene un analista asignado',
+                        delito_sensible: 'retenido por delito sensible',
+                        pep: 'retenido por ser PEP',
+                        sin_conclusion: 'la conclusión del screening no se automatiza',
+                      };
+                      return (
+                        <p className={`text-[11px] mt-3 pt-3 border-t border-indigo-200 dark:border-indigo-800/50 ${duro ? 'text-red-700 dark:text-red-400 font-semibold' : 'text-slate-500 dark:text-slate-400'}`}>
+                          {duro ? '🛑 ' : '⏸️ '}No se cierra solo: {texto[ev.motivo ?? ''] ?? ev.motivo}
+                          {ev.categorias?.length ? ` (${ev.categorias.join(', ')})` : ''}.
+                        </p>
                       );
                     })()}
                   </div>

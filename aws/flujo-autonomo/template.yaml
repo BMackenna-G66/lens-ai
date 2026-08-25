@@ -24,6 +24,13 @@ Parameters:
     Type: String
     NoEcho: true
     Description: API key de Regcheq (screening de Chile).
+  TriggerSecret:
+    Type: String
+    NoEcho: true
+    Description: >
+      Secreto que exige la Function URL para disparar una corrida a mano. La URL
+      es pública por definición, así que la autorización va en el pedido. Sin
+      este secreto, la puerta HTTP rechaza todo y solo funciona el cron.
   FirestoreCollection:
     Type: String
     Default: casos_sf
@@ -76,6 +83,18 @@ Resources:
           LOTE: !Ref Lote
           PRESUPUESTO_MS: !Ref PresupuestoMs
           SCREENING_SCHEMA: '3'
+          TRIGGER_SECRET: !Ref TriggerSecret
+      # Puerta para el botón «Correr ahora» de la cola. AuthType NONE porque el
+      # navegador no puede firmar IAM; la autorización la hace el handler con el
+      # header `x-lens-trigger`, y el secreto lo guarda el Worker — nunca llega al
+      # navegador.
+      #
+      # El riesgo está acotado por diseño: disparar una corrida no puede cerrar
+      # nada que el cron no cerraría igual. Los dos switches y todos los frenos se
+      # evalúan lo mismo.
+      FunctionUrlConfig:
+        AuthType: NONE
+        InvokeMode: BUFFERED
       Events:
         Periodico:
           Type: Schedule
@@ -89,7 +108,11 @@ Resources:
             # El corte NO es arbitrario: el cluster de Redshift pausa 18:30 Chile y
             # la cola de REMESAS necesita consultarlo para traer la fila de la
             # transacción. Corriendo después, las remesas quedan todas en error.
-            Schedule: 'cron(0/30 11-22 * * ? *)'
+            # Cada 5 min entre 11:00 y 22:29 UTC = 07:00 a 18:29 hora Chile.
+            # Las corridas medidas tardan entre 16 y 59 segundos, así que a 5 min
+            # queda más de 4 de margen — y el candado impide que se pisen si un día
+            # una se estira.
+            Schedule: 'cron(0/5 11-22 * * ? *)'
             Name: lens-flujo-autonomo
             Description: Procesa las colas de OFAC y remesas sin intervención.
             Enabled: !If [CronHabilitado, true, false]
@@ -103,7 +126,10 @@ Outputs:
   LogGroup:
     Value: !Sub '/aws/lambda/${FlujoAutonomoFunction}'
   Horario:
-    Value: 'cron(0/30 11-22 * * ? *) — 07:00 a 18:29 Chile'
+    Value: 'cron(0/5 11-22 * * ? *) — cada 5 min, 07:00 a 18:29 Chile'
+  UrlDisparador:
+    Description: Pegar en el secret FLUJO_TRIGGER_URL del Worker.
+    Value: !GetAtt FlujoAutonomoFunctionUrl.FunctionUrl
   EstadoCron:
     Value: !Ref Habilitada
   Aviso:

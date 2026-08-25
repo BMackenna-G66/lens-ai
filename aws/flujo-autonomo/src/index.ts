@@ -175,11 +175,21 @@ async function procesar(caso: CasoSF, cfg: FlujoOfacConfig): Promise<ResultadoCa
       const tipo = TIPOS_CIERRE.find(t => t.id === ev.tipologia);
       if (!tipo) { out.sf = 'error'; out.motivo = `tipología SF desconocida: ${ev.tipologia}`; }
       else {
+        const payload = { CaseNumber: caso.numeroCaso, ...camposDeCierre(tipo, caso.pais) };
         try {
-          const r = await sendCaseUpdate({ CaseNumber: caso.numeroCaso, ...camposDeCierre(tipo, caso.pais) } as never);
-          out.sf = r.ok ? 'ok' : 'error';
-          if (!r.ok) out.motivo = r.errors?.join('; ') ?? `HTTP ${r.status ?? 0}`;
-          await guardarCierre(caso.id, 'sf', !!r.ok, ev.tipologia, out.motivo);
+          const firma = await reservarEnvioSF(caso.id, payload);
+          if (!firma) {
+            // Alguien ya mandó este mismo cierre. No se reenvía y NO se registra
+            // como un cierre nuevo: eso es lo que hacía que la auditoría mostrara
+            // dos cierres donde solo hubo un update.
+            out.sf = 'ya_cerrado';
+          } else {
+            const r = await sendCaseUpdate(payload as never);
+            out.sf = r.ok ? 'ok' : 'error';
+            if (!r.ok) out.motivo = r.errors?.join('; ') ?? `HTTP ${r.status ?? 0}`;
+            await marcarEnvioSF(caso.id, firma, !!r.ok, out.motivo);
+            await guardarCierre(caso.id, 'sf', !!r.ok, ev.tipologia, out.motivo);
+          }
         } catch (e) { out.sf = 'error'; out.motivo = (e as Error).message; }
       }
     }
@@ -226,6 +236,90 @@ async function procesar(caso: CasoSF, cfg: FlujoOfacConfig): Promise<ResultadoCa
   if (canales.length === 0) { out.accion = 'retenido'; out.motivo = 'sin canales de cierre habilitados'; }
 
   return out;
+}
+
+// ── Guard de idempotencia del cierre en Salesforce ──────────────────────────
+// La app cierra por `enviarResolucion`, que tiene este guard; este Lambda usa
+// `sendCaseUpdate` directo y NO lo tenía. Es el hueco que importa, y lo encontré
+// al medir por qué los 69 cierres duplicados de producción no habían mandado dos
+// updates: **el guard de la app los frenó todos**. Los 69 tienen un solo
+// `RESPUESTA_SF_COMPLETADA`. Sin esto, el Lambda sería el primer camino capaz de
+// mandar el update dos veces de verdad.
+//
+// Misma semántica que `caseResolutionService`: se marca ENVIANDO en transacción,
+// se envía, y se marca el resultado. Si otro ya lo mandó con el mismo payload, no
+// se manda de nuevo.
+function hashCorto(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+  return (h >>> 0).toString(16);
+}
+
+// Devuelve null si NO hay que enviar (ya se envió lo mismo, o hay un envío en
+// curso). Devuelve la firma si hay que enviar.
+async function reservarEnvioSF(caseId: string, payload: unknown): Promise<string | null> {
+  const firma = hashCorto(`${caseId}|${JSON.stringify(payload)}`);
+  const ref = db().collection(COLECCION).doc(caseId);
+  return db().runTransaction(async tx => {
+    const prev = ((await tx.get(ref)).data() ?? {}).respuestaSalesforce as
+      { estado?: string; idempotencyKey?: string; intentos?: number } | undefined;
+    if (prev?.estado === 'ENVIANDO') return null;
+    if (prev?.estado === 'ENVIADA' && prev.idempotencyKey === firma) return null;
+    tx.set(ref, limpio({
+      respuestaSalesforce: {
+        ...(prev ?? {}), estado: 'ENVIANDO', idempotencyKey: firma,
+        intentos: (prev?.intentos ?? 0) + 1, ultimoIntentoEn: new Date().toISOString(),
+      },
+    }), { merge: true });
+    return firma;
+  });
+}
+
+async function marcarEnvioSF(caseId: string, firma: string, ok: boolean, error?: string): Promise<void> {
+  await db().collection(COLECCION).doc(caseId).set(limpio({
+    respuestaSalesforce: {
+      estado: ok ? 'ENVIADA' : 'ERROR', idempotencyKey: firma,
+      completadoEn: ok ? new Date().toISOString() : null,
+      codigoError: error ?? null,
+    },
+  }), { merge: true });
+}
+
+// ── Candado de corrida ──────────────────────────────────────────────────────
+// Una corrida a la vez. Con el cron a 30 min era imposible que se pisaran; a 5 min
+// deja de serlo si entran muchos casos de golpe. Y el botón «Correr ahora» puede
+// caer justo encima de una corrida del cron.
+//
+// El candado vence solo: si un Lambda muere sin liberarlo (OOM, timeout duro), el
+// siguiente lo toma pasado el vencimiento en vez de quedar bloqueado para siempre.
+const LOCK_DOC = 'config/flujoAutonomoLock';
+const LOCK_TTL_MS = 15 * 60 * 1000;   // el techo de Lambda: más que eso, murió
+
+async function tomarCandado(quien: string): Promise<{ ok: boolean; motivo?: string }> {
+  const [col, id] = LOCK_DOC.split('/');
+  const ref = db().collection(col).doc(id);
+  try {
+    return await db().runTransaction(async tx => {
+      const snap = await tx.get(ref);
+      const d = snap.exists ? (snap.data() as { hasta?: string; quien?: string }) : null;
+      if (d?.hasta && new Date(d.hasta).getTime() > Date.now()) {
+        return { ok: false, motivo: `otra corrida en curso (${d.quien ?? '?'}), vence ${d.hasta}` };
+      }
+      tx.set(ref, { quien, desde: new Date().toISOString(),
+                    hasta: new Date(Date.now() + LOCK_TTL_MS).toISOString() });
+      return { ok: true };
+    });
+  } catch (e) {
+    // Si el candado no se puede tomar por un error, NO se corre. Preferir no
+    // hacer nada antes que arriesgar dos ejecutores.
+    return { ok: false, motivo: `no se pudo tomar el candado: ${(e as Error).message}` };
+  }
+}
+
+async function soltarCandado(): Promise<void> {
+  const [col, id] = LOCK_DOC.split('/');
+  await db().collection(col).doc(id).set({ hasta: null, liberadoEn: new Date().toISOString() }, { merge: true })
+    .catch(() => {});
 }
 
 // ── Un caso de la cola REMESA ───────────────────────────────────────────────
@@ -297,11 +391,17 @@ async function procesarRemesa(
   if (cfg.cerrarSF) {
     if (caso.cierres?.sf?.ok === true) out.sf = 'ya_cerrado';
     else {
+      const payload = { CaseNumber: caso.numeroCaso, ...camposDeCierreRemesa(tipo, caso.pais) };
       try {
-        const r = await sendCaseUpdate({ CaseNumber: caso.numeroCaso, ...camposDeCierreRemesa(tipo, caso.pais) } as never);
-        out.sf = r.ok ? 'ok' : 'error';
-        if (!r.ok) out.motivo = out.motivo ?? (r.errors?.join('; ') ?? `HTTP ${r.status ?? 0}`);
-        await guardarCierre(caso.id, 'sf', !!r.ok, ev.tipologia, out.motivo);
+        const firma = await reservarEnvioSF(caso.id, payload);
+        if (!firma) out.sf = 'ya_cerrado';
+        else {
+          const r = await sendCaseUpdate(payload as never);
+          out.sf = r.ok ? 'ok' : 'error';
+          if (!r.ok) out.motivo = out.motivo ?? (r.errors?.join('; ') ?? `HTTP ${r.status ?? 0}`);
+          await marcarEnvioSF(caso.id, firma, !!r.ok, out.motivo);
+          await guardarCierre(caso.id, 'sf', !!r.ok, ev.tipologia, out.motivo);
+        }
       } catch (e) { out.sf = 'error'; out.motivo = out.motivo ?? (e as Error).message; }
     }
   }
@@ -315,10 +415,52 @@ async function procesarRemesa(
 }
 
 // ── Handler ─────────────────────────────────────────────────────────────────
-export async function handler(): Promise<Record<string, unknown>> {
+// El evento llega del cron (EventBridge) o del botón (Function URL). Del segundo
+// se exige un secreto en un header: la URL es pública por definición, así que la
+// autorización tiene que estar en el pedido.
+//
+// Nota sobre el riesgo: alguien que lograra disparar una corrida no puede hacer
+// que se cierre nada que el cron no cerraría igual. Todos los frenos y los dos
+// switches se evalúan lo mismo. El daño posible es gasto, no una decisión mala.
+interface EventoHttp { headers?: Record<string, string | undefined>; requestContext?: unknown }
+
+function autorizado(evento: unknown): { ok: boolean; origen: string } {
+  const e = evento as EventoHttp | undefined;
+  // Sin `requestContext` no vino por HTTP: es el cron.
+  if (!e?.requestContext) return { ok: true, origen: 'cron' };
+  const esperado = process.env.TRIGGER_SECRET ?? '';
+  const dado = e.headers?.['x-lens-trigger'] ?? e.headers?.['X-Lens-Trigger'] ?? '';
+  if (!esperado || dado !== esperado) return { ok: false, origen: 'http' };
+  return { ok: true, origen: 'manual' };
+}
+
+export async function handler(evento?: unknown): Promise<Record<string, unknown>> {
   const arranque = Date.now();
   const restante = () => PRESUPUESTO_MS - (Date.now() - arranque);
 
+  const auth = autorizado(evento);
+  if (!auth.ok) {
+    return { statusCode: 401, body: JSON.stringify({ corrio: false, motivo: 'no autorizado' }) };
+  }
+
+  // Una corrida a la vez.
+  const candado = await tomarCandado(`${auth.origen}:${new Date().toISOString()}`);
+  if (!candado.ok) {
+    return { corrio: false, motivo: candado.motivo, origen: auth.origen };
+  }
+
+  try {
+    return await correr(arranque, restante, auth.origen);
+  } finally {
+    await soltarCandado();
+  }
+}
+
+async function correr(
+  arranque: number,
+  restante: () => number,
+  origen: string,
+): Promise<Record<string, unknown>> {
   let conf = await leerConfig();
   if (!conf?.cfg.ofac.enabled) {
     // Apagado no es un error: es el cortafuegos funcionando.
@@ -397,6 +539,11 @@ export async function handler(): Promise<Record<string, unknown>> {
   const cuentaR = contar(resultadosRemesa);
   const resumen = {
     corrio: true,
+    // Quién la disparó: el cron o el botón. Sirve para leer los resúmenes.
+    origen,
+    // Cuánto tardó. No se registraba, y con el cron a 5 min es EL dato que avisa
+    // si las corridas se acercan al límite: hubo que inferirlo de los timestamps.
+    duracionMs: 0,
     // Avisos de la corrida que no son de un caso puntual.
     avisos: log,
     casosEnCola: casos.length,
@@ -440,6 +587,7 @@ export async function handler(): Promise<Record<string, unknown>> {
     detalle: resultados,
   };
 
+  resumen.duracionMs = Date.now() - arranque;
   await registrarCorrida(resumen).catch(() => {});
   return resumen;
 }
