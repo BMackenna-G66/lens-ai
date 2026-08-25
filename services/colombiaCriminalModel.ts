@@ -113,6 +113,10 @@ export interface EvidenceRecord {
   provider_category: string;
   provider_list_type: string;
   // Capa 1 — Identidad
+  // Nombre tal como lo devolvió el proveedor. Se guarda porque la regla de
+  // "nombre completo exacto" lo necesita, y porque sin él no se puede explicar
+  // después por qué una coincidencia se consideró de otra persona.
+  subject_name: string;
   document_match: DocumentMatch;
   name_similarity: number;
   identity_score: number;
@@ -267,6 +271,7 @@ export function buildEvidenceRecords(result: RawResult, qName: string, qDni: str
       raw_offense: opts.raw_offense ?? '',
       provider_priority: sev.provider_priority, provider_severity: sev.provider_severity,
       provider_group: grupo, provider_category: opts.provider_category ?? '', provider_list_type: opts.provider_list_type ?? '',
+      subject_name: recName,
       document_match: id.document_match, name_similarity: id.name_similarity, identity_score: id.identity_score,
       identity_confidence: id.identity_confidence, identity_resolution: id.identity_resolution,
       cluster_id: normDoc(recDoc) ? `DOC:${normDoc(recDoc)}` : `NAME:${nameTokens(recName).join('_') || 'NA'}`,

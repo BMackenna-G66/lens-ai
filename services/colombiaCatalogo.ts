@@ -276,6 +276,59 @@ export interface EvaluacionCO {
   penales: ClasificacionCO[];
   excluidas: ClasificacionCO[];
   indeterminadas: ClasificacionCO[];
+  // Qué regla de identidad intervino, si intervino alguna. Sirve para poder
+  // explicar la conclusión sin volver a consultar al proveedor.
+  reglaIdentidad?: 'homonimia_masiva' | 'nombre_exacto' | null;
+}
+
+// Contexto de IDENTIDAD de la consulta. Se calcula en la Capa 2 y antes se
+// descartaba: `evaluarColombia` solo veía tipo/detalle/estado/fecha, así que la
+// conclusión no podía distinguir "530 coincidencias de gente con otro documento"
+// de "530 coincidencias de esta persona".
+//
+// El caso que lo destapó (02667442): Inspektor devolvió 530 coincidencias, 265 con
+// documento, NINGUNA con el documento del consultado. La Capa 1 dijo liberar, el
+// modelo dijo revisar, y el catálogo —que no veía nada de esto— concluyó Fully
+// Blocked. Repetida la consulta con solo el documento y sin nombre: 0
+// coincidencias. Eran todos homónimos.
+export interface ContextoIdentidadCO {
+  // Cuántas coincidencias crudas devolvió el proveedor, antes de clasificar.
+  totalCoincidencias: number;
+  // ¿Alguna trae el documento del consultado? `false` con volumen alto es la
+  // señal de homonimia masiva.
+  algunaConDocumento: boolean;
+  // ¿El documento del consultado aparece en JEPMS? Si aparece, no se detiene por
+  // homonimia: hay una señal fuerte de identidad por otro lado.
+  documentoEnJepms: boolean;
+  // ¿Alguna coincidencia tiene el nombre completo EXACTO del consultado? Sin
+  // documento, un nombre completo exacto no alcanza para bloquear pero sí para
+  // revisar.
+  algunaNombreExacto: boolean;
+  // Resultado del contraste por documento, si se hizo: consultar solo el documento
+  // sin nombre. `0` prueba la homonimia; `undefined` = no se consultó.
+  coincidenciasSoloDocumento?: number;
+}
+
+// Umbral de coincidencias para considerar homonimia masiva. Parámetro y no
+// constante enterrada, porque se va a querer calibrar.
+//
+// 20 sale de los datos: sobre los casos de Colombia con screening la mediana es de
+// 3 coincidencias y el p90 de 8. Con 20 quedan afuera más del 95 % de los casos
+// normales y entra el 02667442, que tenía 530.
+export const UMBRAL_HOMONIMIA_CO = 20;
+
+// Nombre comparable: sin tildes, en mayúsculas, sin puntuación y con los espacios
+// colapsados. Se exige que coincidan TODAS las palabras, no una similitud
+// parcial: "JUAN PEREZ" y "JUAN PEREZ GOMEZ" no son la misma persona.
+export function nombreExactoCO(a: string | undefined, b: string | undefined): boolean {
+  const norm = (v: string | undefined) => (v ?? '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase().replace(/[^A-Z0-9ÑÜ ]/g, ' ')
+    .split(/\s+/).filter(Boolean);
+  const pa = norm(a), pb = norm(b);
+  if (pa.length === 0 || pb.length === 0) return false;
+  if (pa.length !== pb.length) return false;
+  return pa.every((w, i) => w === pb[i]);
 }
 
 // Aplica los MISMOS umbrales y la misma tabla de decisión que Chile: la política
@@ -283,6 +336,8 @@ export interface EvaluacionCO {
 export function evaluarColombia(
   coincidencias: CoincidenciaCO[] | undefined,
   catalogo: CatalogData = DEFAULT_CATALOG,
+  identidad?: ContextoIdentidadCO,
+  umbralHomonimia: number = UMBRAL_HOMONIMIA_CO,
 ): EvaluacionCO {
   const clasificadas = (coincidencias ?? []).map(clasificarCoincidenciaCO);
   const penales = clasificadas.filter(c => c.clase === 'PENAL');
@@ -351,8 +406,64 @@ export function evaluarColombia(
     razon = `${unicos.size} proceso(s) penal(es) sin delito informado por el proveedor: no se bloquea, lo revisa el analista`;
   }
 
+  // ── Reglas de IDENTIDAD ────────────────────────────────────────────────────
+  // Se aplican DESPUÉS de la conclusión por catálogo.
+  //
+  // La homonimia masiva solo puede BAJAR la conclusión: es una duda sobre si la
+  // persona es la persona, no evidencia nueva.
+  //
+  // El nombre exacto sí puede SUBIRLA de Liberar a UCR, porque es lo que pidió el
+  // negocio: un nombre completo exacto no alcanza para bloquear, pero tampoco para
+  // liberar solo. Con una condición que agregué y conviene revisar: **exige que
+  // haya al menos una coincidencia penal**. Si todo lo que trajo el proveedor era
+  // ruido descartado —una persona desaparecida, un funcionario público— un
+  // homónimo exacto sobre ESO no tiene por qué retener el caso, y sin la condición
+  // quedaría retenido para siempre.
+  //
+  // Y no ocultan nada. Las coincidencias siguen en `penales` y `excluidas` con su
+  // clasificación: cambia el peso en la decisión, no la visibilidad. Una
+  // coincidencia real de esta persona tiene que poder verse igual.
+  let reglaIdentidad: EvaluacionCO['reglaIdentidad'] = null;
+
+  if (identidad) {
+    const homonimiaMasiva =
+      identidad.totalCoincidencias >= umbralHomonimia &&
+      !identidad.algunaConDocumento &&
+      !identidad.documentoEnJepms;
+
+    if (homonimiaMasiva) {
+      reglaIdentidad = 'homonimia_masiva';
+      if (identidad.coincidenciasSoloDocumento === 0) {
+        // El contraste lo probó: consultando SOLO el documento no hay nada. Las
+        // coincidencias son de otras personas con nombre parecido, así que el caso
+        // se libera en vez de mandarse a revisión — que es lo que evita cambiar
+        // bloqueos incorrectos por carga humana.
+        decision = 'Liberar';
+        razon = `${identidad.totalCoincidencias} coincidencias, ninguna con el documento del consultado, ` +
+          'y la consulta por documento solo no devolvió nada: homonimia confirmada';
+      } else {
+        // Sin contraste no se afirma nada: no bloquea ni libera, lo mira alguien.
+        decision = 'Revisar';
+        razon = `${identidad.totalCoincidencias} coincidencias y NINGUNA con el documento del consultado: ` +
+          'no se puede concluir que sea la misma persona';
+      }
+    } else if (
+      // Nombre completo exacto pero sin documento que lo confirme. No alcanza para
+      // bloquear —el nombre no identifica— pero sí para revisar.
+      identidad.algunaNombreExacto && !identidad.algunaConDocumento &&
+      penales.length > 0 &&
+      (decision === 'Fully Blocked' || decision === 'Liberar' || decision === 'Sin Riesgo Significativo')
+    ) {
+      reglaIdentidad = 'nombre_exacto';
+      decision = 'UNDER_COMPLIANCE_REVIEW';
+      razon = 'Coincidencia de nombre completo exacto sin documento que la confirme: ' +
+        'no se bloquea ni se libera solo';
+    }
+  }
+
   return {
     decision, razon,
     scoreTotal, precedentes, noPrecedentes, penales, excluidas, indeterminadas,
+    reglaIdentidad,
   };
 }

@@ -4,7 +4,7 @@
 // Devuelve, para cada caso, la cantidad de delitos únicos y la conclusión.
 
 import { screenChileCriminal } from './lens360Service';
-import { evaluarColombia } from './colombiaCatalogo';
+import { evaluarColombia, nombreExactoCO, UMBRAL_HOMONIMIA_CO, type ContextoIdentidadCO } from './colombiaCatalogo';
 import { evaluateLegalPolicy } from './legalPolicyGate';
 import { analyzeCriminalProfile, type RawResult as CriminalInput } from './colombiaCriminalModel';
 
@@ -39,6 +39,17 @@ export interface CasoScreening {
   // El catálogo de Chile concluye solo con causas penales + PEP; estas se
   // reportan aparte para que el analista las vea.
   otrasListas?: Array<{ clave: string; lista: string; riesgo?: string }>;
+  // Resultado del gate legal (Capa 1) de Colombia. Antes se descartaba.
+  gateLegal?: { reglaId: string; resultado: string };
+  // Señales de identidad y qué regla de identidad intervino en la conclusión.
+  identidad?: {
+    totalCoincidencias: number;
+    algunaConDocumento: boolean;
+    documentoEnJepms: boolean;
+    algunaNombreExacto: boolean;
+    coincidenciasSoloDocumento?: number;
+    reglaAplicada?: 'homonimia_masiva' | 'nombre_exacto';
+  };
   mensaje?: string;
 }
 
@@ -71,6 +82,27 @@ async function inspektorLogin(): Promise<string> {
   });
   if (!resp.ok) throw new Error(`Login Inspektor ${resp.status}`);
   return ((await resp.json()) as { token: { access_token: string } }).token.access_token;
+}
+
+// Contraste por documento: la MISMA consulta pero sin nombre. Si devuelve 0, las
+// coincidencias que traía la consulta por nombre eran de otras personas.
+//
+// Es una función aparte y mínima —solo cuenta— porque su único uso es decidir si
+// una homonimia masiva está probada. No arma screening ni conclusión.
+async function contarSoloPorDocumento(dni: string, tipoDocumento: number): Promise<number> {
+  const token = await inspektorLogin();
+  const resp = await fetch(`${INSPEKTOR_BASE}/ConsultaPrincipal`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      nombre: '', identificacion: dni, tipoDocumento,
+      tienePrioridad_4: true, cantidadPalabras: '3',
+      procuraduria: true, ramaJudicial: true, ramaJEPMS: true,
+    }),
+  });
+  if (!resp.ok) throw new Error(`Contraste Inspektor ${resp.status}`);
+  const data = (await resp.json()) as { listas?: unknown[]; listas_propias?: unknown[] };
+  return [...(data.listas ?? []), ...(data.listas_propias ?? [])].length;
 }
 
 export async function screenColombia(nombre: string, dni: string, tipoDocumento: number): Promise<CasoScreening> {
@@ -119,7 +151,36 @@ export async function screenColombia(nombre: string, dni: string, tipoDocumento:
   // Además el vocabulario del catálogo (Liberar / UNDER_COMPLIANCE_REVIEW /
   // Fully Blocked) es el que entiende el flujo automático, así que Colombia pasa
   // a ser automatizable igual que Chile.
-  const cat = evaluarColombia(coincidencias);
+  // Contexto de IDENTIDAD. Los campos existían en los records de la Capa 2 y se
+  // descartaban acá: el catálogo decidía sin saber si las coincidencias eran de
+  // esta persona. Sobre el caso 02667442 eso significó Fully Blocked con 530
+  // coincidencias de las que ninguna tenía su documento.
+  const recs = outcome.records ?? [];
+  const identidad: ContextoIdentidadCO = {
+    totalCoincidencias: recs.length,
+    algunaConDocumento: recs.some(r => r.document_match === 'EXACT'),
+    documentoEnJepms: !!dniN && jepmsIds.some(j => j.replace(/[.\s-]/g, '').toUpperCase() === dniN),
+    algunaNombreExacto: recs.some(r => nombreExactoCO(r.subject_name, nombre)),
+  };
+
+  // Contraste por documento: si hay volumen alto y ninguna coincidencia trae el
+  // documento, se consulta OTRA VEZ con solo el documento y sin nombre. Si vuelve
+  // vacío, la homonimia queda probada y el caso se libera en vez de irse a
+  // revisión — que es lo que evita cambiar bloqueos incorrectos por carga humana.
+  //
+  // Cuesta una consulta extra y se dispara SOLO en los casos ruidosos, que son
+  // pocos: la mediana de coincidencias es 3 y el p90 es 8.
+  if (identidad.totalCoincidencias >= UMBRAL_HOMONIMIA_CO
+      && !identidad.algunaConDocumento && !identidad.documentoEnJepms && dni) {
+    try {
+      identidad.coincidenciasSoloDocumento = await contarSoloPorDocumento(dni, tipoDocumento);
+    } catch {
+      // Si el contraste falla no se afirma nada: queda sin dato y la regla manda
+      // el caso a revisión, que es el lado seguro.
+    }
+  }
+
+  const cat = evaluarColombia(coincidencias, undefined, identidad);
 
   // Lo excluido se reporta aparte, agrupado, para que el analista lo vea.
   const porEtiqueta = new Map<string, number>();
@@ -145,6 +206,21 @@ export async function screenColombia(nombre: string, dni: string, tipoDocumento:
       fuente: 'Inspektor',
     })) as Coincidencia[],
     otrasListas,
+    // La Capa 1 corría, clasificaba y su resultado se descartaba: no quedaba ni la
+    // regla ni el veredicto. Cuando hubo que averiguar en qué regla caía el caso
+    // 02667442, no había forma sin volver a consultar al proveedor. Ahora la
+    // pregunta se responde mirando la ficha.
+    gateLegal: gate.result ? { reglaId: gate.ruleId, resultado: gate.result } : undefined,
+    // Y por qué la identidad intervino, si intervino. Es lo que explica una
+    // conclusión que no se deduce solo de las coincidencias.
+    identidad: {
+      totalCoincidencias: identidad.totalCoincidencias,
+      algunaConDocumento: identidad.algunaConDocumento,
+      documentoEnJepms: identidad.documentoEnJepms,
+      algunaNombreExacto: identidad.algunaNombreExacto,
+      coincidenciasSoloDocumento: identidad.coincidenciasSoloDocumento,
+      reglaAplicada: cat.reglaIdentidad ?? undefined,
+    },
   };
 }
 
