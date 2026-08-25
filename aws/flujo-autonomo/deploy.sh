@@ -12,6 +12,8 @@ cd "$(dirname "$0")"
 
 SA="${LENS_FIREBASE_SA:-$HOME/Downloads/lens-ai-9da63-firebase-adminsdk-fbsvc-1f18bdf27d.json}"
 KEY_FILE="${LENS_REGCHEQ_KEY_FILE:-$HOME/.lens-regcheq-key}"
+# Secreto del disparador HTTP. Se genera solo la primera vez; nunca se imprime.
+TRIGGER_FILE="${LENS_TRIGGER_SECRET_FILE:-$HOME/.lens-trigger-secret}"
 PROXY="${LENS_PROXY_URL:-https://empresadocs-proxy.bmackenna.workers.dev}"
 ESTADO="${1:-ENABLED}"
 
@@ -20,7 +22,13 @@ ESTADO="${1:-ENABLED}"
    Guardala una sola vez con:
      printf '%s' 'LA-KEY' > $KEY_FILE && chmod 600 $KEY_FILE"; exit 1; }
 
+if [ ! -f "$TRIGGER_FILE" ]; then
+  openssl rand -hex 24 > "$TRIGGER_FILE"; chmod 600 "$TRIGGER_FILE"
+  echo "🔑 Secreto del disparador generado en $TRIGGER_FILE (hay que cargarlo en el Worker, ver abajo)."
+fi
+
 KEY="$(tr -d '[:space:]' < "$KEY_FILE")"
+TRIGGER="$(tr -d '[:space:]' < "$TRIGGER_FILE")"
 # Guarda contra el error más fácil de cometer: dejar el placeholder.
 case "$KEY" in
   ''|TU_KEY|PENDIENTE|LA-KEY|LA_KEY)
@@ -35,10 +43,17 @@ sam deploy --parameter-overrides \
   "FirebaseSaB64=$(base64 -i "$SA" | tr -d '\n')" \
   "ProxyUrl=$PROXY" \
   "RegcheqApiKey=$KEY" \
-  "Habilitada=$ESTADO"
+  "Habilitada=$ESTADO" \
+  "TriggerSecret=$TRIGGER"
 
 echo
 echo "✅ Desplegado con el cron en $ESTADO (horario fijo en template.yaml)"
+echo
+echo "   Para que el botón «Correr ahora» funcione, el Worker necesita:"
+echo "     cd ../../cloudflare/empresadocs-proxy"
+echo "     npx wrangler secret put FLUJO_TRIGGER_URL     # la URL de abajo"
+echo "     npx wrangler secret put FLUJO_TRIGGER_SECRET  # el contenido de $TRIGGER_FILE"
+echo
 echo "   Para ver qué haría ahora mismo:"
 echo "     aws lambda invoke --profile compliance-admin --region us-east-1 \\"
 echo "       --function-name lens-flujo-autonomo --cli-read-timeout 900 /tmp/lens-run.json"
