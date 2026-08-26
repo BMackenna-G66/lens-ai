@@ -83,12 +83,75 @@ const screeningVigente = (s: unknown): boolean =>
   ((s as { schemaVersion?: number } | undefined)?.schemaVersion ?? 1) >= SCREENING_SCHEMA;
 
 // ── Casos de la cola ────────────────────────────────────────────────────────
-// Se leen los que NO están cerrados. `statusDeCaso` es la misma función que usa
-// la app, así que el criterio de "sigue en la cola" es idéntico.
-async function leerCasosAbiertos(): Promise<CasoSF[]> {
+// POR QUÉ ANTES SE LEÍA TODO. `statusDeCaso` es DERIVADO: si el documento no tiene
+// el campo `statusCaso`, lo deduce de `cierres` y `asignacion`. Un caso cerrado por
+// el flujo tenía `cierres.sf.ok` y `cierres.admin.ok` pero podía no tener el campo,
+// así que una consulta por `statusCaso` se lo habría salteado. Filtrar en memoria
+// era correcto y era lo barato de escribir.
+//
+// Lo que no vi es el costo: la colección tiene ~560 documentos y solo ~105 están
+// abiertos. Leer los 560 en cada corrida, cada 5 minutos, son 167.000 lecturas por
+// día contra una cuota de 50.000. El flujo se comía 3,3 veces la cuota del proyecto
+// solo.
+//
+// Ahora se consulta por `statusCaso`, que se escribe siempre. Pero NO se asume que
+// todos los documentos lo tengan: hasta que el backfill haya corrido, se sigue
+// leyendo todo. Un filtro que saltea casos en silencio es peor que uno caro.
+const MARCA_DOC = 'config/flujoAutonomoIndex';
+
+async function backfillListo(): Promise<boolean> {
+  const [col, id] = MARCA_DOC.split('/');
+  const d = await db().collection(col).doc(id).get();
+  return (d.data() as { backfillStatusCaso?: boolean } | undefined)?.backfillStatusCaso === true;
+}
+
+async function leerCasosAbiertos(): Promise<{ casos: CasoSF[]; lecturas: number; modo: string }> {
+  if (await backfillListo()) {
+    // Consulta acotada: solo lo que sigue en la cola.
+    const snap = await db().collection(COLECCION)
+      .where('statusCaso', 'in', ['ABIERTO', 'GESTIONANDO'])
+      .limit(TOPE_CASOS).get();
+    const casos = snap.docs.map(d => ({ ...(d.data() as object), id: d.id } as CasoSF));
+    return { casos, lecturas: snap.size, modo: 'consulta acotada' };
+  }
+  // Sin backfill: lectura completa, como antes. Cara pero sin huecos.
   const snap = await db().collection(COLECCION).limit(TOPE_CASOS * 2).get();
   const casos = snap.docs.map(d => ({ ...(d.data() as object), id: d.id } as CasoSF));
-  return casos.filter(c => statusDeCaso(c) !== 'CERRADO').slice(0, TOPE_CASOS);
+  return {
+    casos: casos.filter(c => statusDeCaso(c) !== 'CERRADO').slice(0, TOPE_CASOS),
+    lecturas: snap.size,
+    modo: 'lectura completa (falta el backfill de statusCaso)',
+  };
+}
+
+// Backfill: escribe `statusCaso` en los documentos que no lo tienen, derivándolo
+// con la misma función que usa la app. Se corre UNA vez y deja la marca.
+//
+// Cuesta una lectura completa y hasta ~560 escrituras, contra una cuota de 20.000
+// escrituras por día. Después de esto cada corrida lee ~105 en vez de 560.
+async function correrBackfill(): Promise<Record<string, unknown>> {
+  const snap = await db().collection(COLECCION).limit(5000).get();
+  let escritos = 0, yaTenian = 0;
+  const TOPE_BATCH = 400;
+  let batch = db().batch(), enBatch = 0;
+
+  for (const d of snap.docs) {
+    const data = d.data() as Record<string, unknown>;
+    if (typeof data.statusCaso === 'string' && data.statusCaso) { yaTenian++; continue; }
+    const derivado = statusDeCaso({ ...(data as object), id: d.id } as CasoSF);
+    batch.set(d.ref, { statusCaso: derivado }, { merge: true });
+    escritos++; enBatch++;
+    if (enBatch >= TOPE_BATCH) { await batch.commit(); batch = db().batch(); enBatch = 0; }
+  }
+  if (enBatch > 0) await batch.commit();
+
+  const [col, id] = MARCA_DOC.split('/');
+  await db().collection(col).doc(id).set({
+    backfillStatusCaso: true, corridoEn: new Date().toISOString(),
+    documentos: snap.size, escritos, yaTenian,
+  }, { merge: true });
+
+  return { backfill: true, documentos: snap.size, escritos, yaTenian };
 }
 
 // ── Persistencia ────────────────────────────────────────────────────────────
@@ -107,6 +170,15 @@ async function guardarScreening(caseId: string, screening: unknown): Promise<voi
   }), { merge: true });
 }
 
+// Además del canal, se escribe `statusCaso`. Antes solo se escribía `cierres` y el
+// status quedaba DERIVADO: por eso una consulta por `statusCaso` se salteaba los
+// casos que este Lambda había cerrado, y por eso había que leer la colección
+// entera en cada corrida. Escribirlo acá es lo que hace posible la consulta
+// acotada de ahora en más.
+//
+// Se calcula con `statusDeCaso`, la misma función de la app, sobre el estado ya
+// mergeado — así el criterio es idéntico y no hay una segunda definición de
+// "cerrado".
 async function guardarCierre(
   caseId: string,
   canal: 'sf' | 'admin',
@@ -114,9 +186,16 @@ async function guardarCierre(
   tipologia: string,
   detalle?: string,
 ): Promise<void> {
-  await db().collection(COLECCION).doc(caseId).set(limpio({
-    cierres: { [canal]: { ok, tipologia, en: new Date().toISOString(), detalle: detalle ?? null, por: 'flujo-autonomo' } },
-  }), { merge: true });
+  const ref = db().collection(COLECCION).doc(caseId);
+  await db().runTransaction(async tx => {
+    const prev = ((await tx.get(ref)).data() ?? {}) as Record<string, unknown>;
+    const cierres = {
+      ...((prev.cierres ?? {}) as Record<string, unknown>),
+      [canal]: { ok, tipologia, en: new Date().toISOString(), detalle: detalle ?? null, por: 'flujo-autonomo' },
+    };
+    const status = statusDeCaso({ ...(prev as object), cierres } as CasoSF);
+    tx.set(ref, limpio({ cierres, statusCaso: status, actualizadoEn: new Date().toISOString() }), { merge: true });
+  });
 }
 
 // Traza de la corrida. Un proceso que cierra casos de compliance sin nadie
@@ -454,6 +533,12 @@ export async function handler(evento?: unknown): Promise<Record<string, unknown>
   const arranque = Date.now();
   const restante = () => PRESUPUESTO_MS - (Date.now() - arranque);
 
+  // Modo backfill: `{"backfill": true}`. No procesa casos, solo completa el campo
+  // `statusCaso` y deja la marca que habilita la consulta acotada.
+  if ((evento as { backfill?: boolean } | undefined)?.backfill === true) {
+    return correrBackfill();
+  }
+
   const auth = autorizado(evento);
   if (!auth.ok) {
     return { statusCode: 401, body: JSON.stringify({ corrio: false, motivo: 'no autorizado' }) };
@@ -490,7 +575,7 @@ async function correr(
   const camposAusentes = conf.camposAusentes.filter(c => c.startsWith('ofac.'));
 
   const log: string[] = [];
-  const abiertos = await leerCasosAbiertos();
+  const { casos: abiertos, lecturas, modo } = await leerCasosAbiertos();
   // El ASUNTO manda en qué cola va cada caso y las colas no se mezclan: misma
   // regla que la app, misma función.
   const casos = abiertos.filter(c => clasificarCola(c.asunto) === 'ofac');
@@ -570,6 +655,10 @@ async function correr(
     // Cuánto tardó. No se registraba, y con el cron a 5 min es EL dato que avisa
     // si las corridas se acercan al límite: hubo que inferirlo de los timestamps.
     duracionMs: 0,
+    // Cuántos documentos leyó la corrida y con qué estrategia. Se registra porque
+    // la cuota de lectura del proyecto se agotó por no estar mirando este número.
+    lecturas,
+    modoLectura: modo,
     // Avisos de la corrida que no son de un caso puntual.
     avisos: log,
     casosEnCola: casos.length,
