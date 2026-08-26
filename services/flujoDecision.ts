@@ -179,6 +179,34 @@ export function statusDeCaso(c: CasoSF): StatusCaso {
 
 export const sigueEnCola = (c: CasoSF): boolean => statusDeCaso(c) !== 'CERRADO';
 
+// El status DESPUÉS de cerrar un canal. Distinto de `statusDeCaso`: acá los
+// CANALES mandan sobre el valor guardado.
+//
+// La diferencia importa y costó caro. `statusDeCaso` da prioridad al campo
+// guardado y solo deriva si no está — correcto para leer. Pero al ESCRIBIR después
+// de un cierre, usar esa función deja el status como estaba: con `ABIERTO` guardado
+// y los dos canales cerrados, devolvía ABIERTO.
+//
+// Medido en producción: 54 casos con los dos canales cerrados seguían marcados
+// ABIERTO, así que se quedaban en la cola y el flujo los reprocesaba en CADA
+// corrida, reportándolos como "cerrado" otra vez. El conteo de cerrados estaba
+// inflado y la cola no bajaba.
+//
+// Un caso ya CERRADO no se reabre por un cierre parcial posterior.
+export function statusTrasCierre(
+  cierres: { sf?: { ok?: boolean }; admin?: { ok?: boolean } } | undefined,
+  statusPrevio: string | undefined,
+  tieneAnalista = false,
+): StatusCaso {
+  const sfOk = cierres?.sf?.ok === true;
+  const adminOk = cierres?.admin?.ok === true;
+  const previo = (statusPrevio ?? '').toUpperCase();
+  if (sfOk && adminOk) return 'CERRADO';
+  if (previo === 'CERRADO') return 'CERRADO';
+  if (sfOk || adminOk || tieneAnalista) return 'GESTIONANDO';
+  return esStatus(previo) ? previo : 'ABIERTO';
+}
+
 // ── La decisión ─────────────────────────────────────────────────────────────
 export type MotivoNoAuto =
   | 'flujo_apagado'

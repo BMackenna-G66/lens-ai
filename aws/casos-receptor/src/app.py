@@ -135,8 +135,22 @@ def _build_patch_url(doc_id: str, campos: list) -> str:
 
 def _guardar_en_firestore(caso: dict) -> None:
     """UPSERT del caso en Firestore vía PATCH con updateMask (crea o actualiza por
-    número de caso, preservando el estado operacional agregado por Lens)."""
+    número de caso, preservando el estado operacional agregado por Lens).
+
+    ANTES de eso intenta un CREATE-ONLY que además marca `statusCaso: ABIERTO`.
+    Por qué: el flujo desatendido consulta la cola por `statusCaso` para no leer la
+    colección entera, y un caso sin ese campo es INVISIBLE para esa consulta.
+
+    Medido: los casos que entraban por acá llegaban sin el campo, el flujo tenía que
+    leer los 639 documentos en cada corrida para no saltearlos, y eso son ~61.000
+    lecturas por día contra una cuota de 50.000.
+
+    Va como create-only (`currentDocument.exists=false`) porque en un caso que YA
+    existe escribir `statusCaso` lo resucitaría: pisaría un CERRADO con ABIERTO. Si
+    el caso existe, esta llamada falla con 409 y se sigue con el PATCH normal, que
+    no toca el campo."""
     doc_id = _doc_id(caso)
+    _crear_si_no_existe(doc_id, caso)
     fields = {
         "numeroCaso": str(caso.get(_CAMPO_NUMERO, "") or ""),
         "asunto": str(caso.get(_CAMPO_ASUNTO, "") or ""),
@@ -153,6 +167,33 @@ def _guardar_en_firestore(caso: dict) -> None:
     req.add_header("Content-Type", "application/json")
     with urllib.request.urlopen(req, timeout=8) as resp:
         resp.read()
+
+
+def _crear_si_no_existe(doc_id: str, caso: dict) -> None:
+    """Crea el documento con `statusCaso: ABIERTO` si no existe. Si existe, no hace
+    nada: el 409 de Firestore es el resultado esperado, no un error."""
+    fields = {
+        "numeroCaso": str(caso.get(_CAMPO_NUMERO, "") or ""),
+        "statusCaso": "ABIERTO",
+    }
+    base = (
+        f"https://firestore.googleapis.com/v1/projects/{FIRESTORE_PROJECT}"
+        f"/databases/(default)/documents/{FIRESTORE_COLLECTION}/{urllib.request.quote(doc_id)}"
+    )
+    mask = "&".join(f"updateMask.fieldPaths={c}" for c in fields)
+    url = f"{base}?{mask}&currentDocument.exists=false"
+    body = json.dumps({"fields": {k: _to_fs_value(v) for k, v in fields.items()}}).encode("utf-8")
+    req = urllib.request.Request(url, data=body, method="PATCH")
+    req.add_header("Authorization", f"Bearer {_access_token()}")
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            resp.read()
+    except urllib.error.HTTPError as e:
+        # 409 / 400 con FAILED_PRECONDITION = el caso ya existía. Es lo normal en una
+        # reingesta y NO se toca el statusCaso: podría estar CERRADO.
+        if e.code not in (400, 409):
+            raise
 
 
 def procesar_caso(caso: dict) -> bool:

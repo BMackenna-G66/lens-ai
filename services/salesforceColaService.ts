@@ -176,7 +176,16 @@ export async function importarCasos(
       // Para los casos nuevos, la fecha de recepción es la de creación en
       // Salesforce (no "ahora"): así la cola queda ordenada como corresponde y
       // reimportar no reordena nada.
-      if (!existe) campos.recibidoEn = c.creadoEn || new Date().toISOString();
+      if (!existe) {
+        campos.recibidoEn = c.creadoEn || new Date().toISOString();
+        // `statusCaso` SIEMPRE en los casos nuevos. El flujo autónomo consulta por
+        // este campo para no leer la colección entera, y un caso sin el campo es
+        // INVISIBLE para esa consulta. Medido: 156 casos importados quedaron fuera
+        // y el flujo corría sobre una cola vacía sin avisar.
+        //
+        // Solo en los nuevos: escribirlo en los existentes pisaría un CERRADO.
+        campos.statusCaso = 'ABIERTO';
+      }
       // merge: preserva screening, asignación, cierres y statusCaso.
       batch.set(doc(db, CASOS_COLLECTION, docId), campos, { merge: true });
     }

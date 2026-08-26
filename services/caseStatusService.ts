@@ -21,14 +21,13 @@ export type StatusCaso = 'ABIERTO' | 'GESTIONANDO' | 'CERRADO';
 export const STATUS_CASO_VALORES: StatusCaso[] = ['ABIERTO', 'GESTIONANDO', 'CERRADO'];
 export type CanalCierre = 'sf' | 'admin';
 
-const esStatus = (v: string): v is StatusCaso =>
-  v === 'ABIERTO' || v === 'GESTIONANDO' || v === 'CERRADO';
 
 // Status del caso. Si hay uno persistido, ese manda; si no (casos anteriores a
 // este cambio), se deriva de los cierres y la asignación.
 // Viven en `flujoDecision.ts` porque el Lambda desatendido las necesita y ese
 // módulo no arrastra Firestore. Se reexportan para no cambiar los imports.
 export { statusDeCaso, sigueEnCola } from './flujoDecision';
+import { statusTrasCierre } from './flujoDecision';
 
 // Registra el resultado de un canal de cierre (Salesforce o Admin) y recalcula el
 // status. Si los DOS canales quedaron OK, el caso pasa a CERRADO y sale de la cola.
@@ -51,14 +50,13 @@ export async function registrarCierreCanal(
       ...cierres,
       [canal]: { ok: !!resultado.ok, en: ahora, tipologia: resultado.tipologia ?? null, detalle: resultado.detalle ?? null },
     };
-    const sfOk = merged.sf?.ok === true;
-    const adminOk = merged.admin?.ok === true;
-    const previo = (data.statusCaso as string | undefined ?? '').toUpperCase();
-    // Un caso ya CERRADO no se reabre por un cierre parcial posterior.
-    const status: StatusCaso = (sfOk && adminOk) ? 'CERRADO'
-      : previo === 'CERRADO' ? 'CERRADO'
-        : (sfOk || adminOk) ? 'GESTIONANDO'
-          : esStatus(previo) ? previo : 'ABIERTO';
+    // Misma función que usa el flujo desatendido: los canales mandan sobre el
+    // valor guardado. Estaba bien acá y mal en el Lambda, y por escribirse dos
+    // veces divergieron.
+    const status: StatusCaso = statusTrasCierre(
+      merged, data.statusCaso as string | undefined,
+      !!(data.asignacion as { analistaId?: string } | undefined)?.analistaId,
+    );
     tx.set(ref, { cierres: merged, statusCaso: status, actualizadoEn: ahora }, { merge: true });
     return status;
   });

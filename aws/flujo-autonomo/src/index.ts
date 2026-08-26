@@ -25,7 +25,7 @@ import { initializeApp, cert, type App } from 'firebase-admin/app';
 import { getFirestore, type Firestore } from 'firebase-admin/firestore';
 
 import { screenCaso, esScreenable } from '../../../services/casosCriminalService';
-import { evaluarCasoAuto, statusDeCaso, normalizarFlujoConfig } from '../../../services/flujoDecision';
+import { evaluarCasoAuto, statusDeCaso, statusTrasCierre, normalizarFlujoConfig } from '../../../services/flujoDecision';
 import type { FlujoOfacConfig, ConfigNormalizada } from '../../../services/flujoDecision';
 import { TIPOS_CIERRE, camposDeCierre } from '../../../services/cierreTipos';
 import { TIPOS_CIERRE_ADMIN, ADMIN_ASSIGNEE_DEFAULT, PEP_PROVIDER_DEFAULT, ofacFlagPara } from '../../../services/cierreAdminTipos';
@@ -99,38 +99,63 @@ const screeningVigente = (s: unknown): boolean =>
 // Ahora se consulta por `statusCaso`, que se escribe siempre. Pero NO se asume que
 // todos los documentos lo tengan: hasta que el backfill haya corrido, se sigue
 // leyendo todo. Un filtro que saltea casos en silencio es peor que uno caro.
-const MARCA_DOC = 'config/flujoAutonomoIndex';
-
-async function backfillListo(): Promise<boolean> {
-  const [col, id] = MARCA_DOC.split('/');
-  const d = await db().collection(col).doc(id).get();
-  return (d.data() as { backfillStatusCaso?: boolean } | undefined)?.backfillStatusCaso === true;
-}
+// LA CONSULTA ACOTADA NO PUEDE TENER HUECOS. Antes se habilitaba con una marca
+// ("el backfill ya corrió") y eso estaba mal: los casos ENTRAN a la colección todo
+// el tiempo, y no todos los caminos de entrada escriben `statusCaso`. El receptor
+// de Salesforce usa `updateMask` a propósito para no pisar el estado operacional,
+// así que no puede escribirlo sin resucitar casos cerrados.
+//
+// Resultado medido: 156 casos importados quedaron SIN el campo, la consulta
+// acotada devolvió 0 abiertos, y el flujo corrió sobre una cola vacía durante
+// horas sin avisar nada. Corridas de 750 ms que parecían "no había nada que hacer".
+//
+// Ahora se comprueba en cada corrida con dos `count()` —que cuestan una lectura
+// por cada 1000 documentos, no una por documento— y si falta el campo en alguno,
+// la corrida lee completo Y CURA los que faltan. Se arregla sola: la corrida
+// siguiente vuelve a ser barata.
+const ESTADOS = ['ABIERTO', 'GESTIONANDO', 'CERRADO'];
 
 async function leerCasosAbiertos(): Promise<{ casos: CasoSF[]; lecturas: number; modo: string }> {
-  if (await backfillListo()) {
-    // Consulta acotada: solo lo que sigue en la cola.
-    const snap = await db().collection(COLECCION)
-      .where('statusCaso', 'in', ['ABIERTO', 'GESTIONANDO'])
-      .limit(TOPE_CASOS).get();
-    const casos = snap.docs.map(d => ({ ...(d.data() as object), id: d.id } as CasoSF));
-    return { casos, lecturas: snap.size, modo: 'consulta acotada' };
+  const col = db().collection(COLECCION);
+  const [total, conCampo] = await Promise.all([
+    col.count().get().then(r => r.data().count),
+    col.where('statusCaso', 'in', ESTADOS).count().get().then(r => r.data().count),
+  ]);
+  const sinCampo = total - conCampo;
+
+  if (sinCampo === 0) {
+    const snap = await col.where('statusCaso', 'in', ['ABIERTO', 'GESTIONANDO']).limit(TOPE_CASOS).get();
+    return {
+      casos: snap.docs.map(d => ({ ...(d.data() as object), id: d.id } as CasoSF)),
+      lecturas: snap.size + 2,          // + los dos count
+      modo: 'consulta acotada',
+    };
   }
-  // Sin backfill: lectura completa, como antes. Cara pero sin huecos.
-  const snap = await db().collection(COLECCION).limit(TOPE_CASOS * 2).get();
+
+  // Hay casos sin el campo: se lee completo para no saltearlos, y se les escribe
+  // el estado derivado con la misma función que usa la app.
+  const snap = await col.limit(TOPE_CASOS * 4).get();
   const casos = snap.docs.map(d => ({ ...(d.data() as object), id: d.id } as CasoSF));
+
+  let batch = db().batch(), enBatch = 0, curados = 0;
+  for (const d of snap.docs) {
+    const data = d.data() as Record<string, unknown>;
+    if (typeof data.statusCaso === 'string' && data.statusCaso) continue;
+    batch.set(d.ref, { statusCaso: statusDeCaso({ ...(data as object), id: d.id } as CasoSF) }, { merge: true });
+    curados++; enBatch++;
+    if (enBatch >= 400) { await batch.commit(); batch = db().batch(); enBatch = 0; }
+  }
+  if (enBatch > 0) await batch.commit();
+
   return {
     casos: casos.filter(c => statusDeCaso(c) !== 'CERRADO').slice(0, TOPE_CASOS),
-    lecturas: snap.size,
-    modo: 'lectura completa (falta el backfill de statusCaso)',
+    lecturas: snap.size + 2,
+    modo: `lectura completa · ${curados} caso(s) sin statusCaso, curados en esta corrida`,
   };
 }
 
-// Backfill: escribe `statusCaso` en los documentos que no lo tienen, derivándolo
-// con la misma función que usa la app. Se corre UNA vez y deja la marca.
-//
-// Cuesta una lectura completa y hasta ~560 escrituras, contra una cuota de 20.000
-// escrituras por día. Después de esto cada corrida lee ~105 en vez de 560.
+// Curar TODOS los documentos de una, sin esperar a que lo haga una corrida. Es una
+// herramienta, no un requisito: la corrida se cura sola.
 async function correrBackfill(): Promise<Record<string, unknown>> {
   const snap = await db().collection(COLECCION).limit(5000).get();
   let escritos = 0, yaTenian = 0;
@@ -147,12 +172,9 @@ async function correrBackfill(): Promise<Record<string, unknown>> {
   }
   if (enBatch > 0) await batch.commit();
 
-  const [col, id] = MARCA_DOC.split('/');
-  await db().collection(col).doc(id).set({
-    backfillStatusCaso: true, corridoEn: new Date().toISOString(),
-    documentos: snap.size, escritos, yaTenian,
-  }, { merge: true });
-
+  // Ya no deja marca: la corrida comprueba en cada pasada si falta el campo en
+  // alguno y se cura sola. La marca era justamente lo que creaba el hueco — decía
+  // "ya está" mientras entraban casos nuevos sin el campo.
   return { backfill: true, documentos: snap.size, escritos, yaTenian };
 }
 
@@ -195,7 +217,15 @@ async function guardarCierre(
       ...((prev.cierres ?? {}) as Record<string, unknown>),
       [canal]: { ok, tipologia, en: new Date().toISOString(), detalle: detalle ?? null, por: 'flujo-autonomo' },
     };
-    const status = statusDeCaso({ ...(prev as object), cierres } as CasoSF);
+    // `statusTrasCierre`, NO `statusDeCaso`: acá los canales tienen que mandar
+    // sobre el valor guardado. Con `statusDeCaso` el status quedaba como estaba y
+    // 54 casos con los dos canales cerrados siguieron marcados ABIERTO,
+    // reprocesándose en cada corrida.
+    const status = statusTrasCierre(
+      cierres as { sf?: { ok?: boolean }; admin?: { ok?: boolean } },
+      prev.statusCaso as string | undefined,
+      !!(prev.asignacion as { analistaId?: string } | undefined)?.analistaId,
+    );
     tx.set(ref, limpio({ cierres, statusCaso: status, actualizadoEn: new Date().toISOString() }), { merge: true });
   });
 }
