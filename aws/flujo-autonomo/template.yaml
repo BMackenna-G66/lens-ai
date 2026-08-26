@@ -132,10 +132,14 @@ Resources:
             Schedule: 'cron(0/15 * * * ? *)'
             Name: lens-flujo-autonomo
             Description: Procesa las colas de OFAC y remesas sin intervención.
-            Enabled: !If [CronHabilitado, true, false]
+            # `State` y no `Enabled`. Con `Enabled: false` el parámetro decía
+            # DISABLED, el output del stack decía DISABLED, y la regla de
+            # EventBridge se quedaba en ENABLED: el apagado no llegaba y el cron
+            # seguía corriendo. Verificado con `aws events describe-rule`, que es
+            # la única fuente que vale — el output del stack repetía el parámetro,
+            # no el estado real.
+            State: !Ref Habilitada
 
-Conditions:
-  CronHabilitado: !Equals [!Ref Habilitada, 'ENABLED']
 
 Outputs:
   FunctionName:
