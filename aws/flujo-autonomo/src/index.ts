@@ -198,6 +198,21 @@ async function guardarCierre(
   });
 }
 
+// LATIDO. Un documento ÚNICO que se sobreescribe en cada invocación, corra o no.
+//
+// Hace falta porque una invocación que no procesa —flujo apagado, candado tomado—
+// no registra resumen, y con razón: a 15 minutos serían 96 documentos por día
+// diciendo "no hice nada". Pero sin latido la app muestra el último resumen real y
+// eso se lee como que el flujo está trabado, cuando en realidad está vivo y
+// apagado. Pasó: el mensaje quedó clavado en la corrida de ayer a las 13:45.
+//
+// Una escritura por invocación, sin acumular nada.
+async function latir(estado: Record<string, unknown>): Promise<void> {
+  await db().collection('config').doc('flujoAutonomoLatido')
+    .set(limpio({ ...estado, en: new Date().toISOString() }), { merge: true })
+    .catch(() => {});
+}
+
 // Traza de la corrida. Un proceso que cierra casos de compliance sin nadie
 // mirando tiene que dejar por qué hizo cada cosa, incluidas las retenciones.
 async function registrarCorrida(resumen: Record<string, unknown>): Promise<void> {
@@ -547,6 +562,7 @@ export async function handler(evento?: unknown): Promise<Record<string, unknown>
   // Una corrida a la vez.
   const candado = await tomarCandado(`${auth.origen}:${new Date().toISOString()}`);
   if (!candado.ok) {
+    await latir({ corrio: false, motivo: candado.motivo, origen: auth.origen });
     return { corrio: false, motivo: candado.motivo, origen: auth.origen };
   }
 
@@ -564,7 +580,9 @@ async function correr(
 ): Promise<Record<string, unknown>> {
   let conf = await leerConfig();
   if (!conf?.cfg.ofac.enabled) {
-    // Apagado no es un error: es el cortafuegos funcionando.
+    // Apagado no es un error: es el cortafuegos funcionando. Pero se late igual,
+    // para que la app pueda distinguir "apagado" de "muerto".
+    await latir({ corrio: false, motivo: 'flujo OFAC apagado', origen });
     return { corrio: false, motivo: 'flujo OFAC apagado' };
   }
   // Qué campos se leyeron por defecto. Un proceso desatendido no puede degradarse
@@ -706,6 +724,10 @@ async function correr(
   };
 
   resumen.duracionMs = Date.now() - arranque;
+  await latir({ corrio: true, origen, duracionMs: resumen.duracionMs,
+                cerrados: resumen.cerrados,
+                cerradasRemesa: resumen.remesa.cerradas,
+                casosEnCola: resumen.casosEnCola });
 
   // El resumen también va al log de CloudWatch, no solo a Firestore. Sirve para
   // poder auditar una corrida cuando Firestore no se puede leer —pasó: la cuota

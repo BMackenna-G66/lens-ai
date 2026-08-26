@@ -7,7 +7,7 @@
 // El disparo va por el Worker, no directo a la Function URL: el Worker guarda el
 // secreto que la puerta exige, así que no queda en el bundle público.
 
-import { collection, query, orderBy, limit, onSnapshot, Firestore } from 'firebase/firestore';
+import { collection, doc, query, orderBy, limit, onSnapshot, Firestore } from 'firebase/firestore';
 import { getDb } from './firebaseService';
 
 // Mismo patrón que el resto de los servicios que hablan con el Worker.
@@ -36,10 +36,14 @@ export interface ResumenCorrida {
   camposAusentes?: string[];
   avisos?: string[];
   motivosRetencion?: Record<string, number>;
+  lecturas?: number;
+  modoLectura?: string;
+  detalle?: DetalleCaso[];
   remesa?: {
     enCola?: number; procesadas?: number; cerradas?: number; retenidas?: number;
     errores?: number; sinScreening?: number; omitidas?: number;
     motivosRetencion?: Record<string, number>;
+    detalle?: DetalleCaso[];
   };
 }
 
@@ -64,6 +68,60 @@ export async function correrFlujoAhora(): Promise<{ disparada: boolean; mensaje?
   catch { throw new Error(texto.slice(0, 200) || `HTTP ${res.status}`); }
   if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
   return { disparada: data.disparada === true, mensaje: data.mensaje };
+}
+
+// LATIDO: un documento único que el flujo sobreescribe en CADA invocación, corra o
+// no. Es lo que distingue "apagado" de "muerto".
+//
+// Hace falta porque una invocación que no procesa no registra resumen —a 15
+// minutos serían 96 documentos por día diciendo "no hice nada"— y sin esto la app
+// mostraba el último resumen real y se leía como que el flujo estaba trabado. Pasó:
+// el mensaje quedó clavado en la corrida de ayer a las 13:45 durante un día entero.
+export interface LatidoFlujo {
+  en?: string;
+  origen?: string;
+  corrio?: boolean;
+  motivo?: string;
+  duracionMs?: number;
+  cerrados?: number;
+  cerradasRemesa?: number;
+  casosEnCola?: number;
+}
+
+export function subscribeLatido(onData: (l: LatidoFlujo | null) => void): () => void {
+  const db = getDb() as Firestore | null;
+  if (!db) { onData(null); return () => {}; }
+  return onSnapshot(
+    doc(db, 'config', 'flujoAutonomoLatido'),
+    snap => onData(snap.exists() ? (snap.data() as LatidoFlujo) : null),
+    () => onData(null),
+  );
+}
+
+// Hace cuánto, en palabras. Un timestamp absoluto de ayer no dice si algo está
+// vivo; "hace 3 minutos" sí.
+export function haceCuanto(iso: string | undefined): string {
+  if (!iso) return 'nunca';
+  const seg = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
+  if (seg < 0) return 'ahora';
+  if (seg < 90) return `hace ${seg}s`;
+  const min = Math.round(seg / 60);
+  if (min < 90) return `hace ${min} min`;
+  const hs = Math.round(min / 60);
+  if (hs < 36) return `hace ${hs} h`;
+  return `hace ${Math.round(hs / 24)} días`;
+}
+
+// El detalle por caso de una corrida: qué pasó con cada uno. Ya se guardaba y no
+// se mostraba en ninguna parte.
+export interface DetalleCaso {
+  caseId?: string;
+  numeroCaso?: string;
+  accion?: string;
+  motivo?: string;
+  tipologia?: string;
+  sf?: string;
+  admin?: string;
 }
 
 // Las últimas corridas, en vivo. Existe porque el resumen no se veía en ninguna

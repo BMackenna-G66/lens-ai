@@ -31,7 +31,7 @@ import { extraerRemesa, clasificarCola } from '../services/flujoDecision';
 import { CATEGORIAS_SENSIBLES } from '../services/delitosSensibles';
 import type { FlujoConfig } from '../services/flujoAutomaticoService';
 import { evaluarCasoAuto, motivosRetencion, retenidoPorDelito } from '../services/flujoAutomaticoEngine';
-import { correrFlujoAhora, subscribeUltimasCorridas, disparadorDisponible, corridaConProblema, type ResumenCorrida } from '../services/flujoCorridasService';
+import { correrFlujoAhora, subscribeUltimasCorridas, subscribeLatido, disparadorDisponible, corridaConProblema, haceCuanto, type ResumenCorrida, type LatidoFlujo } from '../services/flujoCorridasService';
 import { guardarInvestigacion } from '../services/caseInvestigationService';
 import { enviarResolucion, conclusionAStatus } from '../services/caseResolutionService';
 import { TIPOS_CIERRE, camposDeCierre } from '../services/cierreTipos';
@@ -548,6 +548,9 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   const [corriendoFlujo, setCorriendoFlujo] = useState(false);
   const [ultimaCorrida, setUltimaCorrida] = useState<ResumenCorrida | null>(null);
   useEffect(() => subscribeUltimasCorridas(cs => setUltimaCorrida(cs[0] ?? null), 1), []);
+  const [latido, setLatido] = useState<LatidoFlujo | null>(null);
+  useEffect(() => subscribeLatido(setLatido), []);
+  const [verDetalleCorrida, setVerDetalleCorrida] = useState(false);
 
   // Dispara una corrida del Lambda ahora, sin esperar el próximo tick del cron.
   // El candado del Lambda impide que se pise con una del cron: si hay una en
@@ -2018,48 +2021,130 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
         </div>
       )}
 
-      {/* El flujo automático corre en el Lambda, no acá. Esta barra es lo único
-          que lo hace visible: qué pasó en la última corrida y un botón para
-          disparar una ahora sin esperar el tick del cron.
-          Sin esto los resúmenes quedan en Firestore y no los mira nadie — el aviso
-          de que las remesas fallaron por el cluster pausado quedó enterrado ahí. */}
+      {/* El flujo corre en el Lambda, no acá. Esta barra es lo único que lo hace
+          visible, y tiene que distinguir tres cosas que antes se veían iguales:
+          el flujo apagado, el flujo trabado, y el flujo trabajando.
+
+          El LATIDO se escribe en cada invocación corra o no, así que dice si el
+          proceso está vivo. La ÚLTIMA CORRIDA dice qué hizo la última vez que
+          efectivamente procesó. Antes solo había lo segundo, y con los switches
+          apagados el mensaje quedó clavado un día entero en la corrida de ayer. */}
       {!loading && !error && (
-        <div className="mb-4 flex flex-wrap items-center gap-3 rounded-xl border border-indigo-200 dark:border-indigo-800/50 bg-indigo-50/60 dark:bg-indigo-950/30 px-4 py-2 text-xs">
-          <span className="font-bold text-indigo-800 dark:text-indigo-300">Flujo automático</span>
-          {ultimaCorrida ? (() => {
+        <div className="mb-4 rounded-xl border border-indigo-200 dark:border-indigo-800/50 bg-indigo-50/60 dark:bg-indigo-950/30 px-4 py-2 text-xs">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span className="font-bold text-indigo-800 dark:text-indigo-300">Flujo automático</span>
+
+            {/* Vivo o no. Sin latido reciente, el proceso no está corriendo. */}
+            {latido ? (
+              <span className={latido.corrio === false && /apagado/.test(latido.motivo ?? '')
+                ? 'text-slate-500 dark:text-slate-400'
+                : 'text-emerald-700 dark:text-emerald-400 font-semibold'}>
+                {latido.corrio === false
+                  ? `⏸️ ${latido.motivo ?? 'no corrió'} · revisado ${haceCuanto(latido.en)}`
+                  : `▶️ activo · última revisión ${haceCuanto(latido.en)}`}
+              </span>
+            ) : (
+              <span className="text-slate-500 dark:text-slate-400">sin señal del proceso todavía</span>
+            )}
+
+            <button
+              onClick={correrAhora}
+              disabled={corriendoFlujo || !disparadorDisponible()}
+              title={disparadorDisponible()
+                ? 'Corre el flujo ahora, sin esperar el próximo tick del cron'
+                : 'Falta configurar el proxy'}
+              className="ml-auto px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-bold"
+            >
+              {corriendoFlujo ? 'Corriendo…' : 'Correr ahora'}
+            </button>
+          </div>
+
+          {ultimaCorrida && (() => {
             const problema = corridaConProblema(ultimaCorrida);
-            const cuando = ultimaCorrida.en ? new Date(ultimaCorrida.en).toLocaleString('es-CL') : '—';
             const seg = Math.round((ultimaCorrida.duracionMs ?? 0) / 1000);
+            const det = [...(ultimaCorrida.detalle ?? []), ...(ultimaCorrida.remesa?.detalle ?? [])];
+            const cerrados = det.filter(d => d.accion === 'cerrado');
+            const retenidos = det.filter(d => d.accion === 'retenido');
             return (
-              <>
-                <span className="text-slate-600 dark:text-slate-300">
-                  última corrida {cuando}
-                  {ultimaCorrida.origen ? ` (${ultimaCorrida.origen})` : ''}
-                  {seg ? ` · ${seg}s` : ''}
-                  {' · '}OFAC {ultimaCorrida.cerrados ?? 0}/{ultimaCorrida.casosEnCola ?? 0} cerrado(s)
-                  {ultimaCorrida.remesa ? ` · remesas ${ultimaCorrida.remesa.cerradas ?? 0}/${ultimaCorrida.remesa.enCola ?? 0}` : ''}
-                  {(ultimaCorrida.remesa?.omitidas ?? 0) > 0
-                    ? ` (${ultimaCorrida.remesa?.omitidas} en espera: la base de transacciones pausa de 18:30 a 04:00)`
-                    : ''}
-                </span>
-                {problema && (
-                  <span className="font-semibold text-amber-800 dark:text-amber-300">⚠️ {problema}</span>
+              <div className="mt-1.5 pt-1.5 border-t border-indigo-200/70 dark:border-indigo-800/40">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-slate-600 dark:text-slate-300">
+                  <span>
+                    última corrida {haceCuanto(ultimaCorrida.en)}
+                    {ultimaCorrida.origen ? ` (${ultimaCorrida.origen})` : ''}
+                    {seg ? ` · ${seg}s` : ''}
+                    {' · '}OFAC {ultimaCorrida.cerrados ?? 0}/{ultimaCorrida.casosEnCola ?? 0} cerrado(s)
+                    {ultimaCorrida.remesa ? ` · remesas ${ultimaCorrida.remesa.cerradas ?? 0}/${ultimaCorrida.remesa.enCola ?? 0}` : ''}
+                    {(ultimaCorrida.remesa?.omitidas ?? 0) > 0
+                      ? ` (${ultimaCorrida.remesa?.omitidas} en espera: la base de transacciones pausa de 18:30 a 04:00)`
+                      : ''}
+                  </span>
+                  {/* Cuánto leyó: es el número que hizo que se agotara la cuota de
+                      Firestore por no estar mirándolo. */}
+                  {ultimaCorrida.lecturas != null && (
+                    <span className="text-slate-500 dark:text-slate-400">
+                      {ultimaCorrida.lecturas} lectura(s){ultimaCorrida.modoLectura ? ` · ${ultimaCorrida.modoLectura}` : ''}
+                    </span>
+                  )}
+                  {problema && (
+                    <span className="font-semibold text-amber-800 dark:text-amber-300">⚠️ {problema}</span>
+                  )}
+                  {det.length > 0 && (
+                    <button
+                      onClick={() => setVerDetalleCorrida(v => !v)}
+                      className="text-indigo-700 dark:text-indigo-400 underline"
+                    >
+                      {verDetalleCorrida ? 'ocultar' : `ver los ${det.length} caso(s)`}
+                    </button>
+                  )}
+                </div>
+
+                {/* QUÉ pasó con CADA caso. El dato ya se guardaba y no se mostraba
+                    en ninguna parte: había que abrir Firestore para saber por qué
+                    un caso no se liberó. */}
+                {verDetalleCorrida && (
+                  <div className="mt-2 max-h-64 overflow-y-auto rounded-lg border border-indigo-200 dark:border-indigo-800/50 bg-white/70 dark:bg-slate-900/50">
+                    <table className="w-full text-[11px]">
+                      <thead className="bg-indigo-100/60 dark:bg-indigo-950/50 text-slate-600 dark:text-slate-300 text-left sticky top-0">
+                        <tr>
+                          <th className="py-1.5 px-2 font-semibold">Caso</th>
+                          <th className="py-1.5 px-2 font-semibold">Qué pasó</th>
+                          <th className="py-1.5 px-2 font-semibold">Tipología</th>
+                          <th className="py-1.5 px-2 font-semibold">Salesforce</th>
+                          <th className="py-1.5 px-2 font-semibold">Admin</th>
+                          <th className="py-1.5 px-2 font-semibold">Motivo</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {/* Los cerrados primero: es lo que se quiere ver. */}
+                        {[...cerrados, ...retenidos, ...det.filter(d => d.accion !== 'cerrado' && d.accion !== 'retenido')]
+                          .map((d, i) => (
+                          <tr key={`${d.caseId ?? i}-${i}`} className="border-t border-indigo-100 dark:border-indigo-900/40">
+                            <td className="py-1 px-2 font-semibold text-slate-800 dark:text-slate-100">{d.numeroCaso ?? d.caseId ?? '—'}</td>
+                            <td className="py-1 px-2">
+                              <span className={
+                                d.accion === 'cerrado' ? 'text-emerald-700 dark:text-emerald-400 font-semibold'
+                                : d.accion === 'error' ? 'text-red-600 dark:text-red-400 font-semibold'
+                                : 'text-slate-600 dark:text-slate-300'
+                              }>
+                                {d.accion === 'cerrado' ? 'liberado / cerrado'
+                                  : d.accion === 'retenido' ? 'retenido'
+                                  : d.accion === 'sin_screening' ? 'sin screening'
+                                  : d.accion ?? '—'}
+                              </span>
+                            </td>
+                            <td className="py-1 px-2 text-slate-500 dark:text-slate-400">{d.tipologia ?? '—'}</td>
+                            <td className="py-1 px-2 text-slate-500 dark:text-slate-400">{d.sf ?? '—'}</td>
+                            <td className="py-1 px-2 text-slate-500 dark:text-slate-400">{d.admin ?? '—'}</td>
+                            <td className="py-1 px-2 text-slate-500 dark:text-slate-400">{d.motivo ?? '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 )}
-              </>
+              </div>
             );
-          })() : (
-            <span className="text-slate-500 dark:text-slate-400">sin corridas registradas todavía</span>
-          )}
-          <button
-            onClick={correrAhora}
-            disabled={corriendoFlujo || !disparadorDisponible()}
-            title={disparadorDisponible()
-              ? 'Corre el flujo ahora, sin esperar el próximo tick del cron'
-              : 'Falta configurar el proxy'}
-            className="ml-auto px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-bold"
-          >
-            {corriendoFlujo ? 'Corriendo…' : 'Correr ahora'}
-          </button>
+          })()}
         </div>
       )}
 

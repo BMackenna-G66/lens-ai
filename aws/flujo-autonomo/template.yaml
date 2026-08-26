@@ -44,8 +44,17 @@ Parameters:
       de Firestore.
   Lote:
     Type: String
-    Default: '4'
-    Description: Consultas al proveedor en paralelo. Igual que la app.
+    Default: '8'
+    Description: >
+      Consultas al proveedor en paralelo. Era 4, heredado de la app.
+
+      El screening ES el cuello: una consulta a Inspektor tarda ~12,8 s, y con 91
+      casos sin screening eso da 291 s con lote 4 — que explica los 285 s medidos
+      de la corrida completa. Con 8 baja a ~146 s.
+
+      No se subió más de golpe a propósito: duplicar es un paso medible, y si el
+      proveedor empieza a limitar hay que verlo antes de multiplicar por cuatro.
+      La duración queda registrada en cada corrida para poder decidirlo con datos.
   PresupuestoMs:
     Type: String
     Default: '780000'

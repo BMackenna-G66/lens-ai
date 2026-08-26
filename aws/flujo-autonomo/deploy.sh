@@ -44,6 +44,7 @@ sam deploy --parameter-overrides \
   "ProxyUrl=$PROXY" \
   "RegcheqApiKey=$KEY" \
   "Habilitada=$ESTADO" \
+  "Lote=${LENS_LOTE:-8}" \
   "TriggerSecret=$TRIGGER"
 
 echo
