@@ -19,6 +19,8 @@
 // único propio es la capa de Firestore, porque el SDK del navegador no corre en
 // Lambda.
 
+import { EventBridgeClient, EnableRuleCommand, DisableRuleCommand, DescribeRuleCommand }
+  from '@aws-sdk/client-eventbridge';
 import { initializeApp, cert, type App } from 'firebase-admin/app';
 import { getFirestore, type Firestore } from 'firebase-admin/firestore';
 
@@ -395,6 +397,35 @@ async function marcarEnvioSF(caseId: string, firma: string, ok: boolean, error?:
   }), { merge: true });
 }
 
+// ── El cron, prendido y apagado desde la app ────────────────────────────────
+// El navegador no puede tocar EventBridge, así que el Lambda maneja su propia
+// regla. Es la única forma de que el interruptor esté en el mantenedor y no en una
+// terminal.
+//
+// Y son DOS interruptores por diseño, no por accidente: este cron y el switch de
+// Firestore. El de Firestore frena hasta la corrida en curso porque se relee entre
+// lotes; este evita que la corrida arranque. Que el cron se pueda apagar desde la
+// app no los junta — siguen siendo dos.
+const REGLA_CRON = process.env.REGLA_CRON || 'lens-flujo-autonomo';
+const eb = new EventBridgeClient({});
+
+async function estadoCron(): Promise<{ estado: string; horario?: string }> {
+  const r = await eb.send(new DescribeRuleCommand({ Name: REGLA_CRON }));
+  return { estado: r.State ?? 'DESCONOCIDO', horario: r.ScheduleExpression };
+}
+
+async function cambiarCron(a: 'ENABLED' | 'DISABLED'): Promise<Record<string, unknown>> {
+  await eb.send(a === 'ENABLED'
+    ? new EnableRuleCommand({ Name: REGLA_CRON })
+    : new DisableRuleCommand({ Name: REGLA_CRON }));
+  // Se relee de EventBridge en vez de devolver lo que se pidió: el output de un
+  // deploy decía DISABLED mientras la regla seguía ENABLED, y por creerle a eso el
+  // cron siguió corriendo apagado. La única fuente que vale es la regla.
+  const real = await estadoCron();
+  await latir({ cronCambiado: a, cronEstado: real.estado });
+  return { cron: real.estado, horario: real.horario, pedido: a };
+}
+
 // ── Candado de corrida ──────────────────────────────────────────────────────
 // Una corrida a la vez. Con el cron a 30 min era imposible que se pisaran; a 5 min
 // deja de serlo si entran muchos casos de golpe. Y el botón «Correr ahora» puede
@@ -532,7 +563,22 @@ async function procesarRemesa(
 // Nota sobre el riesgo: alguien que lograra disparar una corrida no puede hacer
 // que se cierre nada que el cron no cerraría igual. Todos los frenos y los dos
 // switches se evalúan lo mismo. El daño posible es gasto, no una decisión mala.
-interface EventoHttp { headers?: Record<string, string | undefined>; requestContext?: unknown }
+interface EventoHttp {
+  headers?: Record<string, string | undefined>;
+  requestContext?: unknown;
+  body?: string;
+}
+
+// La acción, venga de `event.body` (Function URL) o de la raíz (invocación directa).
+function leerAccion(evento: unknown): { accion?: string; estado?: string } {
+  const e = evento as (EventoHttp & { accion?: string; estado?: string }) | undefined;
+  if (e?.accion) return { accion: e.accion, estado: e.estado };
+  if (typeof e?.body === 'string' && e.body.trim()) {
+    try { return JSON.parse(e.body) as { accion?: string; estado?: string }; }
+    catch { return {}; }
+  }
+  return {};
+}
 
 function autorizado(evento: unknown): { ok: boolean; origen: string } {
   const e = evento as EventoHttp | undefined;
@@ -557,6 +603,23 @@ export async function handler(evento?: unknown): Promise<Record<string, unknown>
   const auth = autorizado(evento);
   if (!auth.ok) {
     return { statusCode: 401, body: JSON.stringify({ corrio: false, motivo: 'no autorizado' }) };
+  }
+
+  // Consultar o cambiar el cron. Va DESPUÉS de la autorización y ANTES del
+  // candado: prender o apagar el cron no es una corrida y no debe esperar a que
+  // termine la que esté en curso — justamente se puede querer apagar mientras hay
+  // una corriendo.
+  //
+  // OJO CON DE DÓNDE SE LEE LA ACCIÓN. Por Function URL el JSON del pedido llega
+  // en `event.body` como string, no en la raíz del evento: leerla solo de la raíz
+  // hacía que `{"accion":"estado"}` cayera en el camino de corrida normal y
+  // devolviera "flujo OFAC apagado". Por invocación directa (la CLI, un test) sí
+  // viene en la raíz, así que se miran los dos.
+  const acc = leerAccion(evento);
+  if (acc?.accion === 'estado') return estadoCron();
+  if (acc?.accion === 'cron') {
+    const pedido = acc.estado === 'ENABLED' ? 'ENABLED' : 'DISABLED';
+    return cambiarCron(pedido);
   }
 
   // Una corrida a la vez.

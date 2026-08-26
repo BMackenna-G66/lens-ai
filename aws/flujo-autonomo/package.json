@@ -5,6 +5,7 @@
   "type": "module",
   "description": "Flujo automatico desatendido de la Bandeja de Casos (OFAC).",
   "dependencies": {
+    "@aws-sdk/client-eventbridge": "^3.1118.0",
     "firebase-admin": "^12.7.0"
   }
 }

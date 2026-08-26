@@ -153,6 +153,45 @@ export default {
     //   puede cerrar nada que el cron no cerraría igual — los dos switches de
     //   Firestore y todos los frenos se evalúan lo mismo. Lo que se protege es el
     //   gasto, no la decisión.
+    // ── Estado del cron y prenderlo/apagarlo: POST /flujo/cron ────────────────
+    //   El navegador no puede tocar EventBridge; el Lambda maneja su propia regla
+    //   y este endpoint solo agrega el secreto, igual que /flujo/correr.
+    //
+    //   A diferencia de correr, acá SÍ se espera la respuesta: cambiar el cron es
+    //   instantáneo y quien aprieta el interruptor tiene que ver si quedó prendido.
+    //   Devolver 202 y que el estado se vea "después" es exactamente cómo se pierde
+    //   la confianza en un interruptor.
+    if (url.pathname === '/flujo/cron') {
+      if (request.method !== 'POST') return jsonError('Método no permitido', 405, cors);
+      const destino = (env.FLUJO_TRIGGER_URL || '').replace(/\/$/, '');
+      const secreto = env.FLUJO_TRIGGER_SECRET || '';
+      if (!destino || !secreto) return jsonError('Disparador no configurado', 500, cors);
+
+      let cuerpo: { accion?: string; estado?: string };
+      try { cuerpo = await request.json() as typeof cuerpo; }
+      catch { return jsonError('Cuerpo inválido', 400, cors); }
+
+      // Allowlist: solo estas dos acciones pasan. Sin esto, este endpoint sería un
+      // relay abierto hacia el Lambda.
+      const accion = cuerpo.accion === 'cron' ? 'cron' : 'estado';
+      const estado = cuerpo.estado === 'ENABLED' ? 'ENABLED' : 'DISABLED';
+
+      try {
+        const upstream = await fetchTimeout(destino, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-lens-trigger': secreto },
+          body: JSON.stringify(accion === 'cron' ? { accion, estado } : { accion: 'estado' }),
+        }, 30000);
+        const texto = await upstream.text();
+        return new Response(texto, {
+          status: upstream.status,
+          headers: { ...cors, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+        });
+      } catch (e) {
+        return jsonError(`No se pudo leer el estado del cron: ${e instanceof Error ? e.message : String(e)}`, 502, cors);
+      }
+    }
+
     if (url.pathname === '/flujo/correr') {
       if (request.method !== 'POST') return jsonError('Método no permitido', 405, cors);
       const destino = (env.FLUJO_TRIGGER_URL || '').replace(/\/$/, '');

@@ -31,7 +31,7 @@ import { extraerRemesa, clasificarCola } from '../services/flujoDecision';
 import { CATEGORIAS_SENSIBLES } from '../services/delitosSensibles';
 import type { FlujoConfig } from '../services/flujoAutomaticoService';
 import { evaluarCasoAuto, motivosRetencion, retenidoPorDelito } from '../services/flujoAutomaticoEngine';
-import { correrFlujoAhora, subscribeUltimasCorridas, subscribeLatido, disparadorDisponible, corridaConProblema, haceCuanto, type ResumenCorrida, type LatidoFlujo } from '../services/flujoCorridasService';
+import { correrFlujoAhora, subscribeUltimasCorridas, subscribeLatido, disparadorDisponible, corridaConProblema, haceCuanto, leerEstadoCron, cambiarCron, type ResumenCorrida, type LatidoFlujo } from '../services/flujoCorridasService';
 import { guardarInvestigacion } from '../services/caseInvestigationService';
 import { enviarResolucion, conclusionAStatus } from '../services/caseResolutionService';
 import { TIPOS_CIERRE, camposDeCierre } from '../services/cierreTipos';
@@ -551,6 +551,33 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   const [latido, setLatido] = useState<LatidoFlujo | null>(null);
   useEffect(() => subscribeLatido(setLatido), []);
   const [verDetalleCorrida, setVerDetalleCorrida] = useState(false);
+
+  // Estado del cron. Se LEE de EventBridge cada vez que se abre el mantenedor: no
+  // se guarda en Firestore ni se asume, porque el estado real vive en AWS y ya nos
+  // pasó creerle a un output que decía otra cosa.
+  const [cron, setCron] = useState<{ estado: string; horario?: string } | null>(null);
+  const [cronCargando, setCronCargando] = useState(false);
+  const cargarCron = async () => {
+    if (!disparadorDisponible()) return;
+    setCronCargando(true);
+    try { setCron(await leerEstadoCron()); }
+    catch (e) { setFlujoMsg(`❌ Cron: ${(e as Error).message}`); setCron(null); }
+    finally { setCronCargando(false); }
+  };
+  useEffect(() => { if (showFlujo) cargarCron(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [showFlujo]);
+
+  const toggleCron = async () => {
+    const destino = cron?.estado === 'ENABLED' ? 'DISABLED' : 'ENABLED';
+    setCronCargando(true); setFlujoMsg(null);
+    try {
+      const r = await cambiarCron(destino);
+      setCron({ estado: r.estado, horario: r.horario });
+      setFlujoMsg(r.estado === destino
+        ? `✅ Cron ${destino === 'ENABLED' ? 'prendido' : 'apagado'}.`
+        : `⚠️ Se pidió ${destino} y quedó en ${r.estado}.`);
+    } catch (e) { setFlujoMsg(`❌ ${(e as Error).message}`); }
+    finally { setCronCargando(false); }
+  };
 
   // Dispara una corrida del Lambda ahora, sin esperar el próximo tick del cron.
   // El candado del Lambda impide que se pise con una del cron: si hay una en
@@ -1833,6 +1860,55 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                 flujo desatendido corre sin nadie mirando: si el doc quedó
                 incompleto, acá se ve, que es donde está quien puede arreglarlo.
                 Guardar completa el doc y el aviso desaparece. */}
+            {/* EL INTERRUPTOR DEL PROCESO. Va primero porque sin esto prendido, los
+                switches de abajo no hacen nada: son dos interruptores distintos y
+                confundirlos costó un día de "¿por qué no corre?". */}
+            <div className="mb-3 rounded-lg border border-amber-300 dark:border-amber-700/60 bg-white/70 dark:bg-slate-900/40 px-3 py-2.5">
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="min-w-0">
+                  <p className="text-xs font-bold text-slate-800 dark:text-slate-100">
+                    Proceso desatendido
+                    {cron && (
+                      <span className={`ml-2 px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                        cron.estado === 'ENABLED'
+                          ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300'
+                          : 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300'
+                      }`}>
+                        {cron.estado === 'ENABLED' ? 'CORRIENDO' : 'DETENIDO'}
+                      </span>
+                    )}
+                  </p>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                    {cron
+                      ? cron.estado === 'ENABLED'
+                        ? `Corre solo ${cron.horario ? `· ${cron.horario}` : ''}. Los switches de abajo deciden QUÉ hace cada corrida.`
+                        : 'Detenido: no corre nada, ni aunque los switches de abajo estén prendidos.'
+                      : cronCargando ? 'Leyendo el estado…' : 'No se pudo leer el estado.'}
+                  </p>
+                </div>
+                <button
+                  onClick={toggleCron}
+                  disabled={cronCargando || !cron || !disparadorDisponible()}
+                  className={`ml-auto px-4 py-2 rounded-xl text-xs font-bold text-white disabled:opacity-50 ${
+                    cron?.estado === 'ENABLED'
+                      ? 'bg-slate-600 hover:bg-slate-700'
+                      : 'bg-emerald-600 hover:bg-emerald-700'
+                  }`}
+                >
+                  {cronCargando ? 'Un momento…'
+                    : cron?.estado === 'ENABLED' ? 'Detener el proceso' : 'Prender el proceso'}
+                </button>
+                <button
+                  onClick={cargarCron}
+                  disabled={cronCargando}
+                  title="Volver a leer el estado real desde AWS"
+                  className="text-[11px] text-slate-500 dark:text-slate-400 underline disabled:opacity-50"
+                >
+                  refrescar
+                </button>
+              </div>
+            </div>
+
             {flujoCamposAusentes.length > 0 && (
               <p className="text-xs text-amber-800 dark:text-amber-300 mb-3 bg-amber-100/70 dark:bg-amber-900/30 border border-amber-300 dark:border-amber-700/60 rounded-lg px-3 py-2">
                 ⚠️ Estos campos no están en la configuración guardada y se están usando por defecto:{' '}

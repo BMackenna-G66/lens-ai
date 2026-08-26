@@ -159,3 +159,37 @@ export function corridaConProblema(c: ResumenCorrida | undefined): string | null
   if (c.cortadoPorTiempo) return 'la corrida se cortó por tiempo: quedaron casos sin procesar';
   return null;
 }
+
+// ── El cron, desde la app ───────────────────────────────────────────────────
+// Prender y apagar el cron sin pasar por una terminal. El estado se LEE de
+// EventBridge, no se asume: el output de un deploy decía DISABLED mientras la
+// regla seguía ENABLED, y por creerle a eso el cron siguió corriendo apagado.
+export interface EstadoCron { estado: string; horario?: string; pedido?: string }
+
+export async function leerEstadoCron(): Promise<EstadoCron> {
+  if (!PROXY) throw new Error('Proxy no configurado.');
+  const res = await fetch(`${PROXY}/flujo/cron`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ accion: 'estado' }),
+  });
+  const t = await res.text();
+  let d: EstadoCron & { error?: string };
+  try { d = JSON.parse(t) as typeof d; } catch { throw new Error(t.slice(0, 200) || `HTTP ${res.status}`); }
+  if (!res.ok) throw new Error(d.error ?? `HTTP ${res.status}`);
+  return d;
+}
+
+export async function cambiarCron(estado: 'ENABLED' | 'DISABLED'): Promise<EstadoCron> {
+  if (!PROXY) throw new Error('Proxy no configurado.');
+  const res = await fetch(`${PROXY}/flujo/cron`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ accion: 'cron', estado }),
+  });
+  const t = await res.text();
+  let d: (EstadoCron & { cron?: string; error?: string });
+  try { d = JSON.parse(t) as typeof d; } catch { throw new Error(t.slice(0, 200) || `HTTP ${res.status}`); }
+  if (!res.ok) throw new Error(d.error ?? `HTTP ${res.status}`);
+  return { estado: d.cron ?? d.estado, horario: d.horario, pedido: d.pedido };
+}

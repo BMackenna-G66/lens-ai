@@ -25,6 +25,7 @@ npx esbuild src/index.ts \
   --target=node22 \
   --format=esm \
   --external:firebase-admin \
+  --external:@aws-sdk/client-eventbridge \
   --define:import.meta.env=process.env \
   --outfile=dist/index.mjs \
   --log-level=warning
@@ -35,7 +36,7 @@ cat > dist/package.json <<'JSON'
   "name": "lens-flujo-autonomo-dist",
   "version": "1.0.0",
   "type": "module",
-  "dependencies": { "firebase-admin": "^12.7.0" }
+  "dependencies": { "firebase-admin": "^12.7.0", "@aws-sdk/client-eventbridge": "^3.1118.0" }
 }
 JSON
 

@@ -93,6 +93,18 @@ Resources:
           PRESUPUESTO_MS: !Ref PresupuestoMs
           SCREENING_SCHEMA: '3'
           TRIGGER_SECRET: !Ref TriggerSecret
+          REGLA_CRON: lens-flujo-autonomo
+      # Permisos mínimos: ver y cambiar SU PROPIA regla de cron. Es lo que permite
+      # que el interruptor esté en el mantenedor y no en una terminal.
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - events:DescribeRule
+                - events:EnableRule
+                - events:DisableRule
+              Resource: !Sub 'arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/lens-flujo-autonomo'
+
       # Puerta para el botón «Correr ahora» de la cola. AuthType NONE porque el
       # navegador no puede firmar IAM; la autorización la hace el handler con el
       # header `x-lens-trigger`, y el secreto lo guarda el Worker — nunca llega al
