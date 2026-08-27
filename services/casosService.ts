@@ -20,8 +20,18 @@ export const CASOS_COLLECTION = 'casos_sf';
 export const SCREENING_SCHEMA = 3;
 
 // ¿El screening guardado sirve, o hay que volver a consultarlo?
-export const screeningVigente = (s?: { schemaVersion?: number }): boolean =>
-  (s?.schemaVersion ?? 1) >= SCREENING_SCHEMA;
+// ¿El screening guardado sirve, o hay que volver a consultar al proveedor?
+//
+// Mira DOS cosas. La versión sola no alcanza: el screening del beneficiario se
+// guarda incluso cuando el proveedor falló —`screenBeneficiario` no lanza,
+// DEVUELVE `{ estado: 'error' }`— y ese documento queda estampado con la versión
+// actual. Con solo la versión, un screening fallido contaba como vigente y el
+// caso no se reintentaba nunca.
+//
+// Medido en la cola: 7 de las 9 remesas internacionales abiertas estaban
+// congeladas así, con un error de API de hace días.
+export const screeningVigente = (s?: { schemaVersion?: number; estado?: string }): boolean =>
+  (s?.schemaVersion ?? 1) >= SCREENING_SCHEMA && s?.estado !== 'error';
 
 export interface StoredScreening {
   schemaVersion?: number;   // ver SCREENING_SCHEMA

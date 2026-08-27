@@ -15,6 +15,7 @@
 // Reusa los motores ya probados de Chile y Colombia (no los reimplementa) y trae
 // la lógica internacional del módulo Regcheq replicándola acá, sin tocarlo.
 
+import { screenRemesaInternacional } from './remesaInternacionalCatalogo';
 import { screenChileCriminal } from './lens360Service';
 import { screenColombia } from './casosCriminalService';
 import type { Coincidencia } from './casosCriminalService';
@@ -60,6 +61,13 @@ export interface RemesaScreening {
   coincidencias: Coincidencia[];   // delitos/causas (CL y CO)
   listas: ListaCoincidencia[];     // listas con match (INTL)
   mensaje?: string;                // error legible
+  // Trazabilidad del cruce internacional: con qué datos se consultó y qué se
+  // encontró. Solo lo llena el camino INTL.
+  cruceInternacional?: {
+    porNombre: boolean; porDocumento: boolean; pais?: string;
+    totalCoincidencias: number; nombreExacto: number; soloParciales: number;
+    restrictivas: number; informativas: number;
+  };
 }
 
 // Nombres legibles de las listas (replicado del módulo Regcheq).
@@ -139,10 +147,24 @@ export function nombreBeneficiario(row: Partial<RemesaRow>): string {
   return limpiar(row?.beneficiary_name) || compuesto;
 }
 
-// ── Flujo internacional: Regcheq solo por nombre ─────────────────────────────
-// Crea/actualiza la ficha con el nombre y la nacionalidad y devuelve las listas
-// que dieron coincidencia. Sin catálogo: no concluye, solo reporta.
-async function screenInternacional(nombre: string, dni: string, nacionalidad: string): Promise<RemesaScreening> {
+// ── Camino viejo de internacional: Regcheq por ficha ────────────────────────
+// YA NO SE USA para el flujo internacional. Se conserva a propósito, no por
+// olvido: es la vía de rollback y sigue siendo válida para un beneficiario que
+// tenga RUT chileno.
+//
+// Por qué se dejó de usar: Regcheq no busca por nombre, busca fichas, y valida
+// el `dni` de la ficha como RUT chileno. Probado contra la API — pasaporte
+// (`XX1234567`), dígitos sueltos, alfanumérico, el nombre con guiones bajos y un
+// RUT con DV incorrecto devuelven todos `400 dni invalid-554`; un RUT válido
+// devuelve 200 con `dniType: { country: "Chile", document: "RUT" }`.
+//
+// Con eso, el fallback de armar el `dni` desde el nombre no podía funcionar
+// nunca. Medido sobre la cola: 7 de 9 internacionales abiertos quedaban en
+// `estado: 'error'`, y eran exactamente los 7 sin documento.
+//
+// El reemplazo es `screenRemesaInternacional` en
+// `services/remesaInternacionalCatalogo.ts`, que cruza por nombre completo.
+export async function screenInternacional(nombre: string, dni: string, nacionalidad: string): Promise<RemesaScreening> {
   const base: RemesaScreening = {
     estado: 'error', flujo: 'INTL', fuente: 'Regcheq', decision: '—',
     delitosUnicos: 0, coincidencias: [], listas: [],
@@ -274,7 +296,23 @@ export async function screenBeneficiario(row: RemesaRow): Promise<RemesaScreenin
       };
     }
 
-    return await screenInternacional(nombre, dni, limpiar(row?.beneficiary_country_name));
+    // Internacional: cruce por NOMBRE COMPLETO con su catálogo propio. Ver el
+    // comentario de `screenInternacional` para por qué ya no va por Regcheq.
+    const r = await screenRemesaInternacional(nombre, dni, limpiar(row?.beneficiary_country_name));
+    return {
+      estado: r.estado, flujo: 'INTL', fuente: 'Inspektor',
+      decision: r.decision, razon: r.razon,
+      delitosUnicos: r.delitosUnicos,
+      coincidencias: r.coincidencias,
+      listas: r.listas.map(l => ({
+        clave: l.clave,
+        lista: l.informativa ? `${l.lista} (informativa)` : l.lista,
+        riesgo: l.riesgo,
+        detalle: l.matches > 1 ? `${l.detalle ?? '—'} · ${l.matches} coincidencias` : l.detalle,
+      })),
+      mensaje: r.mensaje,
+      cruceInternacional: r.cruce,
+    };
   } catch (e) {
     return {
       estado: 'error', flujo,

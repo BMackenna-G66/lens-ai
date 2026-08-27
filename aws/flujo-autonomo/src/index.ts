@@ -81,8 +81,23 @@ async function leerConfig(): Promise<ConfigNormalizada | null> {
   return normalizarFlujoConfig(snap.data() as Record<string, unknown>);
 }
 
-const screeningVigente = (s: unknown): boolean =>
-  ((s as { schemaVersion?: number } | undefined)?.schemaVersion ?? 1) >= SCREENING_SCHEMA;
+// ¿El screening guardado sirve, o hay que volver a consultar al proveedor?
+//
+// Mira DOS cosas, no una. La versión del esquema sola no alcanza: el camino de
+// remesas guarda el screening incluso cuando el proveedor falló —
+// `screenBeneficiario` no lanza, DEVUELVE `{ estado: 'error' }`— y ese documento
+// sale estampado con la versión actual. Con solo la versión, un screening
+// fallido contaba como vigente y el caso NUNCA se reintentaba.
+//
+// Medido: 7 de las 9 remesas internacionales abiertas estaban congeladas así.
+// El comentario del paso 1 ya decía "se reintenta en la corrida siguiente"; el
+// código no lo cumplía para remesas.
+const screeningVigente = (s: unknown): boolean => {
+  const sc = s as { schemaVersion?: number; estado?: string } | undefined;
+  if ((sc?.schemaVersion ?? 1) < SCREENING_SCHEMA) return false;
+  // Un fallo del proveedor no es un resultado: se vuelve a pedir.
+  return sc?.estado !== 'error';
+};
 
 // ── Casos de la cola ────────────────────────────────────────────────────────
 // POR QUÉ ANTES SE LEÍA TODO. `statusDeCaso` es DERIVADO: si el documento no tiene
@@ -125,10 +140,17 @@ async function leerCasosAbiertos(): Promise<{ casos: CasoSF[]; lecturas: number;
 
   if (sinCampo === 0) {
     const snap = await col.where('statusCaso', 'in', ['ABIERTO', 'GESTIONANDO']).limit(TOPE_CASOS).get();
+    // Se reconcilia también acá: un caso con los dos canales cerrados y el campo en
+    // ABIERTO tiene que salir de la cola, y esta consulta lo trae igual.
+    const arreglos = await reconciliar(snap.docs);
+    const casos = snap.docs.map(d => ({ ...(d.data() as object), id: d.id } as CasoSF))
+      .filter(c => statusTrasCierre(c.cierres, c.statusCaso, !!c.asignacion?.analistaId) !== 'CERRADO');
     return {
-      casos: snap.docs.map(d => ({ ...(d.data() as object), id: d.id } as CasoSF)),
+      casos,
       lecturas: snap.size + 2,          // + los dos count
-      modo: 'consulta acotada',
+      modo: arreglos.desfasados
+        ? `consulta acotada · ${arreglos.desfasados} desfasado(s) corregido(s)`
+        : 'consulta acotada',
     };
   }
 
@@ -137,21 +159,48 @@ async function leerCasosAbiertos(): Promise<{ casos: CasoSF[]; lecturas: number;
   const snap = await col.limit(TOPE_CASOS * 4).get();
   const casos = snap.docs.map(d => ({ ...(d.data() as object), id: d.id } as CasoSF));
 
-  let batch = db().batch(), enBatch = 0, curados = 0;
-  for (const d of snap.docs) {
-    const data = d.data() as Record<string, unknown>;
-    if (typeof data.statusCaso === 'string' && data.statusCaso) continue;
-    batch.set(d.ref, { statusCaso: statusDeCaso({ ...(data as object), id: d.id } as CasoSF) }, { merge: true });
-    curados++; enBatch++;
+  const arreglos = await reconciliar(snap.docs);
+
+  return {
+    casos: casos.filter(c => statusTrasCierre(c.cierres, c.statusCaso, !!c.asignacion?.analistaId) !== 'CERRADO')
+      .slice(0, TOPE_CASOS),
+    lecturas: snap.size + 2,
+    modo: `lectura completa · ${arreglos.sinCampo} sin statusCaso, ${arreglos.desfasados} desfasados`,
+  };
+}
+
+// Pone el `statusCaso` de acuerdo con la realidad de los canales.
+//
+// Dos casos, y el segundo no lo vi hasta mirar corridas reales:
+//
+//   · SIN el campo → se deriva. Son los que entran por caminos que no lo escriben.
+//   · DESFASADO: el campo dice ABIERTO y los DOS canales están cerrados. Esos
+//     casos se quedaban en la cola para siempre y el flujo los reprocesaba en cada
+//     corrida reportándolos como "cerrado" otra vez — 54 casos, los mismos 54 en
+//     todas las corridas. No se corregían por `guardarCierre` porque cuando los dos
+//     canales ya están cerrados ese camino no se ejecuta: sale por `ya_cerrado`.
+//
+// Solo se corrige HACIA CERRADO. Nunca al revés: bajar un status podría devolver a
+// la cola un caso que alguien cerró a mano.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function reconciliar(docs: any[]): Promise<{ sinCampo: number; desfasados: number }> {
+  let batch = db().batch(), enBatch = 0, sinCampo = 0, desfasados = 0;
+  for (const d of docs) {
+    const data = d.data() as Record<string, unknown> & CasoSF;
+    const guardado = typeof data.statusCaso === 'string' ? data.statusCaso : '';
+    const real = statusTrasCierre(data.cierres, guardado || undefined, !!data.asignacion?.analistaId);
+
+    let nuevo: string | null = null;
+    if (!guardado) { nuevo = statusDeCaso({ ...(data as object), id: d.id } as CasoSF); sinCampo++; }
+    else if (guardado !== 'CERRADO' && real === 'CERRADO') { nuevo = 'CERRADO'; desfasados++; }
+    if (!nuevo) continue;
+
+    batch.set(d.ref, { statusCaso: nuevo }, { merge: true });
+    enBatch++;
     if (enBatch >= 400) { await batch.commit(); batch = db().batch(); enBatch = 0; }
   }
   if (enBatch > 0) await batch.commit();
-
-  return {
-    casos: casos.filter(c => statusDeCaso(c) !== 'CERRADO').slice(0, TOPE_CASOS),
-    lecturas: snap.size + 2,
-    modo: `lectura completa · ${curados} caso(s) sin statusCaso, curados en esta corrida`,
-  };
+  return { sinCampo, desfasados };
 }
 
 // Curar TODOS los documentos de una, sin esperar a que lo haga una corrida. Es una
