@@ -343,6 +343,7 @@ export type MotivoNoAutoRemesa =
   | 'asignado'
   | 'sin_screening'
   | 'sin_nacionalidad'
+  | 'identidad_insuficiente'
   | 'delito_sensible'
   | 'con_coincidencias';
 
@@ -385,8 +386,18 @@ export function evaluarRemesaAuto(
   if (!screening || screening.estado === 'error' || screening.estado === 'loading') {
     return { automatizable: false, motivo: 'sin_screening' };
   }
-  if (screening.flujo === 'SIN_DATO' || screening.estado === 'na') {
+  if (screening.flujo === 'SIN_DATO') {
     return { automatizable: false, motivo: 'sin_nacionalidad' };
+  }
+  // `na` en internacional NO es falta de nacionalidad: es que el beneficiario no
+  // trae documento, así que el cruce solo podría ser por nombre y la homonimia
+  // no se puede descartar. Retiene igual, pero el motivo tiene que decir la
+  // verdad — es lo que le dice al analista qué dato ir a buscar.
+  if (screening.estado === 'na') {
+    return {
+      automatizable: false,
+      motivo: screening.flujo === 'INTL' ? 'identidad_insuficiente' : 'sin_nacionalidad',
+    };
   }
 
   // Freno duro por delito sensible, antes de mirar cualquier conclusión.
@@ -413,6 +424,7 @@ export const motivoRemesaLegible = (m: MotivoNoAutoRemesa | undefined): string =
   asignado: 'Lo tiene un analista asignado',
   sin_screening: 'Sin screening resuelto (o el proveedor falló)',
   sin_nacionalidad: 'El beneficiario no trae nacionalidad',
+  identidad_insuficiente: 'Sin documento del beneficiario: homonimia no descartable',
   delito_sensible: 'Retenido por delito sensible',
   con_coincidencias: 'Tiene coincidencias: lo revisa el analista',
 }[m ?? 'sin_screening'] ?? '—');

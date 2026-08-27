@@ -64,9 +64,8 @@ export interface RemesaScreening {
   // Trazabilidad del cruce internacional: con qué datos se consultó y qué se
   // encontró. Solo lo llena el camino INTL.
   cruceInternacional?: {
-    porNombre: boolean; porDocumento: boolean; pais?: string;
-    totalCoincidencias: number; nombreExacto: number; soloParciales: number;
-    restrictivas: number; informativas: number;
+    porDocumento: boolean; pais?: string; palabrasEnNombre: number;
+    documentoTipo?: string; tipoSustituido?: boolean; listasConCoincidencia: number;
   };
 }
 
@@ -147,82 +146,149 @@ export function nombreBeneficiario(row: Partial<RemesaRow>): string {
   return limpiar(row?.beneficiary_name) || compuesto;
 }
 
-// ── Camino viejo de internacional: Regcheq por ficha ────────────────────────
-// YA NO SE USA para el flujo internacional. Se conserva a propósito, no por
-// olvido: es la vía de rollback y sigue siendo válida para un beneficiario que
-// tenga RUT chileno.
+// ── Flujo internacional: Regcheq, ficha con documento extranjero ────────────
 //
-// Por qué se dejó de usar: Regcheq no busca por nombre, busca fichas, y valida
-// el `dni` de la ficha como RUT chileno. Probado contra la API — pasaporte
-// (`XX1234567`), dígitos sueltos, alfanumérico, el nombre con guiones bajos y un
-// RUT con DV incorrecto devuelven todos `400 dni invalid-554`; un RUT válido
-// devuelve 200 con `dniType: { country: "Chile", document: "RUT" }`.
+// Regcheq no busca por nombre: busca FICHAS, y la ficha se identifica con un
+// documento. Lo que rompía antes era que el código, cuando el beneficiario no
+// traía documento, lo fabricaba desde el nombre (`JUAN_PEREZ`) — y eso la API lo
+// rechaza siempre. Medido: 7 de 9 internacionales abiertos en `estado: 'error'`,
+// exactamente los 7 sin documento.
 //
-// Con eso, el fallback de armar el `dni` desde el nombre no podía funcionar
-// nunca. Medido sobre la cola: 7 de 9 internacionales abiertos quedaban en
-// `estado: 'error'`, y eran exactamente los 7 sin documento.
+// Lo que faltaba para los que SÍ traen documento es `dniType`, y hay que
+// mandarlo como OBJETO. Verificado contra la API:
 //
-// El reemplazo es `screenRemesaInternacional` en
-// `services/remesaInternacionalCatalogo.ts`, que cruza por nombre completo.
-export async function screenInternacional(nombre: string, dni: string, nacionalidad: string): Promise<RemesaScreening> {
-  const base: RemesaScreening = {
-    estado: 'error', flujo: 'INTL', fuente: 'Regcheq', decision: '—',
-    delitosUnicos: 0, coincidencias: [], listas: [],
-  };
-  if (!REGCHEQ_KEY) return { ...base, mensaje: 'Falta la key de Regcheq' };
-  if (!nombre) return { ...base, estado: 'na', mensaje: 'El beneficiario no tiene nombre' };
+//   {country:'Perú',  person:'natural', document:'DNI'}      → 200 (Peru/DNI)
+//   {country:'España',person:'natural', document:'DNI'}      → 200 (Spain/DNI)
+//   {country:'Brasil',person:'natural', document:'CPF'}      → 200 (Brazil/CPF)
+//   {country:'México',person:'natural', document:'CURP'}     → 200 (Mexico/CURP)
+//   {country:'Estados Unidos',        …, document:'PASSPORT'}→ 200
+//   dniType ausente, o country en ISO ('PE')                 → 400 dni invalid-554
+//
+// Sin `dniType` la API asume RUT chileno: valida el dígito verificador y rechaza
+// todo lo demás. Con `dniType` la ficha se crea y SE SCREENEA — verificado que el
+// GET de una ficha peruana devuelve `screeningGlobal`,
+// `internationalOrganizations`, `ofacAddressResult`, `gafiResult`, `rtpResult`,
+// `bicResult` y `keywordsResult`.
+//
+// `NIE` y `CUIL` NO existen como tipo en Regcheq (400 con cualquier formato), así
+// que se cae a `PASSPORT`, que sí acepta en todos los países probados. Cuál se
+// usó queda anotado en el screening: una ficha con el tipo sustituido no es un
+// dato limpio y quien revise tiene que poder verlo.
+export interface LecturaInternacional {
+  ok: boolean;
+  sinDocumento: boolean;          // no hay con qué armar la ficha
+  listas: ListaCoincidencia[];    // listas con coincidencia
+  documentoTipo?: string;         // el `document` que aceptó Regcheq
+  tipoSustituido?: boolean;       // se usó PASSPORT porque el declarado no existe
+  mensaje?: string;
+}
 
-  // Sin DNI utilizable se usa el nombre como referencia de la ficha.
-  const ref = dni.replace(/[.\s-]/g, '').toUpperCase() || nombre.replace(/\s+/g, '_').toUpperCase();
+// Tipos que Regcheq reconoce. `NIE` y `CUIL` quedaron fuera a propósito: probados
+// con formatos válidos, devuelven 400.
+const DOCS_REGCHEQ = new Set(['DNI', 'CPF', 'CURP', 'PASSPORT', 'RUT', 'RUC', 'CI']);
 
-  // Se refresca la ficha SIEMPRE (si no, el GET devuelve lo que quedó guardado el
-  // día que se creó). Pero si YA existe se manda solo el dni + su personType: con
-  // el nombre, la API lo pisa partiéndolo en name/fatherName y destroza las
-  // razones sociales. El nombre solo va cuando la ficha se crea de cero.
-  let postEstado = 0;
-  let postDetalle = '';
+export async function leerInternacionalRegcheq(
+  nombre: string,
+  dni: string,
+  pais: string,
+  tipoDocumento: string,
+): Promise<LecturaInternacional> {
+  // Solo lo alfanumérico: los separadores varían por país (CUIL con guiones, CPF
+  // con puntos) y la ficha se identifica por el número.
+  const ref = limpiar(dni).replace(/[^0-9A-Za-z]/g, '').toUpperCase();
+  // SIN DOCUMENTO NO SE INVENTA NADA. Antes acá se armaba un `dni` con el
+  // nombre; el resultado era un 400 garantizado disfrazado de error de API.
+  //
+  // Va ANTES de mirar la key a propósito: que el beneficiario no traiga
+  // documento es un hecho del caso, no una falla de configuración. Al revés, una
+  // key ausente disfrazaba de "error del proveedor" a 12 casos que en realidad
+  // son revisión manual por identidad insuficiente.
+  if (!ref) return { ok: false, sinDocumento: true, listas: [] };
+  if (!limpiar(nombre)) return { ok: false, sinDocumento: true, listas: [], mensaje: 'El beneficiario no trae nombre.' };
+
+  if (!REGCHEQ_KEY) return { ok: false, sinDocumento: false, listas: [], mensaje: 'Falta la key de Regcheq' };
+
+  const paisRegcheq = limpiar(pais);
+  const declarado = limpiar(tipoDocumento).toUpperCase();
+  // Orden de intento: el tipo declarado si Regcheq lo conoce, después PASSPORT.
+  const candidatos = [...new Set([
+    ...(DOCS_REGCHEQ.has(declarado) ? [declarado] : []),
+    'PASSPORT',
+  ])];
+
+  // ¿La ficha ya existe? Si existe NO se manda el nombre: la API lo pisa
+  // partiéndolo en name/fatherName. Y `personType` no se puede modificar después
+  // de creada, así que se respeta el que tenga.
+  let personType = 'natural';
+  let existia = false;
   try {
-    let cuerpo: Record<string, string> = {
-      dni: ref, personType: 'natural',
-      name: nombre.toUpperCase(),
-      ...(nacionalidad ? { nationality: nacionalidad } : {}),
-    };
     const previa = await fetch(`${REGCHEQ_BASE}/record/${ref}/${REGCHEQ_KEY}`);
     if (previa.ok) {
+      existia = true;
       const p = await previa.json().catch(() => ({})) as { personType?: string };
-      cuerpo = { dni: ref, personType: String(p.personType ?? 'natural') };
+      personType = String(p.personType ?? 'natural');
     }
-    const post = await fetch(`${REGCHEQ_BASE}/record/${REGCHEQ_KEY}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(cuerpo),
-    });
-    postEstado = post.status;
-    if (!post.ok) postDetalle = (await post.text()).slice(0, 200);
-  } catch (e) {
-    postDetalle = e instanceof Error ? e.message : String(e);
+  } catch { /* si falla la previa se intenta crear igual */ }
+
+  let creada = false;
+  let documentoTipo: string | undefined;
+  let ultimoError = '';
+  // La ficha NO siempre queda guardada con el número que se mandó: Regcheq
+  // normaliza. Un CPF brasileño con ceros a la izquierda entra con 11 caracteres
+  // y se guarda con 9, así que el GET con el número original devolvía 404 y el
+  // caso salía como "la ficha no quedó disponible a tiempo" cuando existía.
+  //
+  // Por eso se lee el `dni` que devuelve el POST y se usa ESE para consultar, en
+  // vez de adivinar qué normalización aplica cada país.
+  let refGuardada = ref;
+  for (const doc of candidatos) {
+    const cuerpo: Record<string, unknown> = {
+      dni: ref, personType,
+      dniType: { country: paisRegcheq, person: personType, document: doc },
+      ...(existia ? {} : { name: limpiar(nombre).toUpperCase() }),
+    };
+    try {
+      const post = await fetch(`${REGCHEQ_BASE}/record/${REGCHEQ_KEY}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(cuerpo),
+      });
+      if (post.ok) {
+        creada = true; documentoTipo = doc;
+        const j = await post.json().catch(() => ({})) as { dni?: unknown };
+        const devuelto = limpiar(j.dni);
+        if (devuelto) refGuardada = devuelto;
+        break;
+      }
+      ultimoError = `POST ${post.status}: ${(await post.text()).slice(0, 140)}`;
+    } catch (e) {
+      ultimoError = e instanceof Error ? e.message : String(e);
+    }
+  }
+  if (!creada && !existia) {
+    return { ok: false, sinDocumento: false, listas: [], mensaje: `no se pudo crear la ficha (${ultimoError}) · país "${paisRegcheq}"` };
   }
 
-  // La ficha recién creada tarda en indexarse: se reintenta con esperas crecientes
-  // (mismo criterio que el módulo Regcheq, que espera hasta ~3s).
+  // La ficha recién creada tarda en indexarse: se reintenta con esperas
+  // crecientes, igual que el módulo Regcheq.
   let perfil: Record<string, unknown> | null = null;
   let ultimoEstado = 0;
-  for (const espera of [postEstado >= 200 && postEstado < 300 ? 1000 : 300, 2000, 3000]) {
+  // Esperas más largas que el resto del módulo a propósito: una ficha extranjera
+  // recién creada tarda más en indexarse. Con [1s,2s,3s] un CPF brasileño recién
+  // creado devolvía 404 en los tres intentos y el caso salía como error del
+  // proveedor cuando la ficha existía. Ahora suma hasta 16 s.
+  for (const espera of [creada ? 1500 : 300, 2500, 4000, 8000]) {
     await new Promise(r => setTimeout(r, espera));
     try {
-      const resp = await fetch(`${REGCHEQ_BASE}/record/${ref}/${REGCHEQ_KEY}`);
+      const resp = await fetch(`${REGCHEQ_BASE}/record/${encodeURIComponent(refGuardada)}/${REGCHEQ_KEY}`);
       ultimoEstado = resp.status;
       if (resp.ok) { perfil = await resp.json(); break; }
-      if (resp.status !== 404) break;   // 404 = todavía no indexada; otro código no se reintenta
+      if (resp.status !== 404) break;
     } catch (e) {
-      return { ...base, mensaje: e instanceof Error ? e.message : String(e) };
+      return { ok: false, sinDocumento: false, listas: [], mensaje: e instanceof Error ? e.message : String(e) };
     }
   }
   if (!perfil) {
-    // Mensaje accionable: distingue "no se pudo crear la ficha" de "no se indexó".
-    const motivo = postEstado && (postEstado < 200 || postEstado >= 300)
-      ? `no se pudo crear la ficha en Regcheq (POST ${postEstado}${postDetalle ? `: ${postDetalle}` : ''})`
-      : `la ficha no quedó disponible a tiempo (GET ${ultimoEstado})`;
-    return { ...base, mensaje: `${motivo} · ref ${ref}` };
+    return { ok: false, sinDocumento: false, listas: [], mensaje: `la ficha no quedó disponible a tiempo (GET ${ultimoEstado})` };
   }
 
   const listasRaw = (perfil.listas ?? {}) as Record<string, Record<string, unknown>>;
@@ -235,23 +301,17 @@ export async function screenInternacional(nombre: string, dni: string, nacionali
       ...detalleDeLista(entrada.data),
     });
   }
-  // Dedup por nombre legible (la API repite claves con alias: rtp / rtpResult).
+  // Dedup por nombre legible: la API repite claves con alias (rtp / rtpResult).
   const vistas = new Set<string>();
   const unicas = listas.filter(l => (vistas.has(l.lista) ? false : (vistas.add(l.lista), true)));
 
   return {
-    estado: unicas.length > 0 ? 'ok' : 'sin_causas',
-    flujo: 'INTL', fuente: 'Regcheq',
-    // Sin catálogo internacional: se describe el hallazgo, no se concluye.
-    decision: unicas.length > 0 ? `${unicas.length} lista(s) con coincidencia` : 'Sin coincidencias',
-    razon: unicas.map(l => l.lista).join(', '),
-    delitosUnicos: 0, coincidencias: [], listas: unicas,
+    ok: true, sinDocumento: false, listas: unicas,
+    documentoTipo,
+    tipoSustituido: !!documentoTipo && !!declarado && documentoTipo !== declarado,
   };
 }
 
-// ── Entrada única ────────────────────────────────────────────────────────────
-// Screening del beneficiario según su país. No lanza: los errores vuelven como
-// estado 'error' con el mensaje.
 export async function screenBeneficiario(row: RemesaRow): Promise<RemesaScreening> {
   const flujo = flujoDeBeneficiario(row);
   const nombre = nombreBeneficiario(row);
@@ -296,20 +356,17 @@ export async function screenBeneficiario(row: RemesaRow): Promise<RemesaScreenin
       };
     }
 
-    // Internacional: cruce por NOMBRE COMPLETO con su catálogo propio. Ver el
-    // comentario de `screenInternacional` para por qué ya no va por Regcheq.
-    const r = await screenRemesaInternacional(nombre, dni, limpiar(row?.beneficiary_country_name));
+    // Internacional: ficha en Regcheq con el documento extranjero, y catálogo
+    // propio. Ver `leerInternacionalRegcheq` para por qué hace falta `dniType`.
+    const r = await screenRemesaInternacional(
+      nombre, dni,
+      limpiar(row?.beneficiary_country_name),
+      limpiar(row?.beneficiary_dni_type),
+    );
     return {
-      estado: r.estado, flujo: 'INTL', fuente: 'Inspektor',
+      estado: r.estado, flujo: 'INTL', fuente: 'Regcheq',
       decision: r.decision, razon: r.razon,
-      delitosUnicos: r.delitosUnicos,
-      coincidencias: r.coincidencias,
-      listas: r.listas.map(l => ({
-        clave: l.clave,
-        lista: l.informativa ? `${l.lista} (informativa)` : l.lista,
-        riesgo: l.riesgo,
-        detalle: l.matches > 1 ? `${l.detalle ?? '—'} · ${l.matches} coincidencias` : l.detalle,
-      })),
+      delitosUnicos: 0, coincidencias: [], listas: r.listas,
       mensaje: r.mensaje,
       cruceInternacional: r.cruce,
     };

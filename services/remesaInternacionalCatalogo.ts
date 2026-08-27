@@ -1,228 +1,137 @@
 // Catálogo propio de las remesas INTERNACIONALES.
 //
-// ── Por qué existe ─────────────────────────────────────────────────────────
-// El camino internacional consultaba Regcheq, y Regcheq no busca por nombre:
-// busca fichas, identificadas por un `dni` que el proveedor valida como RUT
-// chileno. Probado contra la API: pasaporte bien formado (`XX1234567`), dígitos
-// sueltos (`999888777`), alfanumérico, nombre con guiones bajos y hasta un RUT
-// con dígito verificador incorrecto devuelven todos el mismo
-// `400 dni invalid-554`. Un RUT válido devuelve 200 y la ficha llega clasificada
-// como `dniType: { country: "Chile", document: "RUT" }`.
+// Mismo reparto que Chile y Colombia: el screening consulta, el catálogo
+// concluye. La consulta vive en `remesaScreeningService.leerInternacionalRegcheq`
+// y va contra REGCHEQ — Inspektor cubre Colombia y no corresponde acá.
 //
-// O sea: el endpoint es de Chile. Un beneficiario extranjero sin RUT no puede
-// tener ficha, y el código lo tapaba armando un `dni` con el nombre
-// (`JUAN_PEREZ`), que la API rechaza. Resultado medido sobre la cola real: de 9
-// remesas internacionales abiertas, **7 quedaban en `estado: 'error'`** — las 7
-// sin documento— y las 2 que funcionaban eran las que traían algo con forma de
-// RUT.
+// ── El problema que resuelve ────────────────────────────────────────────────
+// Regcheq no busca por nombre: busca fichas identificadas por un documento
+// (verificado: no existe ningún endpoint de búsqueda por nombre, los 9 que
+// probé devuelven 404). Cuando el beneficiario no traía documento, el código lo
+// fabricaba desde el nombre y la API lo rechazaba con `400 dni invalid-554`. De
+// 9 remesas internacionales abiertas, 7 quedaban en `estado: 'error'` — las 7
+// sin documento.
 //
-// ── Qué hace en cambio ─────────────────────────────────────────────────────
-// Cruza por NOMBRE COMPLETO, que es el único dato que siempre está, sumando
-// documento cuando existe. El proveedor es Inspektor (`ConsultaPrincipal`), que
-// sí acepta consultas sin identificación y cubre listas internacionales:
-// verificado contra la API que devuelve OFAC, SAM de Estados Unidos, sanciones
-// de Panamá, el consolidado TIAR y los consolidados de PEPs internacionales.
+// Lo que faltaba para los que sí traen documento era mandar `dniType` como
+// objeto con el país. Con eso la ficha extranjera se crea y se screenea.
 //
-// El país se guarda para trazabilidad pero NO se manda: `ConsultaPrincipal` no
-// tiene filtro de país. Decir que filtra por país cuando no lo hace sería peor
-// que no tenerlo.
+// ── La tabla de decisión ────────────────────────────────────────────────────
 //
-// ── La tabla de decisión (el mini catálogo) ────────────────────────────────
+//   | Identidad | Coincidencias | Conclusión |
+//   |---|---|---|
+//   | documento + país | ninguna | **Liberar** |
+//   | documento + país | una o más | **Revisar** |
+//   | solo nombre y apellido | — | **Revisar** — homonimia no descartable |
 //
-//   | Coincidencias | Conclusión |
-//   |---|---|
-//   | ninguna | **Liberar** |
-//   | una o más | **Revisar** — la ve una persona |
+// La tercera fila es la regla de negocio explícita: sin documento el cruce solo
+// puede ser por nombre, y con nombre y un apellido la homonimia no se puede
+// descartar. Eso lo mira una persona; no se libera solo y tampoco se marca como
+// error, porque no falló nada — falta un dato.
 //
-// Deliberadamente más simple que el catálogo de Colombia: no clasifica delitos
-// ni descarta ruido. Para internacional no hay muestra con la que calibrar un
-// filtro, y mientras no la haya la regla conservadora es que cualquier
-// coincidencia la mire alguien. Se reportan TODAS las listas con coincidencia
-// para que esa persona pueda triar.
-//
-// Ojo con el ruido: Inspektor mezcla listas restrictivas con fuentes de prensa
-// (`LISTAS INFORMATIVAS`). Sobre un nombre público sancionado devolvió 190
-// coincidencias, de las que 110 eran UNA investigación periodística. Eso no
-// cambia la conclusión —cualquier coincidencia retiene igual— pero sí importa
-// para dimensionar cuántos casos van a revisión, así que el screening deja
-// contados los grupos aparte.
+// Medido sobre la cola real: de 18 remesas internacionales abiertas, 12 no traen
+// documento (7 a España, 2 a Estados Unidos, y una a México, Irlanda y SWIFT), y
+// 11 de esas 12 tienen apenas dos palabras en el nombre.
 
-import { inspektorLogin, INSPEKTOR_BASE, type Coincidencia } from './casosCriminalService';
+import { leerInternacionalRegcheq, type ListaCoincidencia } from './remesaScreeningService';
 
-// Grupos que Inspektor marca como informativos: prensa, no listas restrictivas.
-// No se usan para decidir (cualquier coincidencia retiene), solo para contar y
-// para que quien revise sepa qué tiene delante.
-const GRUPOS_INFORMATIVOS = /INFORMATIVA/i;
-
-export interface ListaInternacional {
-  clave: string;        // idTipoLista de Inspektor
-  lista: string;        // nombreTipoLista, el nombre legible
-  grupo?: string;       // nombreGrupoLista: restrictiva / PEP / informativa
-  riesgo?: string;      // prioridad que reporta el proveedor
-  detalle?: string;     // de dónde salió
-  matches: number;      // cuántas coincidencias trae esta lista
-  informativa: boolean; // prensa, no lista restrictiva
-}
+export type MotivoInternacional =
+  | 'sin_coincidencias'      // libera
+  | 'con_coincidencias'      // hay match en listas
+  | 'identidad_insuficiente' // solo nombre y apellido: homonimia no descartable
+  | 'error_proveedor';
 
 export interface ScreeningInternacional {
   estado: 'ok' | 'sin_causas' | 'error' | 'na';
   flujo: 'INTL';
-  fuente: 'Inspektor';
+  fuente: 'Regcheq';
   decision: 'Liberar' | 'Revisar' | '—';
+  motivo: MotivoInternacional;
   razon?: string;
-  delitosUnicos: number;
-  coincidencias: Coincidencia[];
-  listas: ListaInternacional[];
+  listas: ListaCoincidencia[];
   mensaje?: string;
 
-  // Trazabilidad del cruce: con qué se consultó y qué se encontró. Un proceso
-  // que libera plata sin nadie mirando tiene que poder explicar después con qué
-  // datos decidió.
-  cruce?: {
-    porNombre: boolean;
+  // Con qué se cruzó. Un proceso que libera plata sin nadie mirando tiene que
+  // poder explicar después con qué datos decidió.
+  cruce: {
     porDocumento: boolean;
     pais?: string;
-    totalCoincidencias: number;
-    nombreExacto: number;      // coinciden con el nombre completo, normalizado
-    soloParciales: number;     // coinciden por palabras, no por el nombre entero
-    restrictivas: number;      // coincidencias en listas NO informativas
-    informativas: number;      // coincidencias en fuentes de prensa
+    palabrasEnNombre: number;
+    documentoTipo?: string;
+    tipoSustituido?: boolean;
+    listasConCoincidencia: number;
   };
 }
 
 const limpiar = (v: unknown): string => String(v ?? '').trim();
-
-// Normalización para comparar nombres: minúsculas, sin tildes, espacios
-// colapsados. La misma idea que `nombreExactoCO`, escrita acá para no acoplar
-// este catálogo al de Colombia — son dos reglas de negocio distintas y una
-// puede cambiar sin la otra.
-const normalizarNombre = (v: unknown): string =>
-  limpiar(v).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ');
-
-interface MatchInspektor {
-  idTipoLista?: unknown; nombreTipoLista?: unknown; nombreGrupoLista?: unknown;
-  prioridad?: unknown; fuenteConsulta?: unknown; delito?: unknown;
-  nombreCompleto?: unknown; documentoIdentidad?: unknown; fecha?: unknown;
-  link?: unknown; peps?: unknown;
-}
+const palabras = (v: unknown): number => limpiar(v).split(/\s+/).filter(Boolean).length;
 
 export async function screenRemesaInternacional(
   nombre: string,
   dni: string,
   pais: string,
+  tipoDocumento = '',
 ): Promise<ScreeningInternacional> {
-  const base: ScreeningInternacional = {
-    estado: 'error', flujo: 'INTL', fuente: 'Inspektor', decision: '—',
-    delitosUnicos: 0, coincidencias: [], listas: [],
+  const base = {
+    flujo: 'INTL' as const,
+    fuente: 'Regcheq' as const,
+    listas: [] as ListaCoincidencia[],
   };
-
-  const nombreLimpio = limpiar(nombre);
-  // Sin nombre no hay cruce posible. No es un error del proveedor: es un dato
-  // que el caso no trae, y se marca distinto para que no se lea como falla.
-  if (!nombreLimpio) {
-    return { ...base, estado: 'na', mensaje: 'El beneficiario no trae nombre: no hay con qué cruzar.' };
-  }
-
-  const documento = limpiar(dni).replace(/[.\s]/g, '');
-
-  let data: { listas?: unknown[]; listas_propias?: unknown[] };
-  try {
-    const token = await inspektorLogin();
-    const resp = await fetch(`${INSPEKTOR_BASE}/ConsultaPrincipal`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        nombre: nombreLimpio,
-        identificacion: documento,
-        // 1 = cédula. Es lo que espera la API; para un documento extranjero no
-        // hay código propio, y con `identificacion` vacía el campo se ignora.
-        tipoDocumento: 1,
-        tienePrioridad_4: true,
-        cantidadPalabras: '3',
-        // Las tres fuentes judiciales colombianas se piden apagadas: acá el
-        // beneficiario NO es colombiano por definición del flujo, así que
-        // consultarlas solo agrega latencia y ruido.
-        procuraduria: false,
-        ramaJudicial: false,
-        ramaJEPMS: false,
-      }),
-    });
-    if (!resp.ok) {
-      return { ...base, mensaje: `Consulta Inspektor ${resp.status}` };
-    }
-    data = (await resp.json()) as typeof data;
-  } catch (e) {
-    return { ...base, mensaje: e instanceof Error ? e.message : String(e) };
-  }
-
-  const matches = [...(data.listas ?? []), ...(data.listas_propias ?? [])] as MatchInspektor[];
-
-  // Agrupado por lista: "todas las listas que tengan coincidencias", que es lo
-  // que se muestra.
-  const porLista = new Map<string, ListaInternacional>();
-  for (const m of matches) {
-    const lista = limpiar(m.nombreTipoLista) || 'Lista sin nombre';
-    const grupo = limpiar(m.nombreGrupoLista);
-    const clave = limpiar(m.idTipoLista) || lista;
-    const previa = porLista.get(clave);
-    if (previa) { previa.matches += 1; continue; }
-    porLista.set(clave, {
-      clave, lista, grupo: grupo || undefined,
-      riesgo: limpiar(m.prioridad) || undefined,
-      detalle: limpiar(m.fuenteConsulta) || undefined,
-      matches: 1,
-      informativa: GRUPOS_INFORMATIVOS.test(grupo),
-    });
-  }
-  const listas = [...porLista.values()].sort((a, b) => b.matches - a.matches);
-
-  const objetivo = normalizarNombre(nombreLimpio);
-  const nombreExacto = matches.filter(m => normalizarNombre(m.nombreCompleto) === objetivo).length;
-  const informativas = matches.filter(m => GRUPOS_INFORMATIVOS.test(limpiar(m.nombreGrupoLista))).length;
-
-  const coincidencias: Coincidencia[] = matches.map(m => ({
-    tipo: limpiar(m.delito) || limpiar(m.nombreTipoLista) || 'Coincidencia en lista',
-    detalle: limpiar(m.fuenteConsulta) || limpiar(m.link) || '—',
-    estado: limpiar(m.nombreGrupoLista) || undefined,
-    fecha: limpiar(m.fecha) || undefined,
-    fuente: 'Inspektor',
-    riesgo: limpiar(m.prioridad) || undefined,
-  }));
-
-  const cruce = {
-    porNombre: true,
-    porDocumento: !!documento,
+  const cruceBase = {
+    porDocumento: !!limpiar(dni),
     pais: limpiar(pais) || undefined,
-    totalCoincidencias: matches.length,
-    nombreExacto,
-    soloParciales: matches.length - nombreExacto,
-    restrictivas: matches.length - informativas,
-    informativas,
+    palabrasEnNombre: palabras(nombre),
+    listasConCoincidencia: 0,
   };
 
-  // La tabla de decisión, entera.
-  if (matches.length === 0) {
+  const lectura = await leerInternacionalRegcheq(nombre, dni, pais, tipoDocumento);
+
+  // Sin documento no hay ficha posible, y el cruce por nombre y un apellido no
+  // descarta homonimia. Va a revisión manual, NO a error: no falló el proveedor,
+  // falta un dato del beneficiario.
+  if (lectura.sinDocumento) {
     return {
-      ...base, estado: 'sin_causas', decision: 'Liberar',
-      razon: documento
-        ? 'Sin coincidencias cruzando nombre completo y documento.'
-        : 'Sin coincidencias cruzando el nombre completo.',
-      coincidencias: [], listas: [], cruce,
+      ...base, estado: 'na', decision: 'Revisar', motivo: 'identidad_insuficiente',
+      razon: cruceBase.palabrasEnNombre <= 2
+        ? 'Sin documento y con nombre y un apellido: la homonimia no se puede descartar.'
+        : 'Sin documento del beneficiario: la homonimia no se puede descartar.',
+      cruce: cruceBase,
+      mensaje: lectura.mensaje,
     };
   }
 
-  const conDoc = matches.filter(m => limpiar(m.documentoIdentidad)).length;
+  if (!lectura.ok) {
+    return {
+      ...base, estado: 'error', decision: '—', motivo: 'error_proveedor',
+      mensaje: lectura.mensaje, cruce: cruceBase,
+    };
+  }
+
+  const cruce = {
+    ...cruceBase,
+    documentoTipo: lectura.documentoTipo,
+    tipoSustituido: lectura.tipoSustituido,
+    listasConCoincidencia: lectura.listas.length,
+  };
+
+  if (lectura.listas.length === 0) {
+    return {
+      ...base, estado: 'sin_causas', decision: 'Liberar', motivo: 'sin_coincidencias',
+      razon: `Sin coincidencias cruzando documento ${lectura.documentoTipo ?? ''} de ${cruce.pais ?? 'destino'}.`.replace('  ', ' ')
+        + (lectura.tipoSustituido
+          // Auditable: si liberó con el tipo sustituido, tiene que decirlo. El
+          // screening igual corre sobre nombre + número, pero la ficha quedó con
+          // un tipo que no es el declarado y eso se mira después.
+          ? ` Ojo: el tipo declarado no existe en Regcheq, se consultó como ${lectura.documentoTipo}.`
+          : ''),
+      cruce,
+    };
+  }
+
   return {
-    ...base,
-    estado: 'ok',
-    decision: 'Revisar',
-    razon: `${matches.length} coincidencia(s) en ${listas.length} lista(s)`
-      + ` · ${nombreExacto} con el nombre completo exacto`
-      + ` · ${cruce.restrictivas} en listas restrictivas y ${informativas} en fuentes informativas`
-      + ` · ${conDoc} traen documento.`,
-    delitosUnicos: new Set(coincidencias.map(c => c.tipo)).size,
-    coincidencias,
-    listas,
+    ...base, estado: 'ok', decision: 'Revisar', motivo: 'con_coincidencias',
+    razon: `${lectura.listas.length} lista(s) con coincidencia: ${lectura.listas.map(l => l.lista).join(', ')}`
+      + (lectura.tipoSustituido ? ` · ojo: el tipo de documento declarado no existe en Regcheq, se consultó como ${lectura.documentoTipo}` : ''),
+    listas: lectura.listas,
     cruce,
   };
 }

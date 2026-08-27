@@ -11,7 +11,7 @@ import { analyzeCriminalProfile, type RawResult as CriminalInput } from './colom
 // Inspektor por el Worker (evita CORS), igual que InspektorColombia.
 const INSPEKTOR_DIRECT = 'https://inspektor.datalaft.com:2121/api';
 const INSPEKTOR_PROXY = (process.env.EMPRESADOCS_PROXY_URL || '').replace(/\/$/, '');
-export const INSPEKTOR_BASE = INSPEKTOR_PROXY ? `${INSPEKTOR_PROXY}/inspektor` : INSPEKTOR_DIRECT;
+const INSPEKTOR_BASE = INSPEKTOR_PROXY ? `${INSPEKTOR_PROXY}/inspektor` : INSPEKTOR_DIRECT;
 const INSPEKTOR_USER = ((import.meta as unknown) as { env: Record<string, string> }).env.VITE_INSPEKTOR_USER ?? 'WS_Global81';
 const INSPEKTOR_PASS = ((import.meta as unknown) as { env: Record<string, string> }).env.VITE_INSPEKTOR_PASS ?? 'Risk5397#0ft';
 
@@ -75,10 +75,7 @@ const RECO_LABEL: Record<string, string> = {
   PRIORITY_REVIEW: 'Revisión prioritaria',
 };
 
-// Exportado para que el catálogo internacional de remesas
-// (`remesaInternacionalCatalogo`) no tenga que repetir la credencial en un
-// segundo archivo. La función no cambió: solo dejó de ser privada.
-export async function inspektorLogin(): Promise<string> {
+async function inspektorLogin(): Promise<string> {
   const resp = await fetch(`${INSPEKTOR_BASE}/Auth/login`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ user: INSPEKTOR_USER, password: INSPEKTOR_PASS }),
