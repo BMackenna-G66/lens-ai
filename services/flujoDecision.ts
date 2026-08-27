@@ -35,6 +35,29 @@ export interface FlujoRemesaConfig {
   cerrarSF: boolean;      // ejecutar el cierre en Salesforce
   cerrarAdmin: boolean;   // liberar la transacción en Admin
   tipoLiberar: string;    // id de la tipología que se aplica
+  // Por DESTINO del beneficiario, no por país del cliente. Cada uno se prende
+  // aparte porque el screening de cada destino es distinto y madura distinto:
+  // Chile va por Regcheq con causas penales, Colombia por Inspektor, e INTL solo
+  // consulta listas internacionales y NO concluye (ver `screenInternacional`).
+  // Todos arrancan apagados: un campo ausente no puede liberar plata.
+  paises: Record<string, boolean>;
+}
+
+// Destinos que el flujo de remesas puede tener habilitados. `INTL` no es un país:
+// es "cualquier destino que no sea Chile ni Colombia".
+export const DESTINOS_REMESA: { code: string; label: string }[] = [
+  { code: 'CL', label: 'Chile' },
+  { code: 'CO', label: 'Colombia' },
+  { code: 'INTL', label: 'Internacional' },
+];
+
+// El destino del beneficiario, normalizado igual que `flujoDeBeneficiario` de
+// `remesaScreeningService`. Vive acá porque la decisión lo necesita y el screening
+// no puede importarse en el Lambda sin arrastrar red.
+export function destinoHabilitado(flujo: string | undefined, cfg: FlujoRemesaConfig): boolean {
+  const f = (flujo ?? '').toUpperCase();
+  if (!f || f === 'SIN_DATO') return false;
+  return cfg.paises?.[f] === true;
 }
 
 export interface FlujoConfig {
@@ -60,6 +83,7 @@ export const FLUJO_CONFIG_DEFAULT: FlujoConfig = {
     cerrarSF: true,
     cerrarAdmin: true,
     tipoLiberar: 'liberar',
+    paises: { CL: false, CO: false, INTL: false },   // todos apagados
   },
   actualizadoEn: null,
   actualizadoPor: null,
@@ -118,6 +142,7 @@ export function normalizarFlujoConfig(raw: Record<string, unknown> | undefined):
   marcar('ofac.tipoLiberarUcr', ofacRaw.tipoLiberarUcr);
   marcar('ofac.tipoBloquear', ofacRaw.tipoBloquear);
   marcar('remesa.enabled', remesaRaw.enabled);
+  marcar('remesa.paises', remesaRaw.paises);
   marcar('remesa.tipoLiberar', remesaRaw.tipoLiberar);
 
   return {
@@ -141,6 +166,9 @@ export function normalizarFlujoConfig(raw: Record<string, unknown> | undefined):
         cerrarSF: remesaRaw.cerrarSF !== false,
         cerrarAdmin: remesaRaw.cerrarAdmin !== false,
         tipoLiberar: remesaRaw.tipoLiberar || d.remesa.tipoLiberar,
+        // Igual que en OFAC: los destinos arrancan APAGADOS si el campo falta. Un
+        // campo ausente no puede habilitar la liberación de una transacción.
+        paises: Object.fromEntries(DESTINOS_REMESA.map(p => [p.code, (remesaRaw.paises ?? {})[p.code] === true])),
       },
       actualizadoEn: (raw?.actualizadoEn as string | undefined) ?? null,
       actualizadoPor: (raw?.actualizadoPor as string | undefined) ?? null,
@@ -310,6 +338,7 @@ export function extraerRemesa(asunto: string | undefined): string {
 
 export type MotivoNoAutoRemesa =
   | 'flujo_apagado'
+  | 'destino_apagado'
   | 'ya_cerrado'
   | 'asignado'
   | 'sin_screening'
@@ -341,6 +370,13 @@ export function evaluarRemesaAuto(
 ): EvaluacionRemesa {
   if (!cfg.enabled) return { automatizable: false, motivo: 'flujo_apagado' };
   if (statusDeCaso(caso) === 'CERRADO') return { automatizable: false, motivo: 'ya_cerrado' };
+
+  // Destino apagado en el mantenedor. Va ANTES del screening porque no tiene
+  // sentido evaluar hallazgos de un destino que nadie habilitó — y porque así el
+  // motivo dice la verdad: no se liberó por configuración, no por el beneficiario.
+  if (!destinoHabilitado(screening?.flujo, cfg)) {
+    return { automatizable: false, motivo: 'destino_apagado' };
+  }
   // Igual que en OFAC: un caso con dueño lo trabaja su dueño.
   if (caso.asignacion?.analistaId) return { automatizable: false, motivo: 'asignado' };
 
@@ -372,6 +408,7 @@ export const retenidoPorDelitoRemesa = (s: ScreeningRemesaParaAuto | undefined):
 
 export const motivoRemesaLegible = (m: MotivoNoAutoRemesa | undefined): string => ({
   flujo_apagado: 'Flujo automático apagado',
+  destino_apagado: 'El destino del beneficiario está apagado en el mantenedor',
   ya_cerrado: 'El caso ya está cerrado',
   asignado: 'Lo tiene un analista asignado',
   sin_screening: 'Sin screening resuelto (o el proveedor falló)',

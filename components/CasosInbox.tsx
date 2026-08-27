@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { screeningVigente, SCREENING_SCHEMA, subscribeCasos, isCasosAvailable, guardarScreening, guardarRemesaRow, guardarRemesaRows, guardarScreeningBeneficiario, eliminarCasos, CasoSF } from '../services/casosService';
 import { traerCasosCola, importarCasos, CasoSFRemoto } from '../services/salesforceColaService';
 import { TIPOS_CIERRE_REMESA, tipoRemesaPorId, camposDeCierreRemesa } from '../services/cierreRemesaTipos';
+import { DESTINOS_REMESA } from '../services/flujoDecision';
 import { enviarCierreRemesaAdmin, remesaAdminDisponible, resumenRemesaAdmin } from '../services/remesaAdminService';
 // Solo lo que MUESTRA la decisión: ejecutar es del Lambda.
 import { evaluarRemesaAuto, retenidoPorDelitoRemesa, motivoRemesaLegible } from '../services/flujoRemesaEngine';
@@ -1838,7 +1839,8 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
         const selCls = 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1 text-xs outline-none focus:border-amber-400';
         const setOfac = (patch: Partial<FlujoConfig['ofac']>) => setFlujoDraft(d => ({ ...d, ofac: { ...d.ofac, ...patch } }));
         const sinCambios = JSON.stringify(flujoDraft.ofac) === JSON.stringify(flujoCfg.ofac)
-          && flujoDraft.remesa.enabled === flujoCfg.remesa.enabled;
+          && flujoDraft.remesa.enabled === flujoCfg.remesa.enabled
+          && JSON.stringify(flujoDraft.remesa.paises ?? {}) === JSON.stringify(flujoCfg.remesa.paises ?? {});
         return (
           <div className="mb-4 rounded-xl border border-amber-300 dark:border-amber-800/60 bg-amber-50/60 dark:bg-amber-950/20 p-4">
             <div className="flex items-start justify-between gap-3 mb-3">
@@ -2014,6 +2016,53 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                             </label>
                           </div>
                         </div>
+                      </div>
+
+                      {/* Destinos habilitados. Por DESTINO del beneficiario, no por
+                          país del cliente: el screening de cada uno es distinto y
+                          madura distinto. Internacional NO es un país — es
+                          "cualquier destino que no sea Chile ni Colombia" — y hoy
+                          solo consulta listas internacionales sin concluir nada. */}
+                      <div className="mt-3 text-xs">
+                        <span className="block font-semibold text-slate-500 dark:text-slate-400 mb-1.5">
+                          Destinos habilitados
+                          <span className="ml-2 font-normal text-slate-400">
+                            (el destino del beneficiario, no el país del cliente)
+                          </span>
+                        </span>
+                        <div className="flex flex-wrap items-center gap-2">
+                          {DESTINOS_REMESA.map(d => {
+                            const on = flujoDraft.remesa.paises?.[d.code] === true;
+                            return (
+                              <button
+                                key={d.code}
+                                onClick={() => setRem({ paises: { ...(flujoDraft.remesa.paises ?? {}), [d.code]: !on } })}
+                                className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition-colors ${
+                                  on
+                                    ? 'bg-emerald-600 border-emerald-600 text-white'
+                                    : 'bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-500 dark:text-slate-400'
+                                }`}
+                                title={d.code === 'INTL'
+                                  ? 'Cualquier destino que no sea Chile ni Colombia. Solo consulta listas internacionales: no concluye.'
+                                  : `Beneficiarios con destino ${d.label}`}
+                              >
+                                {on ? '✓ ' : ''}{d.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        {flujoDraft.remesa.paises?.INTL === true && (
+                          <p className="text-[11px] text-amber-700 dark:text-amber-400 mt-2">
+                            ⚠️ Internacional no tiene catálogo: solo reporta qué listas coinciden, no
+                            concluye. Se libera únicamente cuando NO hay ninguna coincidencia.
+                          </p>
+                        )}
+                        {!Object.values(flujoDraft.remesa.paises ?? {}).some(Boolean) && (
+                          <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-2">
+                            Sin destinos habilitados no se libera ninguna remesa, aunque el switch de
+                            arriba esté prendido.
+                          </p>
+                        )}
                       </div>
 
                       <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-2">
