@@ -19,6 +19,10 @@ import {
   type DefinicionComponente,
 } from '../../types/kybMatriz';
 import {
+  compararIdentidad, separarIdentidad, canonDocumento,
+  type Identidad, type CoincidenciaIdentidad, type EstadoIdentidad,
+} from './kybIdentidad';
+import {
   normalizarRazonSocial, similitudNombre, CORTES_NOMBRE, rutValido, limpiarRut,
   huellaDireccion, mismaFecha, fechaAIso, compararMontos, solapamiento,
 } from './kybNormalizadores';
@@ -41,10 +45,30 @@ function estadoPorPresencia(enLens: boolean, enAdmin: boolean): EstadoComparacio
 // empareja por nombre primero, un homónimo puede robarle el match a la persona
 // correcta que sí tenía el documento.
 export interface Emparejamiento {
-  pares: { lens: PersonaCanonica; admin: PersonaCanonica; porDocumento: boolean; similitud: number }[];
+  pares: {
+    lens: PersonaCanonica; admin: PersonaCanonica;
+    porDocumento: boolean;
+    // Confianza propia en que son la misma persona, 0..100. Antes era la
+    // cobertura de tokens; ahora sale de `compararIdentidad`, que saca el cargo,
+    // puntúa por contención y tolera OCR.
+    similitud: number;
+    estadoIdentidad?: EstadoIdentidad;
+    // Por qué se parecen, en palabras. Un número solo no le sirve a nadie.
+    motivoIdentidad?: string;
+    documentoSospechoso?: boolean;
+  }[];
   soloLens: PersonaCanonica[];
   soloAdmin: PersonaCanonica[];
 }
+
+// El cargo y el documento se sacan del nombre ANTES de comparar. Sin esto,
+// "Víctor Manuel Fernández Gómez (Gerente General)" contra "Víctor Manuel
+// Fernández Gómez" daba 67 % —el cargo aportaba dos tokens— y caía debajo del
+// corte. Es la misma persona.
+const aIdentidad = (p: PersonaCanonica): Identidad => {
+  const sep = separarIdentidad(p.nombre, p.documento ?? '');
+  return { nombre: sep.nombre || p.nombre, cargo: sep.cargo, documento: sep.documento };
+};
 
 export function emparejarPersonas(
   lens: PersonaCanonica[] = [],
@@ -54,33 +78,43 @@ export function emparejarPersonas(
   const pendientesAdmin = [...admin];
   const pares: Emparejamiento['pares'] = [];
 
-  // Pasada 1 — documento exacto.
+  // Pasada 1 — documento exacto, con los documentos normalizados igual de los
+  // dos lados (sin puntos, guiones ni ceros a la izquierda). Antes se comparaba
+  // el string crudo y "19.454.161-9" no era igual a "194541619".
   for (let i = pendientesLens.length - 1; i >= 0; i--) {
-    const l = pendientesLens[i];
+    const l = aIdentidad(pendientesLens[i]);
     if (!l.documento) continue;
-    const j = pendientesAdmin.findIndex(a => a.documento && a.documento === l.documento);
+    const dl = canonDocumento(l.documento);
+    if (!dl) continue;
+    const j = pendientesAdmin.findIndex(a => canonDocumento(aIdentidad(a).documento) === dl);
     if (j < 0) continue;
-    pares.push({ lens: l, admin: pendientesAdmin[j], porDocumento: true, similitud: 100 });
+    pares.push({
+      lens: pendientesLens[i], admin: pendientesAdmin[j], porDocumento: true,
+      similitud: 100, estadoIdentidad: 'EXACTO', motivoIdentidad: 'mismo documento',
+    });
     pendientesAdmin.splice(j, 1);
     pendientesLens.splice(i, 1);
   }
 
-  // Pasada 2 — similitud de nombre sobre los sueltos, tomando el mejor par
+  // Pasada 2 — puntaje de identidad sobre los sueltos, tomando el mejor par
   // disponible en cada iteración (no el primero que pase el corte).
   let siguio = true;
   while (siguio) {
     siguio = false;
-    let mejor = { i: -1, j: -1, sim: 0 };
+    let mejor = { i: -1, j: -1, r: null as CoincidenciaIdentidad | null };
     for (let i = 0; i < pendientesLens.length; i++) {
       for (let j = 0; j < pendientesAdmin.length; j++) {
-        const sim = similitudNombre(pendientesLens[i].nombre, pendientesAdmin[j].nombre);
-        if (sim > mejor.sim) mejor = { i, j, sim };
+        const r = compararIdentidad(aIdentidad(pendientesLens[i]), aIdentidad(pendientesAdmin[j]));
+        if (!mejor.r || r.puntaje > mejor.r.puntaje) mejor = { i, j, r };
       }
     }
-    if (mejor.sim >= CORTES_NOMBRE.bajo && mejor.i >= 0) {
+    const r = mejor.r;
+    if (r && mejor.i >= 0 && r.estado !== 'DISTINTO') {
       pares.push({
         lens: pendientesLens[mejor.i], admin: pendientesAdmin[mejor.j],
-        porDocumento: false, similitud: mejor.sim,
+        porDocumento: r.porDocumento, similitud: r.puntaje,
+        estadoIdentidad: r.estado, motivoIdentidad: r.motivo,
+        documentoSospechoso: r.documentoSospechoso,
       });
       pendientesLens.splice(mejor.i, 1);
       pendientesAdmin.splice(mejor.j, 1);
@@ -106,16 +140,33 @@ function estadoPersonas(e: Emparejamiento): { estado: EstadoComparacion; detalle
   if (sueltas === 0 && todosPorDocumento) {
     return { estado: 'COINCIDE', detalle: `${e.pares.length} emparejada(s) por documento.` };
   }
-  const porNombre = e.pares.filter(p => !p.porDocumento).length;
-  return {
-    estado: 'PARCIAL',
-    detalle: [
-      `${e.pares.length} emparejada(s)`,
-      porNombre ? `${porNombre} solo por nombre` : '',
-      e.soloLens.length ? `${e.soloLens.length} solo en documentos` : '',
-      e.soloAdmin.length ? `${e.soloAdmin.length} solo en Admin` : '',
-    ].filter(Boolean).join(' · '),
-  };
+
+  // COINCIDE también cuando no sobra nadie y todos los pares son EXACTOS aunque
+  // se hayan emparejado por nombre. Antes esto caía en PARCIAL y le restaba
+  // puntos a una empresa donde las dos fuentes dicen exactamente lo mismo: la
+  // única "falta" era que las escrituras no repiten el RUT del representante,
+  // que es lo normal.
+  const todosExactos = e.pares.every(p => p.porDocumento || p.estadoIdentidad === 'EXACTO');
+  if (sueltas === 0 && todosExactos) {
+    return {
+      estado: 'COINCIDE',
+      detalle: `${e.pares.length} emparejada(s) · mismo nombre, sin documento en los documentos.`,
+    };
+  }
+
+  const aprox = e.pares.filter(p => p.estadoIdentidad === 'APROXIMADO');
+  const sospechosos = e.pares.filter(p => p.documentoSospechoso);
+  const partes = [`${e.pares.length} emparejada(s)`];
+  // La aproximación se DICE, con su puntaje y su motivo. Es lo que permite ver
+  // que "1 en documentos y 1 en Admin sin coincidencia" en realidad era la misma
+  // persona con el cargo pegado al nombre.
+  if (aprox.length) {
+    partes.push(aprox.map(p => `aproximada ${p.similitud}% (${p.motivoIdentidad ?? 'parecido de nombre'})`).join(' · '));
+  }
+  if (sospechosos.length) partes.push(`${sospechosos.length} con dígito verificador distinto: revisar`);
+  if (e.soloLens.length) partes.push(`${e.soloLens.length} solo en documentos`);
+  if (e.soloAdmin.length) partes.push(`${e.soloAdmin.length} solo en Admin`);
+  return { estado: 'PARCIAL', detalle: partes.join(' · ') };
 }
 
 const nombres = (ps: PersonaCanonica[]): string[] => ps.map(p => p.nombre || p.documento).filter(Boolean);
@@ -131,6 +182,21 @@ const listaNombres = (ps: PersonaCanonica[] | undefined): string | undefined => 
     return p.documento ? `${n} (${p.documento})${pct}` : `${n}${pct}`;
   }).join(' · ');
 };
+
+// Detalle por par emparejado: quién con quién, con qué confianza y por qué.
+// La matriz mostraba un conteo; un "1 emparejada" no deja auditar nada.
+const identidadesDe = (e: Emparejamiento): ResultadoComponente['identidades'] =>
+  e.pares.length
+    ? e.pares.map(p => ({
+        lens: p.lens.nombre || p.lens.documento || '(sin nombre)',
+        admin: p.admin.nombre || p.admin.documento || '(sin nombre)',
+        puntaje: p.similitud,
+        estado: (p.estadoIdentidad === 'APROXIMADO' ? 'APROXIMADO' : 'EXACTO') as 'EXACTO' | 'APROXIMADO',
+        porDocumento: p.porDocumento,
+        motivo: p.motivoIdentidad ?? (p.porDocumento ? 'mismo documento' : 'parecido de nombre'),
+        documentoSospechoso: p.documentoSospechoso,
+      }))
+    : undefined;
 
 // ── Comparadores por componente ──────────────────────────────────────────────
 type Comparador = (lens: LadoCanonico, admin: LadoCanonico, def: DefinicionComponente) => ResultadoComponente;
@@ -182,7 +248,7 @@ const COMPARADORES: Record<string, Comparador> = {
     const e = emparejarPersonas(l.representantesLegales, a.representantesLegales);
     const { estado, detalle } = estadoPersonas(e);
     return base(def, estado, {
-      detalle, emparejados: e.pares.length,
+      detalle, emparejados: e.pares.length, identidades: identidadesDe(e),
       soloEnLens: nombres(e.soloLens), soloEnAdmin: nombres(e.soloAdmin),
       // Se muestran los NOMBRES, no un conteo. Un "1" en la matriz no dice nada:
       // el analista necesita ver a quién se comparó.
@@ -194,7 +260,7 @@ const COMPARADORES: Record<string, Comparador> = {
     const e = emparejarPersonas(l.accionistas, a.accionistas);
     const { estado, detalle } = estadoPersonas(e);
     return base(def, estado, {
-      detalle, emparejados: e.pares.length,
+      detalle, emparejados: e.pares.length, identidades: identidadesDe(e),
       soloEnLens: nombres(e.soloLens), soloEnAdmin: nombres(e.soloAdmin),
       valorLens: listaNombres(l.accionistas), valorAdmin: listaNombres(a.accionistas),
     });
@@ -204,7 +270,7 @@ const COMPARADORES: Record<string, Comparador> = {
     const e = emparejarPersonas(l.directorio, a.directorio);
     const { estado, detalle } = estadoPersonas(e);
     return base(def, estado, {
-      detalle, emparejados: e.pares.length,
+      detalle, emparejados: e.pares.length, identidades: identidadesDe(e),
       soloEnLens: nombres(e.soloLens), soloEnAdmin: nombres(e.soloAdmin),
       valorLens: listaNombres(l.directorio), valorAdmin: listaNombres(a.directorio),
     });

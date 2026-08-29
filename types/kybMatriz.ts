@@ -112,6 +112,18 @@ export interface ResultadoComponente {
   emparejados?: number;
   soloEnLens?: string[];
   soloEnAdmin?: string[];
+  // Cómo se emparejó cada persona, con su puntaje de identidad. Es lo que
+  // permite ver que una "discrepancia" era la misma persona con el cargo pegado
+  // al nombre — antes la matriz solo decía "sin ninguna coincidencia".
+  identidades?: {
+    lens: string;
+    admin: string;
+    puntaje: number;
+    estado: 'EXACTO' | 'APROXIMADO';
+    porDocumento: boolean;
+    motivo: string;
+    documentoSospechoso?: boolean;
+  }[];
 }
 
 // Factor de aporte de cada estado al porcentaje de certidumbre.

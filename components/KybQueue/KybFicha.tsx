@@ -198,6 +198,24 @@ export const KybFicha: React.FC<Props> = ({
                 </td>
                 <td className="py-2 px-3 text-slate-500 dark:text-slate-400">
                   {c.detalle || '—'}
+                  {/* Quién se emparejó con quién y con qué confianza. Antes la
+                      celda decía "1 emparejada" y no había forma de saber si la
+                      coincidencia era sólida o forzada — ni por qué una
+                      "discrepancia" lo era. */}
+                  {c.identidades?.map((id, i) => (
+                    <span key={i} className="block text-[10px] mt-1">
+                      <span className={
+                        id.documentoSospechoso ? 'text-rose-600 dark:text-rose-400 font-bold'
+                        : id.estado === 'EXACTO' ? 'text-emerald-600 dark:text-emerald-400 font-bold'
+                        : 'text-amber-600 dark:text-amber-400 font-bold'
+                      }>
+                        {id.puntaje}% {id.porDocumento ? 'por documento' : id.estado === 'EXACTO' ? 'exacta' : 'aproximada'}
+                      </span>
+                      <span className="text-slate-500 dark:text-slate-400">
+                        {' · '}{id.lens} ↔ {id.admin} · {id.motivo}
+                      </span>
+                    </span>
+                  ))}
                   {c.soloEnLens?.length ? <span className="block text-[10px] text-amber-600 dark:text-amber-400">Solo docs: {c.soloEnLens.join(', ')}</span> : null}
                   {c.soloEnAdmin?.length ? <span className="block text-[10px] text-amber-600 dark:text-amber-400">Solo Admin: {c.soloEnAdmin.join(', ')}</span> : null}
                 </td>

@@ -13,6 +13,7 @@ import type { ExtractedField } from '../../types';
 import type { LadoCanonico, PersonaCanonica } from '../../types/kybCanonico';
 import { normalizarTexto } from '../casosComplianceMapper';
 import { aNumero, clavePersona, normalizarDocumento, dedupPersonas } from './kybAdminMapper';
+import { nombreAlPrincipio, documentoPlausible } from './kybIdentidad';
 import { fechaAIso, huellaDireccion, rutValido
 } from './kybNormalizadores';
 
@@ -62,28 +63,53 @@ function personaDeTexto(texto: string, rol?: string): PersonaCanonica | null {
   // El prefijo se CAPTURA (antes era no-capturante): saber si el número venía
   // rotulado es lo que distingue un documento de un monto suelto.
   const mDoc = limpio.match(/\b(RUT|NIT|RUC|CC|CI|DNI)?\s*[:.]?\s*(\d{1,3}(?:[.\s]\d{3})+(?:[-–][\dkK])?|\d{7,12}(?:[-–][\dkK])?)\b/i);
-  const documento = mDoc ? normalizarDocumento(mDoc[2]) : '';
   const rotulado = !!mDoc?.[1];
-  const nombre = (mDoc ? limpio.replace(mDoc[0], ' ') : limpio)
+  // Un número de la prosa NO es un documento. La regex agarra cualquier cifra, y
+  // de "1.000 acciones" salía documento "1000". Se guarda solo si puede serlo:
+  // venía rotulado (RUT/NIT/...), valida por módulo 11, o tiene largo de
+  // documento. Guardar basura acá es peor que no guardar nada — el emparejador
+  // le cree.
+  const documentoCrudo = mDoc ? normalizarDocumento(mDoc[2]) : '';
+  const documento = (rotulado || rutValido(documentoCrudo) || documentoPlausible(documentoCrudo))
+    ? documentoCrudo : '';
+  let nombre = (mDoc ? limpio.replace(mDoc[0], ' ') : limpio)
     .replace(/\b(RUT|NIT|RUC|CC|CI|DNI)\b/gi, ' ')
     .replace(/[,;:]/g, ' ').replace(/\s+/g, ' ').trim();
   if (!nombre && !documento) return null;
 
-  // Una cláusula no es una persona. El umbral de palabras se aplica SIEMPRE, y
-  // lo único que permite saltearlo es un documento que CONFIRME que hay alguien:
-  // un RUT que valida por módulo 11, o un número que venía rotulado como
-  // documento en el texto.
+  // ── 1. RECORTAR el nombre antes de juzgarlo ──
+  // La escritura escribe "Fulano, 1.000 acciones equivalentes a $X": el nombre
+  // está al principio y lo que sigue es la cláusula. Se corta en la primera
+  // palabra que no puede ser parte de un nombre.
   //
-  // La versión anterior salteaba el umbral con cualquier `documento` presente, y
-  // eso dejaba entrar justo lo que quería filtrar: `personaDeTexto` agarra
+  // Va ANTES del tope de palabras, y ese orden es el punto: al revés, el trozo
+  // entero medía 10 palabras, se descartaba por largo, y con él se perdía el
+  // socio real. Medido sobre Ad Astra SPA — el componente de accionistas (peso
+  // 12) quedaba en SOLO_ADMIN.
+  //
+  // `nombreAlPrincipio` devuelve '' cuando el trozo ni siquiera empieza con un
+  // nombre ("que paga en dinero efectivo y al contado."), y ahí no hay persona.
+  // Eso es lo que mata a los fantasmas que antes llegaban hasta el screening —
+  // uno volvió con "ERROR del proveedor Regcheq 404".
+  if (nombre) {
+    const recortado = nombreAlPrincipio(nombre);
+    if (!recortado) return null;
+    nombre = recortado;
+  }
+
+  // ── 2. Tope de palabras, sobre el nombre YA recortado ──
+  // Queda como red de seguridad. Lo único que permite saltearlo es un documento
+  // que CONFIRME que hay alguien: un RUT que valida por módulo 11, o un número
+  // que venía rotulado como documento en el texto.
+  //
+  // Una versión anterior salteaba el umbral con cualquier `documento` presente,
+  // y eso dejaba entrar justo lo que quería filtrar: `personaDeTexto` agarra
   // cualquier número de la prosa —un monto, un número de artículo— y lo guarda
   // como documento. Medido: cláusulas de 13 a 18 palabras pasaban con
   // "documentos" 1000000, 25000000, 2058. El ruido traía su propia llave.
-  //
-  // Un nombre corto pasa igual con documento basura: es una persona real cuyo
-  // documento se leyó mal, y perderla es peor que arrastrar un documento sucio.
   const confirma = documento !== '' && (rotulado || rutValido(documento));
   if (!confirma && nombre.split(/\s+/).length > MAX_PALABRAS_NOMBRE) return null;
+
   return {
     nombre, documento, tipoDocumento: '',
     clave: clavePersona(nombre, documento),
