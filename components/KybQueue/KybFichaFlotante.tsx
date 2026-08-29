@@ -15,6 +15,7 @@
 // Este componente NO hace fetch: recibe todo por props.
 
 import React, { useEffect, useState } from 'react';
+import { CAMPOS_INFORMATIVOS_KYB } from '../../types/kyb';
 import type { AnalisisKyb, EmpresaKyb, TipoDecisionKyb, DocumentoKyb } from '../../types/kyb';
 import type { DatosGeneralesEmpresa, PersonaCanonica, LadoCanonico } from '../../types/kybCanonico';
 import { datosGeneralesDesdeLado } from '../../services/kyb/kybAdminMapper';
@@ -217,6 +218,16 @@ export const KybFichaFlotante: React.FC<Props> = ({
   // devolvió el detalle de la empresa en esa corrida.
   const adminSinDetalle = !!guardados && !guardados.nombre && !guardados.numeroIdentificacion;
 
+  // Los ocho campos del extractor que no entran a la matriz. Se respeta el orden
+  // de `CAMPOS_INFORMATIVOS_KYB`, no el que devolvió el modelo: una ficha que
+  // cambia de orden entre corridas se lee distinto cada vez.
+  const informativos = (() => {
+    const leidos = new Map((analisis?.extraccion ?? []).map(f => [f.campo, f.valor]));
+    return CAMPOS_INFORMATIVOS_KYB
+      .filter(c => leidos.has(c))
+      .map(campo => ({ campo, valor: leidos.get(campo) ?? '' }));
+  })();
+
   return (
     // Overlay: la cola queda detrás, así al cerrar no hay que retroceder.
     <div className="fixed inset-0 z-40 flex items-start justify-center bg-slate-900/60 backdrop-blur-sm p-3 md:p-6 overflow-y-auto">
@@ -387,13 +398,43 @@ export const KybFichaFlotante: React.FC<Props> = ({
             )}
           </Seccion>
 
-          {/* 6, 7 y 8 — Comparativa, screening y decisión.
+          {/* Información del documento que NO entra en la comparativa.
+              Son los ocho campos del extractor que no alimentan ningún
+              componente de la matriz. Antes se perdían: el mapeo al canónico
+              descartaba lo que no matcheaba una regla. Se muestran acá porque
+              son datos útiles del documento, pero no pesan en la certidumbre —
+              y eso se dice explícito para que nadie los lea como si contaran. */}
+          <Seccion
+            titulo="6 · Información del documento"
+            extra={<span className="text-[11px] text-slate-500 dark:text-slate-400">no entra en la matriz</span>}
+          >
+            {informativos.length === 0 ? (
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                {analisis
+                  ? 'La corrida no guardó estos campos. Volvé a analizar para verlos.'
+                  : 'Sin analizar. Corré el análisis para leer estos campos de los documentos.'}
+              </p>
+            ) : (
+              <dl className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2">
+                {informativos.map(f => (
+                  <div key={f.campo} className="border-b border-slate-100 dark:border-slate-800 pb-1.5">
+                    <dt className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">{f.campo}</dt>
+                    <dd className="text-xs text-slate-800 dark:text-slate-100 whitespace-pre-wrap">
+                      {f.valor || <span className="text-slate-400 italic">sin dato en los documentos</span>}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+            )}
+          </Seccion>
+
+          {/* 7 — Comparativa, screening y decisión.
               Se reusa la ficha que ya existía: trae la matriz de 11 con las tres
               lecturas (Admin, Lens y el resultado), las alertas, el screening
               criminal y el panel de decisión. */}
           <div className="border-t border-slate-200 dark:border-slate-700 pt-4">
             <h3 className="text-sm font-black text-slate-800 dark:text-slate-200 mb-2">
-              6 · Comparativa, screening y decisión
+              7 · Comparativa, screening y decisión
             </h3>
             <KybFicha
               empresa={empresa}

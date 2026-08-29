@@ -57,6 +57,24 @@ export interface DecisionKyb {
 // Vive en la SUBCOLECCIÓN `kyb_empresas/{companyId}/analisis/{runId}`, no en el
 // doc padre: Firestore topa en 1 MiB por documento y la matriz completa con las
 // personas de las cuatro fuentes no cabe. El `rawText` del OCR no se persiste.
+// Los campos del extractor (`PREDEFINED_FIELDS`) que NO alimentan la matriz.
+//
+// Medido corriendo `mapLensALadoCanonico` campo por campo: de los 18, diez
+// llegan al modelo canónico y estos ocho no matchean ninguna regla y se
+// descartaban. Por decisión de negocio se muestran como información del
+// documento y NO entran en la comparativa: no cambian ningún peso ni ningún
+// comparador.
+export const CAMPOS_INFORMATIVOS_KYB: string[] = [
+  'Acciones',
+  'Duración',
+  'Juntas de Accionistas',
+  'Resolución de Conflictos',
+  'Distribución de Utilidades',
+  'Medio de Comunicación',
+  '¿Empresa con fines de lucro?',
+  'Documento contains modificaciones?',
+];
+
 export interface AnalisisKyb {
   runId: string;
   companyId: string;
@@ -81,6 +99,17 @@ export interface AnalisisKyb {
   datosGenerales?: unknown;
   // Inventario de documentos, con la clave para poder abrirlos.
   documentos?: DocumentoKyb[];
+  // Lo que el extractor leyó de los documentos, TAL CUAL, los 18 campos de
+  // `PREDEFINED_FIELDS`. Antes se perdía: `extractedData` entraba a
+  // `mapLensALadoCanonico` y lo que no matcheaba una regla moría ahí. Ocho de los
+  // 18 no llegaban a ninguna parte.
+  //
+  // Se persiste por dos motivos. Uno, esos 8 campos son información útil del
+  // documento aunque no entren a la matriz. Dos, trazabilidad: sin esto no se
+  // puede revisar qué extrajo el modelo sin volver a pagar OCR + Gemini.
+  //
+  // Son 18 strings: el peso en Firestore es despreciable.
+  extraccion?: { campo: string; valor: string }[];
   // Qué faltó, cuando el estado es INCOMPLETO. Es lo que impide decidir a ciegas.
   faltantes?: string[];
   mensajeError?: string;

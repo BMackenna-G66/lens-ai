@@ -186,6 +186,7 @@ export async function analizarEmpresa(
 
   // ── 2. Documentos (lado Lens) ──
   let lens: LadoCanonico = {};
+  let extraccion: { campo: string; valor: string }[] | undefined;
   let estado: EstadoAnalisisKyb = 'COMPLETO';
   let mensajeError: string | undefined;
 
@@ -215,7 +216,13 @@ export async function analizarEmpresa(
           onDocOcr: () => {},
           onPhase: (label) => onProgreso?.({ fase: label }),
         }));
-      lens = mapLensALadoCanonico(resultado.extractedData as ExtractedField[]);
+      const crudo = (resultado.extractedData ?? []) as ExtractedField[];
+      // Se guarda ANTES de mapear: el mapeo descarta lo que no matchea una regla
+      // y esa pérdida era definitiva.
+      extraccion = crudo
+        .filter(f => f && f.field)
+        .map(f => ({ campo: String(f.field), valor: String(f.value ?? '').trim() }));
+      lens = mapLensALadoCanonico(crudo);
       const faltaLens = faltantesLens(lens);
       if (faltaLens.length > 0) {
         estado = 'INCOMPLETO';
@@ -302,6 +309,7 @@ export async function analizarEmpresa(
       fecha: d.date,
       analizado: i < maxDocumentos && hayApiKey,
     })),
+    extraccion,
     faltantes: faltantes.length ? faltantes : undefined,
     mensajeError,
   };
