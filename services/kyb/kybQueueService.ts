@@ -68,6 +68,7 @@ function docToEmpresa(id: string, d: Record<string, unknown>): EmpresaKyb {
     complianceStatus: s(d.complianceStatus) || undefined,
     kycStage1: s(d.kycStage1) || undefined,
     riskLevel: s(d.riskLevel) || undefined,
+    paginaWeb: s(d.paginaWeb) || undefined,
     institucional: typeof d.institucional === 'boolean' ? d.institucional : null,
     enCola: d.enCola !== false,
     statusKyb: (s(d.statusKyb) || 'ABIERTO') as StatusKyb,
@@ -209,9 +210,16 @@ export async function encolarEmpresas(items: EmpresaAEncolar[]): Promise<Resulta
       if (it.snapshot) {
         const tomadoEn = new Date().toISOString();
         campos.snapshotEn = tomadoEn;
+        const snap = snapshotDesdeDetalle(it.snapshot, tomadoEn);
+        // La página web sube al doc padre para que la tabla la muestre sin abrir
+        // el snapshot de cada fila. Solo se escribe cuando HAY snapshot: pisarla
+        // con null en un reencolado sin detalle borraría un dato bueno.
+        // `datosGenerales` está tipado como `unknown` en SnapshotAdmin, así que
+        // se acota acá en vez de cambiar el tipo, que lo consume la ficha entera.
+        campos.paginaWeb = (snap.datosGenerales as { paginaWeb?: string } | undefined)?.paginaWeb ?? null;
         batch.set(
           doc(db, KYB_COLLECTION, it.companyId, SUBCOL_SNAPSHOT, 'admin'),
-          paraFirestore(snapshotDesdeDetalle(it.snapshot, tomadoEn)),
+          paraFirestore(snap),
         );
       }
       batch.set(doc(db, KYB_COLLECTION, it.companyId), paraFirestore(campos), { merge: true });

@@ -353,7 +353,7 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
         <div className="text-center flex-1">
           <h1 className="text-2xl md:text-3xl font-black text-slate-900 dark:text-white">🏢 Cola KYB · Empresas</h1>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-            KYC de empresas: documentos contra Admin, 12 componentes y certidumbre explicable
+            KYC de empresas: documentos contra Admin, 11 componentes y certidumbre explicable
           </p>
         </div>
         <button onClick={onToggleDarkMode} className="text-xs px-3 py-2 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
@@ -790,6 +790,7 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
                     <Th col="razonSocial">Empresa</Th>
                     <Th col="companyId">Company ID</Th>
                     <Th col="identificacion">Identificación</Th>
+                    <th className="py-3 px-4 font-semibold">Página web</th>
                     <Th col="complianceStatus">Compliance</Th>
                     <Th col="certidumbre">Certidumbre</Th>
                     <th className="py-3 px-4 font-semibold">Screening criminal</th>
@@ -817,6 +818,24 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
                       <td className="py-3 px-4 font-bold text-slate-800 dark:text-slate-100">{i.razonSocial}</td>
                       <td className="py-3 px-4 text-slate-600 dark:text-slate-300">{i.companyId}</td>
                       <td className="py-3 px-4 text-slate-600 dark:text-slate-300">{i.identificacion || '—'}</td>
+                      {/* Página web declarada en Admin. Se distingue de un guion a
+                          propósito: "Sin página" es un dato sobre la empresa, no
+                          un campo que no cargamos. El clic no abre la ficha. */}
+                      <td className="py-3 px-4 max-w-[220px]" onClick={e => e.stopPropagation()}>
+                        {i.paginaWeb ? (
+                          <a
+                            href={/^https?:\/\//i.test(i.paginaWeb) ? i.paginaWeb : `https://${i.paginaWeb}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-sky-600 dark:text-sky-400 hover:underline truncate block"
+                            title={i.paginaWeb}
+                          >
+                            {i.paginaWeb.replace(/^https?:\/\//i, '').replace(/\/$/, '')}
+                          </a>
+                        ) : (
+                          <span className="text-slate-400 dark:text-slate-500 italic">Sin página</span>
+                        )}
+                      </td>
                       <td className="py-3 px-4 text-slate-600 dark:text-slate-300">{i.complianceStatus || '—'}</td>
                       <td className="py-3 px-4 font-bold tabular-nums text-slate-800 dark:text-slate-100">
                         {/* Nunca 0%: sin análisis va guion. */}

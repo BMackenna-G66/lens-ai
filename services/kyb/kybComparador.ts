@@ -1,8 +1,8 @@
-// Comparador de los 12 componentes del KYB. Funciones PURAS, sin red.
+// Comparador de los 11 componentes del KYB. Funciones PURAS, sin red.
 //
 // Recibe los dos lados ya en forma canónica (kybAdminMapper para Admin, el
 // pipeline de Lens para los documentos) y devuelve un ResultadoComponente por
-// cada uno de los 12. NO calcula el porcentaje: eso es del motor de certidumbre.
+// cada uno de los 11. NO calcula el porcentaje: eso es del motor de certidumbre.
 //
 // Reglas transversales:
 //   · Si NINGÚN lado aporta el dato → SIN_DATOS (no es culpa de la empresa, pero
@@ -20,7 +20,7 @@ import {
 } from '../../types/kybMatriz';
 import {
   normalizarRazonSocial, similitudNombre, CORTES_NOMBRE, rutValido, limpiarRut,
-  huellaDireccion, mismaFecha, fechaAIso, compararMontos, solapamiento, canonizarFormaLegal,
+  huellaDireccion, mismaFecha, fechaAIso, compararMontos, solapamiento,
 } from './kybNormalizadores';
 
 const hay = (v: unknown): boolean =>
@@ -210,23 +210,6 @@ const COMPARADORES: Record<string, Comparador> = {
     });
   },
 
-  forma_legal: (l, a, def) => {
-    const pre = estadoPorPresencia(hay(l.formaLegal), hay(a.formaLegal));
-    if (pre) return base(def, pre, { valorLens: l.formaLegal, valorAdmin: a.formaLegal });
-    // Se canoniza a sigla: "Sociedad por Acciones" y "SpA" son lo mismo, y
-    // compararlos como texto daba una discrepancia falsa.
-    const nl = canonizarFormaLegal(l.formaLegal), na = canonizarFormaLegal(a.formaLegal);
-    const estado: EstadoComparacion = nl === na ? 'COINCIDE'
-      : (nl.includes(na) || na.includes(nl)) ? 'PARCIAL' : 'DISCREPA';
-    // Si la forma del lado documentos se dedujo del sufijo de la razón social,
-    // se dice: una coincidencia derivada no es lo mismo que una declarada.
-    const origen = l.formaLegalDerivada ? ' Deducida del sufijo de la razón social.' : '';
-    return base(def, estado, {
-      valorLens: l.formaLegal, valorAdmin: a.formaLegal,
-      detalle: (nl === na ? `Misma forma legal (${nl}).` : `${nl} vs ${na}.`) + origen,
-    });
-  },
-
   constitucion: (l, a, def) => {
     const fechaLens = fechaAIso(l.fechaConstitucion), fechaAdmin = fechaAIso(a.fechaConstitucion);
     const pre = estadoPorPresencia(!!fechaLens, !!fechaAdmin);
@@ -327,7 +310,7 @@ const COMPARADORES: Record<string, Comparador> = {
 };
 
 // ── Entrada principal ────────────────────────────────────────────────────────
-// Devuelve SIEMPRE los 12, en el orden del catálogo. Un componente sin
+// Devuelve SIEMPRE los 11, en el orden del catálogo. Un componente sin
 // comparador definido sale como SIN_DATOS en vez de desaparecer: si falta uno, se
 // tiene que ver en la matriz.
 export function compararKyb(lens: LadoCanonico, admin: LadoCanonico): ResultadoComponente[] {

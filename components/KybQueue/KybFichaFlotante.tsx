@@ -14,7 +14,7 @@
 // Primero se entiende al cliente, después se compara, y recién al final se decide.
 // Este componente NO hace fetch: recibe todo por props.
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import type { AnalisisKyb, EmpresaKyb, TipoDecisionKyb, DocumentoKyb } from '../../types/kyb';
 import type { DatosGeneralesEmpresa, PersonaCanonica, LadoCanonico } from '../../types/kybCanonico';
 import { datosGeneralesDesdeLado } from '../../services/kyb/kybAdminMapper';
@@ -70,7 +70,6 @@ const CAMPOS_GENERALES: { clave: keyof DatosGeneralesEmpresa; label: string }[] 
   { clave: 'segmentacion', label: 'Segmentación' },
   { clave: 'nivelRiesgoPartner', label: 'Nivel de riesgo partner' },
   { clave: 'nivelRiesgoGlobal66', label: 'Nivel de riesgo Global66' },
-  { clave: 'formaLegal', label: 'Forma legal' },
   { clave: 'fechaConstitucion', label: 'Fecha de constitución' },
   { clave: 'telefono', label: 'Teléfono' },
   // Admin NO expone una "última validación del partner" (verificado: 56 claves
@@ -173,6 +172,32 @@ export const KybFichaFlotante: React.FC<Props> = ({
   onAnterior, onSiguiente, posicion, snapshot, flujo,
 }) => {
   const [confirmaBorrado, setConfirmaBorrado] = useState(false);
+
+  // Escape cierra la ficha. Es un overlay a pantalla completa: la salida tiene
+  // que estar donde la mano ya está, no solo en la X de la esquina.
+  //
+  // Si hay una confirmación de borrado abierta, Escape la cancela a ELLA y deja
+  // la ficha en pie. Cerrar las dos de un saque haría perder el contexto por un
+  // reflejo, y la de borrado es justo la que conviene poder abortar rápido.
+  //
+  // Tampoco cierra mientras se escribe en un campo: el comentario de la decisión
+  // se perdería entero. Ahí Escape saca el foco y ya.
+  useEffect(() => {
+    const alTecla = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      const foco = document.activeElement as HTMLElement | null;
+      const escribiendo = !!foco && (
+        foco.tagName === 'TEXTAREA'
+        || (foco.tagName === 'INPUT' && !['checkbox', 'radio', 'button'].includes((foco as HTMLInputElement).type))
+        || foco.isContentEditable
+      );
+      if (escribiendo) { foco?.blur(); return; }
+      if (confirmaBorrado) { setConfirmaBorrado(false); return; }
+      onCerrar();
+    };
+    window.addEventListener('keydown', alTecla);
+    return () => window.removeEventListener('keydown', alTecla);
+  }, [confirmaBorrado, onCerrar]);
 
   // Snapshot del barrido: permite abrir la ficha con datos ANTES de analizar.
   // El análisis manda siempre que exista; el snapshot solo rellena el hueco.
@@ -363,7 +388,7 @@ export const KybFichaFlotante: React.FC<Props> = ({
           </Seccion>
 
           {/* 6, 7 y 8 — Comparativa, screening y decisión.
-              Se reusa la ficha que ya existía: trae la matriz de 12 con las tres
+              Se reusa la ficha que ya existía: trae la matriz de 11 con las tres
               lecturas (Admin, Lens y el resultado), las alertas, el screening
               criminal y el panel de decisión. */}
           <div className="border-t border-slate-200 dark:border-slate-700 pt-4">

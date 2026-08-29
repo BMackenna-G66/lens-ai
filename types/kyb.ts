@@ -125,6 +125,11 @@ export interface EmpresaKyb {
   kycStage1?: string;
   riskLevel?: string;
   institucional?: boolean | null;
+  // Página web declarada en Admin (`companyWebsite`). Denormalizada al doc padre
+  // para que la tabla la muestre sin abrir el snapshot de cada empresa: la cola
+  // se suscribe a todos los docs y leer una subcolección por fila costaría una
+  // lectura extra por empresa en cada carga.
+  paginaWeb?: string;
 
   // Cola
   enCola: boolean;                 // se indexa: `enCola ASC, recibidoEn DESC`

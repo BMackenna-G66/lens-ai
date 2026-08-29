@@ -202,10 +202,10 @@ export const AppLauncher: React.FC<AppLauncherProps> = ({ onSelect }) => {
               <div className="flex-1">
                 <h2 className="text-xl font-black text-slate-900 dark:text-white mb-2">Cola KYB — Empresas</h2>
                 <p className="text-slate-500 dark:text-slate-400 text-sm font-medium mb-4 leading-relaxed">
-                  KYC de empresas: compara los documentos contra los datos de Admin campo a campo, arma una matriz de 12 componentes y calcula un porcentaje de certidumbre explicable línea por línea.
+                  KYC de empresas: compara los documentos contra los datos de Admin campo a campo, arma una matriz de 11 componentes y calcula un porcentaje de certidumbre explicable línea por línea.
                 </p>
                 <div className="flex flex-wrap gap-2">
-                  {['🏢 B2B', '⚖️ Matriz de 12', '📊 Certidumbre', '✅ Maker-checker'].map(tag => (
+                  {['🏢 B2B', '⚖️ Matriz de 11', '📊 Certidumbre', '✅ Maker-checker'].map(tag => (
                     <span key={tag} className="text-[10px] font-bold uppercase tracking-widest text-violet-700 dark:text-violet-400 bg-violet-100 dark:bg-violet-950/50 border border-violet-200 dark:border-violet-800/50 px-2 py-1 rounded-lg">{tag}</span>
                   ))}
                 </div>

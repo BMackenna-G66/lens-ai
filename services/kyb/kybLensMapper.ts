@@ -13,7 +13,7 @@ import type { ExtractedField } from '../../types';
 import type { LadoCanonico, PersonaCanonica } from '../../types/kybCanonico';
 import { normalizarTexto } from '../casosComplianceMapper';
 import { aNumero, clavePersona, normalizarDocumento, dedupPersonas } from './kybAdminMapper';
-import { fechaAIso, huellaDireccion, formaLegalDesdeRazonSocial, rutValido
+import { fechaAIso, huellaDireccion, rutValido
 } from './kybNormalizadores';
 
 // Reglas de reconocimiento. La PRIMERA que matchea gana, así que lo más
@@ -23,7 +23,6 @@ interface Regla { campo: keyof LadoCanonico | 'capital' | 'escritura'; patron: R
 const REGLAS: Regla[] = [
   { campo: 'razonSocial', patron: /RAZON SOCIAL|NOMBRE (DE LA )?(EMPRESA|SOCIEDAD)|DENOMINACION/ },
   { campo: 'identificacionNumero', patron: /\b(RUT|NIT|RUC|CUIT)\b|IDENTIFICACION (TRIBUTARIA|FISCAL)|TAX ID/ },
-  { campo: 'formaLegal', patron: /(FORMA|TIPO) (LEGAL|SOCIETARI|DE SOCIEDAD)|CLASIFICACION (DE )?ENTIDAD/ },
   { campo: 'escritura', patron: /(NUMERO|N) DE ESCRITURA|REPERTORIO|ESCRITURA PUBLICA/ },
   { campo: 'fechaConstitucion', patron: /FECHA (DE )?CONSTITUCION|CONSTITUIDA|FECHA DE INICIO DE ACTIVIDADES/ },
   { campo: 'capital', patron: /CAPITAL (SOCIAL|SUSCRITO|PAGADO|ENTERADO)/ },
@@ -161,7 +160,6 @@ export function mapLensALadoCanonico(campos: ExtractedField[] | undefined): Lado
         lado.identificacionNumero ??= normalizarDocumento(valor);
         lado.identificacionTipo ??= /NIT/.test(nombreCampo) ? 'NIT' : /RUC/.test(nombreCampo) ? 'RUC' : 'RUT';
         break;
-      case 'formaLegal': lado.formaLegal ??= valor; break;
       case 'escritura': lado.numeroEscritura ??= valor; break;
       case 'fechaConstitucion': lado.fechaConstitucion ??= fechaAIso(valor) || valor; break;
       case 'capital': {
@@ -181,18 +179,6 @@ export function mapLensALadoCanonico(campos: ExtractedField[] | undefined): Lado
         const k = regla.campo as keyof LadoCanonico;
         if (!(k in lado)) (lado as Record<string, unknown>)[k] = { valor: n, moneda: monedaDe(valor) };
       }
-    }
-  }
-
-  // La forma legal casi nunca viene rotulada en una escritura: va dentro del
-  // nombre. Si la regla por etiqueta no la encontró, se deriva del sufijo de la
-  // razón social — que es el documento diciéndolo, no una suposición nuestra.
-  // Se marca como derivada para que la matriz lo muestre.
-  if (!lado.formaLegal && lado.razonSocial) {
-    const derivada = formaLegalDesdeRazonSocial(lado.razonSocial);
-    if (derivada) {
-      lado.formaLegal = derivada;
-      lado.formaLegalDerivada = true;
     }
   }
 
@@ -220,7 +206,6 @@ export function faltantesLens(lado: LadoCanonico): string[] {
   const esperados: [keyof LadoCanonico, string][] = [
     ['razonSocial', 'Razón social'],
     ['identificacionNumero', 'Identificación tributaria'],
-    ['formaLegal', 'Forma legal'],
     ['fechaConstitucion', 'Fecha de constitución'],
     ['domicilio', 'Domicilio'],
     ['representantesLegales', 'Representantes legales'],

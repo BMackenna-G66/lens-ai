@@ -1,4 +1,9 @@
-// MANTENEDOR de los 12 componentes de la matriz KYB y sus pesos.
+// MANTENEDOR de los 11 componentes de la matriz KYB y sus pesos.
+//
+// Eran 12. `forma_legal` (peso 8) se sacó por pedido del negocio: no se evalúa
+// ni se muestra más. Sus 8 puntos se repartieron sobre los 11 restantes por
+// resto mayor, que preserva el orden relativo exacto — sacar un campo no puede
+// cambiar de paso qué componente pesa más que cuál. El denominador sigue en 100.
 //
 // ⚠️ ESTA ES UNA PROPUESTA, no una definición firmada. El plan la marca como
 // definición de negocio pendiente. Está armada sobre lo que Admin REALMENTE
@@ -26,7 +31,7 @@ export type FuenteComponente = 'AMBAS' | 'SOLO_LENS' | 'SOLO_ADMIN';
 export interface DefinicionComponente {
   id: string;
   label: string;
-  peso: number;                  // los 12 suman 100
+  peso: number;                  // los 11 suman 100
   fuente: FuenteComponente;      // AMBAS = se compara · resto = se valida
   // true = una discrepancia acá es de IDENTIDAD y frena el flujo automático en
   // las dos direcciones: significa que los datos están mal, no la empresa.
@@ -36,39 +41,35 @@ export interface DefinicionComponente {
 
 export const COMPONENTES_KYB: DefinicionComponente[] = [
   {
-    id: 'razon_social', label: 'Razón social', peso: 12, fuente: 'AMBAS', esIdentidad: true,
+    id: 'razon_social', label: 'Razón social', peso: 13, fuente: 'AMBAS', esIdentidad: true,
     descripcion: 'Nombre legal de la empresa, sin sufijos societarios (SPA, LTDA, SAS).',
   },
   {
-    id: 'identificacion', label: 'Identificación tributaria', peso: 12, fuente: 'AMBAS', esIdentidad: true,
+    id: 'identificacion', label: 'Identificación tributaria', peso: 13, fuente: 'AMBAS', esIdentidad: true,
     descripcion: 'RUT / NIT con su tipo. En Chile se valida el dígito verificador (módulo 11).',
   },
   {
-    id: 'representantes', label: 'Representantes legales', peso: 12, fuente: 'AMBAS', esIdentidad: true,
+    id: 'representantes', label: 'Representantes legales', peso: 13, fuente: 'AMBAS', esIdentidad: true,
     descripcion: 'Personas con poder de representación. Se emparejan por documento y, si no hay, por nombre.',
   },
   {
-    id: 'accionistas', label: 'Accionistas / beneficiarios finales', peso: 11, fuente: 'AMBAS',
+    id: 'accionistas', label: 'Accionistas / beneficiarios finales', peso: 12, fuente: 'AMBAS',
     descripcion: 'Socios y beneficiarios finales. En Admin vienen como dict {categoría: [personas]}.',
   },
   {
-    id: 'forma_legal', label: 'Forma legal', peso: 8, fuente: 'AMBAS',
-    descripcion: 'Tipo societario declarado (SPA, LTDA, SAS, SA).',
-  },
-  {
-    id: 'constitucion', label: 'Constitución', peso: 8, fuente: 'AMBAS',
+    id: 'constitucion', label: 'Constitución', peso: 9, fuente: 'AMBAS',
     descripcion: 'Fecha de constitución y número de escritura.',
   },
   {
-    id: 'domicilio', label: 'Domicilio', peso: 8, fuente: 'AMBAS',
+    id: 'domicilio', label: 'Domicilio', peso: 9, fuente: 'AMBAS',
     descripcion: 'Dirección legal. Se compara por huella normalizada, no por texto literal.',
   },
   {
-    id: 'actividad', label: 'Actividad económica', peso: 8, fuente: 'AMBAS',
+    id: 'actividad', label: 'Actividad económica', peso: 9, fuente: 'AMBAS',
     descripcion: 'Giro e industria. Admin la reparte en cinco campos distintos; se unifican.',
   },
   {
-    id: 'facultades', label: 'Facultades y firma', peso: 6, fuente: 'AMBAS',
+    id: 'facultades', label: 'Facultades y firma', peso: 7, fuente: 'AMBAS',
     descripcion: 'Administración conjunta y facultades de firma. Admin SÍ los trae.',
   },
   {

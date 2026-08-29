@@ -34,7 +34,6 @@ const CAMPOS: { clave: keyof DatosGeneralesEmpresa; label: string }[] = [
   { clave: 'segmentacion', label: 'Segmentación' },
   { clave: 'nivelRiesgoPartner', label: 'Nivel de riesgo partner' },
   { clave: 'nivelRiesgoGlobal66', label: 'Nivel de riesgo Global66' },
-  { clave: 'formaLegal', label: 'Forma legal' },
   { clave: 'fechaConstitucion', label: 'Fecha de constitución' },
   { clave: 'telefono', label: 'Teléfono' },
   // Admin NO expone una "última validación del partner" (verificado: 56 claves
