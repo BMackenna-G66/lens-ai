@@ -19,13 +19,14 @@ import {
   type DefinicionComponente,
 } from '../../types/kybMatriz';
 import { evaluarActividades } from './kybActividad';
+import { compararDomicilio, hayDomicilio } from './kybDomicilio';
 import {
   compararIdentidad, separarIdentidad, canonDocumento,
   type Identidad, type CoincidenciaIdentidad, type EstadoIdentidad,
 } from './kybIdentidad';
 import {
   normalizarRazonSocial, similitudNombre, CORTES_NOMBRE, rutValido, limpiarRut,
-  huellaDireccion, mismaFecha, fechaAIso, compararMontos, solapamiento,
+  mismaFecha, fechaAIso, compararMontos, solapamiento,
 } from './kybNormalizadores';
 
 const hay = (v: unknown): boolean =>
@@ -291,15 +292,34 @@ const COMPARADORES: Record<string, Comparador> = {
     });
   },
 
+  // El domicilio casi nunca está completo: puede cambiar entre documentos o
+  // venir en null porque el cliente no lo declaró. Se compara por CONTENCIÓN
+  // parte por parte y el corte positivo es 40 %, por decisión de negocio.
+  // Ver `kybDomicilio.ts`.
   domicilio: (l, a, def) => {
     const tl = l.domicilio?.textoCompleto, ta = a.domicilio?.textoCompleto;
-    const pre = estadoPorPresencia(hay(tl), hay(ta));
-    if (pre) return base(def, pre, { valorLens: tl, valorAdmin: ta });
-    const hl = l.domicilio?.huella || huellaDireccion(tl);
-    const ha = a.domicilio?.huella || huellaDireccion(ta);
-    const sim = similitudNombre(hl, ha);
-    const estado: EstadoComparacion = hl === ha ? 'COINCIDE' : sim >= CORTES_NOMBRE.bajo ? 'PARCIAL' : 'DISCREPA';
-    return base(def, estado, { valorLens: tl, valorAdmin: ta, detalle: `Huella con ${sim}% de coincidencia.` });
+    // La presencia mira TODAS las partes, no solo `textoCompleto`. Antes un
+    // domicilio con comuna y región pero sin ese campo se leía como ausente y el
+    // componente caía en SIN_DATOS con el dato ahí.
+    const pre = estadoPorPresencia(hayDomicilio(l.domicilio), hayDomicilio(a.domicilio));
+    const texto = (d: typeof l.domicilio, t: string | undefined): string | undefined =>
+      t || [d?.calle, d?.numero, d?.ciudad, d?.region, d?.pais].filter(Boolean).join(', ') || undefined;
+    if (pre) return base(def, pre, {
+      valorLens: texto(l.domicilio, tl), valorAdmin: texto(a.domicilio, ta),
+      // Se dice CUÁL lado falta. Un domicilio que el cliente no declaró no es
+      // una discrepancia, y la celda tiene que decirlo en vez de quedar vacía.
+      detalle: pre === 'SOLO_ADMIN' ? 'Los documentos no traen domicilio: Admin sí. No es una discrepancia.'
+        : pre === 'SOLO_LENS' ? 'Admin no trae domicilio: los documentos sí. No es una discrepancia.'
+        : 'Ninguna de las dos fuentes trae domicilio.',
+    });
+
+    const r = compararDomicilio(l.domicilio, a.domicilio);
+    const estado: EstadoComparacion =
+      r.estado === 'SIN_DATOS' ? 'SIN_DATOS' : r.estado as EstadoComparacion;
+    return base(def, estado, {
+      valorLens: texto(l.domicilio, tl), valorAdmin: texto(a.domicilio, ta),
+      detalle: r.detalle,
+    });
   },
 
   // La comparación va en UN SOLO SENTIDO: por cada giro DECLARADO en Admin se
