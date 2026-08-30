@@ -255,7 +255,7 @@ export async function analizarEmpresa(
   onProgreso?.({ fase: 'Comparando los 8 componentes' });
   const componentes = compararKyb(lens, admin);
 
-  // Las 36 alertas del catálogo. Las que no se pueden evaluar por falta de fuente
+  // Las 35 alertas del catálogo. Las que no se pueden evaluar por falta de fuente
   // salen igual con `evaluable: false`, para que el inventario sea completo y
   // nadie confunda "no se pudo evaluar" con "no hay hallazgos".
   onProgreso?.({ fase: 'Evaluando alertas' });

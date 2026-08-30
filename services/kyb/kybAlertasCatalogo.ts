@@ -1,11 +1,11 @@
-// MANTENEDOR de las alertas del KYB. 36 alertas con predicado PURO.
+// MANTENEDOR de las alertas del KYB. 35 alertas con predicado PURO.
 //
 // Cada alerta es una función que mira el contexto del análisis y devuelve si
 // dispara y con qué detalle. Nada de red, nada de estado.
 //
 // Regla del inventario: las alertas que HOY no se pueden evaluar por falta de
 // fuente van igual, con `evaluable: false` y `faltante` poblado. Así el
-// inventario siempre es 36 de 36 y nadie confunde "no se pudo evaluar" con "no
+// inventario siempre es 35 de 35 y nadie confunde "no se pudo evaluar" con "no
 // hay hallazgos" — que es exactamente el error que llevó a los falsos negativos
 // de Regcheq.
 //
@@ -67,8 +67,16 @@ const sinLens = (c: ContextoAlerta): string | null =>
 const sinScreening = (c: ContextoAlerta): string | null =>
   !c.screeningPersonas ? 'Falta el screening criminal de la empresa y sus personas' : null;
 
-const personas = (l: LadoCanonico): PersonaCanonica[] => [
-  ...(l.representantesLegales ?? []), ...(l.accionistas ?? []), ...(l.directorio ?? []),
+// Quienes pueden OBLIGAR a la sociedad: representantes legales y directorio.
+//
+// Los accionistas quedan afuera a propósito. Son dos preguntas distintas: de
+// quien administra necesitamos el documento para poder screenearlo y saber si
+// puede firmar; de quien es dueño interesa la cadena de beneficiario final, que
+// es otro análisis y no se resuelve con la misma alerta. Mezclarlos hacía que
+// DOC_028 disparara por un socio sin RUT cuando el representante estaba
+// perfectamente identificado.
+const conPoderDeAdministracion = (l: LadoCanonico): PersonaCanonica[] => [
+  ...(l.representantesLegales ?? []), ...(l.directorio ?? []),
 ];
 
 const mesesDesde = (iso: string): number | null => {
@@ -233,14 +241,10 @@ export const ALERTAS_KYB: DefinicionAlerta[] = [
       return viejos.length ? `${viejos.length} de ${c.documentos.length} con más de ${UMBRALES.documentoViejoMeses} meses` : null;
     },
   },
-  {
-    codigo: 'DOC_020', label: 'Documentos en estado no aprobado', severidad: 'PREVENTIVA',
-    requiere: sinDocumentos,
-    predicado: c => {
-      const malos = c.documentos.filter(d => d.status && !/APROB|APPROVED|OK|VALID/i.test(d.status));
-      return malos.length ? `${malos.length} documento(s): ${[...new Set(malos.map(d => d.status))].join(', ')}` : null;
-    },
-  },
+  // DOC_020 ("Documentos en estado no aprobado") se eliminó: con la cola de
+  // trabajo los documentos llegan directo y ya no pasan por una aprobación
+  // previa, así que el estado PENDING dejó de significar algo. Disparaba en
+  // todas las empresas y restaba 8 puntos por un flujo que ya no existe.
   {
     codigo: 'DOC_021', label: 'Falta la escritura de constitución', severidad: 'PREVENTIVA',
     requiere: sinLens,
@@ -292,9 +296,11 @@ export const ALERTAS_KYB: DefinicionAlerta[] = [
     },
   },
   {
-    codigo: 'DOC_028', label: 'Personas vinculadas sin documento de identidad', severidad: 'PREVENTIVA',
+    codigo: 'DOC_028', label: 'Representante legal o administrador sin documento de identidad', severidad: 'PREVENTIVA',
     predicado: c => {
-      const sinDoc = personas(c.admin).concat(personas(c.lens)).filter(p => !p.documento);
+      const sinDoc = conPoderDeAdministracion(c.admin)
+        .concat(conPoderDeAdministracion(c.lens))
+        .filter(p => !p.documento);
       if (!sinDoc.length) return null;
       const nombres = [...new Set(sinDoc.map(p => p.nombre).filter(Boolean))];
       return `${nombres.length} sin documento: ${nombres.slice(0, 4).join(', ')}${nombres.length > 4 ? '…' : ''}`;
