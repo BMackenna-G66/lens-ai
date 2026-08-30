@@ -316,12 +316,21 @@ const COMPARADORES: Record<string, Comparador> = {
     if (pre) return base(def, pre, { valorLens: listaL.join(' · ') || undefined, valorAdmin: listaA.join(' · ') || undefined });
 
     const r = evaluarActividades(listaA, listaL);
-    // Un giro declarado que la escritura NO respalda es el hallazgo que importa:
-    // el cliente dice operar en algo que su constitución no lo habilita a hacer.
-    // Por eso pesa más que "coincide a medias".
+    // Un giro sin respaldo SE MUESTRA siempre, pero ya no arrastra el componente
+    // entero a cero.
+    //
+    // Antes bastaba UNA actividad ausente para DISCREPA. Con eso, un cliente que
+    // declara cinco giros y tiene cuatro respaldados por su escritura sacaba los
+    // mismos 0 puntos que uno que no tiene ninguno. No son el mismo riesgo.
+    //
+    // Ahora DISCREPA queda para el caso que de verdad importa: NINGUNO de los
+    // giros declarados aparece en la escritura. Mientras haya al menos uno
+    // respaldado —entero o en parte— es PARCIAL, y las que faltan se listan con
+    // nombre y apellido en el detalle.
+    const respaldadas = r.cubiertas + r.parciales;
     const estado: EstadoComparacion =
-      r.ausentes > 0 ? 'DISCREPA'
-      : r.parciales > 0 ? 'PARCIAL'
+      respaldadas === 0 ? 'DISCREPA'
+      : r.ausentes > 0 || r.parciales > 0 ? 'PARCIAL'
       : 'COINCIDE';
     return base(def, estado, {
       valorLens: listaL.join(' · '), valorAdmin: listaA.join(' · '),

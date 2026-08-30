@@ -67,6 +67,25 @@ Si el documento es de China, utiliza esta guía de mapeo para identificar los ca
 - Distribución de Utilidades: Profit Distribution
 - Medio de Comunicación: Official Communication / Notices
 
+**INSTRUCCIONES PARA LOS DOCUMENTOS DE IDENTIDAD (RUT / NIT / cédula):**
+Es el dato con MÁS peso en la comparación automática: es lo que permite decir que
+dos registros son la misma empresa o la misma persona. Un documento perdido o mal
+leído convierte una coincidencia real en una discrepancia.
+
+- **"RUT de la sociedad"**: el identificador tributario de la SOCIEDAD, nunca el
+  de una persona. Inclúyelo SIEMPRE con su dígito verificador, en el formato en
+  que aparece (ej: 78.451.792-6). Si el dígito es K, escríbelo como K.
+- **Búscalo en TODO el documento**, no solo en el encabezado: la comparecencia,
+  la cláusula de constitución, el timbre notarial y el pie suelen traerlo aunque
+  el título no.
+- Si el documento nombra varios RUT, el de la sociedad que se constituye o
+  modifica — no el de la notaría, ni el del conservador, ni el de los socios.
+- **NUNCA inventes, completes ni corrijas un dígito.** Si el número aparece
+  incompleto o ilegible, escribe exactamente: No especificado
+- **El documento de cada persona** va en la segunda columna del formato de
+  personas que se describe abajo. Búscalo junto al nombre en la comparecencia:
+  "don Juan Pérez, cédula nacional de identidad número 12.345.678-9".
+
 **INSTRUCCIONES PARA LOS CAMPOS DE PERSONAS** ("Representante Legal", "Accionistas y aportes"):
 Estos campos alimentan una comparación automática contra el registro del cliente,
 así que NO uses prosa. Devuelve **UNA PERSONA POR LÍNEA** con este formato exacto:

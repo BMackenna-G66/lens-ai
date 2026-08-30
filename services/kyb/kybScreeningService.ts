@@ -18,6 +18,7 @@
 // de Regcheq, y acá el valor está justamente en poder afirmar que está limpio.
 
 import { screenChileCriminal } from '../lens360Service';
+import { pareceNombreDePersona } from './kybIdentidad';
 import { runPool } from '../casosCriminalService';
 import type { LadoCanonico, PersonaCanonica } from '../../types/kybCanonico';
 import { categoriasSensibles } from '../delitosSensibles';
@@ -82,6 +83,16 @@ export function sujetosDe(admin: LadoCanonico, lens: LadoCanonico): { tipo: Suje
   const vistos = new Set<string>();
 
   const agregar = (tipo: SujetoScreening['tipo'], nombre: string, documento: string) => {
+    // Última barrera antes de mandarle un nombre a un proveedor externo. La
+    // empresa pasa siempre —su razón social no es un nombre de persona— pero una
+    // persona tiene que parecerlo.
+    //
+    // Hace falta porque el extractor devolvía prosa como persona: medido sobre
+    // las corridas guardadas, 148 de 261 "personas" (57 %) no eran personas. Dos
+    // de esos fantasmas llegaron a Regcheq en una empresa real y uno volvió con
+    // "ERROR del proveedor 404". Mandar basura a un proveedor de compliance
+    // ensucia su base y gasta cuota por nada.
+    if (tipo !== 'EMPRESA' && !pareceNombreDePersona(nombre).esNombre) return;
     const clave = documento || nombre.toUpperCase();
     if (!clave || vistos.has(clave)) return;
     vistos.add(clave);
