@@ -228,13 +228,32 @@ function mapDomicilio(c: Crudo): DomicilioCanonico | undefined {
   };
 }
 
+// Admin NO devuelve una lista de facultades. Verificado contra la API:
+// `signatureAuthorization` es un BOOLEANO y
+// `signatureAuthorizationLegalRepresentatives` viene null.
+//
+// La versión anterior convertía ese booleano en una facultad llamada "true", que
+// después se comparaba contra el texto de la escritura. De ahí salía el "0 % de
+// solapamiento en facultades" de la ficha, sobre un dato que no existía.
+//
+// El booleano se guarda aparte, en `autorizacionFirma`, que es lo que sí se
+// puede contrastar: si el cliente declara que hay apoderados, la escritura tiene
+// que otorgar poderes a alguien.
+//
+// El camino de lista se conserva por si Admin empieza a devolverla.
 function mapFacultades(c: Crudo): string[] {
   const out: string[] = [];
-  const sa = c.signatureAuthorization;
-  const sal = c.signatureAuthorizationLegalRepresentatives;
-  for (const v of [sa, sal]) {
-    if (Array.isArray(v)) { for (const x of v) { const s = txt(typeof x === 'object' && x ? (x as Crudo).name ?? JSON.stringify(x) : x); if (s) out.push(s); } }
-    else { const s = txt(typeof v === 'object' && v ? (v as Crudo).name ?? '' : v); if (s) out.push(s); }
+  for (const v of [c.signatureAuthorization, c.signatureAuthorizationLegalRepresentatives]) {
+    if (typeof v === 'boolean') continue;   // es el flag, no una facultad
+    if (Array.isArray(v)) {
+      for (const x of v) {
+        const s = txt(typeof x === 'object' && x ? (x as Crudo).name ?? JSON.stringify(x) : x);
+        if (s && !/^(true|false|null)$/i.test(s)) out.push(s);
+      }
+    } else {
+      const s = txt(typeof v === 'object' && v ? (v as Crudo).name ?? '' : v);
+      if (s && !/^(true|false|null)$/i.test(s)) out.push(s);
+    }
   }
   return out;
 }
@@ -291,6 +310,9 @@ export function mapAdminALadoCanonico(detalle: EmpresaDocsDetail): LadoCanonico 
 
     administracionConjunta: typeof c.hasJointAdministration === 'boolean' ? c.hasJointAdministration : null,
     facultades: mapFacultades(c),
+    // El booleano de Admin, guardado como lo que es. Es lo único de facultades
+    // que Admin declara y que se puede contrastar contra la escritura.
+    autorizacionFirma: typeof c.signatureAuthorization === 'boolean' ? c.signatureAuthorization : null,
 
     // Admin devuelve un RANGO DE TEXTO ("Entre USD 100,000 y USD 1MM"), no un
     // número. Se intenta como número y, si no lo es, se guarda el texto para

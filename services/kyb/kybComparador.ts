@@ -20,13 +20,14 @@ import {
 } from '../../types/kybMatriz';
 import { evaluarActividades } from './kybActividad';
 import { compararDomicilio, hayDomicilio } from './kybDomicilio';
+import { evaluarFacultades, esFacultadReal } from './kybFacultades';
 import {
   compararIdentidad, separarIdentidad, canonDocumento,
   type Identidad, type CoincidenciaIdentidad, type EstadoIdentidad,
 } from './kybIdentidad';
 import {
   normalizarRazonSocial, similitudNombre, CORTES_NOMBRE, rutValido, limpiarRut,
-  mismaFecha, fechaAIso, compararMontos, solapamiento,
+  mismaFecha, fechaAIso, compararMontos,
 } from './kybNormalizadores';
 
 const hay = (v: unknown): boolean =>
@@ -353,30 +354,58 @@ const COMPARADORES: Record<string, Comparador> = {
     });
   },
 
+  // Misma dirección que la actividad: de lo DECLARADO hacia el documento. Pero
+  // Admin no declara una lista de poderes — declara dos booleanos. Ver
+  // `kybFacultades.ts`.
+  //
+  // El estado ya no puede ser COINCIDE sin nada comparado: la línea anterior era
+  // `sol >= 80 ? COINCIDE : sol > 0 ? PARCIAL : COINCIDE`, así que dos listas con
+  // CERO en común daban los 7 puntos completos.
   facultades: (l, a, def) => {
-    const conjL = l.facultades ?? [], conjA = a.facultades ?? [];
+    const conjL = (l.facultades ?? []).filter(esFacultadReal);
+    const conjA = (a.facultades ?? []).filter(esFacultadReal);
     const admL = l.administracionConjunta, admA = a.administracionConjunta;
+    const firmaA = a.autorizacionFirma;
     const hayL = conjL.length > 0 || typeof admL === 'boolean';
-    const hayA = conjA.length > 0 || typeof admA === 'boolean';
+    const hayA = conjA.length > 0 || typeof admA === 'boolean' || typeof firmaA === 'boolean';
     const pre = estadoPorPresencia(hayL, hayA);
+    const verL = () => (hayL ? [typeof admL === 'boolean' ? `conjunta=${admL}` : '', ...conjL].filter(Boolean).join(' · ') : undefined);
+    const verA = () => (hayA ? [
+      typeof admA === 'boolean' ? `conjunta=${admA}` : '',
+      typeof firmaA === 'boolean' ? `autorización de firma=${firmaA}` : '',
+      ...conjA,
+    ].filter(Boolean).join(' · ') : undefined);
     if (pre) return base(def, pre, {
-      valorLens: hayL ? [`conjunta=${admL}`, ...conjL].join(' · ') : undefined,
-      valorAdmin: hayA ? [`conjunta=${admA}`, ...conjA].join(' · ') : undefined,
+      valorLens: verL(), valorAdmin: verA(),
+      // Se dice qué falta. Ojo con el caso de abajo: Admin declara autorización
+      // de firma y de los documentos no se extrajo ninguna facultad. Eso NO se
+      // marca como discrepancia porque no se puede distinguir "la escritura no
+      // otorga poderes" de "no se pudo leer": es ausencia de evidencia. Queda en
+      // SOLO_ADMIN (0.35) y el texto lo explica para que el analista lo mire.
+      detalle: pre === 'SOLO_ADMIN'
+        ? (firmaA === true
+          ? 'Admin declara autorización de firma y de los documentos no se extrajo ninguna facultad: no se puede confirmar ni desmentir.'
+          : 'Los documentos no traen facultades: Admin sí.')
+        : pre === 'SOLO_LENS' ? 'Admin no declara facultades ni administración conjunta: los documentos sí.'
+        : 'Ninguna de las dos fuentes trae facultades.',
     });
+
+    const r = evaluarFacultades(conjA, conjL, firmaA, admA, admL);
+
     // La administración conjunta es el dato duro: si difiere, discrepa aunque el
     // texto de las facultades se parezca.
-    if (typeof admL === 'boolean' && typeof admA === 'boolean' && admL !== admA) {
-      return base(def, 'DISCREPA', {
-        valorLens: `conjunta=${admL}`, valorAdmin: `conjunta=${admA}`,
-        detalle: 'La administración conjunta declarada no coincide.',
-      });
+    if (r.conjuntaDifiere) {
+      return base(def, 'DISCREPA', { valorLens: verL(), valorAdmin: verA(), detalle: r.detalle });
     }
-    const sol = solapamiento(conjL, conjA);
-    return base(def, sol >= 80 ? 'COINCIDE' : sol > 0 ? 'PARCIAL' : 'COINCIDE', {
-      valorLens: [`conjunta=${admL}`, ...conjL].join(' · '),
-      valorAdmin: [`conjunta=${admA}`, ...conjA].join(' · '),
-      detalle: conjL.length && conjA.length ? `${sol}% de solapamiento en facultades.` : 'Administración conjunta coincide.',
-    });
+    if (!r.comparable) {
+      // Nada que contrastar NO es coincidir. Antes acá se devolvían los 7 puntos.
+      return base(def, 'SIN_DATOS', { valorLens: verL(), valorAdmin: verA(), detalle: r.detalle });
+    }
+    const estado: EstadoComparacion =
+      r.ausentes > 0 ? 'DISCREPA'
+      : r.coberturas.some(c => c.estado === 'PARCIAL') ? 'PARCIAL'
+      : 'COINCIDE';
+    return base(def, estado, { valorLens: verL(), valorAdmin: verA(), detalle: r.detalle });
   },
 
   financiero: (l, a, def) => {

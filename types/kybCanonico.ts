@@ -174,6 +174,10 @@ export interface LadoCanonico {
   // (`signatureAuthorization`, `signatureAuthorizationLegalRepresentatives`),
   // al contrario de lo que se asumió al planificar.
   administracionConjunta?: boolean | null;
+  // `signatureAuthorization` de Admin: es un BOOLEANO, no una lista de poderes.
+  // Guardarlo dentro de `facultades` producía una facultad llamada "true" que
+  // después se comparaba contra el texto de la escritura.
+  autorizacionFirma?: boolean | null;
   facultades?: string[];
 
   // Perfil financiero
