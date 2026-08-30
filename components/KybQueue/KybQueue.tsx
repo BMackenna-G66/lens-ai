@@ -110,8 +110,18 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
     if (ids.length === 0) return;
     setMasivo({ hechas: 0, total: ids.length, actual: '', modo: 'analisis' });
     let ok = 0, err = 0;
-    // Concurrencia 2: cada empresa son N descargas + OCR (CPU) + varias llamadas
-    // a Gemini + N consultas a Regcheq. Más paralelo no va más rápido, satura.
+    // UNA EMPRESA A LA VEZ. Se termina una y recién ahí empieza la siguiente.
+    //
+    // Era 2 y no daba paralelismo real, solo hacía correr dos relojes a la vez.
+    // El OCR ya es serial —hay UN solo worker de Tesseract para toda la app, y
+    // `processOneCompany` lanza los documentos con `Promise.all` sobre ese mismo
+    // worker— así que la segunda empresa gastaba su presupuesto de 240 s
+    // esperando que la primera liberara la cola. Con Admin pasaba lo mismo por
+    // el límite de conexiones por host del navegador.
+    //
+    // Medido sobre un lote de 60: 56 corridas cortadas por tiempo —28 por Admin
+    // y 28 por lectura de documentos— contra 5 completas. Es más lento a
+    // propósito: preferimos que termine a que se corte.
     await runPool(ids, async id => {
       const emp = items.find(i => i.companyId === id);
       setMasivo(m => m ? { ...m, actual: emp?.razonSocial ?? id } : m);
@@ -124,7 +134,7 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
         ok++;
       } catch { err++; }
       setMasivo(m => m ? { ...m, hechas: m.hechas + 1 } : m);
-    }, 2);
+    }, 1);
     setMasivo(null);
     setSeleccion(new Set());
     // Si quedó una ficha abierta, se fuerza la recarga: puede haber sido una de

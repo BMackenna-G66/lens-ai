@@ -84,7 +84,17 @@ async function conTope<T>(fase: string, ms: number, tarea: Promise<T>): Promise<
 }
 
 const TOPES_MS = {
-  admin: 45_000,
+  // 120 s y no 45. El tope tiene que ser MAYOR que el peor caso de lo que
+  // envuelve, y no lo era: `getEmpresaDocsCompany` reintenta `/company/bo` tres
+  // veces con 30 s de timeout cada una más 2 s de backoff — 92 s en el peor
+  // caso. Con 45 s el reintento no podía completarse nunca: el tope de la fase
+  // lo mataba antes y el caso salía como "Admin no respondió" sin haber agotado
+  // los intentos.
+  //
+  // Medido: Admin responde en 0,7-1,3 s de a una empresa, así que este tope no
+  // hace más lento el camino normal — solo deja terminar al reintento cuando el
+  // servicio está lento de verdad.
+  admin: 120_000,
   contexto: 30_000,
   documentos: 240_000,   // descarga + OCR + Gemini de varios documentos
   screening: 180_000,    // una consulta a Regcheq por sujeto
