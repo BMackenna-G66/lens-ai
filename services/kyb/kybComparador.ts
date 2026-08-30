@@ -18,6 +18,7 @@ import {
   COMPONENTES_KYB, type ResultadoComponente, type EstadoComparacion,
   type DefinicionComponente,
 } from '../../types/kybMatriz';
+import { evaluarActividades } from './kybActividad';
 import {
   compararIdentidad, separarIdentidad, canonDocumento,
   type Identidad, type CoincidenciaIdentidad, type EstadoIdentidad,
@@ -301,16 +302,34 @@ const COMPARADORES: Record<string, Comparador> = {
     return base(def, estado, { valorLens: tl, valorAdmin: ta, detalle: `Huella con ${sim}% de coincidencia.` });
   },
 
+  // La comparación va en UN SOLO SENTIDO: por cada giro DECLARADO en Admin se
+  // pregunta si la escritura lo respalda. Ver `kybActividad.ts` para por qué.
+  //
+  // Antes era un solapamiento simétrico y dividía por el lado más largo. Sobre
+  // Ad Astra daba 13 % —1 de 8— cuando las dos actividades declaradas estaban en
+  // la escritura, una de ellas literal. Un objeto social amplio es lo normal y
+  // no puede leerse como discrepancia.
   actividad: (l, a, def) => {
     const listaL = [...(l.actividades ?? []), ...(l.industrias ?? [])];
     const listaA = [...(a.actividades ?? []), ...(a.industrias ?? [])];
     const pre = estadoPorPresencia(listaL.length > 0, listaA.length > 0);
     if (pre) return base(def, pre, { valorLens: listaL.join(' · ') || undefined, valorAdmin: listaA.join(' · ') || undefined });
-    const sol = solapamiento(listaL, listaA);
-    const estado: EstadoComparacion = sol >= 80 ? 'COINCIDE' : sol > 0 ? 'PARCIAL' : 'DISCREPA';
+
+    const r = evaluarActividades(listaA, listaL);
+    // Un giro declarado que la escritura NO respalda es el hallazgo que importa:
+    // el cliente dice operar en algo que su constitución no lo habilita a hacer.
+    // Por eso pesa más que "coincide a medias".
+    const estado: EstadoComparacion =
+      r.ausentes > 0 ? 'DISCREPA'
+      : r.parciales > 0 ? 'PARCIAL'
+      : 'COINCIDE';
     return base(def, estado, {
       valorLens: listaL.join(' · '), valorAdmin: listaA.join(' · '),
-      detalle: `${sol}% de solapamiento entre las actividades declaradas.`,
+      detalle: r.detalle,
+      actividades: r.coberturas.map(c => ({
+        declarada: c.declarada, estado: c.estado, puntaje: c.puntaje,
+        faltantes: c.faltantes, literal: c.literal,
+      })),
     });
   },
 

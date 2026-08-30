@@ -216,6 +216,25 @@ export const KybFicha: React.FC<Props> = ({
                       </span>
                     </span>
                   ))}
+                  {/* Por cada giro DECLARADO, si la escritura lo respalda. Un
+                      porcentaje global no dice CUÁL actividad falta, que es lo
+                      único sobre lo que se puede actuar. */}
+                  {c.actividades?.map((a, i) => (
+                    <span key={i} className="block text-[10px] mt-1">
+                      <span className={
+                        a.estado === 'CUBIERTA' ? 'text-emerald-600 dark:text-emerald-400 font-bold'
+                        : a.estado === 'PARCIAL' ? 'text-amber-600 dark:text-amber-400 font-bold'
+                        : 'text-rose-600 dark:text-rose-400 font-bold'
+                      }>
+                        {a.estado === 'CUBIERTA' ? `✓ ${a.puntaje}%` : a.estado === 'PARCIAL' ? `~ ${a.puntaje}%` : '✕ sin respaldo'}
+                      </span>
+                      <span className="text-slate-500 dark:text-slate-400">
+                        {' · '}{a.declarada}
+                        {a.literal ? ' · está literal en la escritura' : ''}
+                        {a.faltantes.length ? ` · falta: ${a.faltantes.join(', ').toLowerCase()}` : ''}
+                      </span>
+                    </span>
+                  ))}
                   {c.soloEnLens?.length ? <span className="block text-[10px] text-amber-600 dark:text-amber-400">Solo docs: {c.soloEnLens.join(', ')}</span> : null}
                   {c.soloEnAdmin?.length ? <span className="block text-[10px] text-amber-600 dark:text-amber-400">Solo Admin: {c.soloEnAdmin.join(', ')}</span> : null}
                 </td>

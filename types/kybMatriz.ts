@@ -124,6 +124,16 @@ export interface ResultadoComponente {
     motivo: string;
     documentoSospechoso?: boolean;
   }[];
+  // Cobertura por giro declarado: cuál está respaldado por la escritura y cuál
+  // no. Un porcentaje global no dice CUÁL actividad falta, que es lo único
+  // accionable.
+  actividades?: {
+    declarada: string;
+    estado: 'CUBIERTA' | 'PARCIAL' | 'AUSENTE';
+    puntaje: number;
+    faltantes: string[];
+    literal: boolean;
+  }[];
 }
 
 // Factor de aporte de cada estado al porcentaje de certidumbre.
