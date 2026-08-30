@@ -76,7 +76,10 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
   // Es lo que convierte la cola en una cola de casos: se analizan muchas de una
   // y después el analista solo entra a ver resultados.
   const [seleccion, setSeleccion] = useState<Set<string>>(new Set());
-  const [masivo, setMasivo] = useState<{ hechas: number; total: number; actual: string } | null>(null);
+  // `modo` para que el progreso no mienta: las dos acciones masivas comparten
+  // este estado y el botón decía "Analizando" también cuando solo se refrescaba
+  // la ficha desde Admin.
+  const [masivo, setMasivo] = useState<{ hechas: number; total: number; actual: string; modo: 'analisis' | 'ficha' } | null>(null);
 
   const toggleSel = (id: string) => (setConfirmaSalida(false), setSeleccion(s2 => {
     const n = new Set(s2);
@@ -105,7 +108,7 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
   const analizarSeleccionadas = async () => {
     const ids = [...seleccion];
     if (ids.length === 0) return;
-    setMasivo({ hechas: 0, total: ids.length, actual: '' });
+    setMasivo({ hechas: 0, total: ids.length, actual: '', modo: 'analisis' });
     let ok = 0, err = 0;
     // Concurrencia 2: cada empresa son N descargas + OCR (CPU) + varias llamadas
     // a Gemini + N consultas a Regcheq. Más paralelo no va más rápido, satura.
@@ -128,6 +131,51 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
     // las analizadas y mostraría la corrida anterior.
     cargadoPara.current = null;
     setMsg(`✅ ${ok} analizada(s)${err ? ` · ${err} con error` : ''}`);
+  };
+
+  // Refresca la FICHA: vuelve a consultar Admin y regraba el snapshot, sin tocar
+  // los documentos. Es la operación barata —solo llamadas a Admin, nada de OCR,
+  // Gemini ni Regcheq— y es la que hace falta cuando cambió un dato del cliente
+  // pero los documentos son los mismos.
+  //
+  // Es seguro sobre la cola: `decidirEncolado` deja a una empresa abierta con su
+  // antigüedad y su estado intactos, y a una cerrada la actualiza sin devolverla
+  // a la cola. NO se manda `reaperturaManual`, justamente para no resucitar nada.
+  //
+  // Concurrencia 4 y no 2: acá no hay CPU ni modelo, solo red.
+  const actualizarFichaSeleccionadas = async () => {
+    const ids = [...seleccion];
+    if (ids.length === 0) return;
+    setMasivo({ hechas: 0, total: ids.length, actual: '', modo: 'ficha' });
+    let ok = 0, err = 0;
+    await runPool(ids, async id => {
+      const emp = items.find(i => i.companyId === id);
+      setMasivo(m => m ? { ...m, actual: emp?.razonSocial ?? id } : m);
+      try {
+        const detalle = await getEmpresaDocsCompany(id);
+        const est = mapEstadoAdmin(id, detalle);
+        const crudo = detalle.adminRaw as Record<string, unknown> | undefined;
+        await encolarEmpresas([{
+          companyId: id,
+          razonSocial: String(crudo?.name ?? '') || emp?.razonSocial || `Empresa ${id}`,
+          identificacion: String(crudo?.identificationNumber ?? '') || undefined,
+          pais: emp?.pais,
+          complianceStatus: est.complianceStatus,
+          kycStage1: est.kycStage1,
+          riskLevel: est.riskLevel,
+          institucional: est.institucional,
+          origen: emp?.origen ?? 'manual',
+          snapshot: detalle,
+        }]);
+        ok++;
+      } catch { err++; }
+      setMasivo(m => m ? { ...m, hechas: m.hechas + 1 } : m);
+    }, 4);
+    setMasivo(null);
+    setSeleccion(new Set());
+    // La ficha abierta puede ser una de las refrescadas: se fuerza la recarga.
+    cargadoPara.current = null;
+    setMsg(`✅ ${ok} ficha(s) actualizada(s) desde Admin${err ? ` · ${err} con error` : ''}`);
   };
 
   // Preset "cola en vivo": UPLOADED_MANUAL · Chile · todos los estados menos
@@ -745,12 +793,25 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
           {seleccion.size > 0 && (
             <div className="flex flex-wrap items-center gap-3 mb-3 bg-violet-50 dark:bg-violet-950/40 border border-violet-200 dark:border-violet-800/50 rounded-xl px-4 py-2 text-sm">
               <span className="font-semibold text-violet-800 dark:text-violet-300">{seleccion.size} seleccionada(s)</span>
+              {/* Primero la acción barata. Actualizar la ficha son llamadas a
+                  Admin; analizar son descargas + OCR + Gemini + Regcheq por
+                  empresa, y muchas veces lo que cambió es un dato del cliente y
+                  no los documentos. */}
+              <button
+                onClick={actualizarFichaSeleccionadas}
+                disabled={!!masivo}
+                className="px-4 py-1.5 rounded-xl border border-violet-300 dark:border-violet-700 text-violet-700 dark:text-violet-300 hover:bg-violet-100 dark:hover:bg-violet-900/40 disabled:opacity-50 text-xs font-bold"
+                title="Vuelve a consultar Admin y regraba el snapshot. No re-lee los documentos."
+              >
+                {masivo?.modo === 'ficha' ? `Actualizando ${masivo.hechas}/${masivo.total}…` : `Actualizar ficha (${seleccion.size})`}
+              </button>
               <button
                 onClick={analizarSeleccionadas}
                 disabled={!!masivo}
                 className="px-4 py-1.5 rounded-xl bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white text-xs font-bold"
+                title="Re-lee los documentos con el modelo y vuelve a correr la matriz y el screening."
               >
-                {masivo ? `Analizando ${masivo.hechas}/${masivo.total}…` : `Analizar ${seleccion.size}`}
+                {masivo?.modo === 'analisis' ? `Analizando ${masivo.hechas}/${masivo.total}…` : `Analizar ${seleccion.size}`}
               </button>
               {masivo?.actual && (
                 <span className="text-xs text-violet-700 dark:text-violet-400 truncate">{masivo.actual}</span>
