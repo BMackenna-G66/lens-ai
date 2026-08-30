@@ -153,13 +153,13 @@ export const KybFicha: React.FC<Props> = ({
         </div>
       )}
 
-      {/* Matriz de los 11. Las tres lecturas van una al lado de la otra en la
+      {/* Matriz de los 8. Las tres lecturas van una al lado de la otra en la
           MISMA fila: Admin (la fuente de verdad operativa), lo que Lens sacó de
           los documentos, y el resultado de cruzarlas. Separarlas en tres tablas
           obligaría a saltar entre ellas para comparar un solo campo. */}
       <div className="flex items-baseline justify-between gap-3 mb-2">
         <h3 className="text-sm font-black text-slate-800 dark:text-slate-200">
-          Matriz de 11 componentes — Admin · Lens · resultado
+          Matriz de 8 componentes — Admin · Lens · resultado
         </h3>
         <span className="text-[10px] text-slate-400 dark:text-slate-500">
           el denominador es fijo (100): un componente sin dato NO se redistribuye
@@ -459,7 +459,7 @@ export const KybFicha: React.FC<Props> = ({
   );
 };
 
-// Matriz vacía cuando todavía no hay análisis: se muestran los 11 en gris para
+// Matriz vacía cuando todavía no hay análisis: se muestran los 8 en gris para
 // que se vea QUÉ se va a comparar, en vez de una tabla en blanco.
 function placeholders(): ResultadoComponente[] {
   return COMPONENTES_KYB.map(c => ({

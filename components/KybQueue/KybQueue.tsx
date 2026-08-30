@@ -401,7 +401,7 @@ export const KybQueue: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }
         <div className="text-center flex-1">
           <h1 className="text-2xl md:text-3xl font-black text-slate-900 dark:text-white">🏢 Cola KYB · Empresas</h1>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-            KYC de empresas: documentos contra Admin, 11 componentes y certidumbre explicable
+            KYC de empresas: documentos contra Admin, 8 componentes y certidumbre explicable
           </p>
         </div>
         <button onClick={onToggleDarkMode} className="text-xs px-3 py-2 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700">

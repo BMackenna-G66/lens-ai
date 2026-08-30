@@ -21,6 +21,7 @@ import type { LadoCanonico, EstadoAdminEmpresa, PersonaCanonica } from '../../ty
 import type { EmpresaDocsContexto, EmpresaDocsDocument } from '../../types/empresaDocs';
 import type { ResultadoComponente } from '../../types/kybMatriz';
 import type { AlertaKyb, SeveridadAlertaKyb } from '../../types/kyb';
+import { compararMontos } from './kybNormalizadores';
 import { normalizarTexto } from '../casosComplianceMapper';
 import { rutValido, limpiarRut, fechaAIso } from './kybNormalizadores';
 import { categoriasSensibles } from '../delitosSensibles';
@@ -349,7 +350,21 @@ export const ALERTAS_KYB: DefinicionAlerta[] = [
   },
   {
     codigo: 'DOC_034', label: 'Cifras financieras fuera de tolerancia entre fuentes', severidad: 'PREVENTIVA',
-    predicado: c => estadoDe(c, 'financiero') === 'DISCREPA' ? comp(c, 'financiero')?.detalle ?? null : null,
+    // Lee los VALORES, no el componente. El componente `financiero` se sacó de la
+    // matriz porque ninguna fuente lo informaba en la práctica y aportaba 0
+    // puntos siempre; si esta alerta siguiera leyéndolo, dejaría de dispararse en
+    // silencio. La comparación de montos vale igual aunque no pese en el score.
+    predicado: c => {
+      const campos: [string, number | null | undefined, number | null | undefined][] = [
+        ['Facturación anual', c.lens.facturacionAnualEstimada?.valor, c.admin.facturacionAnualEstimada?.valor],
+        ['Ingreso mensual', c.lens.ingresoMensual?.valor, c.admin.ingresoMensual?.valor],
+        ['Egreso mensual', c.lens.egresoMensual?.valor, c.admin.egresoMensual?.valor],
+        ['Activos', c.lens.activosTotales?.valor, c.admin.activosTotales?.valor],
+        ['Pasivos', c.lens.pasivosTotales?.valor, c.admin.pasivosTotales?.valor],
+      ];
+      const fuera = campos.filter(([, x, y]) => compararMontos(x, y) === 'DISCREPA').map(([n]) => n);
+      return fuera.length ? `Fuera de tolerancia: ${fuera.join(', ')}` : null;
+    },
   },
   {
     codigo: 'DOC_035', label: 'Sin información financiera en ninguna fuente', severidad: 'PREVENTIVA',

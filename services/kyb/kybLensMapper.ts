@@ -54,6 +54,50 @@ const partir = (v: string): string[] =>
 // 7 u 8 palabras. Una cláusula de escritura arranca en 13.
 const MAX_PALABRAS_NOMBRE = 8;
 
+// ── Camino nuevo: una persona por línea, "NOMBRE | DOCUMENTO | DATO" ───────
+// Es lo que el prompt le pide ahora al modelo. El formato existe porque en prosa
+// se perdían personas y datos: sobre una empresa real, "Fabián Ignacio Vergara
+// Vega y Emerson Rodrigo" entraba como UNA sola persona con el apellido del
+// segundo cortado, y de dos accionistas al 50 % se extraía uno y sin porcentaje.
+//
+// El parser tolera las dos formas: si la línea trae "|" se lee estructurada, y si
+// no, se cae al camino de prosa. Hace falta porque los análisis ya guardados y
+// cualquier desvío del modelo tienen que seguir funcionando.
+function personaDeLinea(linea: string, rol?: string): PersonaCanonica | null {
+  const partes = linea.split('|').map(x => x.trim());
+  if (partes.length < 2) return null;
+  const [nombreCrudo, docCrudo, datoCrudo] = partes;
+
+  const nombre = nombreAlPrincipio(nombreCrudo) || '';
+  if (!nombre) return null;
+
+  const sinDoc = /^(sin\s*documento|no especificado|n\/?a|-)?$/i.test((docCrudo ?? '').trim());
+  const documento = sinDoc ? '' : normalizarDocumento(docCrudo);
+
+  // El tercer campo es el porcentaje para accionistas y el cargo para
+  // representantes. Se distingue por el contenido, no por la posición.
+  const dato = (datoCrudo ?? '').trim();
+  const mPct = dato.match(/(\d+(?:[.,]\d+)?)\s*%/);
+  const participacionPct = mPct ? Number(mPct[1].replace(',', '.')) : null;
+  const cargo = !mPct && dato && !/^(sin\s*porcentaje|no especificado|n\/?a|-)$/i.test(dato) ? dato : undefined;
+
+  return {
+    nombre, documento, tipoDocumento: '',
+    clave: clavePersona(nombre, documento),
+    rol: cargo || rol,
+    ...(participacionPct !== null ? { participacionPct } : {}),
+  };
+}
+
+// Varias personas nombradas juntas: "Juan Pérez y María Soto". Se separan solo
+// si LOS DOS lados parecen un nombre — así "Ortega y Gasset" no se parte.
+function partirPorConjuncion(trozo: string): string[] {
+  const m = trozo.split(/\s+[yY]\s+|\s+&\s+/);
+  if (m.length < 2) return [trozo];
+  const partes = m.map(x => x.trim()).filter(Boolean);
+  return partes.every(x => nombreAlPrincipio(x)) ? partes : [trozo];
+}
+
 function personaDeTexto(texto: string, rol?: string): PersonaCanonica | null {
   const limpio = texto.replace(/\s+/g, ' ').trim();
   if (!limpio) return null;
@@ -110,10 +154,18 @@ function personaDeTexto(texto: string, rol?: string): PersonaCanonica | null {
   const confirma = documento !== '' && (rotulado || rutValido(documento));
   if (!confirma && nombre.split(/\s+/).length > MAX_PALABRAS_NOMBRE) return null;
 
+  // El porcentaje de participación, si el trozo lo trae. Se busca en el texto
+  // ORIGINAL, no en el nombre recortado: el recorte corta justo antes del "50 %".
+  // Antes no se extraía nunca del lado documentos, así que el componente de
+  // accionistas comparaba nombres sin participación contra Admin que sí la trae.
+  const mPct = limpio.match(/(\d{1,3}(?:[.,]\d+)?)\s*%/);
+  const participacionPct = mPct ? Number(mPct[1].replace(',', '.')) : null;
+
   return {
     nombre, documento, tipoDocumento: '',
     clave: clavePersona(nombre, documento),
     rol,
+    ...(participacionPct !== null && participacionPct <= 100 ? { participacionPct } : {}),
   };
 }
 
@@ -159,11 +211,22 @@ export function mapLensALadoCanonico(campos: ExtractedField[] | undefined): Lado
       ? undefined
       : PATRONES_PERSONAS.find(p => p.patron.test(nombreCampo));
     if (reglaPersona) {
-      for (const trozo of partir(valor)) {
-        const p = personaDeTexto(trozo, reglaPersona.rol);
-        if (p) personas[reglaPersona.destino].push(
+      // Línea por línea PRIMERO: el formato nuevo usa "|" como separador de
+      // campos y `partir` corta justamente en "|", así que aplicarlo antes
+      // destrozaría cada persona en tres pedazos.
+      const agregar = (p: PersonaCanonica | null) => {
+        if (!p) return;
+        personas[reglaPersona.destino].push(
           reglaPersona.destino === 'representantesLegales' ? { ...p, esRepresentanteLegal: true } : p,
         );
+      };
+      for (const linea of valor.split(/\r?\n/).map(x => x.trim()).filter(Boolean)) {
+        if (linea.includes('|')) { agregar(personaDeLinea(linea, reglaPersona.rol)); continue; }
+        // Prosa: se parte por los separadores de siempre y además por la
+        // conjunción, que juntaba dos personas en una.
+        for (const trozo of partir(linea)) {
+          for (const sub of partirPorConjuncion(trozo)) agregar(personaDeTexto(sub, reglaPersona.rol));
+        }
       }
       continue;
     }

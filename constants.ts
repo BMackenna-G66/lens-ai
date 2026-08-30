@@ -67,6 +67,31 @@ Si el documento es de China, utiliza esta guía de mapeo para identificar los ca
 - Distribución de Utilidades: Profit Distribution
 - Medio de Comunicación: Official Communication / Notices
 
+**INSTRUCCIONES PARA LOS CAMPOS DE PERSONAS** ("Representante Legal", "Accionistas y aportes"):
+Estos campos alimentan una comparación automática contra el registro del cliente,
+así que NO uses prosa. Devuelve **UNA PERSONA POR LÍNEA** con este formato exacto:
+
+NOMBRE COMPLETO | DOCUMENTO | DATO
+
+- **NOMBRE COMPLETO**: todos los nombres y apellidos como figuran en el documento.
+  NUNCA abrevies, ni cortes un apellido, ni uses iniciales. Si el apellido materno
+  aparece, inclúyelo.
+- **Si el documento nombra a varias personas juntas** —"Juan Pérez y María Soto",
+  o separadas por comas— son LÍNEAS DISTINTAS, una por persona. Nunca las juntes.
+- **DOCUMENTO**: RUT, cédula, DNI o pasaporte con su formato original. Si el
+  documento no lo dice, escribe exactamente: sin documento
+- **DATO**: para "Accionistas y aportes", el PORCENTAJE de participación (ej: 50%).
+  Si el documento da acciones y no porcentaje, calcúlalo sobre el total y escríbelo
+  igual. Si no se puede, escribe: sin porcentaje
+  Para "Representante Legal", el CARGO (ej: Gerente General).
+
+Ejemplo de "Accionistas y aportes":
+JUAN ANDRÉS PÉREZ SOTO | 12.345.678-9 | 50%
+MARÍA JOSÉ GONZÁLEZ RUIZ | 9.876.543-2 | 50%
+
+Ejemplo de "Representante Legal":
+JUAN ANDRÉS PÉREZ SOTO | 12.345.678-9 | Gerente General
+
 **INSTRUCCIONES PARA "Análisis de Facultades Específicas":**
 Busca estas facultades y devuelve un JSON stringified con estas claves exactas:
 - "compraVentaBienes": true/false (comprar, vender, enajenar bienes).

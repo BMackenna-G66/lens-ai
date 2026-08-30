@@ -8,7 +8,7 @@
 // Secuencia:
 //   1. Admin — ficha, personas, malla societaria y contexto (T&C, segmentación)
 //   2. Documentos — descarga + OCR + extracción con el pipeline que ya existe
-//   3. Comparación de los 11 componentes (puro)
+//   3. Comparación de los 8 componentes (puro)
 //   4. Certidumbre explicable (puro)
 //   5. Persistencia en la subcolección analisis/{runId}
 //
@@ -252,7 +252,7 @@ export async function analizarEmpresa(
   }
 
   // ── 3 y 4. Comparación y certidumbre (puros) ──
-  onProgreso?.({ fase: 'Comparando los 11 componentes' });
+  onProgreso?.({ fase: 'Comparando los 8 componentes' });
   const componentes = compararKyb(lens, admin);
 
   // Las 36 alertas del catálogo. Las que no se pueden evaluar por falta de fuente

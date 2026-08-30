@@ -1,6 +1,6 @@
 // Motor de certidumbre del KYB. Función PURA.
 //
-// Convierte los 11 componentes comparados en un porcentaje EXPLICABLE. La
+// Convierte los 8 componentes comparados en un porcentaje EXPLICABLE. La
 // invariante que hace que sea auditable:
 //
 //     razones.reduce((s, r) => s + r.delta, 0) === certidumbre

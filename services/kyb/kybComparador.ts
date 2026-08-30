@@ -1,8 +1,8 @@
-// Comparador de los 11 componentes del KYB. Funciones PURAS, sin red.
+// Comparador de los 8 componentes del KYB. Funciones PURAS, sin red.
 //
 // Recibe los dos lados ya en forma canónica (kybAdminMapper para Admin, el
 // pipeline de Lens para los documentos) y devuelve un ResultadoComponente por
-// cada uno de los 11. NO calcula el porcentaje: eso es del motor de certidumbre.
+// cada uno de los 8. NO calcula el porcentaje: eso es del motor de certidumbre.
 //
 // Reglas transversales:
 //   · Si NINGÚN lado aporta el dato → SIN_DATOS (no es culpa de la empresa, pero
@@ -27,7 +27,7 @@ import {
 } from './kybIdentidad';
 import {
   normalizarRazonSocial, similitudNombre, CORTES_NOMBRE, rutValido, limpiarRut,
-  mismaFecha, fechaAIso, compararMontos,
+  mismaFecha, fechaAIso,
 } from './kybNormalizadores';
 
 const hay = (v: unknown): boolean =>
@@ -207,17 +207,6 @@ type Comparador = (lens: LadoCanonico, admin: LadoCanonico, def: DefinicionCompo
 const base = (def: DefinicionComponente, estado: EstadoComparacion, extra: Partial<ResultadoComponente> = {}): ResultadoComponente =>
   ({ id: def.id, label: def.label, peso: def.peso, estado, ...extra });
 
-// Componente de FUENTE ÚNICA: no se compara, se valida que el dato exista.
-function validarFuenteUnica(def: DefinicionComponente, presente: boolean, valor?: string): ResultadoComponente {
-  return base(def, presente ? 'COINCIDE' : 'SIN_DATOS', {
-    valorLens: def.fuente === 'SOLO_LENS' ? valor : undefined,
-    valorAdmin: def.fuente === 'SOLO_ADMIN' ? valor : undefined,
-    detalle: presente
-      ? 'Fuente única: el dato está presente y no requiere contraparte.'
-      : 'Fuente única: el dato no está.',
-  });
-}
-
 const COMPARADORES: Record<string, Comparador> = {
   razon_social: (l, a, def) => {
     const pre = estadoPorPresencia(hay(l.razonSocial), hay(a.razonSocial));
@@ -266,16 +255,6 @@ const COMPARADORES: Record<string, Comparador> = {
       detalle, emparejados: e.pares.length, identidades: identidadesDe(e),
       soloEnLens: nombres(e.soloLens), soloEnAdmin: nombres(e.soloAdmin),
       valorLens: listaNombres(l.accionistas), valorAdmin: listaNombres(a.accionistas),
-    });
-  },
-
-  directorio: (l, a, def) => {
-    const e = emparejarPersonas(l.directorio, a.directorio);
-    const { estado, detalle } = estadoPersonas(e);
-    return base(def, estado, {
-      detalle, emparejados: e.pares.length, identidades: identidadesDe(e),
-      soloEnLens: nombres(e.soloLens), soloEnAdmin: nombres(e.soloAdmin),
-      valorLens: listaNombres(l.directorio), valorAdmin: listaNombres(a.directorio),
     });
   },
 
@@ -408,43 +387,10 @@ const COMPARADORES: Record<string, Comparador> = {
     return base(def, estado, { valorLens: verL(), valorAdmin: verA(), detalle: r.detalle });
   },
 
-  financiero: (l, a, def) => {
-    const campos: [string, number | null | undefined, number | null | undefined][] = [
-      ['Facturación anual', l.facturacionAnualEstimada?.valor, a.facturacionAnualEstimada?.valor],
-      ['Ingreso mensual', l.ingresoMensual?.valor, a.ingresoMensual?.valor],
-      ['Egreso mensual', l.egresoMensual?.valor, a.egresoMensual?.valor],
-      ['Activos', l.activosTotales?.valor, a.activosTotales?.valor],
-      ['Pasivos', l.pasivosTotales?.valor, a.pasivosTotales?.valor],
-    ];
-    const comparables = campos.map(([n, x, y]) => [n, compararMontos(x, y)] as const).filter(([, r]) => r !== null);
-    if (comparables.length === 0) {
-      const hayL = campos.some(([, x]) => x !== null && x !== undefined);
-      const hayA = campos.some(([, , y]) => y !== null && y !== undefined);
-      return base(def, estadoPorPresencia(hayL, hayA) ?? 'SIN_DATOS', {
-        detalle: 'No hay ningún monto con dato en los dos lados.',
-      });
-    }
-    const discrepan = comparables.filter(([, r]) => r === 'DISCREPA');
-    const parciales = comparables.filter(([, r]) => r === 'PARCIAL');
-    const estado: EstadoComparacion = discrepan.length > 0 ? 'DISCREPA'
-      : parciales.length > 0 ? 'PARCIAL' : 'COINCIDE';
-    return base(def, estado, {
-      detalle: [
-        `${comparables.length} monto(s) comparados`,
-        discrepan.length ? `fuera de tolerancia: ${discrepan.map(([n]) => n).join(', ')}` : '',
-        parciales.length ? `en tolerancia amplia: ${parciales.map(([n]) => n).join(', ')}` : '',
-      ].filter(Boolean).join(' · '),
-    });
-  },
-
-  estructura: (_l, a, def) => validarFuenteUnica(
-    def, (a.relaciones ?? []).length > 0,
-    `${(a.relaciones ?? []).length} relación(es)`,
-  ),
 };
 
 // ── Entrada principal ────────────────────────────────────────────────────────
-// Devuelve SIEMPRE los 11, en el orden del catálogo. Un componente sin
+// Devuelve SIEMPRE los 8, en el orden del catálogo. Un componente sin
 // comparador definido sale como SIN_DATOS en vez de desaparecer: si falta uno, se
 // tiene que ver en la matriz.
 export function compararKyb(lens: LadoCanonico, admin: LadoCanonico): ResultadoComponente[] {

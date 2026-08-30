@@ -1,9 +1,20 @@
-// MANTENEDOR de los 11 componentes de la matriz KYB y sus pesos.
+// MANTENEDOR de los 8 componentes de la matriz KYB y sus pesos.
 //
-// Eran 12. `forma_legal` (peso 8) se sacó por pedido del negocio: no se evalúa
-// ni se muestra más. Sus 8 puntos se repartieron sobre los 11 restantes por
-// resto mayor, que preserva el orden relativo exacto — sacar un campo no puede
-// cambiar de paso qué componente pesa más que cuál. El denominador sigue en 100.
+// Eran 12. Se sacaron cuatro por pedido del negocio, porque no aportan al
+// análisis:
+//
+//   forma_legal (8)   — el tipo societario ya va dentro de la razón social
+//   financiero  (6)   — ninguna de las dos fuentes lo informa en la práctica
+//   directorio  (5)   — no llega dato de `board-member` y salía SIN_DATOS siempre
+//   estructura  (4)   — solo Admin la tiene y venía vacía
+//
+// Los tres últimos, medidos sobre la cola: aportaban 0 puntos en todas las
+// empresas. Un componente que nunca puede sumar no mide nada y además hunde el
+// denominador — eran 15 de 100 inalcanzables por diseño.
+//
+// Los 23 puntos se repartieron por resto mayor, que preserva el orden relativo
+// exacto: sacar componentes no puede cambiar de paso cuál pesa más que cuál. El
+// denominador sigue fijo en 100.
 //
 // ⚠️ ESTA ES UNA PROPUESTA, no una definición firmada. El plan la marca como
 // definición de negocio pendiente. Está armada sobre lo que Admin REALMENTE
@@ -31,7 +42,7 @@ export type FuenteComponente = 'AMBAS' | 'SOLO_LENS' | 'SOLO_ADMIN';
 export interface DefinicionComponente {
   id: string;
   label: string;
-  peso: number;                  // los 11 suman 100
+  peso: number;                  // los 8 suman 100
   fuente: FuenteComponente;      // AMBAS = se compara · resto = se valida
   // true = una discrepancia acá es de IDENTIDAD y frena el flujo automático en
   // las dos direcciones: significa que los datos están mal, no la empresa.
@@ -41,48 +52,36 @@ export interface DefinicionComponente {
 
 export const COMPONENTES_KYB: DefinicionComponente[] = [
   {
-    id: 'razon_social', label: 'Razón social', peso: 13, fuente: 'AMBAS', esIdentidad: true,
+    id: 'razon_social', label: 'Razón social', peso: 15, fuente: 'AMBAS', esIdentidad: true,
     descripcion: 'Nombre legal de la empresa, sin sufijos societarios (SPA, LTDA, SAS).',
   },
   {
-    id: 'identificacion', label: 'Identificación tributaria', peso: 13, fuente: 'AMBAS', esIdentidad: true,
+    id: 'identificacion', label: 'Identificación tributaria', peso: 15, fuente: 'AMBAS', esIdentidad: true,
     descripcion: 'RUT / NIT con su tipo. En Chile se valida el dígito verificador (módulo 11).',
   },
   {
-    id: 'representantes', label: 'Representantes legales', peso: 13, fuente: 'AMBAS', esIdentidad: true,
+    id: 'representantes', label: 'Representantes legales', peso: 15, fuente: 'AMBAS', esIdentidad: true,
     descripcion: 'Personas con poder de representación. Se emparejan por documento y, si no hay, por nombre.',
   },
   {
-    id: 'accionistas', label: 'Accionistas / beneficiarios finales', peso: 12, fuente: 'AMBAS',
+    id: 'accionistas', label: 'Accionistas / beneficiarios finales', peso: 14, fuente: 'AMBAS',
     descripcion: 'Socios y beneficiarios finales. En Admin vienen como dict {categoría: [personas]}.',
   },
   {
-    id: 'constitucion', label: 'Constitución', peso: 9, fuente: 'AMBAS',
+    id: 'constitucion', label: 'Constitución', peso: 11, fuente: 'AMBAS',
     descripcion: 'Fecha de constitución y número de escritura.',
   },
   {
-    id: 'domicilio', label: 'Domicilio', peso: 9, fuente: 'AMBAS',
+    id: 'domicilio', label: 'Domicilio', peso: 11, fuente: 'AMBAS',
     descripcion: 'Dirección legal. Se compara por huella normalizada, no por texto literal.',
   },
   {
-    id: 'actividad', label: 'Actividad económica', peso: 9, fuente: 'AMBAS',
+    id: 'actividad', label: 'Actividad económica', peso: 11, fuente: 'AMBAS',
     descripcion: 'Giro e industria. Admin la reparte en cinco campos distintos; se unifican.',
   },
   {
-    id: 'facultades', label: 'Facultades y firma', peso: 7, fuente: 'AMBAS',
+    id: 'facultades', label: 'Facultades y firma', peso: 8, fuente: 'AMBAS',
     descripcion: 'Administración conjunta y facultades de firma. Admin SÍ los trae.',
-  },
-  {
-    id: 'financiero', label: 'Perfil financiero', peso: 6, fuente: 'AMBAS',
-    descripcion: 'Facturación, ingresos, egresos, activos y pasivos. Con tolerancia relativa.',
-  },
-  {
-    id: 'directorio', label: 'Directorio', peso: 5, fuente: 'AMBAS',
-    descripcion: 'Miembros del directorio (board-member).',
-  },
-  {
-    id: 'estructura', label: 'Estructura societaria', peso: 4, fuente: 'SOLO_ADMIN',
-    descripcion: 'Malla de relaciones. Solo Admin la tiene: se valida que exista, no se compara.',
   },
 ];
 
