@@ -26,6 +26,15 @@ export interface CompanyProcessResult {
 export interface ProcessCallbacks {
   onDocOcr: (docId: string, status: 'done' | 'error', error?: string) => void;
   onPhase: (label: string) => void;
+  // Tope de páginas por documento para el OCR. OPCIONAL: sin esto se leen todas,
+  // que es lo que hace el Lens clásico y no cambia.
+  //
+  // La cola KYB sí lo usa: el OCR recorre página por página renderizando a
+  // escala 2.0, y una escritura escaneada de 40 páginas consume varios minutos
+  // en UN documento contra un presupuesto por empresa.
+  maxPaginasOcr?: number;
+  // Se llama cuando el tope recortó un documento, con el nombre y las páginas.
+  onTopePaginas?: (fileName: string, leidas: number, total: number) => void;
 }
 
 // Pure processing function — no React state, no side effects beyond callbacks.
@@ -33,7 +42,7 @@ export interface ProcessCallbacks {
 export async function processOneCompany(
   company: BatchCompanyInput,
   mode: BatchMode,
-  { onDocOcr, onPhase }: ProcessCallbacks
+  { onDocOcr, onPhase, maxPaginasOcr, onTopePaginas }: ProcessCallbacks
 ): Promise<CompanyProcessResult> {
 
   // ── Phase 1: OCR all docs in parallel ──────────────────────────────────────
@@ -62,7 +71,9 @@ export async function processOneCompany(
         throw new Error('Sin archivo ni blob disponible');
       }
 
-      const text = await getTextFromFile(file);
+      const text = await getTextFromFile(file, undefined, maxPaginasOcr
+        ? { maxPaginasOcr, onTope: (leidas, total) => onTopePaginas?.(doc.fileName, leidas, total) }
+        : undefined);
       textByIndex[i] = text;
       onDocOcr(doc.id, 'done');
     } catch (err) {

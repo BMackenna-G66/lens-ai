@@ -96,9 +96,24 @@ const TOPES_MS = {
   // servicio está lento de verdad.
   admin: 120_000,
   contexto: 30_000,
-  documentos: 240_000,   // descarga + OCR + Gemini de varios documentos
+  // Presupuesto POR DOCUMENTO, no por empresa. Antes eran 240 s fijos para
+  // todos juntos: una empresa con 8 documentos tenía 30 s por documento y una
+  // con 1 tenía 240 s para el mismo trabajo. Medido: el corte más frecuente era
+  // "Lectura de documentos: no respondió en 240s".
+  //
+  // La causa de fondo es el OCR, que recorre TODAS las páginas del PDF
+  // renderizando a escala 2.0 y pasando Tesseract por cada una. Con el tope de
+  // páginas de abajo el trabajo por documento queda acotado, y este presupuesto
+  // escala con la cantidad.
+  documentosPorDoc: 60_000,
+  documentosMin: 240_000,   // piso: nunca menos que antes
+  documentosMax: 900_000,   // techo: 15 min, para que un lote no quede colgado
   screening: 180_000,    // una consulta a Regcheq por sujeto
 } as const;
+
+// Páginas que se le pasan al OCR por documento. Si el PDF tiene más, se leen las
+// primeras: en una escritura la identidad está al principio.
+const MAX_PAGINAS_OCR = 15;
 
 const runId = (hash: string): string => `${new Date().toISOString().replace(/[:.]/g, '-')}_${hash}`;
 
@@ -211,7 +226,15 @@ export async function analizarEmpresa(
     }
   } else {
     try {
-      const entradas = await aDocumentosDePipeline(documentos.slice(0, maxDocumentos), onProgreso);
+      const recortados: string[] = [];
+      const aLeer = documentos.slice(0, maxDocumentos);
+      const entradas = await aDocumentosDePipeline(aLeer, onProgreso);
+      // El presupuesto crece con la cantidad de documentos, entre el piso
+      // histórico y un techo de 15 minutos.
+      const topeDocs = Math.min(
+        TOPES_MS.documentosMax,
+        Math.max(TOPES_MS.documentosMin, aLeer.length * TOPES_MS.documentosPorDoc),
+      );
       const entrada: BatchCompanyInput = {
         id: companyId,
         companyName: admin.razonSocial ?? companyId,
@@ -221,10 +244,20 @@ export async function analizarEmpresa(
         source: 'empresa_docs',
         documents: entradas,
       };
-      const resultado = await conTope('Lectura de documentos', TOPES_MS.documentos,
+      const resultado = await conTope('Lectura de documentos', topeDocs,
         processOneCompany(entrada, 'individual', {
           onDocOcr: () => {},
           onPhase: (label) => onProgreso?.({ fase: label }),
+          // En una escritura la identidad —RUT, razón social, comparecencia,
+          // capital, objeto social— está en las primeras páginas; las últimas son
+          // firmas y timbres. OCR'ear 40 páginas para encontrar lo que está en las
+          // primeras 15 es lo que reventaba el presupuesto.
+          maxPaginasOcr: MAX_PAGINAS_OCR,
+          // Un documento leído parcial se DICE. Va a `faltantes`, que es lo que
+          // impide decidir a ciegas: si la identidad estaba en la página 30, el
+          // analista tiene que saber que no se miró.
+          onTopePaginas: (nombre, leidas, total) =>
+            recortados.push(`${nombre}: se leyeron ${leidas} de ${total} páginas`),
         }));
       const crudo = (resultado.extractedData ?? []) as ExtractedField[];
       // Se guarda ANTES de mapear: el mapeo descarta lo que no matchea una regla
@@ -233,6 +266,9 @@ export async function analizarEmpresa(
         .filter(f => f && f.field)
         .map(f => ({ campo: String(f.field), valor: String(f.value ?? '').trim() }));
       lens = mapLensALadoCanonico(crudo);
+      if (recortados.length) {
+        faltantes.push(`OCR limitado a ${MAX_PAGINAS_OCR} páginas por documento — ${recortados.join(' · ')}`);
+      }
       const faltaLens = faltantesLens(lens);
       if (faltaLens.length > 0) {
         estado = 'INCOMPLETO';
@@ -242,8 +278,21 @@ export async function analizarEmpresa(
         faltantes.push(`Se analizaron ${maxDocumentos} de ${documentos.length} documentos`);
       }
     } catch (e) {
-      estado = 'ERROR';
-      mensajeError = e instanceof Error ? e.message : String(e);
+      const msg = e instanceof Error ? e.message : String(e);
+      // Un CORTE POR TIEMPO no invalida la corrida: el lado de Admin ya se leyó
+      // bien y sus componentes pueden puntuar. Antes esto iba a ERROR y la
+      // empresa perdía TODO —incluida la identidad que Admin ya había dado— por
+      // un documento escaneado largo.
+      //
+      // ERROR queda para lo que de verdad significa "volvé a correrlo": un fallo
+      // del pipeline, no un presupuesto agotado.
+      if (/no respondió en \d+s/.test(msg)) {
+        estado = 'INCOMPLETO';
+        faltantes.push(`No se pudieron leer los documentos a tiempo (${msg}). Los datos de Admin sí se leyeron.`);
+      } else {
+        estado = 'ERROR';
+        mensajeError = msg;
+      }
     }
   }
 

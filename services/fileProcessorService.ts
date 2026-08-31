@@ -52,15 +52,33 @@ export const terminateTesseractWorker = async (): Promise<void> => {
 };
 
 
+// `maxPaginasOcr` es OPCIONAL y por defecto no limita nada: el Lens clásico
+// sigue leyendo el documento entero, exactamente como antes.
+//
+// Existe porque el bucle de OCR recorre TODAS las páginas, renderizando a escala
+// 2.0 y pasando Tesseract por cada una. Una escritura escaneada de 40 páginas son
+// 40 renders más 40 reconocimientos: varios minutos para UN documento. La cola
+// KYB tiene un presupuesto por empresa y con eso se le iba entero — medido:
+// "Lectura de documentos: no respondió en 240s".
+export interface OpcionesTexto {
+  maxPaginasOcr?: number;
+  // Avisa cuando el tope RECORTÓ el documento. Sin esto se leerían 15 de 40
+  // páginas en silencio, que es exactamente lo que una herramienta de compliance
+  // no puede hacer: quien revisa tiene que saber que el documento se leyó
+  // parcial.
+  onTope?: (leidas: number, total: number) => void;
+}
+
 export const getTextFromFile = async (
   file: File,
-  onProgress?: (progress: number, status: string) => void
+  onProgress?: (progress: number, status: string) => void,
+  opciones?: OpcionesTexto,
 ): Promise<string> => {
   return new Promise((resolve, reject) => {
     console.log(`Processing file type: ${file.type}`);
 
     if (file.type === 'application/pdf') {
-      extractTextFromPdfWithOcr(file, onProgress).then(resolve).catch(reject);
+      extractTextFromPdfWithOcr(file, onProgress, opciones).then(resolve).catch(reject);
     } else if (file.type === 'text/plain') {
       extractTextFromTxt(file).then(resolve).catch(reject);
     } else if (
@@ -140,7 +158,8 @@ const extractTextFromImageWithOcr = async (
 
 const extractTextFromPdfWithOcr = async (
   file: File,
-  onProgress?: (progress: number, status: string) => void
+  onProgress?: (progress: number, status: string) => void,
+  opciones?: OpcionesTexto,
 ): Promise<string> => {
   console.log(`[extractTextFromPdfWithOcr] Starting OCR text extraction for ${file.name}`);
   let pdfDocProxy: PDFDocumentProxy | null = null;
@@ -160,7 +179,19 @@ const extractTextFromPdfWithOcr = async (
     const worker = await getTesseractWorker();
 
     let fullText = '';
-    const totalPages = pdfDocProxy.numPages;
+    // Tope de páginas para el OCR. Sin `maxPaginasOcr` se leen todas, que es el
+    // comportamiento histórico. Con tope se leen las PRIMERAS N: en una escritura
+    // la identidad —RUT, razón social, comparecencia, capital, objeto social—
+    // está al principio, y las últimas páginas son firmas y timbres.
+    const paginasDelPdf = pdfDocProxy.numPages;
+    const tope = opciones?.maxPaginasOcr && opciones.maxPaginasOcr > 0
+      ? Math.min(opciones.maxPaginasOcr, paginasDelPdf)
+      : paginasDelPdf;
+    const totalPages = tope;
+    if (tope < paginasDelPdf) {
+      console.log(`[extractTextFromPdfWithOcr] Tope de OCR: ${tope} de ${paginasDelPdf} páginas`);
+      opciones?.onTope?.(tope, paginasDelPdf);
+    }
     for (let i = 1; i <= totalPages; i++) {
       console.log(`[extractTextFromPdfWithOcr] Rendering page ${i} of ${totalPages} for OCR`);
 
