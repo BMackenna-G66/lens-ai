@@ -437,6 +437,19 @@ function hashCorto(s: string): string {
 // Lambda: más que eso y la corrida que lo tomó ya no existe.
 const ENVIANDO_TTL_MS = 15 * 60 * 1000;
 
+const esperar = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
+
+// ¿Salesforce rechazó por un bloqueo momentáneo del registro?
+//
+// Es lo que devuelve cuando otro proceso —típicamente sus propios flows— está
+// tocando el caso. Salesforce lo dice explícito: "Inténtelo de nuevo". Se
+// distingue de un rechazo real (picklist inválido, campo obligatorio) porque
+// ese no se arregla reintentando y no hay que gastarle 5 segundos.
+function esBloqueoTemporalSF(r: { errors?: string[]; status?: number } | undefined): boolean {
+  const txt = (r?.errors ?? []).join(' ').toUpperCase();
+  return /UNABLE_TO_LOCK_ROW|REGISTRO NO DISPONIBLE|INT[EÉ]NTELO DE NUEVO|QUERYEXCEPTION|ROW LOCK/.test(txt);
+}
+
 async function reservarEnvioSF(caseId: string, payload: unknown): Promise<string | null> {
   const firma = hashCorto(`${caseId}|${JSON.stringify(payload)}`);
   const ref = db().collection(COLECCION).doc(caseId);
@@ -566,7 +579,10 @@ async function procesarRemesa(
     // dato del cliente. `baseCaida` lo distingue.
     return baseCaida
       ? { ...base, accion: 'error', motivo: 'la base de transacciones no respondió (cluster pausado o caído): reintentar' }
-      : { ...base, accion: 'sin_screening', motivo: 'la transacción no está en la base' };
+      // NO decir "no está en la base": la consulta va contra el ESPEJO de
+      // Redshift, y una remesa recién creada existe en Admin pero todavía no
+      // replicó. El caso se retoma solo en la corrida siguiente.
+      : { ...base, accion: 'sin_screening', motivo: 'la transacción todavía no replicó al espejo de Redshift: se retoma en la próxima corrida' };
   }
 
   // Screening del beneficiario, cacheado igual que el de OFAC.
@@ -627,7 +643,29 @@ async function procesarRemesa(
         const firma = await reservarEnvioSF(caso.id, payload);
         if (!firma) out.sf = 'ya_cerrado';
         else {
-          const r = await sendCaseUpdate(payload as never);
+          let r = await sendCaseUpdate(payload as never);
+
+          // Un solo reintento a los 5 s cuando Salesforce contesta que el
+          // registro está bloqueado.
+          //
+          // No es un fallo nuestro: los flows de Salesforce —"Asignación
+          // Automática de Casos Compliance"— tocan el caso justo después de
+          // crearlo, y mientras dura eso el update rebota. Salesforce mismo dice
+          // "Inténtelo de nuevo". Dura segundos.
+          //
+          // Sin esto, Admin quedaba liberado y el caso a medias hasta la corrida
+          // siguiente: hasta 15 minutos en los que alguien lo cierra a mano
+          // creyendo que se colgó. Pasó con el caso 02683141.
+          //
+          // UN solo reintento y listo: si a los 5 s sigue bloqueado, no es el
+          // flow de creación y no vale la pena quemar presupuesto de la corrida.
+          // El caso queda en ERROR, que NO bloquea `reservarEnvioSF`, así que la
+          // próxima corrida lo toma igual.
+          if (!r.ok && esBloqueoTemporalSF(r)) {
+            await esperar(5000);
+            r = await sendCaseUpdate(payload as never);
+          }
+
           out.sf = r.ok ? 'ok' : 'error';
           if (!r.ok) out.motivo = out.motivo ?? (r.errors?.join('; ') ?? `HTTP ${r.status ?? 0}`);
           await marcarEnvioSF(caso.id, firma, !!r.ok, out.motivo);
