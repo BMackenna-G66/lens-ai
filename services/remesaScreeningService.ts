@@ -15,6 +15,7 @@
 // Reusa los motores ya probados de Chile y Colombia (no los reimplementa) y trae
 // la lógica internacional del módulo Regcheq replicándola acá, sin tocarlo.
 
+import { evaluarSamePerson } from './remesaSamePerson';
 import { screenRemesaInternacional } from './remesaInternacionalCatalogo';
 import { screenChileCriminal } from './lens360Service';
 import { screenColombia } from './casosCriminalService';
@@ -25,7 +26,11 @@ const REGCHEQ_BASE = 'https://external-api.regcheq.com';
 const REGCHEQ_KEY = ((import.meta as unknown) as { env: Record<string, string> }).env.VITE_REGCHEQ_API_KEY ?? '';
 
 export type FlujoRemesa = 'CL' | 'CO' | 'INTL' | 'SIN_DATO';
-export type EstadoRemesaScreening = 'ok' | 'sin_causas' | 'error' | 'na';
+// `same_person` NO es un resultado del screening: es que no hubo screening. El
+// beneficiario resultó ser el mismo cliente y se tomó el atajo antes de llamar a
+// ningún proveedor. Tiene su propio estado justamente para que no se confunda
+// con `sin_causas`, que sí significa "se consultó y no había nada".
+export type EstadoRemesaScreening = 'ok' | 'sin_causas' | 'error' | 'na' | 'same_person';
 
 // Un match concreto dentro de una lista (Screening Global trae varios).
 export interface HitLista {
@@ -66,6 +71,16 @@ export interface RemesaScreening {
   cruceInternacional?: {
     porDocumento: boolean; pais?: string; palabrasEnNombre: number;
     documentoTipo?: string; tipoSustituido?: boolean; listasConCoincidencia: number;
+  };
+  // Envío a sí mismo. Cuando `samePerson` es true NO se consultó a ningún
+  // proveedor: `evidencia` guarda con qué documentos se hizo la comparación,
+  // que es lo único que respalda la liberación.
+  samePerson?: boolean;
+  evidenciaSamePerson?: {
+    documento?: string;          // el documento normalizado que coincidió
+    dniCliente?: string;         // tal cual venía en el caso
+    dniBeneficiario?: string;    // tal cual venía en la transacción
+    tipoDniCliente?: string;
   };
 }
 
@@ -312,10 +327,59 @@ export async function leerInternacionalRegcheq(
   };
 }
 
-export async function screenBeneficiario(row: RemesaRow): Promise<RemesaScreening> {
+/**
+ * Opciones del atajo de envío a sí mismo.
+ *
+ * Es OPCIONAL a propósito: sin `opciones`, `screenBeneficiario` se comporta
+ * exactamente como antes. Nada del camino existente cambia si el llamador no
+ * pasa nada.
+ */
+export interface OpcionesScreening {
+  /** Documento del CLIENTE que envía (sale del caso, no de Redshift). */
+  dniCliente?: string;
+  /** Solo informativo, para la evidencia. */
+  tipoDniCliente?: string;
+  /**
+   * El switch del mantenedor. Si está apagado, el atajo NO se aplica y se
+   * consulta al proveedor como siempre: con la automatización apagada el
+   * analista necesita la evidencia para decidir a mano.
+   */
+  samePersonActivo?: boolean;
+}
+
+export async function screenBeneficiario(
+  row: RemesaRow,
+  opciones?: OpcionesScreening,
+): Promise<RemesaScreening> {
   const flujo = flujoDeBeneficiario(row);
   const nombre = nombreBeneficiario(row);
   const dni = limpiar(row?.beneficiary_dni);
+
+  // ── Atajo: envío a sí mismo ───────────────────────────────────────────────
+  // Va ANTES de todo lo demás: si el beneficiario es el propio cliente, no hay
+  // proveedor que consultar. Ese cliente ya pasó el onboarding.
+  //
+  // Solo se evalúa con el switch prendido y con un documento del cliente. Sin
+  // alguna de las dos cosas, el flujo sigue de largo como siempre.
+  if (opciones?.samePersonActivo && opciones?.dniCliente) {
+    const sp = evaluarSamePerson({ dniCliente: opciones.dniCliente, dniBeneficiario: dni, flujo });
+    if (sp.esMismaPersona) {
+      return {
+        estado: 'same_person', flujo, fuente: '—',
+        decision: 'Envío a sí mismo',
+        razon: sp.motivo,
+        delitosUnicos: 0, coincidencias: [], listas: [],
+        samePerson: true,
+        evidenciaSamePerson: {
+          documento: sp.documento,
+          dniCliente: sp.dniClienteCrudo,
+          dniBeneficiario: sp.dniBeneficiarioCrudo,
+          tipoDniCliente: opciones.tipoDniCliente || undefined,
+        },
+        mensaje: 'No se consultó a ningún proveedor: el beneficiario es el mismo cliente.',
+      };
+    }
+  }
 
   if (flujo === 'SIN_DATO') {
     return {

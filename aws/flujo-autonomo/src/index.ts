@@ -37,6 +37,7 @@ import { TIPOS_CIERRE_REMESA, camposDeCierreRemesa } from '../../../services/cie
 import { enviarCierreRemesaAdmin } from '../../../services/remesaAdminService';
 import { buscarRemesas } from '../../../services/remesasService';
 import { screenBeneficiario } from '../../../services/remesaScreeningService';
+import { dniDelCliente, tipoDniDelCliente } from '../../../services/remesaSamePerson';
 import type { CasoSF } from '../../../services/casosService';
 
 // ── Configuración de la corrida ─────────────────────────────────────────────
@@ -569,10 +570,20 @@ async function procesarRemesa(
   }
 
   // Screening del beneficiario, cacheado igual que el de OFAC.
+  //
+  // Se le pasa el documento del CLIENTE junto con el switch de "envío a sí
+  // mismo": si el beneficiario resulta ser el propio cliente, `screenBeneficiario`
+  // corta antes de llamar a ningún proveedor. Esto tiene que estar acá y no solo
+  // en la Bandeja porque el ejecutor del flujo automático es este Lambda — sin
+  // esto, el atajo solo aplicaría cuando un analista tuviera la pantalla abierta.
   let screening = caso.screeningBeneficiario as Record<string, unknown> | undefined;
   if (!screeningVigente(screening)) {
     try {
-      screening = (await screenBeneficiario(fila as never)) as unknown as Record<string, unknown>;
+      screening = (await screenBeneficiario(fila as never, {
+        dniCliente: dniDelCliente(caso as never),
+        tipoDniCliente: tipoDniDelCliente(caso as never),
+        samePersonActivo: cfg.samePerson === true,
+      })) as unknown as Record<string, unknown>;
       await db().collection(COLECCION).doc(caso.id).set(limpio({
         screeningBeneficiario: { ...screening, schemaVersion: SCREENING_SCHEMA, screenedAt: new Date().toISOString() },
       }), { merge: true });

@@ -41,6 +41,15 @@ export interface FlujoRemesaConfig {
   // consulta listas internacionales y NO concluye (ver `screenInternacional`).
   // Todos arrancan apagados: un campo ausente no puede liberar plata.
   paises: Record<string, boolean>;
+  // Envío a sí mismo: si el documento del beneficiario es el mismo que el del
+  // cliente, no se consulta a ningún proveedor y se libera. Ese cliente ya fue
+  // validado en el onboarding.
+  //
+  // El switch gobierna las DOS cosas —saltear el screening y liberar—, no solo
+  // la liberación: si controlara únicamente lo segundo, con el flujo apagado se
+  // habría salteado igual el proveedor y el analista se quedaría sin evidencia
+  // para decidir a mano. Ver `remesaSamePerson.ts`.
+  samePerson: boolean;
 }
 
 // Destinos que el flujo de remesas puede tener habilitados. `INTL` no es un país:
@@ -84,6 +93,7 @@ export const FLUJO_CONFIG_DEFAULT: FlujoConfig = {
     cerrarAdmin: true,
     tipoLiberar: 'liberar',
     paises: { CL: false, CO: false, INTL: false },   // todos apagados
+    samePerson: false,       // por pedido explícito: arranca APAGADO
   },
   actualizadoEn: null,
   actualizadoPor: null,
@@ -169,6 +179,9 @@ export function normalizarFlujoConfig(raw: Record<string, unknown> | undefined):
         // Igual que en OFAC: los destinos arrancan APAGADOS si el campo falta. Un
         // campo ausente no puede habilitar la liberación de una transacción.
         paises: Object.fromEntries(DESTINOS_REMESA.map(p => [p.code, (remesaRaw.paises ?? {})[p.code] === true])),
+        // Mismo criterio: ausente ⇒ apagado. Saltear el control de sanciones no
+        // puede quedar activado por un campo que faltaba en el documento.
+        samePerson: remesaRaw.samePerson === true,
       },
       actualizadoEn: (raw?.actualizadoEn as string | undefined) ?? null,
       actualizadoPor: (raw?.actualizadoPor as string | undefined) ?? null,
@@ -345,7 +358,8 @@ export type MotivoNoAutoRemesa =
   | 'sin_nacionalidad'
   | 'identidad_insuficiente'
   | 'delito_sensible'
-  | 'con_coincidencias';
+  | 'con_coincidencias'
+  | 'same_person_apagado';
 
 export interface EvaluacionRemesa {
   automatizable: boolean;
@@ -356,12 +370,15 @@ export interface EvaluacionRemesa {
 
 // Forma mínima del screening del beneficiario que necesita la decisión.
 export interface ScreeningRemesaParaAuto {
-  estado?: string;    // ok | sin_causas | error | na
+  estado?: string;    // ok | sin_causas | error | na | same_person
   flujo?: string;     // CL | CO | INTL | SIN_DATO
   decision?: string;
   pep?: boolean;      // se ignora a propósito (ver arriba)
   coincidencias?: Array<{ tipo?: string; detalle?: string }>;
   listas?: Array<{ lista?: string }>;
+  // Envío a sí mismo: el beneficiario ES el cliente. Cuando viene en true no se
+  // consultó a ningún proveedor — el atajo ocurrió ANTES del screening.
+  samePerson?: boolean;
 }
 
 export function evaluarRemesaAuto(
@@ -380,6 +397,24 @@ export function evaluarRemesaAuto(
   }
   // Igual que en OFAC: un caso con dueño lo trabaja su dueño.
   if (caso.asignacion?.analistaId) return { automatizable: false, motivo: 'asignado' };
+
+  // ── Envío a sí mismo ──────────────────────────────────────────────────────
+  // El beneficiario es el mismo cliente, ya validado en el onboarding. No se
+  // consultó a ningún proveedor y no hace falta: se libera.
+  //
+  // Va DESPUÉS de los frenos de configuración y asignación —el atajo no puede
+  // pasar por encima de un destino apagado ni de un caso con dueño— y ANTES de
+  // los chequeos de hallazgos, que acá no aplican porque no hay screening que
+  // mirar.
+  //
+  // El `cfg.samePerson` se vuelve a exigir aunque el screening ya lo respetó:
+  // si alguien apagó el switch entre la corrida del screening y esta
+  // evaluación, un resultado cacheado no puede seguir liberando.
+  if (screening?.samePerson === true) {
+    return cfg.samePerson
+      ? { automatizable: true, tipologia: cfg.tipoLiberar }
+      : { automatizable: false, motivo: 'same_person_apagado' };
+  }
 
   // Sin screening resuelto no se libera nada. Incluye el caso en que el proveedor
   // devolvió error: un fallo de la API NO puede leerse como "sin hallazgos".
@@ -427,4 +462,5 @@ export const motivoRemesaLegible = (m: MotivoNoAutoRemesa | undefined): string =
   identidad_insuficiente: 'Sin documento del beneficiario: homonimia no descartable',
   delito_sensible: 'Retenido por delito sensible',
   con_coincidencias: 'Tiene coincidencias: lo revisa el analista',
+  same_person_apagado: 'Es un envío a sí mismo, pero la liberación automática same person está apagada',
 }[m ?? 'sin_screening'] ?? '—');
