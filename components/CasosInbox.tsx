@@ -12,7 +12,7 @@ import {
 import { SF_CASE_FIELDS } from '../services/salesforceCaseFields';
 import { buscarRemesa, buscarRemesas, RemesaResult, RemesaRow } from '../services/remesasService';
 import { screenBeneficiario, flujoDeBeneficiario, nombreBeneficiario } from '../services/remesaScreeningService';
-import { dniDelCliente, tipoDniDelCliente } from '../services/remesaSamePerson';
+import { dniDelCliente, tipoDniDelCliente, evaluarSamePerson } from '../services/remesaSamePerson';
 import type { RemesaScreening } from '../services/remesaScreeningService';
 import { screenCaso, esScreenable, runPool, Coincidencia, CasoScreening } from '../services/casosCriminalService';
 import { generateCasoPdf, CasoPdfCoincidencia } from '../services/pdfGenerator';
@@ -1551,6 +1551,25 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     return true;
   };
 
+  // ¿El beneficiario es el mismo cliente?
+  //
+  // Se calcula acá y NO se lee del screening a propósito: el screening solo trae
+  // la marca cuando el switch del mantenedor está prendido, y la columna tiene
+  // que decir la verdad siempre. El switch decide si se saltea el proveedor y se
+  // libera; ver esto no depende de él.
+  //
+  // Es una comparación de strings, sin red: se puede correr por fila sin costo.
+  // `null` = todavía no llegó la fila de la transacción, así que no se sabe.
+  const esSamePerson = useCallback((c: QueuedCaso): boolean | null => {
+    const r = c.remesa ? remesaMap[c.remesa] : undefined;
+    if (!r) return null;
+    return evaluarSamePerson({
+      dniCliente: dniDelCliente(c),
+      dniBeneficiario: r.beneficiary_dni,
+      flujo: flujoDeBeneficiario(r),
+    }).esMismaPersona;
+  }, [remesaMap]);
+
   // Orden por columna (asc/desc). Cada columna tiene una clave; el valor se obtiene
   // del caso o de los mapas (remesa/screening) según corresponda.
   const ordenados = useMemo(() => {
@@ -1566,6 +1585,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
         case 'customerid': return remesaMap[c.remesa]?.customer_id ?? idInterno(c);
         case 'correocliente': return correoCliente(c);
         case 'nombrecliente': return nombreCompleto(c);
+        case 'sameperson': { const v = esSamePerson(c); return v === null ? -1 : v ? 1 : 0; }
         case 'benefflujo': return benefMap[c.id]?.flujo || '';
         case 'benefconclusion': return benefMap[c.id]?.decision || '';
         case 'benefhallazgos': {
@@ -2545,8 +2565,10 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                   {activeQueue === 'otros' && Th('fecha', 'Fecha llegada')}
                   {activeQueue === 'remesa' && (
                     <>
-                      {/* Orden pedido: caso → beneficiario → identificación → TX → cliente */}
+                      {/* Orden pedido: caso → same person → beneficiario →
+                          identificación → TX → cliente → screening. */}
                       {Th('numeroCaso', 'Nº caso')}
+                      {Th('sameperson', 'Same person', 'text-center')}
                       {Th('benef', 'Beneficiario')}
                       {Th('benefdni', 'DNI benef.')}
                       {Th('beneftipodni', 'Tipo DNI')}
@@ -2554,13 +2576,13 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                       {Th('remesa', 'Nº remesa')}
                       {Th('customerid', 'Customer ID')}
                       {Th('correocliente', 'Correo cliente')}
-                      {Th('nombrecliente', 'Nombre cliente')}
-                      {Th('paisorigen', 'País origen')}
-                      {Th('tipoenvio', 'Tipo de envío')}
                       {/* Screening del beneficiario */}
                       {Th('benefflujo', 'Flujo')}
                       {Th('benefconclusion', 'Conclusión')}
                       {Th('benefhallazgos', 'Hallazgos', 'text-center')}
+                      {Th('nombrecliente', 'Nombre cliente')}
+                      {Th('tipoenvio', 'Tipo de envío')}
+                      {Th('paisorigen', 'País origen')}
                       {Th('fecha', 'Fecha llegada')}
                     </>
                   )}
@@ -2589,7 +2611,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
               <tbody>
                 {ordenados.length === 0 && (
                   <tr>
-                    <td colSpan={columnas.length + (activeQueue === 'remesa' ? 16 : activeQueue === 'ofac' ? 13 : 2)} className="py-8 text-center text-slate-400">
+                    <td colSpan={columnas.length + (activeQueue === 'remesa' ? 17 : activeQueue === 'ofac' ? 13 : 2)} className="py-8 text-center text-slate-400">
                       Sin casos en esta cola.
                     </td>
                   </tr>
@@ -2616,6 +2638,18 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                         return (
                         <>
                           <td className="px-3 py-2 whitespace-nowrap font-bold text-slate-800 dark:text-slate-100">{c.numeroCaso || '—'}</td>
+                          {/* Envío a sí mismo. Se calcula SIEMPRE, aunque el switch
+                              esté apagado: el switch decide si se saltea el screening
+                              y se libera, no si el analista puede verlo. */}
+                          <td className="px-3 py-2 whitespace-nowrap text-center">
+                            {(() => {
+                              const sp = esSamePerson(c);
+                              if (sp === null) return <span className="text-slate-400">{r ? '…' : '—'}</span>;
+                              return sp
+                                ? <span className="font-bold text-emerald-600 dark:text-emerald-400" title="El documento del beneficiario es el mismo que el del cliente">Sí</span>
+                                : <span className="text-slate-400">No</span>;
+                            })()}
+                          </td>
                           <td className="px-3 py-2 max-w-[220px] truncate text-slate-700 dark:text-slate-200" title={r?.beneficiary_name}>{rCell(r?.beneficiary_name)}</td>
                           <td className="px-3 py-2 whitespace-nowrap text-slate-700 dark:text-slate-200">{rCell(r?.beneficiary_dni)}</td>
                           <td className="px-3 py-2 whitespace-nowrap text-slate-600 dark:text-slate-300">{rCell(r?.beneficiary_dni_type)}</td>
@@ -2623,9 +2657,6 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                           <td className="px-3 py-2 whitespace-nowrap font-bold text-sky-700 dark:text-sky-400">{c.remesa || '—'}</td>
                           <td className="px-3 py-2 whitespace-nowrap text-slate-600 dark:text-slate-300">{r?.customer_id ? String(r.customer_id) : idInterno(c)}</td>
                           <td className="px-3 py-2 max-w-[200px] truncate text-slate-600 dark:text-slate-300" title={correoCliente(c)}>{correoCliente(c)}</td>
-                          <td className="px-3 py-2 max-w-[180px] truncate text-slate-700 dark:text-slate-200" title={nombreCompleto(c)}>{nombreCompleto(c)}</td>
-                          <td className="px-3 py-2 whitespace-nowrap text-slate-700 dark:text-slate-200">{r?.origin_country || paisOrigen(c)}</td>
-                          <td className="px-3 py-2 whitespace-nowrap text-slate-700 dark:text-slate-200">{rCell(r?.tipo_envio)}</td>
                           {/* Screening del beneficiario */}
                           <td className="px-3 py-2 whitespace-nowrap text-slate-600 dark:text-slate-300">
                             {b ? (b.flujo === 'CL' ? '🇨🇱 Chile' : b.flujo === 'CO' ? '🇨🇴 Colombia' : b.flujo === 'SIN_DATO' ? '⚠️ Sin dato' : '🌍 Intl') : (r ? '…' : '—')}
@@ -2647,6 +2678,9 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                           <td className="px-3 py-2 whitespace-nowrap text-center font-bold text-slate-800 dark:text-slate-200">
                             {hallazgos === null ? '…' : hallazgos}
                           </td>
+                          <td className="px-3 py-2 max-w-[180px] truncate text-slate-700 dark:text-slate-200" title={nombreCompleto(c)}>{nombreCompleto(c)}</td>
+                          <td className="px-3 py-2 whitespace-nowrap text-slate-700 dark:text-slate-200">{rCell(r?.tipo_envio)}</td>
+                          <td className="px-3 py-2 whitespace-nowrap text-slate-700 dark:text-slate-200">{r?.origin_country || paisOrigen(c)}</td>
                           <td className="px-3 py-2 whitespace-nowrap text-slate-500 dark:text-slate-400">{fmtFecha(c.recibidoEn)}</td>
                         </>
                         );
