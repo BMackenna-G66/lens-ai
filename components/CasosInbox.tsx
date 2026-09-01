@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { screeningVigente, SCREENING_SCHEMA, subscribeCasos, isCasosAvailable, guardarScreening, guardarRemesaRow, guardarRemesaRows, guardarScreeningBeneficiario, eliminarCasos, CasoSF } from '../services/casosService';
 import { traerCasosCola, importarCasos, CasoSFRemoto } from '../services/salesforceColaService';
 import { TIPOS_CIERRE_REMESA, tipoRemesaPorId, camposDeCierreRemesa } from '../services/cierreRemesaTipos';
@@ -12,6 +12,7 @@ import {
 import { SF_CASE_FIELDS } from '../services/salesforceCaseFields';
 import { buscarRemesa, buscarRemesas, RemesaResult, RemesaRow } from '../services/remesasService';
 import { screenBeneficiario, flujoDeBeneficiario, nombreBeneficiario } from '../services/remesaScreeningService';
+import { dniDelCliente, tipoDniDelCliente } from '../services/remesaSamePerson';
 import type { RemesaScreening } from '../services/remesaScreeningService';
 import { screenCaso, esScreenable, runPool, Coincidencia, CasoScreening } from '../services/casosCriminalService';
 import { generateCasoPdf, CasoPdfCoincidencia } from '../services/pdfGenerator';
@@ -960,6 +961,18 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   // país del beneficiario: Chile → Regcheq, Colombia → Inspektor, resto → listas.
   const [benefScreen, setBenefScreen] = useState<RemesaScreening | null>(null);
   const [benefLoading, setBenefLoading] = useState(false);
+
+  // Datos del atajo "envío a sí mismo" para una consulta de screening.
+  //
+  // El documento del CLIENTE sale del caso —la consulta a Redshift trae el del
+  // beneficiario pero no el del remitente— y el switch sale del mantenedor. Si
+  // el switch está apagado esto igual se pasa, y `screenBeneficiario` consulta
+  // al proveedor como siempre: es él quien respeta la bandera.
+  const opcionesSamePerson = useCallback((c: CasoSF | null | undefined) => ({
+    dniCliente: dniDelCliente(c ?? undefined),
+    tipoDniCliente: tipoDniDelCliente(c ?? undefined),
+    samePersonActivo: flujoCfg.remesa.samePerson === true,
+  }), [flujoCfg.remesa.samePerson]);
   useEffect(() => {
     setBenefScreen(null);
     const row = remesaData?.estado === 'ok' ? remesaData.row : undefined;
@@ -969,7 +982,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     if (guardado) { setBenefScreen(guardado); return; }
     let cancelado = false;
     setBenefLoading(true);
-    screenBeneficiario(row)
+    screenBeneficiario(row, opcionesSamePerson(sel))
       .then(r => {
         if (cancelado) return;
         setBenefScreen(r);
@@ -1029,7 +1042,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       if (r.estado === 'ok' && r.row) {
         setRemesaMap(prev => ({ ...prev, [c.remesa]: r.row! }));
         guardarRemesaRow(c.id, r.row);
-        const sc = await screenBeneficiario(r.row);
+        const sc = await screenBeneficiario(r.row, opcionesSamePerson(c));
         setBenefScreen(sc);
         setBenefMap(prev => ({ ...prev, [c.id]: sc }));
         if (sc.estado !== 'error') guardarScreeningBeneficiario(c.id, sc);
@@ -1092,7 +1105,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     runPool(pendientes, async c => {
       const row = remesaMap[c.remesa];
       try {
-        const r = await screenBeneficiario(row);
+        const r = await screenBeneficiario(row, opcionesSamePerson(c));
         setBenefMap(prev => ({ ...prev, [c.id]: r }));
         // Se cachea en el caso: no se vuelve a consultar en la próxima sesión.
         if (r.estado !== 'error') guardarScreeningBeneficiario(c.id, r);
@@ -1840,6 +1853,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
         const setOfac = (patch: Partial<FlujoConfig['ofac']>) => setFlujoDraft(d => ({ ...d, ofac: { ...d.ofac, ...patch } }));
         const sinCambios = JSON.stringify(flujoDraft.ofac) === JSON.stringify(flujoCfg.ofac)
           && flujoDraft.remesa.enabled === flujoCfg.remesa.enabled
+          && flujoDraft.remesa.samePerson === flujoCfg.remesa.samePerson
           && JSON.stringify(flujoDraft.remesa.paises ?? {}) === JSON.stringify(flujoCfg.remesa.paises ?? {});
         return (
           <div className="mb-4 rounded-xl border border-amber-300 dark:border-amber-800/60 bg-amber-50/60 dark:bg-amber-950/20 p-4">
@@ -2061,6 +2075,39 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                           <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-2">
                             Sin destinos habilitados no se libera ninguna remesa, aunque el switch de
                             arriba esté prendido.
+                          </p>
+                        )}
+                      </div>
+
+                      {/* Envío a sí mismo. Es el ÚNICO camino que saltea la consulta
+                          a listas, así que va separado y con su propio switch: el
+                          resto de la configuración decide cuándo se libera con
+                          screening, esto decide cuándo se libera SIN screening. */}
+                      <div className="mt-3 pt-3 border-t border-slate-200 dark:border-slate-700 text-xs">
+                        <button
+                          onClick={() => setRem({ samePerson: !flujoDraft.remesa.samePerson })}
+                          className="flex items-center gap-2 w-full text-left"
+                        >
+                          <span className={sw(flujoDraft.remesa.samePerson)}><span className={knob(flujoDraft.remesa.samePerson)} /></span>
+                          <span className="font-semibold text-slate-600 dark:text-slate-300">
+                            Liberación automática «same person»
+                          </span>
+                          <span className={`text-[11px] font-bold ${flujoDraft.remesa.samePerson ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-400'}`}>
+                            {flujoDraft.remesa.samePerson ? 'ACTIVA' : 'APAGADA'}
+                          </span>
+                        </button>
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1.5 leading-relaxed">
+                          Cuando el <b>documento del beneficiario es el mismo que el del cliente</b>, la
+                          plata no cambia de manos: es el cliente moviéndose fondos a una cuenta propia,
+                          y ya fue validado en el onboarding. Con esto prendido{' '}
+                          <b>no se consulta Regcheq ni Inspektor</b> y la transacción se libera.
+                        </p>
+                        {flujoDraft.remesa.samePerson && (
+                          <p className="text-[11px] text-amber-700 dark:text-amber-400 mt-2 leading-relaxed">
+                            ⚠️ Es el único camino que saltea el control de listas. Solo aplica con
+                            coincidencia <b>exacta</b> de documento, con ambos documentos presentes, y{' '}
+                            <b>nunca en envíos internacionales</b> (ahí rara vez viene el documento del
+                            beneficiario). Apagado, esos casos se screenean como cualquier otro.
                           </p>
                         )}
                       </div>
@@ -2829,8 +2876,37 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                         <p className="text-xs text-slate-500 dark:text-slate-400">No se puede screenear: {sc.mensaje}</p>
                       )}
 
-                      {/* Chile / Colombia: causas penales contra el catálogo */}
-                      {!benefLoading && sc && (sc.flujo === 'CL' || sc.flujo === 'CO') && sc.estado !== 'error' && (
+                      {/* Envío a sí mismo: NO hubo consulta a ningún proveedor. Se
+                          muestra la evidencia de la comparación, que es lo único que
+                          respalda la liberación — decir "sin causas penales" acá sería
+                          afirmar algo que nadie verificó. */}
+                      {!benefLoading && sc?.samePerson && (
+                        <div className="rounded-lg border border-emerald-300 dark:border-emerald-700/60 bg-emerald-50 dark:bg-emerald-900/20 px-3 py-2.5">
+                          <p className="text-xs font-bold text-emerald-700 dark:text-emerald-400 mb-1">
+                            ↩︎ Envío a sí mismo — no se consultó ninguna lista
+                          </p>
+                          <p className="text-[11px] text-emerald-800/90 dark:text-emerald-300/90 leading-relaxed">
+                            El documento del beneficiario es el mismo que el del cliente, que ya fue
+                            validado en el onboarding.
+                          </p>
+                          <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] text-slate-600 dark:text-slate-300">
+                            <span>
+                              <span className="text-slate-400">Cliente:</span>{' '}
+                              {sc.evidenciaSamePerson?.tipoDniCliente ? `${sc.evidenciaSamePerson.tipoDniCliente} ` : ''}
+                              <b>{sc.evidenciaSamePerson?.dniCliente || '—'}</b>
+                            </span>
+                            <span>
+                              <span className="text-slate-400">Beneficiario:</span>{' '}
+                              <b>{sc.evidenciaSamePerson?.dniBeneficiario || '—'}</b>
+                            </span>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Chile / Colombia: causas penales contra el catálogo.
+                          Se excluye el atajo same person: ahí no se consultó nada y
+                          este bloque diría "Sin causas penales" sin haber mirado. */}
+                      {!benefLoading && sc && !sc.samePerson && (sc.flujo === 'CL' || sc.flujo === 'CO') && sc.estado !== 'error' && (
                         <>
                           {sc.coincidencias.length === 0
                             ? <p className="text-xs text-emerald-600 dark:text-emerald-400">Sin causas penales.{sc.pep ? ' (marcado PEP)' : ''}</p>
