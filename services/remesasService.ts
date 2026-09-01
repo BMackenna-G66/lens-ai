@@ -65,7 +65,21 @@ export async function buscarRemesa(remesa: string | number): Promise<RemesaResul
 
   const rows = data.rows ?? [];
   const notFound = data.not_found ?? [];
-  if (rows.length === 0) return { estado: 'not_found', notFound, mensaje: 'La transacción no existe en la base.' };
+  // OJO con el texto: esto NO significa que la transacción no exista.
+  //
+  // La consulta va contra el ESPEJO de Redshift, no contra Admin. Una remesa
+  // recién creada existe en Admin y todavía no replicó — se vio con la TX
+  // 14818703, visible en Admin y ausente acá mientras la 14818600 ya estaba.
+  // Decir "no existe" es afirmar algo falso sobre la operación del cliente, y
+  // un analista puede rechazar el caso por eso. Es el mismo error que ya se
+  // corrigió con el cluster pausado: infraestructura nuestra presentada como
+  // dato del cliente.
+  if (rows.length === 0) {
+    return {
+      estado: 'not_found', notFound,
+      mensaje: 'La transacción todavía no está en el espejo de Redshift. Si es reciente, es demora de replicación: se reintenta solo en la próxima corrida.',
+    };
+  }
   return { estado: 'ok', row: rows[0], notFound };
 }
 

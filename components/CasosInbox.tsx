@@ -1570,6 +1570,25 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     }).esMismaPersona;
   }, [remesaMap]);
 
+  // Cierre a medias: un canal cerró y el otro no.
+  //
+  // Los dos sentidos importan y significan cosas distintas:
+  //   · Admin ok, SF pendiente → LA PLATA YA SE LIBERÓ y el caso sigue abierto.
+  //     Es el que se ve raro y tienta a cerrar a mano; el flujo lo reintenta solo.
+  //   · SF ok, Admin pendiente → el caso figura cerrado y la plata sigue retenida.
+  //     Es el peligroso, porque no se nota mirando el caso.
+  //
+  // Solo se marca el canal que el mantenedor tiene PRENDIDO: un canal apagado no
+  // está pendiente, simplemente no se usa.
+  const cierreAMedias = useCallback((c: CasoSF): { texto: string; grave: boolean } | null => {
+    const adminOk = c.cierres?.admin?.ok === true;
+    const sfOk = c.cierres?.sf?.ok === true;
+    const usaAdmin = flujoCfg.remesa.cerrarAdmin, usaSF = flujoCfg.remesa.cerrarSF;
+    if (usaAdmin && usaSF && adminOk && !sfOk) return { texto: 'Liberado en Admin · pendiente en Salesforce', grave: false };
+    if (usaAdmin && usaSF && sfOk && !adminOk) return { texto: 'Cerrado en Salesforce · NO liberado en Admin', grave: true };
+    return null;
+  }, [flujoCfg.remesa.cerrarAdmin, flujoCfg.remesa.cerrarSF]);
+
   // Orden por columna (asc/desc). Cada columna tiene una clave; el valor se obtiene
   // del caso o de los mapas (remesa/screening) según corresponda.
   const ordenados = useMemo(() => {
@@ -2637,7 +2656,27 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                         const hallazgos = b ? (b.flujo === 'INTL' ? b.listas.length : b.delitosUnicos) : null;
                         return (
                         <>
-                          <td className="px-3 py-2 whitespace-nowrap font-bold text-slate-800 dark:text-slate-100">{c.numeroCaso || '—'}</td>
+                          <td className="px-3 py-2 whitespace-nowrap font-bold text-slate-800 dark:text-slate-100">
+                            {c.numeroCaso || '—'}
+                            {/* Cierre a medias. Va pegado al Nº de caso y no en una
+                                columna propia para no alterar el orden pedido. */}
+                            {(() => {
+                              const m = cierreAMedias(c);
+                              if (!m) return null;
+                              return (
+                                <span
+                                  title={`${m.texto}. El flujo lo reintenta en la próxima corrida: no hace falta cerrarlo a mano.`}
+                                  className={`ml-1.5 align-middle text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                                    m.grave
+                                      ? 'bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300'
+                                      : 'bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300'
+                                  }`}
+                                >
+                                  {m.grave ? '⚠ Admin pend.' : '⚠ SF pend.'}
+                                </span>
+                              );
+                            })()}
+                          </td>
                           {/* Envío a sí mismo. Se calcula SIEMPRE, aunque el switch
                               esté apagado: el switch decide si se saltea el screening
                               y se libera, no si el analista puede verlo. */}
@@ -2854,8 +2893,19 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                       </div>
                     )}
 
+                    {/* NO decir "no existe": la consulta va contra el espejo de
+                        Redshift, no contra Admin. Una remesa recién creada existe
+                        en Admin y todavía no replicó. */}
                     {!remesaLoading && remesaData?.estado === 'not_found' && (
-                      <p className="text-xs text-slate-500 dark:text-slate-400">La transacción <b>{sel.remesa}</b> no existe en la base.</p>
+                      <div className="text-xs text-amber-700 dark:text-amber-400">
+                        <p>
+                          La transacción <b>{sel.remesa}</b> todavía no está en el espejo de Redshift.
+                        </p>
+                        <p className="text-slate-500 dark:text-slate-400 mt-1">
+                          Si es reciente, es demora de replicación: existe en Admin y el flujo la
+                          retoma solo en la próxima corrida. <b>No la rechaces por esto.</b>
+                        </p>
+                      </div>
                     )}
                     {!remesaLoading && remesaData?.estado === 'cluster_unavailable' && (
                       <p className="text-xs text-amber-600 dark:text-amber-400">Redshift no disponible: {remesaData.mensaje}</p>
@@ -2865,6 +2915,34 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                     )}
                   </div>
                 )}
+
+                {/* Cierre a medias: lo primero que tiene que ver quien abre el caso,
+                    porque determina si hay algo que hacer o solo que esperar. */}
+                {activeQueue === 'remesa' && sel && (() => {
+                  const m = cierreAMedias(sel);
+                  if (!m) return null;
+                  return (
+                    <div className={`mb-3 rounded-lg border px-3 py-2.5 ${
+                      m.grave
+                        ? 'border-red-300 dark:border-red-700/60 bg-red-50 dark:bg-red-900/20'
+                        : 'border-amber-300 dark:border-amber-700/60 bg-amber-50 dark:bg-amber-900/20'
+                    }`}>
+                      <p className={`text-xs font-bold ${m.grave ? 'text-red-700 dark:text-red-400' : 'text-amber-700 dark:text-amber-400'}`}>
+                        ⚠ {m.texto}
+                      </p>
+                      <p className="text-[11px] text-slate-600 dark:text-slate-300 mt-1 leading-relaxed">
+                        {m.grave
+                          ? 'El caso figura cerrado pero la transacción sigue retenida. Revisar en Admin: esto no se resuelve solo.'
+                          : 'La transacción ya se liberó. El canal de Salesforce falló y el flujo lo reintenta a los 5 segundos y en la próxima corrida — no hace falta cerrarlo a mano.'}
+                      </p>
+                      {sel.cierres?.sf?.detalle && (
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1.5 font-mono break-words">
+                          {String(sel.cierres.sf.detalle).slice(0, 220)}
+                        </p>
+                      )}
+                    </div>
+                  );
+                })()}
 
                 {/* Screening del BENEFICIARIO de la remesa (Chile / Colombia / Internacional) */}
                 {activeQueue === 'remesa' && remesaData?.estado === 'ok' && remesaData.row && (() => {
