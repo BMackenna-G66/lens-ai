@@ -5,6 +5,7 @@ import { ExtractedField, CryptoWalletProfile, ComplianceAnalysisResult, Financia
 import { Lens360Result, RegcheqEnrichment } from '../types/lens360';
 import { ColombiaProfile, buildTimeline } from './colombiaCriminalParser';
 import { ValidationAlert, SEVERITY_META } from './validationRules';
+import { esPrecedente, esNoPrecedente } from './precedentes';
 
 // Convierte el color hex de una severidad a tripleta RGB para jsPDF.
 const hexToRgb = (hex: string): [number, number, number] => {
@@ -1513,8 +1514,18 @@ export const generateCriminalProfilePdf = async (profile: PersonProfile): Promis
   }
 
   // ── Score breakdown ───────────────────────────────────────────────────────
-  const precedentes = profile.crimes.filter(c => (c.catalogType || '').toUpperCase().includes('PRECEDENTE'));
-  const noPrecedentes = profile.crimes.filter(c => !(c.catalogType || '').toUpperCase().includes('PRECEDENTE'));
+  // Clasificación por comparación EXACTA contra los dos valores del catálogo.
+  //
+  // Acá había un `includes('PRECEDENTE')`, y como "DELITOS NO PRECEDENTES"
+  // contiene esa palabra, TODOS los delitos caían en `precedentes` y
+  // `noPrecedentes` quedaba siempre vacío: un cliente con 2 precedentes y 3 no
+  // precedentes salía en el PDF como 5 y 0. Los scores por tramo salían igual de
+  // mal (todo el peso en el tramo de precedentes).
+  //
+  // El total no cambiaba —es la suma de los dos tramos— así que el error no
+  // afectó ninguna decisión, solo el desglose que se lee en este PDF.
+  const precedentes = profile.crimes.filter(c => esPrecedente(c.catalogType));
+  const noPrecedentes = profile.crimes.filter(c => esNoPrecedente(c.catalogType));
   const preScore = precedentes.reduce((s, c) => s + (c.catalogValue || 0), 0);
   const noPreScore = noPrecedentes.reduce((s, c) => s + (c.catalogValue || 0), 0);
   const totalScore = preScore + noPreScore;
