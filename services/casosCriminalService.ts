@@ -31,6 +31,16 @@ export interface CasoScreening {
   estado: ScreeningEstado;
   fuente: 'Regcheq' | 'Inspektor' | '—';
   delitosUnicos: number;
+  // Los mismos delitos únicos, abiertos por tipo de catálogo. 8 causas por
+  // delitos no precedentes no se leen igual que 8 precedentes, y hasta ahora la
+  // ficha solo mostraba el total.
+  //
+  // `sinClasificar` son los delitos que no están en el catálogo: NO se suman a
+  // ninguno de los dos lados. Si se contaran como no precedentes, un catálogo
+  // incompleto se leería como ausencia de riesgo.
+  precedentes?: number;
+  noPrecedentes?: number;
+  sinClasificar?: number;
   decision: string;   // conclusión
   razon: string;
   coincidencias: Coincidencia[];
@@ -194,6 +204,10 @@ export async function screenColombia(nombre: string, dni: string, tipoDocumento:
     estado: cat.penales.length > 0 ? 'ok' : 'sin_causas',
     fuente: 'Inspektor',
     delitosUnicos: cat.precedentes + cat.noPrecedentes,   // eventos únicos, no menciones
+    // El desglose ya lo calcula el catálogo de Colombia; antes solo se publicaba
+    // la suma y el detalle se perdía.
+    precedentes: cat.precedentes,
+    noPrecedentes: cat.noPrecedentes,
     decision: cat.decision,
     // Se conserva la lectura del proveedor como contexto, no como conclusión.
     razon: [cat.razon, (outcome.risk_factors ?? []).join('; '),
@@ -242,7 +256,12 @@ export async function screenCaso(caso: CasoMin): Promise<CasoScreening> {
         fuente: c.tribunal || undefined,
         riesgo: undefined,
       }));
-      return { estado: r.estado, fuente: 'Regcheq', delitosUnicos: r.delitosUnicos, decision: r.decision, razon: r.razon, coincidencias, pep: r.pep, otrasListas: r.otrasListas, mensaje: r.mensaje };
+      return {
+        estado: r.estado, fuente: 'Regcheq', delitosUnicos: r.delitosUnicos,
+        precedentes: r.precedentes, noPrecedentes: r.noPrecedentes, sinClasificar: r.sinClasificar,
+        decision: r.decision, razon: r.razon, coincidencias, pep: r.pep,
+        otrasListas: r.otrasListas, mensaje: r.mensaje,
+      };
     }
     if (esColombia(pais)) {
       const tipo = String(caso.datos?.['Tipo de DNI'] ?? '');
