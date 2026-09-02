@@ -1922,10 +1922,23 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
         const knob = (on: boolean) => `absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${on ? 'left-[22px]' : 'left-0.5'}`;
         const selCls = 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1 text-xs outline-none focus:border-amber-400';
         const setOfac = (patch: Partial<FlujoConfig['ofac']>) => setFlujoDraft(d => ({ ...d, ofac: { ...d.ofac, ...patch } }));
-        const sinCambios = JSON.stringify(flujoDraft.ofac) === JSON.stringify(flujoCfg.ofac)
-          && flujoDraft.remesa.enabled === flujoCfg.remesa.enabled
-          && flujoDraft.remesa.samePerson === flujoCfg.remesa.samePerson
-          && JSON.stringify(flujoDraft.remesa.paises ?? {}) === JSON.stringify(flujoCfg.remesa.paises ?? {});
+        // ¿Hay algo para guardar? Se compara el bloque COMPLETO de cada flujo.
+        //
+        // Antes la parte de remesa se comparaba campo por campo a mano y la lista
+        // se había quedado atrás: `cerrarSF`, `cerrarAdmin` y `tipoLiberar` no
+        // estaban, así que cambiar los canales de cierre no habilitaba el botón
+        // de guardar. Con un switch nuevo cada vez, esa lista se vuelve a quedar
+        // atrás sola; comparar el objeto entero no.
+        //
+        // `estable` ordena las claves antes de serializar: el draft se arma con
+        // spreads y un mismo contenido con otro orden de claves no puede contar
+        // como cambio.
+        const estable = (v: unknown): string => JSON.stringify(v, (_k, val) =>
+          val && typeof val === 'object' && !Array.isArray(val)
+            ? Object.fromEntries(Object.entries(val as object).sort(([a], [b]) => a.localeCompare(b)))
+            : val);
+        const sinCambios = estable(flujoDraft.ofac) === estable(flujoCfg.ofac)
+          && estable(flujoDraft.remesa) === estable(flujoCfg.remesa);
         return (
           <div className="mb-4 rounded-xl border border-amber-300 dark:border-amber-800/60 bg-amber-50/60 dark:bg-amber-950/20 p-4">
             <div className="flex items-start justify-between gap-3 mb-3">
@@ -2175,10 +2188,51 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                         </p>
                         {flujoDraft.remesa.samePerson && (
                           <p className="text-[11px] text-amber-700 dark:text-amber-400 mt-2 leading-relaxed">
-                            ⚠️ Es el único camino que saltea el control de listas. Solo aplica con
-                            coincidencia <b>exacta</b> de documento, con ambos documentos presentes, y{' '}
-                            <b>nunca en envíos internacionales</b> (ahí rara vez viene el documento del
-                            beneficiario). Apagado, esos casos se screenean como cualquier otro.
+                            ⚠️ Solo aplica con coincidencia <b>exacta</b> de documento, con ambos
+                            documentos presentes, y <b>nunca en envíos internacionales</b> (ahí rara vez
+                            viene el documento del beneficiario). Apagado, esos casos se screenean como
+                            cualquier otro.
+                          </p>
+                        )}
+                      </div>
+
+                      {/* Internacional sin documento del beneficiario. Va con su
+                          propio switch por lo mismo que «same person»: es el otro
+                          camino que libera SIN cruce de listas. Acá no es que se
+                          saltee el control — es que no se puede hacer: Regcheq solo
+                          busca por documento y no hay endpoint por nombre. */}
+                      <div className="mt-3 pt-3 border-t border-slate-200 dark:border-slate-700 text-xs">
+                        <button
+                          onClick={() => setRem({ intlSinDocumento: !flujoDraft.remesa.intlSinDocumento })}
+                          className="flex items-center gap-2 w-full text-left"
+                        >
+                          <span className={sw(flujoDraft.remesa.intlSinDocumento)}><span className={knob(flujoDraft.remesa.intlSinDocumento)} /></span>
+                          <span className="font-semibold text-slate-600 dark:text-slate-300">
+                            Liberar internacionales sin documento del beneficiario
+                          </span>
+                          <span className={`text-[11px] font-bold ${flujoDraft.remesa.intlSinDocumento ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-400'}`}>
+                            {flujoDraft.remesa.intlSinDocumento ? 'ACTIVA' : 'APAGADA'}
+                          </span>
+                        </button>
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1.5 leading-relaxed">
+                          Regcheq busca fichas <b>por documento</b>: no existe búsqueda por nombre. Cuando
+                          el beneficiario internacional no trae documento —2 de cada 3 casos— no hay cruce
+                          posible y hoy quedan esperando a un analista que tampoco tiene con qué cruzar.
+                          Con esto prendido <b>se liberan igual</b>, porque la cola está para detener
+                          hallazgos, no identidades incompletas.
+                        </p>
+                        {flujoDraft.remesa.intlSinDocumento && (
+                          <p className="text-[11px] text-amber-700 dark:text-amber-400 mt-2 leading-relaxed">
+                            ⚠️ Esas transacciones se liberan <b>sin screening de listas</b>: apetito de
+                            riesgo asumido para la cola de remesas. Sigue reteniendo todo lo demás — un{' '}
+                            <b>error del proveedor</b> (un fallo de API no es «sin hallazgos»), cualquier{' '}
+                            <b>coincidencia de lista</b>, y los <b>delitos sensibles</b>. Requiere el
+                            destino <b>Internacional</b> habilitado arriba.
+                          </p>
+                        )}
+                        {flujoDraft.remesa.intlSinDocumento && flujoDraft.remesa.paises?.INTL !== true && (
+                          <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1.5">
+                            El destino Internacional está apagado arriba, así que esto todavía no libera nada.
                           </p>
                         )}
                       </div>
