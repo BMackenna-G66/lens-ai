@@ -50,6 +50,23 @@ export interface FlujoRemesaConfig {
   // habría salteado igual el proveedor y el analista se quedaría sin evidencia
   // para decidir a mano. Ver `remesaSamePerson.ts`.
   samePerson: boolean;
+  // Internacional sin documento del beneficiario: se libera igual.
+  //
+  // Regla de negocio explícita, autorizada y con el riesgo asumido: la cola de
+  // remesas tiene un apetito de riesgo más amplio que OFAC porque acá se libera
+  // una transacción puntual, no se vincula a un cliente. La cola está para
+  // detener HALLAZGOS, no identidades incompletas.
+  //
+  // Qué pasa cuando está prendido: el beneficiario internacional que no trae
+  // documento no se puede cruzar contra Regcheq —la API solo busca por
+  // documento, no existe endpoint por nombre— así que ese caso se libera SIN
+  // screening de listas. Es el segundo camino que saltea el control, junto con
+  // `samePerson`, y por eso tiene switch propio y arranca apagado.
+  //
+  // Qué NO cambia: un error del proveedor sigue reteniendo (un fallo de API no
+  // es "sin hallazgos"), cualquier coincidencia de lista retiene, el delito
+  // sensible retiene siempre, y el destino INTL tiene que estar habilitado.
+  intlSinDocumento: boolean;
 }
 
 // Destinos que el flujo de remesas puede tener habilitados. `INTL` no es un país:
@@ -94,6 +111,7 @@ export const FLUJO_CONFIG_DEFAULT: FlujoConfig = {
     tipoLiberar: 'liberar',
     paises: { CL: false, CO: false, INTL: false },   // todos apagados
     samePerson: false,       // por pedido explícito: arranca APAGADO
+    intlSinDocumento: false, // ídem: saltear listas no se prende por defecto
   },
   actualizadoEn: null,
   actualizadoPor: null,
@@ -182,6 +200,7 @@ export function normalizarFlujoConfig(raw: Record<string, unknown> | undefined):
         // Mismo criterio: ausente ⇒ apagado. Saltear el control de sanciones no
         // puede quedar activado por un campo que faltaba en el documento.
         samePerson: remesaRaw.samePerson === true,
+        intlSinDocumento: remesaRaw.intlSinDocumento === true,
       },
       actualizadoEn: (raw?.actualizadoEn as string | undefined) ?? null,
       actualizadoPor: (raw?.actualizadoPor as string | undefined) ?? null,
@@ -424,15 +443,26 @@ export function evaluarRemesaAuto(
   if (screening.flujo === 'SIN_DATO') {
     return { automatizable: false, motivo: 'sin_nacionalidad' };
   }
-  // `na` en internacional NO es falta de nacionalidad: es que el beneficiario no
-  // trae documento, así que el cruce solo podría ser por nombre y la homonimia
-  // no se puede descartar. Retiene igual, pero el motivo tiene que decir la
-  // verdad — es lo que le dice al analista qué dato ir a buscar.
+  // `na` = no se pudo screenear. En internacional eso significa que el
+  // beneficiario no trae documento (Regcheq solo busca por documento), en el
+  // resto que no trae nacionalidad y no hay proveedor que elegir.
+  //
+  // Con `intlSinDocumento` prendido, el internacional sin documento NO retiene:
+  // sigue de largo a los chequeos de hallazgos de abajo, que con las listas
+  // vacías lo liberan. Es la regla autorizada —la cola detiene hallazgos, no
+  // identidades incompletas— y por eso el switch es lo único que la habilita.
+  //
+  // "Sin nacionalidad" queda afuera del atajo a propósito: sin destino no se
+  // puede saber qué switch del mantenedor aplica, así que no hay autorización
+  // que consultar. Sigue reteniendo.
   if (screening.estado === 'na') {
-    return {
-      automatizable: false,
-      motivo: screening.flujo === 'INTL' ? 'identidad_insuficiente' : 'sin_nacionalidad',
-    };
+    const intlSinDoc = screening.flujo === 'INTL';
+    if (!intlSinDoc || !cfg.intlSinDocumento) {
+      return {
+        automatizable: false,
+        motivo: intlSinDoc ? 'identidad_insuficiente' : 'sin_nacionalidad',
+      };
+    }
   }
 
   // Freno duro por delito sensible, antes de mirar cualquier conclusión.
