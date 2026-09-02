@@ -114,6 +114,21 @@ const cellText = (v: unknown): string => {
   return String(v);
 };
 
+// Arma un dato compuesto de la fila de Redshift —"tipo + número",
+// "origen → destino"— descartando las partes que no vinieron.
+//
+// Existe porque interpolar directo en un template literal escribe el string
+// "null" en pantalla: la remesa 14836705 mostraba «DNI: null null» cuando el
+// beneficiario internacional no trae documento. Ningún guard de vacío lo caza,
+// porque "null" no es ni '' ni null. Devuelve '' cuando no queda ninguna parte,
+// para que el render caiga en el '—' de siempre.
+const unirDato = (partes: unknown[], sep = ' '): string =>
+  partes
+    .map(p => (p === null || p === undefined ? '' : String(p).trim()))
+    // También se filtra el literal "null": Redshift puede entregarlo como texto.
+    .filter(p => p !== '' && p.toLowerCase() !== 'null')
+    .join(sep);
+
 // Campos del payload que la cola OFAC "promueve" a columnas propias (con el orden
 // pedido); se excluyen del bloque de columnas dinámicas para no duplicarlas.
 const OFAC_PROMOVIDAS = ['Número del caso', 'Id interno del usuario', 'Nombre', 'Apellido', 'Nombre completo', 'País Origen', 'País'];
@@ -2893,11 +2908,11 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                       <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-2 text-xs">
                         {([
                           ['Beneficiario', remesaData.row.beneficiary_name],
-                          ['DNI', `${remesaData.row.beneficiary_dni_type} ${remesaData.row.beneficiary_dni}`],
+                          ['DNI', unirDato([remesaData.row.beneficiary_dni_type, remesaData.row.beneficiary_dni])],
                           ['Customer ID', remesaData.row.customer_id],
                           ['Email', remesaData.row.beneficiary_email],
                           ['Tipo de envío', remesaData.row.tipo_envio],
-                          ['Origen → Destino', `${remesaData.row.origin_country} → ${remesaData.row.destiny_country}`],
+                          ['Origen → Destino', unirDato([remesaData.row.origin_country, remesaData.row.destiny_country], ' → ')],
                           ['Monto USD', remesaData.row.destiny_amount_usd],
                           ['Estado TX', remesaData.row.tx_status],
                           ['Fecha TX', remesaData.row.start_date],
