@@ -1,21 +1,23 @@
 // Precedente vs no precedente: la clasificación del catálogo, en un solo lugar.
 //
-// ── La trampa ──────────────────────────────────────────────────────────────
-// El catálogo usa dos etiquetas y una CONTIENE a la otra:
+// ── Comparación EXACTA, nunca por substring ────────────────────────────────
+// El catálogo tiene exactamente DOS valores, verificado sobre los 1.488 delitos
+// del catálogo de Chile:
 //
-//   "DELITOS PRECEDENTES"
-//   "DELITOS NO PRECEDENTES"     ← también contiene la palabra "PRECEDENTE"
+//   "DELITOS PRECEDENTES"       →   218
+//   "DELITOS NO PRECEDENTES"    → 1.270
 //
-// Por eso `tipo.includes('PRECEDENTE')` es siempre verdadero y clasifica TODO
-// como precedente. Hay que descartar el "NO PRECEDENTE" antes de preguntar por
-// el precedente, y ese orden es justamente lo que se olvida cada vez que
-// alguien lo reescribe.
+// No hay variantes. Y como uno CONTIENE al otro, cualquier `includes` o
+// `contains` se topa: `'DELITOS NO PRECEDENTES'.includes('PRECEDENTE')` es
+// `true`, así que un filtro por substring clasifica TODO como precedente.
 //
-// Está escrito tres veces en el repo: `criminalDataProcessor` lo hace bien,
-// `lens360Service` lo hace bien con un comentario que avisa del riesgo, y
-// `pdfGenerator` lo hace MAL —usa `includes('PRECEDENTE')` a secas, así que
-// cuenta todos los delitos como precedentes y ninguno como no precedente.
-// Este módulo existe para que haya una sola versión.
+// Por eso acá se compara contra los dos valores fijos y nada más. No es una
+// versión más cuidadosa del substring: es no usar substring. Un valor que no sea
+// uno de los dos NO se adivina — cae en `sinClasificar`, que es visible y
+// obliga a mirar el catálogo en vez de bucketear en silencio.
+//
+// Es el mismo criterio que ya usaba el catálogo de Colombia
+// (`colombiaCatalogo`: `p.tipoDelito === 'DELITOS PRECEDENTES'`).
 //
 // ── Sobre qué se cuenta ────────────────────────────────────────────────────
 // Sobre EVENTOS ÚNICOS, no menciones. Regcheq devuelve una fila por delito y
@@ -25,15 +27,23 @@
 // El criterio de unicidad es el mismo que usa el resto del sistema: RUC, y si
 // no hay RUC, el nombre del delito.
 
-/** Etiquetas de catálogo que significan "no precedente". */
-export const esNoPrecedente = (tipo: unknown): boolean =>
-  /NO[\s_]*PRECEDENTE/.test(String(tipo ?? '').toUpperCase());
+/** Los dos únicos valores del catálogo. */
+export const TIPO_PRECEDENTE = 'DELITOS PRECEDENTES';
+export const TIPO_NO_PRECEDENTE = 'DELITOS NO PRECEDENTES';
 
-/** Etiquetas que significan "precedente". Descarta primero el "no precedente". */
-export const esPrecedente = (tipo: unknown): boolean => {
-  const t = String(tipo ?? '').toUpperCase();
-  return !esNoPrecedente(t) && t.includes('PRECEDENTE');
-};
+// Normaliza SOLO el ruido de transcripción —mayúsculas, espacios de sobra,
+// tildes— para que "delitos  precedentes" siga siendo el mismo valor. No abre la
+// puerta a coincidencias parciales: después se compara con `===`.
+const canon = (tipo: unknown): string =>
+  String(tipo ?? '')
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toUpperCase().replace(/[_\s]+/g, ' ').trim();
+
+/** ¿Es exactamente "DELITOS PRECEDENTES"? */
+export const esPrecedente = (tipo: unknown): boolean => canon(tipo) === TIPO_PRECEDENTE;
+
+/** ¿Es exactamente "DELITOS NO PRECEDENTES"? */
+export const esNoPrecedente = (tipo: unknown): boolean => canon(tipo) === TIPO_NO_PRECEDENTE;
 
 export interface ConteoPrecedentes {
   precedentes: number;
