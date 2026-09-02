@@ -14,6 +14,7 @@ import { evaluateValidationRules } from './validationRules';
 import { triggerSiiViaProxy, siiProxyDisponible } from './regcheqSii';
 import { evaluateLegalPolicy } from './legalPolicyGate';
 import { analyzeCriminalProfile, type RawResult as CriminalInput } from './colombiaCriminalModel';
+import { contarPrecedentes, esPrecedente, esNoPrecedente } from './precedentes';
 
 // ─── Config (mismas fuentes que RegcheqTool / InspektorColombia) ────────────────
 const REGCHEQ_BASE = 'https://external-api.regcheq.com';
@@ -114,14 +115,12 @@ function evaluateCriminal(rut: string, nombre: string, additionalData: Record<st
   };
   applyEvaluationToProfile(profile, loadCriminalCatalog());
 
-  // Conteo precedentes / no precedentes.
-  // OJO: "DELITOS NO PRECEDENTES" también contiene "PRECEDENTE", así que hay que
-  // excluir explícitamente los "NO PRECEDENTE" antes de contar los precedentes.
-  const cat = (c: Crime) => (c.catalogType || '').toUpperCase();
-  const isNoPre = (c: Crime) => /NO[\s_]*PRECEDENTE/.test(cat(c));
-  const isPre = (c: Crime) => !isNoPre(c) && cat(c).includes('PRECEDENTE');
-  const precedentes = profile.crimes.filter(isPre);
-  const noPrecedentes = profile.crimes.filter(isNoPre);
+  // Conteo precedentes / no precedentes. La clasificación vive en
+  // `precedentes.ts`: "DELITOS NO PRECEDENTES" también contiene la palabra
+  // "PRECEDENTE", y ese orden de chequeo es lo que se olvida cada vez que se
+  // reescribe. Acá se usa el módulo para no tener otra copia.
+  const precedentes = profile.crimes.filter(c => esPrecedente(c.catalogType));
+  const noPrecedentes = profile.crimes.filter(c => esNoPrecedente(c.catalogType));
   const sum = (arr: Crime[]) => arr.reduce((s, c) => s + (c.catalogValue || 0), 0);
 
   const decision = profile.preEvaluation ? {
@@ -377,6 +376,13 @@ export interface OtraLista {
 export interface CasoScreeningChile {
   estado: 'ok' | 'sin_causas' | 'error';
   delitosUnicos: number;
+  // Los delitos únicos abiertos por tipo de catálogo. Es la lectura que importa:
+  // 8 causas por delitos no precedentes no dicen lo mismo que 8 precedentes.
+  // `sinClasificar` son los que no están en el catálogo y por eso NO se pueden
+  // contar en ninguno de los dos lados.
+  precedentes?: number;
+  noPrecedentes?: number;
+  sinClasificar?: number;
   decision: string;   // conclusión (motor de decisión del Criminal Profiler)
   razon: string;
   crimes: Lens360Crime[];
@@ -488,9 +494,16 @@ export async function screenChileCriminal(rut: string, nombre = ''): Promise<Cas
   const ev = evaluateCriminal(rutN, nombreEff, additionalData);
   // Delitos únicos: causas distintas (dedupe por RUC; fallback al tipo de delito).
   const delitosUnicos = new Set(ev.crimes.map(c => (c.ruc || '').trim() || (c.crimen || '').trim()).filter(Boolean)).size;
+  // El desglose sale de `ev.profile.crimes`, que son los MISMOS eventos ya
+  // deduplicados por RUC y con `catalogType` puesto por el catálogo. Contarlo
+  // sobre `ev.crimes` no serviría: ahí no está la etiqueta del catálogo.
+  const conteo = contarPrecedentes(ev.profile?.crimes);
   return {
     estado: 'ok',
     delitosUnicos,
+    precedentes: conteo.precedentes,
+    noPrecedentes: conteo.noPrecedentes,
+    sinClasificar: conteo.sinClasificar,
     decision: ev.decision?.decision ?? 'Con causas',
     razon: ev.decision?.razon ?? '',
     crimes: ev.crimes,

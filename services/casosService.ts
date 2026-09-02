@@ -38,6 +38,12 @@ export interface StoredScreening {
   estado?: string;
   fuente?: string;
   delitosUnicos?: number;
+  // Desglose de los delitos únicos por tipo de catálogo. Se cachea junto con el
+  // resto: sin esto, un screening leído del caché vuelve solo con el total y la
+  // ficha pierde el desglose hasta que alguien reconsulte al proveedor.
+  precedentes?: number;
+  noPrecedentes?: number;
+  sinClasificar?: number;
   decision?: string;
   razon?: string;
   coincidencias?: unknown[]; // legacy, se mantiene por compatibilidad de la UI

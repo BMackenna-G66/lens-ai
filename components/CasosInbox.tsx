@@ -13,6 +13,7 @@ import { SF_CASE_FIELDS } from '../services/salesforceCaseFields';
 import { buscarRemesa, buscarRemesas, RemesaResult, RemesaRow } from '../services/remesasService';
 import { screenBeneficiario, flujoDeBeneficiario, nombreBeneficiario } from '../services/remesaScreeningService';
 import { dniDelCliente, tipoDniDelCliente, evaluarSamePerson } from '../services/remesaSamePerson';
+import { etiquetaAntiguedad, resumenPrecedentes } from '../services/precedentes';
 import type { RemesaScreening } from '../services/remesaScreeningService';
 import { screenCaso, esScreenable, runPool, Coincidencia, CasoScreening } from '../services/casosCriminalService';
 import { generateCasoPdf, CasoPdfCoincidencia } from '../services/pdfGenerator';
@@ -50,6 +51,10 @@ interface ScreeningState {
   estado: 'loading' | 'ok' | 'sin_causas' | 'error' | 'na';  // na = país sin screening (ni Chile ni Colombia)
   fuente?: string;
   delitosUnicos?: number;
+  // Desglose de los delitos únicos por tipo de catálogo (ver services/precedentes.ts).
+  precedentes?: number;
+  noPrecedentes?: number;
+  sinClasificar?: number;
   decision?: string;
   razon?: string;
   coincidencias?: Coincidencia[];
@@ -263,6 +268,9 @@ const CoincidenciasAgrupadas: React.FC<{ co: Coincidencia[] }> = ({ co }) => {
             <th className={`${celda} font-bold`}>Detalle (RUC)</th>
             <th className={`${celda} font-bold`}>Estado</th>
             <th className={`${celda} font-bold`}>Fecha</th>
+            {/* Antigüedad: una causa de hace 2 años no se lee igual que una de
+                hace 20, y hasta ahora había que calcularlo mentalmente. */}
+            <th className={`${celda} font-bold`}>Antigüedad</th>
             <th className={`${celda} font-bold`}>Fuente</th>
             <th className={`${celda} font-bold`}>Riesgo</th>
           </tr>
@@ -290,6 +298,7 @@ const CoincidenciasAgrupadas: React.FC<{ co: Coincidencia[] }> = ({ co }) => {
                   </td>
                   <td className={celda}>{top?.estado || '—'}</td>
                   <td className={`${celda} whitespace-nowrap`}>{top?.fecha || '—'}</td>
+                  <td className={`${celda} whitespace-nowrap text-slate-600 dark:text-slate-300`}>{etiquetaAntiguedad(top?.fecha)}</td>
                   <td className={celda}>{top?.fuente || '—'}</td>
                   <td className={celda}>{top?.riesgo || '—'}</td>
                 </tr>
@@ -300,6 +309,7 @@ const CoincidenciasAgrupadas: React.FC<{ co: Coincidencia[] }> = ({ co }) => {
                     <td className={`${celda} break-words max-w-[280px]`}>{x.detalle || '—'}</td>
                     <td className={celda}>{x.estado || '—'}</td>
                     <td className={`${celda} whitespace-nowrap`}>{x.fecha || '—'}</td>
+                    <td className={`${celda} whitespace-nowrap`}>{etiquetaAntiguedad(x.fecha)}</td>
                     <td className={celda}>{x.fuente || '—'}</td>
                     <td className={celda}>{x.riesgo || '—'}</td>
                   </tr>
@@ -1283,7 +1293,8 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   // Aplica un resultado al estado y lo PERSISTE en Firestore (salvo errores, que se
   // reintentan la próxima vez). Compartido entre analistas y sobrevive recargas.
   const aplicarScreening = (caso: QueuedCaso, r: CasoScreening) => {
-    setScreenMap(prev => ({ ...prev, [caso.id]: { estado: r.estado, fuente: r.fuente, delitosUnicos: r.delitosUnicos, decision: r.decision, razon: r.razon, coincidencias: r.coincidencias, pep: r.pep, otrasListas: r.otrasListas, mensaje: r.mensaje } }));
+    setScreenMap(prev => ({ ...prev, [caso.id]: { estado: r.estado, fuente: r.fuente, delitosUnicos: r.delitosUnicos,
+        precedentes: r.precedentes, noPrecedentes: r.noPrecedentes, sinClasificar: r.sinClasificar, decision: r.decision, razon: r.razon, coincidencias: r.coincidencias, pep: r.pep, otrasListas: r.otrasListas, mensaje: r.mensaje } }));
     if (r.estado === 'error') {
       // El error NO se cachea (así se reintenta), pero SÍ se registra: antes los
       // fallos no dejaban rastro en ninguna parte y un caso que fallaba se veía
@@ -1304,6 +1315,9 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       guardarScreening(caso.id, {
         schemaVersion: SCREENING_SCHEMA,
         estado: r.estado, fuente: r.fuente, delitosUnicos: r.delitosUnicos,
+        // Se persiste el desglose: sin esto, un screening leído del caché vuelve
+        // sin precedentes/no precedentes y la ficha muestra solo el total.
+        precedentes: r.precedentes, noPrecedentes: r.noPrecedentes, sinClasificar: r.sinClasificar,
         decision: r.decision, razon: r.razon, coincidencias: r.coincidencias, pep: r.pep,
         otrasListas: r.otrasListas, alertas,
       }).catch(() => {});
@@ -1311,6 +1325,9 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       // por delito sensible (lo que hay que poder auditar con el flujo automático).
       logScreening(caso, clasificar(caso), {
         fuente: r.fuente, estado: r.estado, decision: r.decision,
+        // El desglose precedentes/no precedentes NO va al espejo de Redshift:
+        // `colas_trabajo.screening` no tiene esas columnas y agregarlas es un
+        // cambio de esquema. Vive en la ficha y en el caché de Firestore.
         delitosUnicos: r.delitosUnicos, pep: r.pep,
         categoriasSensibles: retenidoPorDelito(r),
         coincidencias: r.coincidencias,
@@ -1326,7 +1343,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       for (const c of casos) {
         if (screeningVigente(c.screening) && c.screening && !(c.id in next)) {
           const sc = c.screening;
-          next[c.id] = { estado: (sc.estado as ScreeningState['estado']) ?? 'ok', fuente: sc.fuente, delitosUnicos: sc.delitosUnicos, decision: sc.decision, razon: sc.razon, coincidencias: sc.coincidencias as Coincidencia[] | undefined, pep: sc.pep, otrasListas: sc.otrasListas as ScreeningState['otrasListas'] };
+          next[c.id] = { estado: (sc.estado as ScreeningState['estado']) ?? 'ok', fuente: sc.fuente, delitosUnicos: sc.delitosUnicos, precedentes: sc.precedentes as number | undefined, noPrecedentes: sc.noPrecedentes as number | undefined, sinClasificar: sc.sinClasificar as number | undefined, decision: sc.decision, razon: sc.razon, coincidencias: sc.coincidencias as Coincidencia[] | undefined, pep: sc.pep, otrasListas: sc.otrasListas as ScreeningState['otrasListas'] };
           changed = true;
         }
       }
@@ -3255,7 +3272,22 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                             ? <p className="text-xs text-emerald-600 dark:text-emerald-400">Sin coincidencias / causas penales.</p>
                             : (
                               <>
-                                <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">{sc.delitosUnicos} delito(s) único(s) · {co.length} coincidencia(s) · agrupadas por RUC</p>
+                                {/* Los delitos únicos abiertos por catálogo. El total
+                                    solo no dice nada: 8 no precedentes y 8
+                                    precedentes son perfiles muy distintos. */}
+                                <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">
+                                  <b className="text-slate-700 dark:text-slate-200">{sc.delitosUnicos} delito(s) único(s)</b>
+                                  {(() => {
+                                    const d = resumenPrecedentes({
+                                      precedentes: sc.precedentes ?? 0,
+                                      noPrecedentes: sc.noPrecedentes ?? 0,
+                                      sinClasificar: sc.sinClasificar ?? 0,
+                                      total: 0,
+                                    });
+                                    return d ? <> — {d}</> : null;
+                                  })()}
+                                  {' · '}{co.length} coincidencia(s) · agrupadas por RUC
+                                </p>
                                 <CoincidenciasAgrupadas co={co} />
                               </>
                             )}
