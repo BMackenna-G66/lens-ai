@@ -417,6 +417,19 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   const [remesaMasivoSending, setRemesaMasivoSending] = useState(false);
   const [remesaMasivoResult, setRemesaMasivoResult] = useState<string | null>(null);
 
+  // ── Cerrojos contra el doble envío a Admin ─────────────────────────────────
+  // Son `useRef` y no estados a propósito: `setState` es asíncrono, así que
+  // entre el primer clic y el re-render que deshabilita el botón queda una
+  // ventana de milisegundos en la que un segundo clic entra de nuevo al handler
+  // y manda otra vez. Un ref cambia en el mismo tick y cierra esa ventana.
+  // `disabled` queda como segunda barrera, no como la única.
+  const remesaMasivoLock = useRef(false);
+  // Casos con el cierre en Admin ya aplicado EN ESTA SESIÓN, compartido por la
+  // ficha y el masivo: aplicar en uno bloquea el otro. Hace falta además de
+  // `cierres.admin.ok` porque eso llega de Firestore un instante después, y en
+  // ese lapso un segundo envío repetiría la operación.
+  const remesaAdminHechos = useRef<Set<string>>(new Set());
+
   // Una sola acción cierra los DOS canales: primero Admin (una llamada con todas
   // las transacciones del lote) y después Salesforce. Antes había que elegir canal
   // y correr el masivo dos veces.
@@ -428,8 +441,11 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   // sentido cerrar el caso en Salesforce diciendo que se resolvió, así que ese
   // caso se saltea en el canal SF.
   const cerrarMasivoRemesa = async () => {
+    // Mismo cerrojo síncrono que la ficha: `disabled` llega un re-render tarde.
+    if (remesaMasivoLock.current) return;
     const tipo = tipoRemesaPorId(remesaMasivoTipo);
     if (!tipo || seleccion.size === 0) return;
+    remesaMasivoLock.current = true;
     setRemesaMasivoSending(true); setRemesaMasivoResult(null);
     const seleccionados = [...seleccion]
       .map(id => colas.remesa.find(c => c.id === id))
@@ -439,7 +455,11 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       // ── 1) Admin: aplica la tipología a las transacciones ──
       const conTx = seleccionados.filter(c => c.remesa);
       const sinTx = seleccionados.length - conTx.length;
-      const pendientesAdmin = conTx.filter(c => c.cierres?.admin?.ok !== true);
+      // Se excluye lo ya aplicado por las DOS vías: lo persistido en el caso, y
+      // lo aplicado en esta sesión (Firestore replica un instante después, y en
+      // ese lapso un segundo lote reenviaría lo mismo).
+      const pendientesAdmin = conTx.filter(c =>
+        c.cierres?.admin?.ok !== true && !remesaAdminHechos.current.has(c.id));
 
       let rAdmin: Awaited<ReturnType<typeof enviarCierreRemesaAdmin>> = { ok: true, results: [] };
       if (pendientesAdmin.length > 0) {
@@ -454,6 +474,9 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       for (const c of pendientesAdmin) {
         const res = resPorTx.get(String(c.remesa));
         if (!res?.ok) continue;
+        // Antes del await: si el lote se corta a la mitad, lo ya aplicado queda
+        // registrado igual y no se reenvía.
+        remesaAdminHechos.current.add(c.id);
         await registrarCierreCanal(c.id, 'admin', { ok: true, tipologia: tipo.id }, actor ?? undefined).catch(() => {});
         logCierre(c, 'remesa', { canal: 'ADMIN', ok: true, tipologia: tipo.id, statusEnviado: tipo.statusDB }, actor ?? undefined);
       }
@@ -503,6 +526,9 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     } finally {
       setRemesaMasivoSending(false);
       setRemesaMasivoConfirm(false);
+      // Acá sí se reabre: un lote parcial hay que poder reintentarlo. Lo que ya
+      // se aplicó no se reenvía, porque quedó en `remesaAdminHechos`.
+      remesaMasivoLock.current = false;
     }
   };
 
@@ -1223,6 +1249,19 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   const [remesaAdminConfirm, setRemesaAdminConfirm] = useState(false);
   const [remesaAdminSending, setRemesaAdminSending] = useState(false);
   const [remesaAdminMsg, setRemesaAdminMsg] = useState('');
+  const [remesaAdminAplicado, setRemesaAdminAplicado] = useState(false);
+
+  // ── Cerrojo contra el doble envío ──────────────────────────────────────────
+  // Un `useRef` y NO un estado, porque `setState` es asíncrono: entre el primer
+  // clic y el re-render que deshabilita el botón hay una ventana de un par de
+  // milisegundos en la que un segundo clic vuelve a entrar al handler y manda
+  // una segunda vez. `disabled` sola no alcanza. El ref cambia en el mismo tick.
+  //
+  // Y NO se libera cuando la aplicación salió bien: queda cerrado hasta que se
+  // cambia de caso. Liberarlo en el `finally` reabría la misma ventana al
+  // revés —el ref ya en false y `remesaAdminAplicado` todavía sin re-renderizar—
+  // así que un clic tardío entraba igual. Si falló sí se libera, para reintentar.
+  const remesaAdminLock = useRef(false);
 
   // Al cambiar de caso se pre-llena con el N° de transacción del asunto y el
   // usuario logueado, y se limpia lo de la ficha anterior.
@@ -1233,13 +1272,37 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     setRemesaAdminTicket('');
     setRemesaAdminConfirm(false);
     setRemesaAdminMsg('');
+    // Cambiar de caso es la única forma de reabrir el cerrojo. Es a propósito:
+    // hace falta un acto explícito para poder volver a aplicar algo en Admin.
+    setRemesaAdminAplicado(false);
+    remesaAdminLock.current = false;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sel?.id]);
 
+  // ¿Este caso ya tiene el cierre en Admin? Se mira lo persistido y lo de esta
+  // sesión: lo primero sobrevive recargas y lo ve cualquier analista, lo segundo
+  // tapa el lapso hasta que Firestore replica.
+  const adminYaAplicado = !!sel && (
+    remesaAdminAplicado
+    || sel.cierres?.admin?.ok === true
+    || remesaAdminHechos.current.has(sel.id)
+  );
+
   const enviarRemesaAdmin = async () => {
+    // Primera línea y síncrono: es lo que hace que dos clics seguidos sean un
+    // solo envío.
+    if (remesaAdminLock.current) return;
     const tipo = tipoRemesaPorId(remesaAdminTipo);
     const ids = remesaAdminIds.split(',').map(s => s.trim()).filter(Boolean);
     if (!tipo || !sel || ids.length === 0) return;
+    // Segundo freno, por si el estado del caso cambió mientras la ficha estaba
+    // abierta (otro analista, o el flujo automático).
+    if (sel.cierres?.admin?.ok === true || remesaAdminHechos.current.has(sel.id)) {
+      setRemesaAdminMsg('↷ Este caso ya tiene el cierre en Admin aplicado.');
+      setRemesaAdminConfirm(false);
+      return;
+    }
+    remesaAdminLock.current = true;
     setRemesaAdminSending(true); setRemesaAdminMsg('');
     try {
       const r = await enviarCierreRemesaAdmin({
@@ -1251,9 +1314,15 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       });
       setRemesaAdminMsg(resumenRemesaAdmin(r, tipo.participio));
       if (r.ok) {
+        // Se marca ANTES de cualquier await: a partir de acá el botón no vuelve.
+        remesaAdminHechos.current.add(sel.id);
+        setRemesaAdminAplicado(true);
         // Mismo circuito que OFAC: el canal cerrado saca el caso de la cola
         // cuando ambos (SF + Admin) quedaron OK.
         await registrarCierreCanal(sel.id, 'admin', { ok: true, tipologia: tipo.id }, actor ?? undefined).catch(() => {});
+      } else {
+        // Falló en Admin: se reabre el cerrojo para poder reintentar.
+        remesaAdminLock.current = false;
       }
       logCierre(sel, clasificar(sel), {
         canal: 'ADMIN', ok: r.ok, tipologia: tipo.id, statusEnviado: tipo.statusDB,
@@ -1283,6 +1352,10 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       }).catch(() => {});
     } catch (e) {
       setRemesaAdminMsg(`❌ ${e instanceof Error ? e.message : String(e)}`);
+      // No se sabe si la API alcanzó a aplicar el cambio antes de la excepción,
+      // así que el cerrojo NO se reabre solo: reintentar a ciegas puede aplicar
+      // dos veces. Para reintentar hay que salir del caso y volver a entrar, y
+      // en el medio se ve el estado real de la transacción en la ficha.
     } finally {
       setRemesaAdminSending(false);
       setRemesaAdminConfirm(false);
@@ -3648,8 +3721,21 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                         )}
 
                         <div className="flex items-center gap-3 mt-3 flex-wrap">
-                          {!remesaAdminConfirm ? (
+                          {/* Aplicado ⇒ el botón NO vuelve. Un botón que se
+                              re-habilita después de mover plata es una invitación
+                              a aplicar dos veces; para volver a operar hay que
+                              salir del caso y entrar de nuevo. */}
+                          {adminYaAplicado ? (
+                            <p className="text-xs font-semibold text-emerald-700 dark:text-emerald-400">
+                              ✅ Cierre en Admin ya aplicado
+                              {tipoRemesaPorId(String(sel.cierres?.admin?.tipologia ?? remesaAdminTipo))?.label
+                                ? ` («${tipoRemesaPorId(String(sel.cierres?.admin?.tipologia ?? remesaAdminTipo))?.label}»)`
+                                : ''}
+                              . No se puede volver a aplicar desde acá.
+                            </p>
+                          ) : !remesaAdminConfirm ? (
                             <button
+                              type="button"
                               onClick={() => setRemesaAdminConfirm(true)}
                               disabled={!tipo || !remesaAdminIds.trim() || !remesaAdminDisponible()}
                               className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white text-sm font-bold"
@@ -3664,10 +3750,17 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                                     mueven la plata para lados distintos. */}
                                 <b>{tipo?.advertencia}</b>
                               </span>
-                              <button onClick={enviarRemesaAdmin} disabled={remesaAdminSending} className="px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold disabled:opacity-50">
+                              <button
+                                type="button"
+                                onClick={enviarRemesaAdmin}
+                                // `disabled` es la segunda barrera, no la primera: la
+                                // primera es el cerrojo síncrono del handler.
+                                disabled={remesaAdminSending}
+                                className="px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold disabled:opacity-50"
+                              >
                                 {remesaAdminSending ? 'Enviando…' : 'Sí, aplicar'}
                               </button>
-                              <button onClick={() => setRemesaAdminConfirm(false)} disabled={remesaAdminSending} className="px-3 py-1 rounded-lg border border-slate-300 dark:border-slate-600">Cancelar</button>
+                              <button type="button" onClick={() => setRemesaAdminConfirm(false)} disabled={remesaAdminSending} className="px-3 py-1 rounded-lg border border-slate-300 dark:border-slate-600">Cancelar</button>
                             </div>
                           )}
                           {remesaAdminMsg && (
