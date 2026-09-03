@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { screeningVigente, SCREENING_SCHEMA, subscribeCasos, isCasosAvailable, guardarScreening, guardarRemesaRow, guardarRemesaRows, guardarScreeningBeneficiario, eliminarCasos, CasoSF } from '../services/casosService';
 import { traerCasosCola, importarCasos, CasoSFRemoto } from '../services/salesforceColaService';
-import { TIPOS_CIERRE_REMESA, tipoRemesaPorId, camposDeCierreRemesa } from '../services/cierreRemesaTipos';
+import { TIPOS_CIERRE_REMESA, TIPOS_REMESA_AUTOMATICOS, tipoRemesaPorId, camposDeCierreRemesa } from '../services/cierreRemesaTipos';
 import { DESTINOS_REMESA } from '../services/flujoDecision';
 import { enviarCierreRemesaAdmin, remesaAdminDisponible, resumenRemesaAdmin } from '../services/remesaAdminService';
 // Solo lo que MUESTRA la decisión: ejecutar es del Lambda.
@@ -417,13 +417,16 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   const [remesaMasivoSending, setRemesaMasivoSending] = useState(false);
   const [remesaMasivoResult, setRemesaMasivoResult] = useState<string | null>(null);
 
-  // Una sola acción libera los DOS canales: primero Admin (una llamada con todas
+  // Una sola acción cierra los DOS canales: primero Admin (una llamada con todas
   // las transacciones del lote) y después Salesforce. Antes había que elegir canal
   // y correr el masivo dos veces.
   //
+  // Sirve para cualquier tipología del mantenedor —liberar o rechazar—: el estado
+  // destino y la tipificación de Salesforce salen de `tipo`, no de acá.
+  //
   // Admin va primero a propósito: es el que mueve la plata. Si falla, no tiene
-  // sentido cerrar el caso en Salesforce diciendo que se liberó, así que ese caso
-  // se saltea en el canal SF.
+  // sentido cerrar el caso en Salesforce diciendo que se resolvió, así que ese
+  // caso se saltea en el canal SF.
   const cerrarMasivoRemesa = async () => {
     const tipo = tipoRemesaPorId(remesaMasivoTipo);
     if (!tipo || seleccion.size === 0) return;
@@ -433,7 +436,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       .filter((c): c is QueuedCaso => !!c);
 
     try {
-      // ── 1) Admin: libera las transacciones ──
+      // ── 1) Admin: aplica la tipología a las transacciones ──
       const conTx = seleccionados.filter(c => c.remesa);
       const sinTx = seleccionados.length - conTx.length;
       const pendientesAdmin = conTx.filter(c => c.cierres?.admin?.ok !== true);
@@ -455,7 +458,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
         logCierre(c, 'remesa', { canal: 'ADMIN', ok: true, tipologia: tipo.id, statusEnviado: tipo.statusDB }, actor ?? undefined);
       }
 
-      // ── 2) Salesforce: solo los casos cuya plata quedó liberada ──
+      // ── 2) Salesforce: solo los casos cuya transacción quedó en el estado destino ──
       const adminOk = (c: QueuedCaso) =>
         c.cierres?.admin?.ok === true || resPorTx.get(String(c.remesa))?.ok === true;
       const paraSF = seleccionados.filter(c => adminOk(c) && c.cierres?.sf?.ok !== true);
@@ -489,7 +492,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       }
 
       const partes = [
-        resumenRemesaAdmin(rAdmin),
+        resumenRemesaAdmin(rAdmin, tipo.participio),
         `${sfOk} cerrado(s) en Salesforce${sfErr ? `, ${sfErr} con error` : ''}`,
         sinTx ? `${sinTx} sin N° de transacción` : '',
       ].filter(Boolean);
@@ -1246,7 +1249,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
         requestedBy: remesaAdminBy,
         changeTicket: remesaAdminTicket,
       });
-      setRemesaAdminMsg(resumenRemesaAdmin(r));
+      setRemesaAdminMsg(resumenRemesaAdmin(r, tipo.participio));
       if (r.ok) {
         // Mismo circuito que OFAC: el canal cerrado saca el caso de la cola
         // cuando ambos (SF + Admin) quedaron OK.
@@ -1616,8 +1619,19 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     const adminOk = c.cierres?.admin?.ok === true;
     const sfOk = c.cierres?.sf?.ok === true;
     const usaAdmin = flujoCfg.remesa.cerrarAdmin, usaSF = flujoCfg.remesa.cerrarSF;
-    if (usaAdmin && usaSF && adminOk && !sfOk) return { texto: 'Liberado en Admin · pendiente en Salesforce', grave: false };
-    if (usaAdmin && usaSF && sfOk && !adminOk) return { texto: 'Cerrado en Salesforce · NO liberado en Admin', grave: true };
+    if (!usaAdmin || !usaSF) return null;
+    // El texto nombra la tipología que se aplicó, que queda guardada en el canal.
+    // Desde que se puede rechazar, un "liberado en Admin" fijo diría lo contrario
+    // de lo que pasó en la mitad de los cierres.
+    const label = (t: unknown) => tipoRemesaPorId(String(t ?? ''))?.label;
+    if (adminOk && !sfOk) {
+      const l = label(c.cierres?.admin?.tipologia);
+      return { texto: `Admin aplicado${l ? ` («${l}»)` : ''} · pendiente en Salesforce`, grave: false };
+    }
+    if (sfOk && !adminOk) {
+      const l = label(c.cierres?.sf?.tipologia);
+      return { texto: `Cerrado en Salesforce${l ? ` («${l}»)` : ''} · NO aplicado en Admin`, grave: true };
+    }
     return null;
   }, [flujoCfg.remesa.cerrarAdmin, flujoCfg.remesa.cerrarSF]);
 
@@ -2096,10 +2110,19 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                             onChange={e => setRem({ tipoLiberar: e.target.value })}
                             className="w-full px-2 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-sm"
                           >
-                            {TIPOS_CIERRE_REMESA.map(t => (
+                            {/* SOLO las automáticas. «Rechazar» no se ofrece acá:
+                                el flujo desatendido decide "no hay hallazgos" y de
+                                ahí saca la tipología, así que ponerlo a rechazar
+                                haría que el cron rechace en masa lo que está
+                                limpio. Los dos ejecutores lo vuelven a verificar. */}
+                            {TIPOS_REMESA_AUTOMATICOS().map(t => (
                               <option key={t.id} value={t.id}>{t.label} — {t.statusDB}</option>
                             ))}
                           </select>
+                          <span className="block text-[11px] text-slate-500 dark:text-slate-400 mt-1">
+                            El flujo automático solo libera. Rechazar es manual, desde la ficha o el
+                            cierre masivo.
+                          </span>
                         </label>
                         <div className="text-xs">
                           <span className="block font-semibold text-slate-500 dark:text-slate-400 mb-1">Canales que cierra</span>
@@ -2587,7 +2610,8 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                 <div className="flex items-center gap-2 text-xs">
                   <span className="text-amber-900 dark:text-amber-200">
                     ¿Aplicar «{tipoRemesaPorId(remesaMasivoTipo)?.label}» a {seleccion.size} caso(s)?
-                    Libera la transacción en Admin y cierra el caso en Salesforce. <b>Libera plata real.</b>
+                    Cambia el estado de la transacción en Admin y cierra el caso en Salesforce.{' '}
+                    <b>{tipoRemesaPorId(remesaMasivoTipo)?.advertencia}</b>
                   </span>
                   <button onClick={cerrarMasivoRemesa} disabled={remesaMasivoSending} className="px-3 py-1 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold disabled:opacity-50">
                     {remesaMasivoSending ? 'Enviando…' : 'Sí, aplicar'}
@@ -3585,10 +3609,10 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                   const tipo = tipoRemesaPorId(remesaAdminTipo);
                   return (
                     <>
-                      <Seccion>💸 Cierre en Admin (liberar transacción)</Seccion>
+                      <Seccion>💸 Cierre en Admin (liberar o rechazar la transacción)</Seccion>
                       <div className="rounded-xl border border-rose-200 dark:border-rose-800/50 bg-rose-50/40 dark:bg-rose-950/20 p-4">
                         <p className="text-[11px] text-rose-700 dark:text-rose-300 mb-3 font-semibold">
-                          ⚠️ Cambia el estado de la transacción en Admin (producción): libera plata real.
+                          ⚠️ Cambia el estado de la transacción en Admin (producción): mueve plata real.
                         </p>
                         {!remesaAdminDisponible() && (
                           <p className="text-xs text-amber-600 dark:text-amber-400 mb-3">Proxy no configurado (EMPRESADOCS_PROXY_URL).</p>
@@ -3635,7 +3659,10 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                           ) : (
                             <div className="flex items-center gap-2 text-xs bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800/50 rounded-xl px-3 py-2">
                               <span className="text-rose-700 dark:text-rose-300">
-                                ¿Aplicar «{tipo?.label}» a {remesaAdminIds.split(',').filter(s => s.trim()).length} transacción(es)? <b>Libera plata real.</b>
+                                ¿Aplicar «{tipo?.label}» a {remesaAdminIds.split(',').filter(s => s.trim()).length} transacción(es)?{' '}
+                                {/* La advertencia la trae la tipología: liberar y rechazar
+                                    mueven la plata para lados distintos. */}
+                                <b>{tipo?.advertencia}</b>
                               </span>
                               <button onClick={enviarRemesaAdmin} disabled={remesaAdminSending} className="px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold disabled:opacity-50">
                                 {remesaAdminSending ? 'Enviando…' : 'Sí, aplicar'}

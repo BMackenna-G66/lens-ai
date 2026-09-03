@@ -70,7 +70,12 @@ export async function procesarRemesaAuto(
   const evaluacion = evaluarRemesaAuto(caso, screening, cfg);
   if (!evaluacion.automatizable || !evaluacion.tipologia) return null;
   const tipo = tipoRemesaPorId(evaluacion.tipologia);
-  if (!tipo) return null;
+  // `automatico` es un freno, no una preferencia: el flujo desatendido solo
+  // decide "este caso no tiene hallazgos", así que la única tipología que puede
+  // aplicar es la que libera. Rechazar la decide una persona sobre un caso
+  // concreto. Se verifica acá y no solo en el mantenedor porque la config vive en
+  // Firestore y se puede editar a mano.
+  if (!tipo || !tipo.automatico) return null;
 
   const res: ResultadoRemesaAuto = {
     caseId: caso.id, numeroCaso: caso.numeroCaso, tipologia: tipo.id, sf: 'omitido', admin: 'omitido',
