@@ -2238,11 +2238,12 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                       </div>
 
                       <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-2">
-                        Con el switch prendido, un caso de remesa se cierra solo cuando el screening del
-                        beneficiario no arroja coincidencias. <b>Cualquier coincidencia lo deja al analista</b>,
-                        y los delitos sensibles lo <b>retienen siempre</b> (igual que en OFAC).
-                        A diferencia de OFAC, la marca <b>PEP del beneficiario NO retiene</b> la remesa:
-                        acá se libera una transacción, no se vincula a un cliente.
+                        Con el switch prendido, un caso de remesa se cierra solo salvo que el screening
+                        del beneficiario traiga un <b>delito sensible</b> o una <b>coincidencia en listas
+                        de sanciones</b> (OFAC, ONU, UE, GAFI). Dos cosas que <b>no</b> retienen acá y sí
+                        en OFAC, porque se libera una transacción y no se vincula a un cliente: la marca{' '}
+                        <b>PEP</b> del beneficiario, y las <b>causas penales que no son sensibles</b> — un
+                        antecedente viejo y no sensible no dice nada sobre esta transferencia.
                       </p>
                     </>
                   );
@@ -2257,6 +2258,14 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                 Si el screening trae un delito de estas categorías <b>o el cliente es PEP</b>, el caso
                 <b> no se cierra automáticamente</b> (ni en Salesforce ni en Admin) aunque la conclusión diga liberar.
                 Queda para el analista. Regla fija, no se puede desactivar desde acá.
+              </p>
+              {/* La caja es de las dos colas, pero los frenos no son los mismos y
+                  callarlo hace que el mantenedor diga algo falso de remesas. */}
+              <p className="text-[11px] text-red-700 dark:text-red-400 mt-1">
+                <b>En la cola de remesas es distinto:</b> ahí se libera una transacción, no se vincula a
+                un cliente. La marca PEP <b>no</b> retiene, y las causas penales que <b>no</b> son de
+                estas categorías tampoco. Lo que retiene una remesa son estas categorías y las
+                coincidencias en <b>listas de sanciones</b> (OFAC, ONU, UE, GAFI).
               </p>
               <div className="flex flex-wrap gap-1.5 mt-2">
                 {CATEGORIAS_SENSIBLES.map(c => (
