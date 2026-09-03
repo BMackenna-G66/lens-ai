@@ -614,6 +614,13 @@ async function procesarRemesa(
   const out: ResultadoCaso = { ...base, accion: 'error', tipologia: ev.tipologia, sf: 'omitido', admin: 'omitido' };
   const tipo = TIPOS_CIERRE_REMESA.find(t => t.id === ev.tipologia);
   if (!tipo) return { ...out, motivo: `tipología de remesa desconocida: ${ev.tipologia}` };
+  // Freno: este flujo solo puede LIBERAR. Rechazar es una decisión de una
+  // persona sobre un caso puntual, y acá se procesan lotes de noche sin nadie
+  // mirando. El mantenedor no ofrece las tipologías no automáticas, pero la
+  // config vive en Firestore y se puede editar a mano: el freno va también acá.
+  if (!tipo.automatico) {
+    return { ...base, accion: 'retenido', motivo: `la tipología «${tipo.label}» no se aplica de forma automática` };
+  }
 
   // Admin PRIMERO: es el canal que mueve la plata. Si Salesforce falla, el caso
   // queda abierto con la transacción liberada, que es recuperable; al revés
