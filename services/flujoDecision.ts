@@ -338,12 +338,18 @@ export const motivosRetencion = (screening: ScreeningParaAuto | undefined): stri
 // Aparte de la de OFAC a propósito: acá se libera la TRANSACCIÓN, no se toca al
 // cliente, y los frenos no son los mismos.
 //
-// La diferencia que más importa: **PEP NO retiene la remesa.** En OFAC un cliente
-// PEP no se libera solo porque lo que corresponde es el bloqueo preventivo más el
-// formulario PEP. Acá se libera una transacción puntual, no se vincula a un
-// cliente, así que por decisión de negocio la marca PEP del beneficiario no frena.
-// Está acá abajo escrito una sola vez, igual que el resto: si el Lambda lo
-// reimplementara, ese matiz es justo el que se perdería.
+// Las dos diferencias que más importan, las dos por la misma razón —acá se
+// libera una transacción puntual, no se vincula a un cliente— y las dos por
+// decisión de negocio explícita:
+//
+//   1. **PEP NO retiene la remesa.** En OFAC un cliente PEP no se libera solo
+//      porque lo que corresponde es el bloqueo preventivo más el formulario PEP.
+//   2. **Las causas penales no sensibles TAMPOCO retienen.** La cola de remesas
+//      tiene un apetito de riesgo más amplio: detiene delitos sensibles y
+//      coincidencias en listas de sanciones, no cualquier antecedente.
+//
+// Están acá abajo escritas una sola vez, igual que el resto: si el Lambda lo
+// reimplementara, esos dos matices son justo los que se perderían.
 
 // EN QUÉ COLA VA UN CASO. El asunto es lo que manda y las colas no se mezclan:
 // es una regla de negocio explícita, no una heurística de presentación. Vive acá
@@ -377,7 +383,9 @@ export type MotivoNoAutoRemesa =
   | 'sin_nacionalidad'
   | 'identidad_insuficiente'
   | 'delito_sensible'
-  | 'con_coincidencias'
+  // Coincide en listas de sanciones (OFAC/ONU/UE/GAFI). Las causas penales NO
+  // sensibles ya no retienen la remesa: ver `evaluarRemesaAuto`.
+  | 'coincidencia_listas'
   | 'same_person_apagado';
 
 export interface EvaluacionRemesa {
@@ -471,10 +479,28 @@ export function evaluarRemesaAuto(
 
   // OJO: acá NO va el freno por PEP. Es deliberado (ver arriba).
 
-  // Cualquier otra coincidencia —causa penal no sensible o lista internacional—
-  // la revisa el analista.
-  if ((screening.coincidencias?.length ?? 0) > 0) return { automatizable: false, motivo: 'con_coincidencias' };
-  if ((screening.listas?.length ?? 0) > 0) return { automatizable: false, motivo: 'con_coincidencias' };
+  // ── Las causas penales NO sensibles NO retienen la remesa ──────────────────
+  // Segunda diferencia deliberada con OFAC, y la que más se nota: allá cualquier
+  // causa penal deja el caso al analista, porque lo que se decide es qué hacer
+  // con el CLIENTE. Acá se libera una transacción puntual, y el apetito de
+  // riesgo de la cola de remesas es más amplio: un hurto de hace seis años o una
+  // receptación de hace catorce no dicen nada sobre esta transferencia.
+  //
+  // La cola de remesas está para detener las categorías sensibles —tráfico,
+  // lavado, terrorismo, armas, defraudaciones—, que son las que sí hablan del
+  // origen o el destino de la plata. Ese freno está arriba y es lo único que
+  // retiene por delito.
+  //
+  // Decisión de negocio explícita: antes acá había un `if` por
+  // `coincidencias.length` que replicaba la regla de OFAC.
+
+  // Las LISTAS sí retienen, y no es lo mismo que un delito.
+  //
+  // `listas` no son causas penales: son coincidencias en OFAC, ONU, UE, GAFI y
+  // las demás listas de sanciones. Eso no es apetito de riesgo, es una
+  // prohibición: pagarle a alguien sancionado no se libera solo por más amplio
+  // que sea el criterio de la cola. Queda para el analista.
+  if ((screening.listas?.length ?? 0) > 0) return { automatizable: false, motivo: 'coincidencia_listas' };
 
   return { automatizable: true, tipologia: cfg.tipoLiberar };
 }
@@ -491,6 +517,6 @@ export const motivoRemesaLegible = (m: MotivoNoAutoRemesa | undefined): string =
   sin_nacionalidad: 'El beneficiario no trae nacionalidad',
   identidad_insuficiente: 'Sin documento del beneficiario: homonimia no descartable',
   delito_sensible: 'Retenido por delito sensible',
-  con_coincidencias: 'Tiene coincidencias: lo revisa el analista',
+  coincidencia_listas: 'Coincide en listas de sanciones: lo revisa el analista',
   same_person_apagado: 'Es un envío a sí mismo, pero la liberación automática same person está apagada',
 }[m ?? 'sin_screening'] ?? '—');

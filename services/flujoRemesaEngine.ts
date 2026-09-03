@@ -9,13 +9,15 @@
 //   3. sin screening resuelto (o el proveedor falló) → nunca se libera a ciegas
 //   4. beneficiario sin nacionalidad → no se pudo elegir proveedor
 //   5. DELITO SENSIBLE → freno duro, igual que en OFAC
-//   6. cualquier otra coincidencia (causa penal o lista) → queda al analista
+//   6. coincidencia en listas de sanciones (OFAC/ONU/UE/GAFI) → queda al analista
 //
-// Diferencia deliberada con OFAC: **PEP NO retiene la remesa**. En OFAC un
-// cliente PEP no se libera solo porque lo que corresponde es el bloqueo
-// preventivo + formulario PEP. Acá se está liberando una transacción puntual, no
-// vinculando a un cliente, así que por decisión de negocio la marca PEP del
-// beneficiario no frena el flujo.
+// Dos diferencias deliberadas con OFAC, las dos porque acá se libera una
+// transacción puntual y no se vincula a un cliente:
+//   · **PEP NO retiene la remesa.** En OFAC un cliente PEP no se libera solo
+//     porque lo que corresponde es el bloqueo preventivo + formulario PEP.
+//   · **Las causas penales no sensibles tampoco retienen.** La cola de remesas
+//     tiene un apetito de riesgo más amplio: un antecedente viejo y no sensible
+//     no dice nada sobre esta transferencia. Los delitos sensibles sí retienen.
 //
 // Funciones PURAS (sin red ni escrituras) para poder testearlas solas.
 
