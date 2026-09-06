@@ -289,9 +289,18 @@ async function guardarCierre(
 // apagado. Pasó: el mensaje quedó clavado en la corrida de ayer a las 13:45.
 //
 // Una escritura por invocación, sin acumular nada.
+//
+// Y SIN `merge`. Con merge, los campos de la invocación anterior sobreviven a la
+// siguiente: una corrida que sale bien no manda `motivo`, así que el `motivo` del
+// error anterior quedaba pegado y el documento terminaba diciendo dos cosas a la
+// vez (`corrio: true` junto al "no se pudo tomar el candado" de ayer). El latido
+// es una foto del último intento, no un acumulado: se pisa entero.
+//
+// Nadie más escribe este documento —solo esta función— así que pisarlo completo
+// no borra nada de otro.
 async function latir(estado: Record<string, unknown>): Promise<void> {
   await db().collection('config').doc('flujoAutonomoLatido')
-    .set(limpio({ ...estado, en: new Date().toISOString() }), { merge: true })
+    .set(limpio({ ...estado, en: new Date().toISOString() }))
     .catch(() => {});
 }
 
