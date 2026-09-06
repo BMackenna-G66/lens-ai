@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { screeningVigente, SCREENING_SCHEMA, subscribeCasos, isCasosAvailable, guardarScreening, guardarRemesaRow, guardarRemesaRows, guardarScreeningBeneficiario, eliminarCasos, CasoSF } from '../services/casosService';
+import { screeningVigente, SCREENING_SCHEMA, subscribeCasos, isCasosAvailable, guardarScreening, guardarRemesaRow, guardarRemesaRows, guardarScreeningBeneficiario, eliminarCasos, TOPE_COLA, CasoSF, InfoCola } from '../services/casosService';
 import { traerCasosCola, importarCasos, CasoSFRemoto } from '../services/salesforceColaService';
 import { TIPOS_CIERRE_REMESA, TIPOS_REMESA_AUTOMATICOS, tipoRemesaPorId, camposDeCierreRemesa } from '../services/cierreRemesaTipos';
 import { DESTINOS_REMESA } from '../services/flujoDecision';
@@ -357,7 +357,12 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   const [activeQueue, setActiveQueue] = useState<QueueKey>('ofac');
   const filtrosVacios = { pais: '', estado: '', prioridad: '', conclusion: '', pep: '', numeroCaso: '', dni: '', status: '', tipoEnvio: '', flujoBenef: '' };
   // Los casos CERRADOS salen de la cola; este toggle los vuelve a mostrar.
+  // Además cambia QUÉ se pide a Firestore: apagado trae solo la cola, prendido
+  // lee la colección completa. Ver `subscribeCasos`.
   const [verCerrados, setVerCerrados] = useState(false);
+  // Qué se terminó leyendo. Se muestra para que nadie tenga que adivinar si la
+  // cola está vacía o si la consulta se quedó corta.
+  const [infoCola, setInfoCola] = useState<InfoCola | null>(null);
   const [filtros, setFiltros] = useState<Record<string, string>>(filtrosVacios);
   const setFiltroCol = (k: string, v: string) => setFiltros(f => ({ ...f, [k]: v }));
   const [sortCol, setSortCol] = useState<string>('fecha');
@@ -794,12 +799,17 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       setLoading(false);
       return;
     }
+    // Se re-suscribe al cambiar «ver cerrados»: con el toggle apagado la consulta
+    // trae solo los casos en cola, que es lo que se muestra. Prenderlo lee la
+    // colección completa —el histórico sigue disponible—, y por eso es una acción
+    // explícita y no el estado por defecto. Ver `subscribeCasos`.
     const unsub = subscribeCasos(
-      data => { setCasos(data); setLoading(false); },
+      (data, info) => { setCasos(data); setInfoCola(info); setLoading(false); },
       msg => { setError(msg); setLoading(false); },
+      { incluirCerrados: verCerrados },
     );
     return () => unsub();
-  }, []);
+  }, [verCerrados]);
 
   // ── Clasificación en colas por asunto ──────────────────────────────────────
   // OFAC: asunto = "Coincidencia OFAC" (exacto). Remesa: asunto del bot que
@@ -2570,10 +2580,22 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
             <div className="flex flex-wrap items-center gap-2">
               <FiltroCombo label="País" value={filtros.pais} options={opcionesFiltro.pais} onChange={v => setFiltroCol('pais', v)} />
               <FiltroCombo label="Status" value={filtros.status} options={[...STATUS_CASO_VALORES]} onChange={v => setFiltroCol('status', v)} />
-              <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-500 dark:text-slate-400 whitespace-nowrap" title="Los casos CERRADOS salen de la cola. Marcá esto para volver a verlos.">
+              <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-500 dark:text-slate-400 whitespace-nowrap" title="Los casos CERRADOS salen de la cola. Marcá esto para volver a verlos: se trae el histórico completo, que es más lento y consume más lecturas.">
                 <input type="checkbox" checked={verCerrados} onChange={e => setVerCerrados(e.target.checked)} className="w-3.5 h-3.5" />
                 Ver cerrados
               </label>
+              {/* Qué se leyó. Sin esto, una cola corta y una consulta que se quedó
+                  corta se ven exactamente igual. */}
+              {infoCola && (
+                <span
+                  className={`text-[11px] whitespace-nowrap ${infoCola.truncado ? 'text-amber-600 dark:text-amber-400 font-semibold' : 'text-slate-400 dark:text-slate-500'}`}
+                  title={infoCola.motivo ?? `Se leyeron ${infoCola.leidos} documentos de Firestore para esta vista.`}
+                >
+                  {infoCola.truncado
+                    ? `⚠️ tope de ${TOPE_COLA}: hay casos sin mostrar`
+                    : `${infoCola.leidos} leídos · ${infoCola.modo}`}
+                </span>
+              )}
               {activeQueue === 'remesa' && <FiltroCombo label="Tipo de envío" value={filtros.tipoEnvio} options={opcionesFiltro.tipoEnvio} onChange={v => setFiltroCol('tipoEnvio', v)} />}
               {activeQueue === 'remesa' && <FiltroCombo label="Flujo" value={filtros.flujoBenef} options={opcionesFiltro.flujoBenef} onChange={v => setFiltroCol('flujoBenef', v)} />}
               {activeQueue === 'ofac' && <FiltroCombo label="Estado" value={filtros.estado} options={opcionesFiltro.estado} onChange={v => setFiltroCol('estado', v)} />}

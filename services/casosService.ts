@@ -4,7 +4,9 @@
 // POST /casos. Este servicio solo LEE (onSnapshot); la app no escribe acá.
 // Ver aws/casos-receptor/ para el productor.
 
-import { collection, onSnapshot, query, doc, writeBatch, Firestore } from 'firebase/firestore';
+import {
+  collection, onSnapshot, query, doc, writeBatch, where, limit, getCountFromServer, Firestore,
+} from 'firebase/firestore';
 import { getDb } from './firebaseService';
 
 export const CASOS_COLLECTION = 'casos_sf';
@@ -224,25 +226,106 @@ export async function guardarScreeningBeneficiario(caseId: string, screening: un
   });
 }
 
+// ── Cuánto se lee para pintar la cola ───────────────────────────────────────
+// Esta suscripción leía la colección ENTERA en cada carga: 1.531 documentos para
+// mostrar 2 casos abiertos. Con ~33 aperturas se agotaba la cuota diaria de
+// Firestore (plan Spark, 50.000 lecturas/día), y al agotarse NO cae solo la
+// Bandeja: cae todo Lens, porque comparten el proyecto. Pasó el 05-09-2026, con
+// el flujo autónomo mostrando "no se pudo tomar el candado: RESOURCE_EXHAUSTED".
+//
+// Ahora la cola pide solo lo que muestra. Los CERRADOS se traen únicamente
+// cuando alguien los pide con «ver cerrados», que es cuando de verdad importan:
+// el acceso al histórico no se pierde, deja de pagarse en cada carga.
+//
+// POR QUÉ NO SE ACOTA A CIEGAS. `statusCaso` es un campo persistido, pero la UI
+// además lo DERIVA de `cierres`/`asignacion`. Un documento sin el campo lo
+// saltearía la consulta acotada EN SILENCIO, y el caso desaparecería de la cola
+// sin que nadie se entere. Ya pasó del lado del Lambda: 156 casos importados sin
+// el campo dieron una cola vacía durante horas. Por eso antes de acotar se
+// comprueba con dos `count()` —que cuestan una lectura por cada 1000 documentos,
+// no una por documento— que TODOS lo tengan; si falta en alguno, se lee completo
+// como antes y se dice por qué. Es el mismo criterio que usa `leerCasosAbiertos`
+// en el flujo autónomo: una consulta acotada no puede tener huecos.
+const ESTADOS_CASO = ['ABIERTO', 'GESTIONANDO', 'CERRADO'];
+const ESTADOS_EN_COLA = ['ABIERTO', 'GESTIONANDO'];
+export const TOPE_COLA = 500;
+
+export interface OpcionesCola {
+  /** Traer también los CERRADOS. Cuesta leer la colección completa. */
+  incluirCerrados?: boolean;
+}
+
+/** Qué se terminó leyendo, para que la UI pueda decirlo en vez de que se adivine. */
+export interface InfoCola {
+  modo: 'acotada' | 'completa';
+  leidos: number;
+  /** Se llegó al tope: hay casos abiertos que no se están mostrando. */
+  truncado: boolean;
+  motivo?: string;
+}
+
 // Suscripción en vivo. Devuelve unsubscribe. Ordena por recibidoEn desc en cliente
-// (evita exigir un índice compuesto en Firestore).
+// (evita exigir un índice compuesto en Firestore, igual que antes).
 export function subscribeCasos(
-  onData: (casos: CasoSF[]) => void,
+  onData: (casos: CasoSF[], info: InfoCola) => void,
   onError?: (msg: string) => void,
+  opciones?: OpcionesCola,
 ): () => void {
   const db = getDb() as Firestore | null;
   if (!db) {
     onError?.('Firestore no está configurado.');
     return () => {};
   }
-  const q = query(collection(db, CASOS_COLLECTION));
-  return onSnapshot(
-    q,
-    snap => {
-      const casos = snap.docs.map(d => docToCaso(d.id, d.data() as Record<string, unknown>));
-      casos.sort((a, b) => (b.recibidoEn || '').localeCompare(a.recibidoEn || ''));
-      onData(casos);
-    },
-    err => onError?.(err.message),
-  );
+
+  const col = collection(db, CASOS_COLLECTION);
+  let cancelado = false;
+  let unsub: (() => void) | null = null;
+
+  const escuchar = (q: ReturnType<typeof query>, info: Omit<InfoCola, 'leidos' | 'truncado'>, tope?: number) => {
+    if (cancelado) return;
+    unsub = onSnapshot(
+      q,
+      snap => {
+        const casos = snap.docs.map(d => docToCaso(d.id, d.data() as Record<string, unknown>));
+        casos.sort((a, b) => (b.recibidoEn || '').localeCompare(a.recibidoEn || ''));
+        onData(casos, { ...info, leidos: snap.size, truncado: !!tope && snap.size >= tope });
+      },
+      err => onError?.(err.message),
+    );
+  };
+
+  void (async () => {
+    // Con los cerrados pedidos no hay filtro que valga: se lee completo, como
+    // antes. Y SIN tope, a propósito: un `limit` sin `orderBy` recorta por id, o
+    // sea al azar, y un histórico con huecos invisibles es peor que uno caro.
+    if (opciones?.incluirCerrados) {
+      escuchar(query(col), { modo: 'completa', motivo: 'Se están mostrando los cerrados: se lee la colección completa.' });
+      return;
+    }
+
+    let todosTienenEstado = false;
+    try {
+      const [total, conCampo] = await Promise.all([
+        getCountFromServer(col),
+        getCountFromServer(query(col, where('statusCaso', 'in', ESTADOS_CASO))),
+      ]);
+      todosTienenEstado = total.data().count === conCampo.data().count;
+    } catch {
+      // Si el conteo falla (cuota, permisos, red), NO se acota: preferir leer de
+      // más antes que esconder casos.
+      todosTienenEstado = false;
+    }
+    if (cancelado) return;
+
+    if (todosTienenEstado) {
+      escuchar(query(col, where('statusCaso', 'in', ESTADOS_EN_COLA), limit(TOPE_COLA)), { modo: 'acotada' }, TOPE_COLA);
+    } else {
+      escuchar(query(col), {
+        modo: 'completa',
+        motivo: 'Hay casos sin `statusCaso`: se lee la colección completa para no saltear ninguno.',
+      });
+    }
+  })();
+
+  return () => { cancelado = true; unsub?.(); };
 }
