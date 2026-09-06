@@ -377,7 +377,11 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   const toggleSel = (id: string) => setSeleccion(prev => {
     const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n;
   });
-  const limpiarSeleccion = () => { setSeleccion(new Set()); setConfirmarBorrado(false); };
+  // Ancla del rango: la última fila que se marcó a mano. Shift+clic en otra
+  // selecciona todo lo que hay entre las dos. Es un ref y no un estado porque no
+  // se dibuja: guardarlo como estado re-renderizaría la tabla entera en cada clic.
+  const anclaSel = useRef<string | null>(null);
+  const limpiarSeleccion = () => { setSeleccion(new Set()); setConfirmarBorrado(false); anclaSel.current = null; };
   const borrarSeleccionados = async () => {
     setBorrando(true);
     try { await eliminarCasos([...seleccion]); limpiarSeleccion(); }
@@ -1766,6 +1770,41 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   }, [filtrados, sortCol, sortDir, remesaMap, screenMap, filtros]);
 
   // Selección "todos" sobre la vista actual (cola + filtro + orden).
+  // Clic en el checkbox de una fila. Con Shift, en vez de marcar una sola, aplica
+  // el rango que va desde el ancla hasta acá.
+  //
+  // El rango COPIA el estado del ancla, como en una planilla: si el ancla quedó
+  // marcada, se marca todo el tramo; si se desmarcó, se desmarca todo. Así el
+  // mismo gesto sirve para seleccionar y para deseleccionar.
+  //
+  // El ancla NO se mueve con Shift: queda donde estaba para poder corregir el
+  // rango con otro Shift+clic más arriba o más abajo, en vez de tener que empezar
+  // de nuevo.
+  //
+  // Se recorre `ordenados`, que es LO QUE SE VE: si hay un filtro puesto o la
+  // tabla está ordenada por otra columna, el rango es el visible, no el de la
+  // colección. Marcar cosas que no están en pantalla sería exactamente lo que uno
+  // no quiere en una cola que cierra plata.
+  const manejarSelFila = (id: string, shift: boolean) => {
+    const ancla = anclaSel.current;
+    const i = shift && ancla ? ordenados.findIndex(c => c.id === ancla) : -1;
+    const j = i >= 0 ? ordenados.findIndex(c => c.id === id) : -1;
+    // Sin ancla, o si el ancla ya no está en la vista (cambió el filtro o la
+    // cola), se comporta como un clic normal.
+    if (i < 0 || j < 0) {
+      toggleSel(id);
+      anclaSel.current = id;
+      return;
+    }
+    const marcar = seleccion.has(ancla!);
+    const [desde, hasta] = i <= j ? [i, j] : [j, i];
+    setSeleccion(prev => {
+      const n = new Set(prev);
+      for (let k = desde; k <= hasta; k++) marcar ? n.add(ordenados[k].id) : n.delete(ordenados[k].id);
+      return n;
+    });
+  };
+
   const allSel = ordenados.length > 0 && ordenados.every(c => seleccion.has(c.id));
   const toggleAll = () => setSeleccion(prev => {
     const todos = ordenados.length > 0 && ordenados.every(c => prev.has(c.id));
@@ -2862,7 +2901,25 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                       className={`cursor-pointer border-b border-slate-100 dark:border-slate-700/50 ${activo ? 'bg-sky-50 dark:bg-sky-950/40' : seleccion.has(c.id) ? 'bg-red-50/60 dark:bg-red-950/20' : 'hover:bg-slate-50 dark:hover:bg-slate-700/30'}`}
                     >
                       <td className="px-3 py-2" onClick={e => e.stopPropagation()}>
-                        <input type="checkbox" checked={seleccion.has(c.id)} onChange={() => toggleSel(c.id)} className="w-4 h-4 cursor-pointer align-middle" />
+                        <input
+                          type="checkbox"
+                          checked={seleccion.has(c.id)}
+                          // Shift+clic marca todo el tramo desde la última fila
+                          // que se tocó. React dispara este onChange desde el
+                          // click, así que el evento nativo trae `shiftKey`; con
+                          // la barra espaciadora no lo trae y se toma como clic
+                          // normal, que es lo correcto.
+                          onChange={e => {
+                            const ev = e.nativeEvent as Partial<MouseEvent>;
+                            manejarSelFila(c.id, ev.shiftKey === true);
+                          }}
+                          // Sin esto, Shift+clic pinta de azul el texto entre las
+                          // dos filas: el navegador lo interpreta como selección
+                          // de texto.
+                          onMouseDown={e => { if (e.shiftKey) e.preventDefault(); }}
+                          title="Shift+clic para marcar todo el rango desde la última fila marcada"
+                          className="w-4 h-4 cursor-pointer align-middle"
+                        />
                       </td>
                       {activeQueue === 'otros' && <td className="px-3 py-2 whitespace-nowrap text-slate-500 dark:text-slate-400">{fmtFecha(c.recibidoEn)}</td>}
                       {activeQueue === 'remesa' && (() => {
