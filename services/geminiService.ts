@@ -91,6 +91,9 @@ async function executeWithRetry<T>(apiCall: (ai: GoogleGenAI) => Promise<T>): Pr
 // Modelo Gemini. 'gemini-2.5-flash' fue deprecado por Google (404). Se usa el
 // Flash estable vigente. Alternativa auto-actualizable: 'gemini-flash-latest'.
 const primaryAnalysisModel = 'gemini-3.5-flash';
+// Se exporta para poder guardarlo junto a la extracción: cuando el modelo cambie,
+// hace falta saber cuál produjo cada ficha para poder comparar calidad.
+export const MODELO_ANALISIS = primaryAnalysisModel;
 const chatModel = 'gemini-3.5-flash';
 const jsonConfig = { responseMimeType: "application/json", thinkingConfig: { thinkingBudget: 0 } } as const;
 

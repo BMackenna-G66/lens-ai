@@ -179,6 +179,102 @@ TABLAS = {
             "ocurrido_en": "ts",
         },
     },
+
+    # ── Schema `lens`: persistencia de la extracción de documentos ────────────
+    # Estas cinco viven en OTRO schema (`lens`), no en `colas_trabajo`. La clave
+    # del request lleva el prefijo `lens_` para que no pueda chocar con una tabla
+    # de colas, y `schema`/`nombre` dicen dónde se escribe de verdad.
+    #
+    # Los cuatro flujos que extraen fichas —analizador, batch, API y KYB—
+    # escriben en `lens_analisis` y `lens_analisis_campo`. Es a propósito: los
+    # cuatro producen la MISMA ficha, y con una tabla por flujo comparar la
+    # calidad entre ellos exigiría un UNION a mano cada vez.
+
+    # Cabecera: una fila por ejecución. Es el eje del cruce (`analisis_id`).
+    "lens_analisis": {
+        "schema": "lens", "nombre": "analisis",
+        "pk": ["analisis_id"],
+        "cols": {
+            "analisis_id": "", "origen": "",
+            "actor_tipo": "", "actor_id": "", "actor_email": "",
+            "ejecutado_en": "ts",
+            "n_archivos": "int", "archivos": "json", "consolidado": "bool",
+            "proposito": "",
+            "estado": "", "pais_detectado": "",
+            "rut_sociedad": "", "razon_social": "",
+            "paginas_totales": "int", "paginas_por_capa": "int",
+            "paginas_por_ocr": "int", "caracteres": "int",
+            "modelo": "", "tokens_prompt": "int", "tokens_salida": "int",
+            "duracion_ms": "int", "error": "", "avisos": "json",
+            "cargado_en": "ts",
+        },
+    },
+
+    # La extracción campo por campo. Formato LARGO: la lista de campos cambia y
+    # varios valores son párrafos enteros.
+    # OJO con la PK: es SINTÉTICA (`analisis_id|campo`) y no compuesta, porque la
+    # ruta batcheada de la Data API borra por `pk[0]` —"todas las tablas tienen
+    # PK simple"—. Con una PK compuesta, escribir un campo habría borrado los
+    # otros 17 del mismo análisis. Misma convención que `liberacion_id`.
+    "lens_analisis_campo": {
+        "schema": "lens", "nombre": "analisis_campo",
+        "pk": ["campo_id"],
+        "cols": {
+            "campo_id": "",
+            "analisis_id": "", "campo": "", "orden": "int",
+            "valor": "", "vacio": "bool",
+            "origen": "", "ejecutado_en": "ts",
+            # Previstas para cuando la UI permita corregir: el par
+            # "lo que dijo el modelo / lo que corrigió la persona" es lo único
+            # que deja medir alucinación.
+            "valor_corregido": "", "corregido_por": "", "corregido_en": "ts",
+            "cargado_en": "ts",
+        },
+    },
+
+    # La ficha completa en JSON (SUPER). Tabla aparte porque es un blob grande y
+    # no se quiere arrastrar en cada consulta de la cabecera.
+    "lens_analisis_ficha": {
+        "schema": "lens", "nombre": "analisis_ficha",
+        "pk": ["analisis_id"],
+        "cols": {
+            "analisis_id": "", "origen": "", "ejecutado_en": "ts",
+            "ficha": "json", "hash_documentos": "", "cargado_en": "ts",
+        },
+    },
+
+    # El batch, documento por documento. El grano es el DOCUMENTO: una corrida
+    # procesa muchos archivos y cada uno pudo fallar por su cuenta.
+    # PK sintética por el mismo motivo que `lens_analisis_campo`.
+    "lens_batch_documento": {
+        "schema": "lens", "nombre": "batch_documento",
+        "pk": ["documento_uid"],
+        "cols": {
+            "documento_uid": "",
+            "analisis_id": "", "documento_id": "", "nombre_archivo": "",
+            "fuente": "", "slot": "", "estado_documento": "", "ok": "bool",
+            "metodo": "", "paginas_totales": "int", "paginas_leidas": "int",
+            "paginas_por_ocr": "int", "caracteres": "int", "error": "",
+            "ejecutado_en": "ts", "cargado_en": "ts",
+        },
+    },
+
+    # Toda llamada a la API, incluidas las que NO llegaron a analizar (401 por
+    # secreto, 413 por tamaño, 502 por timeout). Eso no es un análisis, así que
+    # no puede ir en `lens_analisis` — pero es justo lo que hay que mirar cuando
+    # el equipo de tech dice "la API no responde". `analisis_id` va NULL ahí.
+    "lens_api_solicitud": {
+        "schema": "lens", "nombre": "api_solicitud",
+        "pk": ["solicitud_id"],
+        "cols": {
+            "solicitud_id": "", "analisis_id": "", "consumidor": "",
+            "recibido_en": "ts", "ruta": "", "metodo": "",
+            "http_status": "int", "n_documentos": "int", "bytes_entrada": "int",
+            "incluir_texto": "bool", "pais_forzado": "",
+            "estado": "", "error": "", "duracion_ms": "int",
+            "ip_origen": "", "cargado_en": "ts",
+        },
+    },
 }
 
 
@@ -208,6 +304,23 @@ def _normalizar(valor, tipo):
     if tipo == "json":
         return valor if isinstance(valor, str) else json.dumps(valor, ensure_ascii=False)
     return str(valor)
+
+
+def _destino(tabla):
+    """`schema.tabla` donde se escribe de verdad.
+
+    El schema sale del whitelist si la tabla declara uno, y si no del global
+    (`REDSHIFT_SCHEMA`, por defecto `colas_trabajo`). Hace falta porque las
+    tablas de `lens` viven en su propio schema y las de colas no se mueven.
+
+    El nombre físico también sale del whitelist: la clave del request lleva
+    prefijo (`lens_analisis`) para que no choque con una tabla de colas, y la
+    tabla real es `lens.analisis`.
+
+    Ninguno de los dos viene del request: los dos salen de este mapa, así que
+    sigue sin haber forma de inyectar un destino."""
+    spec = TABLAS[tabla]
+    return f"{spec.get('schema') or SCHEMA}.{spec.get('nombre') or tabla}"
 
 
 def _columnas(tabla, datos):
@@ -250,7 +363,7 @@ def _sentencias(tabla, datos):
     ("Invalid length for parameter ... valid min length: 1"), así que no se puede
     mandar '' como marcador de nulo. Verificado contra el cluster."""
     spec = TABLAS[tabla]
-    destino = f"{SCHEMA}.{tabla}"
+    destino = _destino(tabla)
 
     # Columnas desconocidas: se ignoran. Columnas nulas: se omiten.
     cols, exprs, vals = [], [], []
@@ -391,7 +504,13 @@ def _escribir_dataapi(filas):
 
     # 2) Un DELETE + un INSERT por grupo.
     for (tabla, cols, exprs), items in grupos.items():
-        destino = f"{SCHEMA}.{tabla}"
+        # OJO: hay DOS rutas de escritura (esta y `_sentencias`, la de TCP) y las
+        # dos tienen que resolver el destino igual. Cuando esta quedó con el
+        # schema global, los INSERT de `lens_*` se fueron a
+        # `colas_trabajo.lens_analisis` —que no existe— y como
+        # `execute_statement` es asíncrono el fallo no se vio: el logger devolvía
+        # ok y en Redshift no había nada.
+        destino = _destino(tabla)
         pk = TABLAS[tabla]["pk"][0]                  # todas las tablas tienen PK simple
         pos_pk = cols.index(pk)
         indices = [i for i, _ in items]

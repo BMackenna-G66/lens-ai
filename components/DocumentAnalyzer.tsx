@@ -15,7 +15,8 @@ import {
     analyzeDocumentForRisks,
     analyzeDocumentIntegrity,
     hasValidApiKeys,
-    generateExecutiveSummary
+    generateExecutiveSummary,
+    MODELO_ANALISIS
 } from '../services/geminiService';
 import { generatePdf } from '../services/pdfGenerator';
 import { fetchRegcheqEnrichment, hasRegcheqKey } from '../services/regcheqEnrichment';
@@ -23,6 +24,8 @@ import { generateCsv } from '../services/csvGenerator';
 import { IconJson, IconCsv, IconAlertTriangle, IconAlertTriangleSolid, IconFileText, IconFiles, IconImport, IconExport } from './IconComponents';
 import { DocumentChat } from './DocumentChat';
 import { KEYWORDS_BY_COUNTRY } from '../services/countryKeywords';
+import { nuevoAnalisisId, persistirAnalisis } from '../services/lensPersistenciaService';
+import { useAuth } from '../context/AuthContext';
 import { db } from '../services/dbService';
 import { trackDocumentProcessed } from '../services/analyticsService';
 
@@ -47,6 +50,9 @@ const keywordFieldMap: { [key: string]: string | undefined } = {
 const PROCESSING_LOCK_KEY = 'lens_ai_processing_lock';
 
 export const DocumentAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> = ({ onOpen360 }) => {
+  // Quién ejecuta el análisis. Se guarda con la extracción en Redshift: sin esto
+  // la tabla dice qué se extrajo pero no quién lo pidió.
+  const { user } = useAuth();
   const [processedDocuments, setProcessedDocuments] = useState<ProcessedDocument[]>([]);
   const [processingQueue, setProcessingQueue] = useState<QueueItem[]>([]);
   const [currentProcessingJobInfo, setCurrentProcessingJobInfo] = useState<{ id: string, displayName: string, isConsolidated: boolean } | null>(null);
@@ -169,6 +175,7 @@ export const DocumentAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> =
       }));
     };
 
+    const t0 = Date.now();
     try {
       setProcessingQueue(prev => prev.slice(1));
       const docToProcess = processedDocuments.find(d => d.id === docId);
@@ -226,15 +233,53 @@ export const DocumentAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> =
         const rut = rutRaw.replace(/[.\s-]/g, '').toUpperCase();
         // RUT chileno válido: 7-8 dígitos + dígito verificador (0-9 o K).
         const esRutValido = /^[0-9]{7,8}[0-9K]$/.test(rut);
+        let enriquecimiento: unknown;
         if (esRutValido && hasRegcheqKey()) {
           updateDoc(FileProcessingStatus.COMPLETED, { regcheqEnrichment: { loading: true, consultado: true, encontrado: false, amlHits: [] } });
           try {
             const enr = await fetchRegcheqEnrichment(rut, razon);
+            enriquecimiento = enr;
             updateDoc(FileProcessingStatus.COMPLETED, { regcheqEnrichment: { ...enr, loading: false } });
           } catch (e: any) {
+            enriquecimiento = { error: e?.message };
             updateDoc(FileProcessingStatus.COMPLETED, { regcheqEnrichment: { loading: false, consultado: true, encontrado: false, amlHits: [], error: e?.message } });
           }
         }
+
+        // ── Persistencia en Redshift (schema `lens`) ──────────────────────────
+        // Va DESPUÉS de que el análisis quedó completo y SIN await: es un efecto,
+        // no parte del análisis. Si Redshift está dormido —se pausa 18:30–04:00—
+        // las filas quedan en el buffer del navegador y entran cuando vuelve.
+        // Que la persistencia falle no le puede costar el trabajo a nadie.
+        //
+        // NO se manda `combinedText`: son 73.759 caracteres en una escritura de
+        // 41 páginas. Ver el DDL en aws/colas-logger/sql/lens_schema.sql.
+        void persistirAnalisis({
+          analisisId: nuevoAnalisisId(),
+          origen: 'analizador',
+          actor: user ? { uid: user.uid, nombre: user.displayName ?? undefined, email: user.email ?? undefined } : null,
+          campos: extractedData,
+          archivos: files.map(f => f.name),
+          consolidado: isConsolidated,
+          proposito: docToProcess.purpose,
+          estado: 'COMPLETO',
+          paisDetectado: country,
+          caracteres: combinedText.length,
+          modelo: MODELO_ANALISIS,
+          duracionMs: Date.now() - t0,
+          // Claves en snake_case, NO camelCase. Redshift baja a minúsculas el
+          // identificador al navegar un SUPER con punto, así que
+          // `ficha.paisDetectado` devuelve NULL EN SILENCIO mientras
+          // `ficha.pais_detectado` funciona. Verificado contra el cluster.
+          ficha: {
+            campos: extractedData,
+            pais_detectado: country,
+            proposito: docToProcess.purpose,
+            archivos: files.map(f => f.name),
+            consolidado: isConsolidated,
+            regcheq: enriquecimiento,
+          },
+        });
       } else {
         updateDoc(FileProcessingStatus.COMPLETED, { statusMessage: "Listo para chatear." });
         trackDocumentProcessed('analyzer');
@@ -246,7 +291,7 @@ export const DocumentAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> =
       setCurrentProcessingJobInfo(null);
       localStorage.removeItem(PROCESSING_LOCK_KEY);
     }
-  }, [processingQueue, currentProcessingJobInfo, processedDocuments, tabId]);
+  }, [processingQueue, currentProcessingJobInfo, processedDocuments, tabId, user]);
 
   useEffect(() => {
     if (!currentProcessingJobInfo && !isLockedByAnotherTab && processingQueue.length > 0) {
