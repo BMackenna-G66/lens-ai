@@ -7,7 +7,9 @@ import { SEVERITY_META } from '../services/validationRules';
 import { BatchCompanyInput, BatchSourceType, BatchMode, CompanyMetadata, AdminComparisonResult } from '../types/batch';
 import { fromLocalFolder } from '../services/batchInputNormalizer';
 import { processOneCompany } from '../services/batchProcessor';
-import { hasValidApiKeys, getChatResponse } from '../services/geminiService';
+import { hasValidApiKeys, getChatResponse, MODELO_ANALISIS } from '../services/geminiService';
+import { nuevoAnalisisId, persistirAnalisis } from '../services/lensPersistenciaService';
+import { useAuth } from '../context/AuthContext';
 import { GEMINI_CHAT_SYSTEM_INSTRUCTION } from '../constants';
 import { EmpresaDocsImporter } from './EmpresaDocsImporter';
 import { DocumentChat } from './DocumentChat';
@@ -111,6 +113,8 @@ const SourceBadge: React.FC<{ source: BatchSourceType }> = ({ source }) => (
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export const BatchAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> = ({ onOpen360 }) => {
+  // Quién corrió el batch. Va con la extracción a Redshift.
+  const { user } = useAuth();
   const [sourceType, setSourceType]   = useState<BatchSourceType>('local_folder');
   const [mode, setMode]               = useState<BatchMode>('completo');
   const [pendingInput, setPendingInput] = useState<BatchCompanyInput[]>([]);
@@ -256,6 +260,7 @@ export const BatchAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> = ({
         };
       }));
 
+      const tEmpresa = Date.now();
       try {
         const result = await processOneCompany(company, mode, {
           onDocOcr: (docId, status, error) => patchDoc(ci, docId, { ocrStatus: status, error }),
@@ -277,9 +282,83 @@ export const BatchAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> = ({
           adminComparison: result.adminComparison,
         });
 
+        // ── Persistencia en Redshift (schema `lens`) ────────────────────────
+        // Una fila de cabecera + una por campo + la ficha completa + UNA POR
+        // DOCUMENTO. El detalle por documento es lo que el batch tiene y los
+        // otros flujos no: una corrida procesa muchos archivos de una empresa y
+        // cada uno pudo fallar por su cuenta, así que sin esa tabla "el batch
+        // salió parcial" no dice qué faltó.
+        //
+        // Sin await: es un efecto, no parte del análisis. Si el cluster está
+        // dormido, las filas esperan en el buffer del navegador.
+        // NO se manda `result.rawText` — es el texto consolidado de todos los
+        // documentos, y eso no va al warehouse (ver el DDL).
+        const analisisId = nuevoAnalisisId();
+        void persistirAnalisis({
+          analisisId,
+          origen: 'batch',
+          actor: user ? { uid: user.uid, nombre: user.displayName ?? undefined, email: user.email ?? undefined } : null,
+          campos: result.extractedData ?? [],
+          archivos: company.documents.map(d => d.fileName),
+          consolidado: mode === 'completo',
+          proposito: 'extract',
+          estado: result.errorCount > 0 ? 'PARCIAL' : 'COMPLETO',
+          paisDetectado: company.country,
+          caracteres: result.rawText?.length,
+          modelo: MODELO_ANALISIS,
+          duracionMs: Date.now() - tEmpresa,
+          // Claves en snake_case, NO camelCase: Redshift baja a minúsculas el
+          // identificador al navegar un SUPER con punto, así que una clave
+          // camelCase devuelve NULL EN SILENCIO. Verificado contra el cluster.
+          // Los objetos anidados de proveedores (regcheq, comparativa) conservan
+          // su forma original; para navegarlos hace falta
+          // `json_extract_path_text(json_serialize(ficha), …)`.
+          ficha: {
+            empresa: {
+              nombre: company.companyName,
+              company_id: company.companyId,
+              identificacion: company.identificationNumber,
+              pais: company.country,
+              fuente: company.source,
+            },
+            campos: result.extractedData,
+            resumen_ejecutivo: result.executiveSummary,
+            regcheq: result.regcheqEnrichment,
+            comparativa_admin: result.adminComparison,
+            errores: result.errorCount,
+          },
+        }, company.documents.map(d => ({
+          analisisId,
+          documentoId: d.id,
+          nombreArchivo: d.fileName,
+          fuente: d.source,
+          slot: d.slot,
+          estadoDocumento: d.documentStatus,
+          // El error de descarga viene marcado desde la entrada; si no hay
+          // error, el documento se leyó.
+          ok: !d.error,
+          error: d.error,
+        })));
+
       } catch (err) {
         const error = err instanceof Error ? err.message : 'Error en análisis';
         patchCompany(ci, { status: 'error', statusLabel: undefined, error });
+
+        // El fallo también se guarda: una corrida que no dejó rastro es una
+        // corrida que nadie puede revisar después.
+        void persistirAnalisis({
+          analisisId: nuevoAnalisisId(),
+          origen: 'batch',
+          actor: user ? { uid: user.uid, nombre: user.displayName ?? undefined, email: user.email ?? undefined } : null,
+          campos: [],
+          archivos: company.documents.map(d => d.fileName),
+          consolidado: mode === 'completo',
+          proposito: 'extract',
+          estado: 'ERROR',
+          paisDetectado: company.country,
+          error,
+          duracionMs: Date.now() - tEmpresa,
+        });
       }
     }
 
