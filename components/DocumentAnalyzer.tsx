@@ -5,7 +5,7 @@ import { DocumentCard } from './DocumentCard';
 import { LoadingSpinner } from './LoadingSpinner';
 import { Alert } from './Alert';
 import { PREDEFINED_FIELDS, GEMINI_PROMPT_TEMPLATE, GEMINI_CHAT_SYSTEM_INSTRUCTION } from '../constants'; 
-import { ProcessedDocument, FileProcessingStatus, SupplementaryDocumentAnalysis, SupplementaryAnalysisStatus, ComparisonResult, ChatMessage, QueueItem, AnalysisPurpose, RiskAnalysisStatus, IntegrityAnalysisStatus } from '../types';
+import { ProcessedDocument, FileProcessingStatus, SupplementaryDocumentAnalysis, SupplementaryAnalysisStatus, ComparisonResult, ChatMessage, QueueItem, AnalysisPurpose, RiskAnalysisStatus, IntegrityAnalysisStatus, ExtractedField } from '../types';
 import { getTextFromFile } from '../services/fileProcessorService';
 import {
     analyzeDocumentWithGemini,
@@ -24,7 +24,7 @@ import { generateCsv } from '../services/csvGenerator';
 import { IconJson, IconCsv, IconAlertTriangle, IconAlertTriangleSolid, IconFileText, IconFiles, IconImport, IconExport } from './IconComponents';
 import { DocumentChat } from './DocumentChat';
 import { KEYWORDS_BY_COUNTRY } from '../services/countryKeywords';
-import { nuevoAnalisisId, persistirAnalisis } from '../services/lensPersistenciaService';
+import { nuevoAnalisisId, persistirAnalisis, persistirFicha, sha256Hex } from '../services/lensPersistenciaService';
 import { useAuth } from '../context/AuthContext';
 import { db } from '../services/dbService';
 import { trackDocumentProcessed } from '../services/analyticsService';
@@ -48,6 +48,52 @@ const keywordFieldMap: { [key: string]: string | undefined } = {
 };
 
 const PROCESSING_LOCK_KEY = 'lens_ai_processing_lock';
+
+// La ficha completa que se guarda en `lens.analisis_ficha`.
+//
+// Claves en snake_case, NO camelCase: Redshift baja a minúsculas el
+// identificador al navegar un SUPER con punto, así que `ficha.paisDetectado`
+// devuelve NULL EN SILENCIO mientras `ficha.pais_detectado` funciona.
+// Verificado contra el cluster. Los objetos anidados de proveedores conservan
+// su forma; para esos hay que usar json_extract_path_text.
+//
+// Una sola función para las dos escrituras —la de la extracción y la de después,
+// cuando terminan riesgo o integridad— porque el logger reemplaza la fila
+// entera: si las dos armaran el JSON distinto, la segunda perdería lo de la
+// primera sin que se note.
+const fichaLens = (p: {
+  campos?: ExtractedField[];
+  pais?: string;
+  proposito?: string;
+  archivos?: string[];
+  consolidado?: boolean;
+  regcheq?: unknown;
+  riesgo?: unknown;
+  integridad?: unknown;
+}) => ({
+  campos: p.campos,
+  pais_detectado: p.pais,
+  proposito: p.proposito,
+  archivos: p.archivos,
+  consolidado: p.consolidado,
+  regcheq: p.regcheq,
+  analisis_riesgo: p.riesgo,
+  analisis_integridad: p.integridad,
+});
+
+// La ficha reconstruida desde el documento tal como está ahora. Se usa al
+// reescribir: junta lo que había con lo que acaba de terminar.
+const fichaDelDoc = (d: ProcessedDocument, extra: { riesgo?: unknown; integridad?: unknown }) =>
+  fichaLens({
+    campos: d.extractedData,
+    pais: d.detectedCountry,
+    proposito: d.purpose,
+    archivos: d.sourceFileNames ?? [d.fileName],
+    consolidado: !!d.sourceFileNames,
+    regcheq: d.regcheqEnrichment,
+    riesgo: extra.riesgo ?? d.riskAnalysisResult,
+    integridad: extra.integridad ?? d.integrityAnalysisResult,
+  });
 
 export const DocumentAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> = ({ onOpen360 }) => {
   // Quién ejecuta el análisis. Se guarda con la extracción en Redshift: sin esto
@@ -254,8 +300,11 @@ export const DocumentAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> =
         //
         // NO se manda `combinedText`: son 73.759 caracteres en una escritura de
         // 41 páginas. Ver el DDL en aws/colas-logger/sql/lens_schema.sql.
+        const analisisId = nuevoAnalisisId();
+        const analisisEn = new Date().toISOString();
         void persistirAnalisis({
-          analisisId: nuevoAnalisisId(),
+          analisisId,
+          ejecutadoEn: analisisEn,
           origen: 'analizador',
           actor: user ? { uid: user.uid, nombre: user.displayName ?? undefined, email: user.email ?? undefined } : null,
           campos: extractedData,
@@ -267,19 +316,25 @@ export const DocumentAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> =
           caracteres: combinedText.length,
           modelo: MODELO_ANALISIS,
           duracionMs: Date.now() - t0,
-          // Claves en snake_case, NO camelCase. Redshift baja a minúsculas el
-          // identificador al navegar un SUPER con punto, así que
-          // `ficha.paisDetectado` devuelve NULL EN SILENCIO mientras
-          // `ficha.pais_detectado` funciona. Verificado contra el cluster.
-          ficha: {
+          ficha: fichaLens({
             campos: extractedData,
-            pais_detectado: country,
+            pais: country,
             proposito: docToProcess.purpose,
             archivos: files.map(f => f.name),
             consolidado: isConsolidated,
             regcheq: enriquecimiento,
-          },
+          }),
+        }, undefined, {
+          // El material crudo, para poder recalibrar: el texto EXACTO que se le
+          // mandó al modelo y lo que devolvió antes de que el esquema lo
+          // acomodara. Va troceado a otra tabla; ver `lens.analisis_texto`.
+          textoDocumento: combinedText,
+          respuestaModelo: rawResponse,
         });
+        // El id queda en el documento para que riesgo e integridad puedan
+        // reescribir ESTA misma ficha en vez de crear otra fila.
+        void sha256Hex(combinedText).then(sha =>
+          updateDoc(FileProcessingStatus.COMPLETED, { analisisId, analisisEn, hashDocumentos: sha }));
       } else {
         updateDoc(FileProcessingStatus.COMPLETED, { statusMessage: "Listo para chatear." });
         trackDocumentProcessed('analyzer');
@@ -349,6 +404,12 @@ export const DocumentAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> =
         const result = await analyzeDocumentForRisks(doc.rawTextContent);
         setProcessedDocuments(prev => prev.map(d => d.id === documentId ? { ...d, riskAnalysisStatus: RiskAnalysisStatus.COMPLETED, riskAnalysisResult: result } : d));
         if (result.suspiciousActivity?.detected) trackDocumentProcessed('analyzer', doc.detectedCountry, true);
+        // El riesgo se corre DESPUÉS de la extracción, así que hasta ahora no
+        // quedaba en ninguna parte. Se reescribe la misma fila de la ficha.
+        if (doc.analisisId) {
+          void persistirFicha(doc.analisisId, 'analizador', fichaDelDoc(doc, { riesgo: result }),
+            { ejecutadoEn: doc.analisisEn, hashDocumentos: doc.hashDocumentos });
+        }
     } catch(error: any) {
         setProcessedDocuments(prev => prev.map(d => d.id === documentId ? { ...d, riskAnalysisStatus: RiskAnalysisStatus.ERROR, riskAnalysisError: error.message } : d));
     }
@@ -362,6 +423,11 @@ export const DocumentAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> =
     try {
         const result = await analyzeDocumentIntegrity(doc.rawTextContent);
         setProcessedDocuments(prev => prev.map(d => d.id === documentId ? { ...d, integrityAnalysisStatus: IntegrityAnalysisStatus.COMPLETED, integrityAnalysisResult: result } : d));
+        // Igual que el de riesgo: corre después y hay que reescribir la ficha.
+        if (doc.analisisId) {
+          void persistirFicha(doc.analisisId, 'analizador', fichaDelDoc(doc, { integridad: result }),
+            { ejecutadoEn: doc.analisisEn, hashDocumentos: doc.hashDocumentos });
+        }
     } catch(error: any) {
         setProcessedDocuments(prev => prev.map(d => d.id === documentId ? { ...d, integrityAnalysisStatus: IntegrityAnalysisStatus.ERROR, integrityAnalysisError: error.message } : d));
     }

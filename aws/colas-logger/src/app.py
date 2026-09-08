@@ -259,6 +259,23 @@ TABLAS = {
         },
     },
 
+    # El material crudo: la ENTRADA (texto del documento) y la SALIDA textual del
+    # modelo, partidas en trozos. Para recalibrar hace falta poder volver a
+    # correr el modelo sobre exactamente el mismo texto y comparar contra
+    # exactamente lo que había respondido.
+    #
+    # Va en trozos por dos límites medidos: la Data API rechaza requests de más
+    # de 200 kB, y VARCHAR topa en 65.535 bytes. PK sintética, igual que el resto.
+    "lens_analisis_texto": {
+        "schema": "lens", "nombre": "analisis_texto",
+        "pk": ["texto_id"],
+        "cols": {
+            "texto_id": "", "analisis_id": "", "tipo": "", "orden": "int",
+            "partes": "int", "texto": "", "caracteres": "int", "sha256": "",
+            "origen": "", "ejecutado_en": "ts", "cargado_en": "ts",
+        },
+    },
+
     # Toda llamada a la API, incluidas las que NO llegaron a analizar (401 por
     # secreto, 413 por tamaño, 502 por timeout). Eso no es un análisis, así que
     # no puede ir en `lens_analisis` — pero es justo lo que hay que mirar cuando
