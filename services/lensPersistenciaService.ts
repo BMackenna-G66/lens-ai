@@ -93,6 +93,42 @@ export interface EntradaAnalisis {
   hashDocumentos?: string;
 }
 
+// ── Material crudo: la entrada y la salida textual del modelo ───────────────
+// Para recalibrar no alcanza con la ficha: hay que poder volver a correr el
+// modelo sobre EXACTAMENTE el mismo texto y comparar contra exactamente lo que
+// había respondido.
+//
+// Va en trozos por dos límites medidos contra el cluster:
+//   · la Data API rechaza un request de más de 200 kB, y el texto viaja como
+//     parámetro ("Query string size exceeds 200 kB")
+//   · VARCHAR en Redshift topa en 65.535 BYTES, y una escritura de 41 páginas
+//     son 73.759 caracteres
+//
+// 20.000 caracteres por trozo deja margen para los acentos, que ocupan 2 bytes.
+export const TROZO_CHARS = 20_000;
+// Cuántos trozos entran en un request. 8 × 20.000 ≈ 160 kB, bajo el techo de 200
+// kB con margen. El logger agrupa las filas de una misma tabla en UN INSERT, así
+// que este número es el que decide el tamaño del request, no el del trozo.
+const TROZOS_POR_LOTE = 8;
+
+export type TipoTexto = 'documento' | 'respuesta_modelo';
+
+/** sha256 en hex. Identifica el documento sin tener que rearmarlo. */
+export async function sha256Hex(texto: string): Promise<string> {
+  try {
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(texto));
+    return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+  } catch {
+    return '';   // sin WebCrypto (contexto no seguro): se guarda sin hash
+  }
+}
+
+export const trocear = (texto: string, tam = TROZO_CHARS): string[] => {
+  const partes: string[] = [];
+  for (let i = 0; i < texto.length; i += tam) partes.push(texto.slice(i, i + tam));
+  return partes;
+};
+
 export interface EntradaBatchDocumento {
   analisisId: string;
   documentoId: string;
@@ -213,22 +249,95 @@ export function filasDeBatchDocumentos(docs: EntradaBatchDocumento[]): Fila[] {
   }));
 }
 
+/** Los trozos de un texto, listos para mandar. */
+export function filasDeTexto(
+  analisisId: string, tipo: TipoTexto, texto: string, sha: string,
+  origen: OrigenAnalisis, ejecutadoEn?: string,
+): Fila[] {
+  const partes = trocear(texto);
+  const en = ts(ejecutadoEn ?? new Date());
+  const cargado = ts();
+  return partes.map((t, i) => ({
+    tabla: 'lens_analisis_texto',
+    datos: {
+      texto_id: `${analisisId}|${tipo}|${i}`,
+      analisis_id: analisisId,
+      tipo, orden: i, partes: partes.length,
+      texto: t, caracteres: t.length,
+      sha256: sha || undefined,
+      origen, ejecutado_en: en, cargado_en: cargado,
+    },
+  }));
+}
+
 /**
  * Manda todo. Best-effort y sin lanzar: quien lo llama no tiene que defenderse.
  *
  * No se hace `await` desde la UI a propósito — persistir es un efecto, no parte
  * del análisis. Si Redshift está dormido, las filas quedan en el buffer del
  * navegador y entran cuando vuelve.
+ *
+ * OJO con reenviar: el logger hace DELETE + INSERT de la fila entera con LAS
+ * COLUMNAS QUE LLEGAN, no un merge. Reenviar una fila con menos columnas BORRA
+ * las que faltan. Por eso `persistirFicha` manda siempre la fila completa.
  */
 export async function persistirAnalisis(
   e: EntradaAnalisis,
   documentos?: EntradaBatchDocumento[],
+  crudo?: { textoDocumento?: string; respuestaModelo?: string },
 ): Promise<{ escritas: number; fallidas: number; error?: string }> {
   try {
-    const filas = [...filasDeAnalisis(e), ...(documentos?.length ? filasDeBatchDocumentos(documentos) : [])];
+    // El hash del documento se calcula acá y viaja también en la ficha: sirve
+    // para cruzar dos análisis del mismo archivo sin rearmar el texto.
+    const sha = crudo?.textoDocumento ? await sha256Hex(crudo.textoDocumento) : '';
+    const filas = [
+      ...filasDeAnalisis({ ...e, hashDocumentos: e.hashDocumentos ?? (sha || undefined) }),
+      ...(documentos?.length ? filasDeBatchDocumentos(documentos) : []),
+    ];
+    let escritas = 0, fallidas = 0, error: string | undefined;
     const r = await enviarLote(filas);
-    return { escritas: r.escritas, fallidas: r.fallidas, error: r.error };
+    escritas += r.escritas; fallidas += r.fallidas; error ??= r.error;
+
+    // Los textos van aparte y en lotes chicos: son lo único que puede pasarse
+    // del techo de 200 kB por request.
+    const textos = [
+      ...(crudo?.textoDocumento ? filasDeTexto(e.analisisId, 'documento', crudo.textoDocumento, sha, e.origen, e.ejecutadoEn) : []),
+      ...(crudo?.respuestaModelo ? filasDeTexto(e.analisisId, 'respuesta_modelo', crudo.respuestaModelo, '', e.origen, e.ejecutadoEn) : []),
+    ];
+    for (let i = 0; i < textos.length; i += TROZOS_POR_LOTE) {
+      const rt = await enviarLote(textos.slice(i, i + TROZOS_POR_LOTE));
+      escritas += rt.escritas; fallidas += rt.fallidas; error ??= rt.error;
+    }
+    return { escritas, fallidas, error };
   } catch (err) {
     return { escritas: 0, fallidas: 0, error: (err as Error).message };
   }
+}
+
+/**
+ * Reescribe SOLO la ficha completa. Para cuando terminan análisis que corren
+ * después de la extracción —riesgo, integridad— y que hasta ahora no quedaban
+ * en ninguna parte.
+ *
+ * Manda la fila ENTERA a propósito: el logger borra e inserta con las columnas
+ * que recibe, así que mandar solo `ficha` dejaría `origen`, `ejecutado_en` y el
+ * hash en NULL.
+ */
+export async function persistirFicha(
+  analisisId: string, origen: OrigenAnalisis, ficha: unknown,
+  opciones?: { ejecutadoEn?: string; hashDocumentos?: string },
+): Promise<void> {
+  try {
+    await enviarLote([{
+      tabla: 'lens_analisis_ficha',
+      datos: {
+        analisis_id: analisisId,
+        origen,
+        ejecutado_en: ts(opciones?.ejecutadoEn ?? new Date()),
+        ficha,
+        hash_documentos: opciones?.hashDocumentos,
+        cargado_en: ts(),
+      },
+    }]);
+  } catch { /* best-effort */ }
 }

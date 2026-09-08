@@ -157,6 +157,48 @@ DISTSTYLE KEY DISTKEY (analisis_id)
 SORTKEY (ejecutado_en);
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- El material crudo del análisis: la ENTRADA y la SALIDA textual del modelo.
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Para recalibrar el modelo no alcanza con la ficha estructurada: hace falta
+-- poder volver a correrlo sobre EXACTAMENTE el mismo texto y comparar contra
+-- exactamente lo que había respondido. Eso es lo que guarda esta tabla.
+--
+--   tipo = 'documento'         → el texto que se le mandó al modelo
+--   tipo = 'respuesta_modelo'  → lo que devolvió, antes de que el esquema lo acomodara
+--
+-- ── Por qué está partida en trozos ──────────────────────────────────────────
+-- Dos límites duros, los dos medidos contra este cluster:
+--   · la Data API rechaza un request de más de 200 kB ("Query string size
+--     exceeds 200 kB"), y el texto viaja como parámetro
+--   · VARCHAR en Redshift topa en 65.535 BYTES, y una escritura de 41 páginas
+--     son 73.759 caracteres — no entra en una sola celda
+-- Por eso el texto se corta en trozos de ~20.000 caracteres y se guarda uno por
+-- fila, con `orden` para poder rearmarlo.
+--
+-- OJO al rearmar: `LISTAGG` también topa en 65.535 bytes, así que un documento
+-- largo NO se puede reconstruir en una sola consulta. Se traen los trozos
+-- ordenados y se concatenan del lado del cliente.
+--
+-- El `sha256` es del texto COMPLETO y se repite en cada trozo: sirve para saber
+-- si dos análisis distintos corrieron sobre el mismo documento, sin rearmar nada.
+CREATE TABLE IF NOT EXISTS lens.analisis_texto (
+  texto_id          VARCHAR(320)   NOT NULL,   -- analisis_id|tipo|orden
+  analisis_id       VARCHAR(64)    NOT NULL,
+  tipo              VARCHAR(24),               -- documento | respuesta_modelo
+  orden             SMALLINT,                  -- 0-based
+  partes            SMALLINT,                  -- cuántos trozos tiene ese tipo
+  texto             VARCHAR(65535),
+  caracteres        INTEGER,                   -- de ESTE trozo
+  sha256            VARCHAR(64),               -- del texto COMPLETO
+  origen            VARCHAR(20),
+  ejecutado_en      TIMESTAMP,
+  cargado_en        TIMESTAMP,
+  PRIMARY KEY (texto_id)
+)
+DISTSTYLE KEY DISTKEY (analisis_id)
+SORTKEY (analisis_id, orden);
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- Toda llamada a la API, incluidas las que NO llegaron a analizar.
 -- ─────────────────────────────────────────────────────────────────────────────
 -- "Todo lo que se procese por la API" incluye lo que se RECHAZÓ: un 401 por

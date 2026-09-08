@@ -338,7 +338,12 @@ export const BatchAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> = ({
           // error, el documento se leyó.
           ok: !d.error,
           error: d.error,
-        })));
+        })), {
+          // El texto consolidado de todos los documentos de la empresa: es la
+          // entrada exacta que recibió el modelo, y sin eso no se puede
+          // recalibrar. Va troceado a `lens.analisis_texto`.
+          textoDocumento: result.rawText,
+        });
 
       } catch (err) {
         const error = err instanceof Error ? err.message : 'Error en análisis';

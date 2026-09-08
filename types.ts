@@ -107,6 +107,13 @@ export interface ProcessedDocument {
   integrityAnalysisResult?: IntegrityAnalysisResult;
   integrityAnalysisError?: string;
   regcheqEnrichment?: RegcheqEnrichment; // screening AML + SII (solo empresas chilenas)
+  // ── Persistencia en Redshift (schema `lens`) ────────────────────────────────
+  // Se guardan en el documento para que los análisis que corren DESPUÉS de la
+  // extracción —riesgo, integridad— puedan reescribir la misma fila en vez de
+  // crear una nueva. Sobreviven al recargar porque el documento va a IndexedDB.
+  analisisId?: string;
+  analisisEn?: string;        // ISO de la ejecución
+  hashDocumentos?: string;    // sha256 del texto fuente
 }
 
 // Type for items in the processing queue, can be a single File or a consolidated job
