@@ -9,6 +9,7 @@ import { fromLocalFolder } from '../services/batchInputNormalizer';
 import { processOneCompany } from '../services/batchProcessor';
 import { hasValidApiKeys, getChatResponse, MODELO_ANALISIS } from '../services/geminiService';
 import { nuevoAnalisisId, persistirAnalisis } from '../services/lensPersistenciaService';
+import { pendientesEnBuffer, reintentarPendientes } from '../services/colasLogService';
 import { useAuth } from '../context/AuthContext';
 import { GEMINI_CHAT_SYSTEM_INSTRUCTION } from '../constants';
 import { EmpresaDocsImporter } from './EmpresaDocsImporter';
@@ -115,6 +116,16 @@ const SourceBadge: React.FC<{ source: BatchSourceType }> = ({ source }) => (
 export const BatchAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> = ({ onOpen360 }) => {
   // Quién corrió el batch. Va con la extracción a Redshift.
   const { user } = useAuth();
+
+  // Reintento del log pendiente. Mismo motivo que en el analizador: el buffer
+  // solo se vaciaba desde la Bandeja de Casos, y quien corre batches puede no
+  // abrirla nunca. Un batch es además el caso que más filas manda de una.
+  useEffect(() => {
+    const correr = () => { if (pendientesEnBuffer() > 0) void reintentarPendientes(); };
+    correr();
+    const t = setInterval(correr, 5 * 60 * 1000);
+    return () => clearInterval(t);
+  }, []);
   const [sourceType, setSourceType]   = useState<BatchSourceType>('local_folder');
   const [mode, setMode]               = useState<BatchMode>('completo');
   const [pendingInput, setPendingInput] = useState<BatchCompanyInput[]>([]);

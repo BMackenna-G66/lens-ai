@@ -25,6 +25,7 @@ import { IconJson, IconCsv, IconAlertTriangle, IconAlertTriangleSolid, IconFileT
 import { DocumentChat } from './DocumentChat';
 import { KEYWORDS_BY_COUNTRY } from '../services/countryKeywords';
 import { nuevoAnalisisId, persistirAnalisis, persistirFicha, sha256Hex } from '../services/lensPersistenciaService';
+import { pendientesEnBuffer, reintentarPendientes } from '../services/colasLogService';
 import { useAuth } from '../context/AuthContext';
 import { db } from '../services/dbService';
 import { trackDocumentProcessed } from '../services/analyticsService';
@@ -124,6 +125,21 @@ export const DocumentAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> =
       setIsKeyValid(hasValidApiKeys);
     };
     checkApiKey();
+  }, []);
+
+  // Reintento del log pendiente, igual que en la Bandeja.
+  //
+  // Hace falta acá porque hasta ahora el buffer SOLO se vaciaba desde la Bandeja
+  // de Casos, y quien usa el analizador puede no abrirla nunca: si una escritura
+  // fallaba —Redshift pausado, un corte de red— las filas quedaban atrapadas en
+  // su navegador para siempre. Pasó: un análisis del 08-09 a las 16:16 guardó la
+  // ficha y perdió el texto, y los trozos quedaron en el buffer sin nadie que
+  // los reintentara.
+  useEffect(() => {
+    const correr = () => { if (pendientesEnBuffer() > 0) void reintentarPendientes(); };
+    correr();
+    const t = setInterval(correr, 5 * 60 * 1000);
+    return () => clearInterval(t);
   }, []);
 
   useEffect(() => {
