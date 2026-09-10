@@ -69,6 +69,32 @@ export interface OpcionesTexto {
   onTope?: (leidas: number, total: number) => void;
 }
 
+// ── Métricas de la extracción, por canal lateral ───────────────────────────
+// Cuántas páginas tenía el archivo, cuántas se leyeron y con qué método. Va a
+// `lens.analisis` para tener línea base de costo: sin eso no hay con qué
+// comparar la ruta multimodal que viene después.
+//
+// POR QUÉ UN CANAL LATERAL Y NO EL VALOR DE RETORNO. `getTextFromFile` la
+// llaman siete lugares en cinco archivos; cambiar su firma a
+// `{texto, metricas}` obliga a tocar los siete. El requisito es que nada de lo
+// que existe cambie de forma, así que las métricas se dejan al costado y las
+// lee quien las necesita.
+//
+// Es un `WeakMap` con el File como clave: no hay que limpiarlo —cuando el
+// componente suelta el archivo, la entrada se va con él— y no puede confundir
+// dos archivos con el mismo nombre.
+export interface MetricasExtraccion {
+  paginasTotales: number;
+  paginasLeidas: number;
+  paginasPorOcr: number;
+  paginasPorCapa: number;
+  metodo: 'ocr' | 'texto_plano' | 'ninguno';
+  caracteres: number;
+}
+const metricasPorArchivo = new WeakMap<File, MetricasExtraccion>();
+export const metricasDeArchivo = (f: File): MetricasExtraccion | undefined => metricasPorArchivo.get(f);
+const anotarMetricas = (f: File, m: MetricasExtraccion): void => { metricasPorArchivo.set(f, m); };
+
 export const getTextFromFile = async (
   file: File,
   onProgress?: (progress: number, status: string) => void,
@@ -98,6 +124,12 @@ const extractTextFromTxt = (file: File): Promise<string> => {
     const reader = new FileReader();
     reader.onload = (event) => {
       if (event.target && typeof event.target.result === 'string') {
+        // Un .txt no tiene páginas ni OCR: se anota igual para que la línea
+        // base no tenga huecos y se pueda distinguir "no aplica" de "no medido".
+        anotarMetricas(file, {
+          paginasTotales: 0, paginasLeidas: 0, paginasPorOcr: 0, paginasPorCapa: 0,
+          metodo: 'texto_plano', caracteres: event.target.result.length,
+        });
         resolve(event.target.result);
       } else {
         reject(new Error('No se pudo leer el archivo TXT.'));
@@ -246,6 +278,17 @@ const extractTextFromPdfWithOcr = async (
     }
     
     console.log(`[extractTextFromPdfWithOcr] Successfully extracted text via OCR from ${file.name}. Total length: ${trimmedFullText.length}. Preview (first 200 chars): "${trimmedFullText.substring(0, 200).replace(/\n/g, ' ')}"`);
+    // Esta ruta OCRea TODAS las páginas: no hay atajo por capa de texto, así que
+    // `paginasPorCapa` es 0 siempre. No es un descuido — es el dato que hace
+    // visible la diferencia con la API, que sí lee la capa primero.
+    anotarMetricas(file, {
+      paginasTotales: pdfDocProxy?.numPages ?? 0,
+      paginasLeidas: totalPages,
+      paginasPorOcr: totalPages,
+      paginasPorCapa: 0,
+      metodo: 'ocr',
+      caracteres: trimmedFullText.length,
+    });
     return trimmedFullText;
 
   } catch (error: any) {

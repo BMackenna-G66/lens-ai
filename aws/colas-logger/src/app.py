@@ -207,6 +207,47 @@ TABLAS = {
             "modelo": "", "tokens_prompt": "int", "tokens_salida": "int",
             "duracion_ms": "int", "error": "", "avisos": "json",
             "cargado_en": "ts",
+            # Fase 1. `company_id` es la más importante: hoy el único cruce con
+            # el resto del warehouse es `rut_sociedad`, QUE LO EXTRAE EL MODELO.
+            # Si lee mal un dígito, la empresa se parte en dos. Esto viene del
+            # llamador: es un hecho, no una lectura.
+            "company_id": "",
+            "domicilio_pais": "", "domicilio_region": "", "domicilio_ciudad": "",
+            "domicilio_calle": "", "domicilio_numero": "", "domicilio_complemento": "",
+            "domicilio_cp": "", "domicilio_raw": "",
+            "notaria_registro": "", "fecha_constitucion_iso": "ts",
+            "flag_administracion_conjunta": "bool", "flag_limites_monto": "bool",
+            "flag_18a": "bool",
+        },
+    },
+
+    # Fase 1 · Personas: representantes, accionistas y la cadena anidada.
+    # UNA tabla con auto-referencia (`persona_padre_uid`), no varias: un
+    # accionista indirecto es una persona colgando de la jurídica, y separarlo
+    # obligaría a un UNION para la pregunta más común.
+    # PK sintética por lo de siempre — el logger borra por la primera columna.
+    "lens_analisis_persona": {
+        "schema": "lens", "nombre": "analisis_persona",
+        "pk": ["persona_uid"],
+        "cols": {
+            "persona_uid": "", "analisis_id": "", "rol": "",
+            "persona_padre_uid": "", "nivel": "int", "orden": "int",
+            "person_type": "", "nombre_completo": "", "nombre": "", "apellido": "",
+            "documento": "", "documento_canon": "", "tipo_documento": "",
+            "pais_origen": "", "participacion_pct": "num", "es_pep": "bool",
+            "cargo": "", "dato_crudo": "",
+            "origen": "", "ejecutado_en": "ts", "cargado_en": "ts",
+        },
+    },
+
+    # Fase 1 · economicActivities[] — es una lista, necesita su tabla.
+    "lens_analisis_actividad": {
+        "schema": "lens", "nombre": "analisis_actividad",
+        "pk": ["actividad_uid"],
+        "cols": {
+            "actividad_uid": "", "analisis_id": "", "orden": "int",
+            "codigo": "", "descripcion": "",
+            "origen": "", "ejecutado_en": "ts", "cargado_en": "ts",
         },
     },
 
