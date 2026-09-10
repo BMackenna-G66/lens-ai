@@ -6,7 +6,7 @@ import { LoadingSpinner } from './LoadingSpinner';
 import { Alert } from './Alert';
 import { PREDEFINED_FIELDS, GEMINI_PROMPT_TEMPLATE, GEMINI_CHAT_SYSTEM_INSTRUCTION } from '../constants'; 
 import { ProcessedDocument, FileProcessingStatus, SupplementaryDocumentAnalysis, SupplementaryAnalysisStatus, ComparisonResult, ChatMessage, QueueItem, AnalysisPurpose, RiskAnalysisStatus, IntegrityAnalysisStatus, ExtractedField } from '../types';
-import { getTextFromFile } from '../services/fileProcessorService';
+import { getTextFromFile, metricasDeArchivo } from '../services/fileProcessorService';
 import {
     analyzeDocumentWithGemini,
     analyzeDocumentComparisonWithGemini,
@@ -281,7 +281,7 @@ export const DocumentAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> =
         updateDoc(FileProcessingStatus.ANALYZING, { statusMessage: "Analizando con IA...", detectedCountry: country });
         
         const prompt = GEMINI_PROMPT_TEMPLATE(combinedText, countryContext);
-        const { extractedData, rawResponse } = await analyzeDocumentWithGemini(prompt);
+        const { extractedData, rawResponse, uso } = await analyzeDocumentWithGemini(prompt);
         updateDoc(FileProcessingStatus.COMPLETED, { extractedData, rawGeminiResponse: rawResponse, statusMessage: "Completado." });
         trackDocumentProcessed('analyzer', country, false);
 
@@ -332,6 +332,22 @@ export const DocumentAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> =
           caracteres: combinedText.length,
           modelo: MODELO_ANALISIS,
           duracionMs: Date.now() - t0,
+          // Línea base de costo. Se suman las métricas de todos los archivos del
+          // análisis: en consolidado son varios. La ruta de la SPA OCRea todo,
+          // así que `paginasPorCapa` da 0 — es el contraste con la API, que lee
+          // la capa de texto primero.
+          ...(() => {
+            const ms = files.map(f => metricasDeArchivo(f)).filter(Boolean) as NonNullable<ReturnType<typeof metricasDeArchivo>>[];
+            if (ms.length === 0) return {};
+            const sum = (k: 'paginasTotales' | 'paginasPorOcr' | 'paginasPorCapa') => ms.reduce((a, m) => a + m[k], 0);
+            return {
+              paginasTotales: sum('paginasTotales'),
+              paginasPorOcr: sum('paginasPorOcr'),
+              paginasPorCapa: sum('paginasPorCapa'),
+            };
+          })(),
+          tokensPrompt: uso?.promptTokenCount,
+          tokensSalida: uso?.candidatesTokenCount,
           ficha: fichaLens({
             campos: extractedData,
             pais: country,

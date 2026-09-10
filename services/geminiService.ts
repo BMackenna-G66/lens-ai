@@ -98,7 +98,7 @@ const chatModel = 'gemini-3.5-flash';
 const jsonConfig = { responseMimeType: "application/json", thinkingConfig: { thinkingBudget: 0 } } as const;
 
 // ─── Token tracking (fire-and-forget) ────────────────────────────────────────
-interface UsageMeta { promptTokenCount?: number; candidatesTokenCount?: number; totalTokenCount?: number }
+export interface UsageMeta { promptTokenCount?: number; candidatesTokenCount?: number; totalTokenCount?: number }
 function fireTokenEvent(operation: string, model: string, usage: UsageMeta | null | undefined): void {
   if (!usage) return;
   import('./analyticsService').then(({ trackTokenUsage }) => {
@@ -123,16 +123,21 @@ export const detectCountryWithGemini = async (documentText: string): Promise<str
   });
 };
 
-export const analyzeDocumentWithGemini = async (prompt: string): Promise<{ extractedData: ExtractedField[]; rawResponse: string }> => {
+// `uso` se AGREGA al retorno, no reemplaza nada: los llamadores que solo
+// desestructuran `extractedData` y `rawResponse` siguen igual. Hace falta porque
+// los tokens se estaban tirando —solo iban a analytics— y sin ellos
+// `lens.analisis` no puede dar la línea base de costo.
+export const analyzeDocumentWithGemini = async (prompt: string): Promise<{ extractedData: ExtractedField[]; rawResponse: string; uso?: UsageMeta }> => {
   const responseSchema = { type: Type.ARRAY, items: { type: Type.OBJECT, properties: { field: { type: Type.STRING, enum: PREDEFINED_FIELDS }, value: { type: Type.STRING } }, required: ['field', 'value'] } };
   return executeWithRetry(async (ai) => {
     const response = await ai.models.generateContent({ model: primaryAnalysisModel, contents: prompt, config: { responseMimeType: "application/json", responseSchema, thinkingConfig: { thinkingBudget: 0 } } });
-    fireTokenEvent('Análisis Documento', primaryAnalysisModel, response.usageMetadata as UsageMeta);
+    const uso = response.usageMetadata as UsageMeta | undefined;
+    fireTokenEvent('Análisis Documento', primaryAnalysisModel, uso);
     const text = response.text;
     if (!text?.trim()) throw new Error("Respuesta vacía de la API de Gemini.");
     const parsedData: ExtractedField[] = JSON.parse(extractJsonFromResponse(text));
     const extractedDataMap = new Map(parsedData.map(item => [item.field, item.value]));
-    return { extractedData: PREDEFINED_FIELDS.map(f => ({ field: f, value: extractedDataMap.get(f) || "No especificado" })), rawResponse: text };
+    return { extractedData: PREDEFINED_FIELDS.map(f => ({ field: f, value: extractedDataMap.get(f) || "No especificado" })), rawResponse: text, uso };
   });
 };
 
