@@ -26,6 +26,8 @@ import { DocumentChat } from './DocumentChat';
 import { KEYWORDS_BY_COUNTRY } from '../services/countryKeywords';
 import { nuevoAnalisisId, persistirAnalisis, persistirFicha, sha256Hex } from '../services/lensPersistenciaService';
 import { pendientesEnBuffer, reintentarPendientes } from '../services/colasLogService';
+import { extraerShareholders, filasDePersonas } from '../services/shareholdersService';
+import { persistirPersonas } from '../services/lensPersistenciaService';
 import { useAuth } from '../context/AuthContext';
 import { db } from '../services/dbService';
 import { trackDocumentProcessed } from '../services/analyticsService';
@@ -367,6 +369,39 @@ export const DocumentAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> =
         // reescribir ESTA misma ficha en vez de crear otra fila.
         void sha256Hex(combinedText).then(sha =>
           updateDoc(FileProcessingStatus.COMPLETED, { analisisId, analisisEn, hashDocumentos: sha }));
+
+        // ── Composición societaria (Fase 3) ──────────────────────────────────
+        // SEGUNDA llamada al modelo, con el ARCHIVO NATIVO. Es a propósito: el
+        // porcentaje de cada socio sale de la estructura de la tabla, y el
+        // texto que produce el OCR ya la perdió. Los 18 campos de arriba NO se
+        // tocan — siguen saliendo del camino de texto exactamente igual.
+        //
+        // Sin await y con su propio try: si esto falla, el análisis que el
+        // analista está mirando ya terminó y no se entera.
+        //
+        // Sobre el primer archivo soportado: el contrato es por análisis, no
+        // por archivo, y en un consolidado la escritura es la que manda.
+        // Fusionar la composición de varios documentos es otro problema.
+        const archivoNativo = files.find(f => /\.(pdf|jpe?g|png)$/i.test(f.name));
+        if (archivoNativo) {
+          void (async () => {
+            try {
+              const { resultado, violaciones } = await extraerShareholders(archivoNativo);
+              const filas = filasDePersonas(analisisId, resultado, {
+                origen: 'analizador', ejecutadoEn: analisisEn,
+              });
+              if (violaciones.total > 0) {
+                // No se corrige moviendo gente de lugar: eso escondería el error
+                // que hay que medir. Se deja registrado y la fila persiste con el
+                // rol del lugar donde el modelo la puso.
+                console.warn('[shareholders] la regla de oro no se cumplió', violaciones);
+              }
+              await persistirPersonas(filas as unknown as Array<Record<string, unknown>>);
+            } catch (e) {
+              console.warn('[shareholders] no se pudo extraer la composición societaria:', (e as Error).message);
+            }
+          })();
+        }
       } else {
         updateDoc(FileProcessingStatus.COMPLETED, { statusMessage: "Listo para chatear." });
         trackDocumentProcessed('analyzer');

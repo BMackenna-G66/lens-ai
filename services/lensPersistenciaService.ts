@@ -341,3 +341,22 @@ export async function persistirFicha(
     }]);
   } catch { /* best-effort */ }
 }
+
+// ── Personas: composición societaria (Fase 3) ──────────────────────────────
+// Las filas las arma `shareholdersService.filasDePersonas`, que ya resuelve el
+// uid sintético, la cadena padre→hijo y la guarda de dígitos del documento.
+// Acá solo se mandan.
+//
+// Se separan del envío principal para que un fallo en la extracción de
+// shareholders no arrastre a la ficha ni a los 18 campos.
+export async function persistirPersonas(
+  filas: Array<Record<string, unknown>>,
+): Promise<{ escritas: number; fallidas: number; error?: string }> {
+  if (!filas.length) return { escritas: 0, fallidas: 0 };
+  try {
+    const r = await enviarLote(filas.map(datos => ({ tabla: 'lens_analisis_persona', datos })));
+    return { escritas: r.escritas, fallidas: r.fallidas, error: r.error };
+  } catch (e) {
+    return { escritas: 0, fallidas: 0, error: (e as Error).message };
+  }
+}

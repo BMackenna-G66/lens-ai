@@ -717,3 +717,90 @@ Para cada pilar, basa la evaluación en el contenido real de ambos documentos. S
 
 El nivelCumplimientoGlobal debe calcularse como el porcentaje de pilares que "Cumple" o "Cumple Parcialmente" sobre el total.
 `;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Shareholders — extracción estructurada (Fase 3 del plan de absorción)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// BLOQUE NUEVO Y APARTE. No toca `GEMINI_PROMPT_TEMPLATE` ni
+// `PREDEFINED_FIELDS`: los 18 campos siguen produciendo exactamente lo mismo.
+// Tocar el prompt existente cambiaría lo que devuelve la SPA, y el formato
+// `NOMBRE | DOCUMENTO | DATO` que hoy parsea al 100 % sale de ahí.
+//
+// Se manda con el ARCHIVO NATIVO (ver `generarConArchivo`), no con su texto: el
+// porcentaje de cada socio sale de la estructura de la tabla, que es
+// exactamente lo que el OCR aplana.
+export const GEMINI_SHAREHOLDERS_PROMPT = `Eres un analista de KYC. Del documento adjunto extrae la COMPOSICIÓN SOCIETARIA y los REPRESENTANTES LEGALES.
+
+Devuelve SOLO JSON con el esquema pedido. No expliques nada.
+
+═══ QUIÉN CUENTA COMO DUEÑO ═══
+Trata como DUEÑO a quien figure con cualquiera de estas etiquetas:
+Accionista · Socio · Asociado · Miembro · Miembro Fundador · Fundador ·
+Aportante · Constituyente · Cooperado · Adherente ·
+Beneficiario (solo cuando figura como dueño directo).
+
+Si hay una columna TIPO DE ASOCIADO, TIPO DE SOCIO o CALIDAD con valores como
+"Fundador", "Activo" u "Honorario", esa fila ES un dueño directo.
+
+PROHIBIDO excluir a una entidad por su tipo legal. Las ESAL, cooperativas,
+asociaciones y fundaciones SÍ entran: sus asociados y miembros fundadores son
+equivalentes a accionistas para KYC.
+
+═══ DÓNDE VA CADA UNO — regla de oro ═══
+1. Persona NATURAL que aparece en la tabla de propiedad → "directOwnership"
+2. Persona JURÍDICA que aparece en la tabla de propiedad → "indirectShareholders", en la RAÍZ
+3. Persona NATURAL que está detrás de una jurídica → "indirectShareholders", ANIDADA dentro de esa jurídica
+
+"directOwnership" NUNCA lleva personas jurídicas.
+La raíz de "indirectShareholders" NUNCA lleva personas naturales.
+Las dos claves aparecen SIEMPRE, aunque queden vacías.
+
+═══ BUSCÁ LA CADENA — no esperes que venga servida ═══
+Por CADA persona jurídica que pongas en "indirectShareholders", RECORRÉ EL
+DOCUMENTO COMPLETO buscando si en otra parte se detalla quiénes son sus socios,
+asociados o accionistas. Casi nunca está en la misma tabla: suele venir en una
+cláusula aparte, en un anexo o en un certificado de cámara de comercio, con su
+propio encabezado y su propia tabla.
+
+Si la encontrás, esas personas van ANIDADAS dentro de esa jurídica.
+
+Si el documento no revela quién está detrás de una jurídica, su arreglo anidado
+va vacío: []. NO INVENTES PERSONAS. Nunca completes una cadena que el documento
+no muestra.
+
+═══ name / lastName — leelo con cuidado ═══
+"shareholderName" es el nombre completo TAL CUAL figura en el documento.
+Además hay que partirlo:
+  · "name"     = TODOS los nombres de pila
+  · "lastName" = TODOS los apellidos
+
+En los registros de Colombia el orden es APELLIDOS PRIMERO. En Chile suele ser
+nombres primero. Decidí por el contexto del documento, no por la posición fija.
+
+Ejemplos correctos:
+  "PEREZ GOMEZ ANGELA VIVIANA"  → name: "ANGELA VIVIANA"  lastName: "PEREZ GOMEZ"
+  "JUAN ANDRES PEREZ SOTO"      → name: "JUAN ANDRES"     lastName: "PEREZ SOTO"
+  "MARIA JOSE GONZALEZ RUIZ"    → name: "MARIA JOSE"      lastName: "GONZALEZ RUIZ"
+
+Fijate en el primero: es orden registral colombiano, y "VIVIANA" es un segundo
+NOMBRE, no un apellido. Un error acá se repite en todo el registro colombiano.
+
+Para personas JURÍDICAS: "shareholderName" es la razón social, y "name" y
+"lastName" van vacíos.
+
+═══ EL RESTO DE LOS CAMPOS ═══
+· personType: "NATURAL" o "JURIDICA"
+· shareholderId: el documento tal como figura (RUT, cédula, NIT, DNI, pasaporte).
+  Si el documento lo escribe en palabras, transcribí los DÍGITOS.
+  Si no aparece, dejalo vacío.
+· identificationType: CC, NIT, RUT, CE, PASAPORTE, DNI… lo que corresponda
+· countryOfOrigin: país de la persona o de constitución de la jurídica
+· ownershipPercentage: número, sin el signo %. Si el documento da acciones y el
+  total, calculalo. Si no se puede saber, dejalo en null — NO lo estimes.
+· isPEP: true solo si el documento lo dice; false si dice que no; null si no lo menciona.
+
+Para los REPRESENTANTES LEGALES, además: "position" con el cargo (Gerente
+General, Representante Legal, Administrador…).
+
+Extraé lo que el documento dice. Si un dato no está, va vacío o null.`;

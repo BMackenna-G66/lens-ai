@@ -392,10 +392,17 @@ export interface RespuestaMultimodal {
  * él, Gemini la fuerza al esquema (que es como se va a pedir el contrato de
  * shareholders).
  */
+// Tope de salida. MEDIDO: con el esquema anidado de shareholders, una de cada
+// cinco corridas se desbocó y generó 45.358 tokens de salida antes de cortarse
+// sola, devolviendo un JSON truncado e inútil. El tope no arregla la respuesta
+// —sigue saliendo inválida— pero acota lo que cuesta el accidente: 8.192 en vez
+// de 45.000. Una ficha completa con cadena anidada usa ~800.
+export const TOPE_SALIDA_MULTIMODAL = 8192;
+
 export async function generarConArchivo(
   archivo: File,
   prompt: string,
-  opciones?: { responseSchema?: unknown; operacion?: string },
+  opciones?: { responseSchema?: unknown; operacion?: string; maxSalida?: number },
 ): Promise<RespuestaMultimodal> {
   const mime = mimeParaGemini(archivo);
   if (!mime) {
@@ -421,6 +428,7 @@ export async function generarConArchivo(
       contents: [{ parts: [{ inlineData: { mimeType: mime, data: datos } }, { text: prompt }] }],
       config: {
         thinkingConfig: { thinkingBudget: 0 },
+        maxOutputTokens: opciones?.maxSalida ?? TOPE_SALIDA_MULTIMODAL,
         ...(opciones?.responseSchema
           ? { responseMimeType: 'application/json', responseSchema: opciones.responseSchema }
           : {}),
