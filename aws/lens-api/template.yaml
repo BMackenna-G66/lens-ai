@@ -62,6 +62,7 @@ Resources:
       MemorySize: 3008
       Environment:
         Variables:
+          ALMACEN_TABLA: !Ref TablaAnalisis
           API_SECRET: !Ref ApiSecretValue
           GEMINI_API_KEY: !Ref GeminiApiKey
           MOTOR_OCR: !Ref MotorOcr
@@ -75,6 +76,11 @@ Resources:
             - Effect: Allow
               Action: textract:DetectDocumentText
               Resource: '*'
+        # Almacén de idempotencia. El contrato dice que ms-company genera el
+        # analysisId justamente para que un segundo POST devuelva lo guardado en
+        # vez de re-analizar y volver a cobrar tokens.
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TablaAnalisis
       # Endpoint HTTPS nativo de la Lambda. NO API Gateway: el rol
       # `compliance-admin` no tiene `apigateway:POST`. Auth NONE a nivel infra;
       # la protección real es el header x-api-secret que valida el handler,
@@ -85,6 +91,30 @@ Resources:
           AllowOrigins: ['*']
           AllowMethods: [POST, GET]
           AllowHeaders: [content-type, x-api-secret]
+
+  # ── Almacén de idempotencia ───────────────────────────────────────────────
+  # NO va en Redshift a propósito: el cluster se pausa de 18:30 a 04:00 y un
+  # GET /v1/analyses a las once de la noche devolvería error sobre algo que sí
+  # analizamos. La idempotencia es operacional, no analítica.
+  #
+  # PAY_PER_REQUEST porque el tráfico es a demanda y no vale la pena
+  # aprovisionar capacidad para unas decenas de análisis por día.
+  #
+  # El TTL acota cuánto vive: son resultados de documentos societarios en una
+  # base operacional, no un archivo histórico. Lo analítico va a `lens.*`.
+  TablaAnalisis:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: analysis_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: analysis_id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
 
   # NO se declara un AWS::Logs::LogGroup para fijar la retención.
   #
