@@ -1,0 +1,11 @@
+# Entorno local para correr los tests. No se despliega: Lambda instala desde
+# src/requirements.txt durante `sam build`.
+.venv/
+.pytest_cache/
+__pycache__/
+
+# Salida de `sam build`
+.aws-sam/
+
+# Basura de macOS
+.DS_Store

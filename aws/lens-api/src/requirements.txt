@@ -1,0 +1,15 @@
+# Dependencias de la API. `sam build` resuelve las dos sin Docker en macOS
+# arm64 — verificado.
+#
+# `pypdf` es Python puro. `requests` también, pero arrastra
+# `charset_normalizer`, que trae una extensión C opcional; el PythonPipBuilder
+# de SAM baja el wheel de `manylinux aarch64` correcto, así que no hace falta
+# `--use-container`.
+#
+# boto3 ya viene en el runtime de Lambda → no se incluye.
+#
+# NO se usa PyMuPDF ni Pillow a propósito: son binarios pesados y sin wheel
+# para todas las combinaciones. La rasterización no hace falta porque el OCR lo
+# hace Textract, que recibe la página como PDF.
+pypdf>=5.1,<6
+requests>=2.31,<3
