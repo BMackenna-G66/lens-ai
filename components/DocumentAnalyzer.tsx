@@ -73,6 +73,14 @@ const fichaLens = (p: {
   regcheq?: unknown;
   riesgo?: unknown;
   integridad?: unknown;
+  // Resultado de la extracción estructurada: `{ok, senales}` si corrió, o
+  // `{ok:false, error}` si falló. Sin esta marca no se puede distinguir "el
+  // código nunca llegó a esa pestaña" de "se ejecutó y falló", que es
+  // exactamente lo que pasó al mirar `analisis_persona` vacía.
+  shareholders?: unknown;
+  // true cuando el archivo no dejó métricas de extracción. Mismo motivo: que la
+  // ausencia sea un dato y no un silencio.
+  metricasAusentes?: boolean;
 }) => ({
   campos: p.campos,
   pais_detectado: p.pais,
@@ -82,12 +90,15 @@ const fichaLens = (p: {
   regcheq: p.regcheq,
   analisis_riesgo: p.riesgo,
   analisis_integridad: p.integridad,
+  shareholders: p.shareholders,
+  metricas_ausentes: p.metricasAusentes,
 });
 
 // La ficha reconstruida desde el documento tal como está ahora. Se usa al
 // reescribir: junta lo que había con lo que acaba de terminar.
 const fichaDelDoc = (d: ProcessedDocument, extra: { riesgo?: unknown; integridad?: unknown }) =>
   fichaLens({
+    shareholders: d.shareholdersResultado,
     campos: d.extractedData,
     pais: d.detectedCountry,
     proposito: d.purpose,
@@ -240,6 +251,8 @@ export const DocumentAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> =
     };
 
     const t0 = Date.now();
+    // Marca de que las métricas de extracción no estuvieron. Va a la ficha.
+    let metricasFaltaron = false;
     try {
       setProcessingQueue(prev => prev.slice(1));
       const docToProcess = processedDocuments.find(d => d.id === docId);
@@ -340,7 +353,10 @@ export const DocumentAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> =
           // la capa de texto primero.
           ...(() => {
             const ms = files.map(f => metricasDeArchivo(f)).filter(Boolean) as NonNullable<ReturnType<typeof metricasDeArchivo>>[];
-            if (ms.length === 0) return {};
+            // Sin métricas NO se devuelve un objeto vacío en silencio: se deja
+            // dicho, porque si no la columna en NULL puede ser "no se midió" o
+            // "el código no llegó" y no hay manera de saber cuál.
+            if (ms.length === 0) { metricasFaltaron = true; return {}; }
             const sum = (k: 'paginasTotales' | 'paginasPorOcr' | 'paginasPorCapa') => ms.reduce((a, m) => a + m[k], 0);
             return {
               paginasTotales: sum('paginasTotales'),
@@ -351,6 +367,7 @@ export const DocumentAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> =
           tokensPrompt: uso?.promptTokenCount,
           tokensSalida: uso?.candidatesTokenCount,
           ficha: fichaLens({
+            metricasAusentes: metricasFaltaron || undefined,
             campos: extractedData,
             pais: country,
             proposito: docToProcess.purpose,
@@ -403,9 +420,24 @@ export const DocumentAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> =
                 // Se aplana y se avisa en vez de perderlo en silencio.
                 console.warn('[shareholders] la cadena sigue más abajo del nivel 1', senales);
               }
-              await persistirPersonas(filas as unknown as Array<Record<string, unknown>>);
+              const r = await persistirPersonas(filas as unknown as Array<Record<string, unknown>>);
+              // La marca va a la FICHA, que es la fila que sí se puede reescribir
+              // entera sin perder columnas. Así queda por escrito que esto corrió
+              // y con qué resultado, en vez de deducirlo de una tabla vacía.
+              const marca = { ok: true, personas: filas.length, senales: r.error ? { ...senales, errorEscritura: r.error } : senales };
+              updateDoc(FileProcessingStatus.COMPLETED, { shareholdersResultado: marca });
+              void persistirFicha(analisisId, 'analizador',
+                fichaDelDoc({ ...docToProcess, extractedData, detectedCountry: country,
+                  shareholdersResultado: marca } as ProcessedDocument, {}),
+                { ejecutadoEn: analisisEn });
             } catch (e) {
+              const marca = { ok: false, error: (e as Error).message };
               console.warn('[shareholders] no se pudo extraer la composición societaria:', (e as Error).message);
+              updateDoc(FileProcessingStatus.COMPLETED, { shareholdersResultado: marca });
+              void persistirFicha(analisisId, 'analizador',
+                fichaDelDoc({ ...docToProcess, extractedData, detectedCountry: country,
+                  shareholdersResultado: marca } as ProcessedDocument, {}),
+                { ejecutadoEn: analisisEn });
             }
           })();
         }
