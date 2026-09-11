@@ -333,6 +333,9 @@ export const DocumentAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> =
         // 41 páginas. Ver el DDL en aws/colas-logger/sql/lens_schema.sql.
         const analisisId = nuevoAnalisisId();
         const analisisEn = new Date().toISOString();
+        // Se resuelve ACÁ, antes de persistir, porque decide QUIÉN escribe la
+        // ficha. Dos escritores para la misma fila se pisan: ver `omitirFicha`.
+        const archivoNativo = files.find(f => /\.(pdf|jpe?g|png)$/i.test(f.name));
         void persistirAnalisis({
           analisisId,
           ejecutadoEn: analisisEn,
@@ -366,6 +369,9 @@ export const DocumentAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> =
           })(),
           tokensPrompt: uso?.promptTokenCount,
           tokensSalida: uso?.candidatesTokenCount,
+          // Si va a correr shareholders, la ficha la escribe ESE camino y
+          // nadie más. Si no hay archivo nativo, se escribe acá como siempre.
+          omitirFicha: !!archivoNativo,
           ficha: fichaLens({
             metricasAusentes: metricasFaltaron || undefined,
             campos: extractedData,
@@ -399,7 +405,6 @@ export const DocumentAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> =
         // Sobre el primer archivo soportado: el contrato es por análisis, no
         // por archivo, y en un consolidado la escritura es la que manda.
         // Fusionar la composición de varios documentos es otro problema.
-        const archivoNativo = files.find(f => /\.(pdf|jpe?g|png)$/i.test(f.name));
         if (archivoNativo) {
           void (async () => {
             try {
@@ -426,18 +431,22 @@ export const DocumentAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> =
               // y con qué resultado, en vez de deducirlo de una tabla vacía.
               const marca = { ok: true, personas: filas.length, senales: r.error ? { ...senales, errorEscritura: r.error } : senales };
               updateDoc(FileProcessingStatus.COMPLETED, { shareholdersResultado: marca });
-              void persistirFicha(analisisId, 'analizador',
-                fichaDelDoc({ ...docToProcess, extractedData, detectedCountry: country,
-                  shareholdersResultado: marca } as ProcessedDocument, {}),
-                { ejecutadoEn: analisisEn });
+              void sha256Hex(combinedText).then(sha => persistirFicha(analisisId, 'analizador',
+                fichaLens({ campos: extractedData, pais: country, proposito: docToProcess.purpose,
+                  archivos: files.map(f => f.name), consolidado: isConsolidated,
+                  regcheq: enriquecimiento, shareholders: marca,
+                  metricasAusentes: metricasFaltaron || undefined }),
+                { ejecutadoEn: analisisEn, hashDocumentos: sha }));
             } catch (e) {
               const marca = { ok: false, error: (e as Error).message };
               console.warn('[shareholders] no se pudo extraer la composición societaria:', (e as Error).message);
               updateDoc(FileProcessingStatus.COMPLETED, { shareholdersResultado: marca });
-              void persistirFicha(analisisId, 'analizador',
-                fichaDelDoc({ ...docToProcess, extractedData, detectedCountry: country,
-                  shareholdersResultado: marca } as ProcessedDocument, {}),
-                { ejecutadoEn: analisisEn });
+              void sha256Hex(combinedText).then(sha => persistirFicha(analisisId, 'analizador',
+                fichaLens({ campos: extractedData, pais: country, proposito: docToProcess.purpose,
+                  archivos: files.map(f => f.name), consolidado: isConsolidated,
+                  regcheq: enriquecimiento, shareholders: marca,
+                  metricasAusentes: metricasFaltaron || undefined }),
+                { ejecutadoEn: analisisEn, hashDocumentos: sha }));
             }
           })();
         }

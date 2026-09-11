@@ -91,6 +91,19 @@ export interface EntradaAnalisis {
   /** El JSON completo de la ficha. SIN el texto del documento (ver el DDL). */
   ficha?: unknown;
   hashDocumentos?: string;
+  /**
+   * No escribir la fila de la ficha en este lote.
+   *
+   * Existe porque `lens.analisis_ficha` NO puede tener dos escritores para la
+   * misma fila. El logger hace DELETE+INSERT y la Data API ejecuta en asíncrono,
+   * así que cuando la extracción principal y la de shareholders escribían las
+   * dos, el orden en Redshift no era el de envío: medido sobre 25 análisis
+   * reales, la principal ganó las 25 veces y la marca de shareholders se perdió
+   * SIEMPRE.
+   *
+   * Con esto, el que va a reescribirla es el ÚNICO que la escribe.
+   */
+  omitirFicha?: boolean;
 }
 
 // ── Material crudo: la entrada y la salida textual del modelo ───────────────
@@ -206,7 +219,7 @@ export function filasDeAnalisis(e: EntradaAnalisis): Fila[] {
     });
   }
 
-  if (e.ficha !== undefined) {
+  if (e.ficha !== undefined && !e.omitirFicha) {
     filas.push({
       tabla: 'lens_analisis_ficha',
       datos: {
@@ -315,7 +328,14 @@ export async function persistirAnalisis(
 }
 
 /**
- * Reescribe SOLO la ficha completa. Para cuando terminan análisis que corren
+ * Reescribe SOLO la ficha completa.
+ *
+ * OJO al consultar la marca en Redshift: `ficha.shareholders.ok::varchar`
+ * devuelve NULL. No es que falte el dato — es que castear un BOOLEANO de un
+ * SUPER a varchar da NULL. `ficha.shareholders IS NOT NULL` y
+ * `ficha.shareholders.personas::int` funcionan, y para el booleano sirve
+ * `json_extract_path_text(json_serialize(ficha),'shareholders','ok')`.
+ * Medido contra el cluster. Para cuando terminan análisis que corren
  * después de la extracción —riesgo, integridad— y que hasta ahora no quedaban
  * en ninguna parte.
  *
