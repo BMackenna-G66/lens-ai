@@ -1,0 +1,18 @@
+version = 0.1
+
+[default.deploy.parameters]
+# Los nombres `lens-api` y `lens-api-fnurl` NO se pueden reutilizar: quedaron en
+# ROLLBACK_FAILED y ROLLBACK_COMPLETE de dos intentos fallidos, y
+# `compliance-admin` no tiene `cloudformation:DeleteStack` para limpiarlos.
+# Hay que pedirle a alguien con más permisos que los borre.
+stack_name = "lens-analisis-fnurl"
+resolve_s3 = true
+s3_prefix = "lens-api"
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+# Perfil AWS SSO de compliance (cuenta 561521480266). Único con CloudFormation.
+profile = "compliance-admin"
+# NOTA: los secretos NO se guardan acá. Se pasan en cada deploy con
+# --parameter-overrides "ApiSecretValue=... GeminiApiKey=...", leyéndolos de
+# archivo o del entorno para que no queden en el historial del shell.

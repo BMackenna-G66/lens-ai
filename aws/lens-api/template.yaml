@@ -1,0 +1,112 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Description: >
+  lens-api — el procesamiento documental de Lens expuesto por HTTP.
+  Entra un documento, sale la ficha de 18 campos. La ingesta corre por cuenta
+  de quien llama. No toca la SPA.
+
+Parameters:
+  ApiSecretValue:
+    Type: String
+    NoEcho: true
+    Description: Secreto del header x-api-secret que valida el handler.
+  GeminiApiKey:
+    Type: String
+    NoEcho: true
+    Description: API Key de Gemini.
+  MotorOcr:
+    Type: String
+    Default: textract
+    AllowedValues: [textract, ninguno]
+    Description: >
+      `textract` habilita el OCR para las páginas sin capa de texto.
+      `ninguno` lo desactiva: los escaneos vuelven con aviso en lugar de texto.
+      Sirve para desplegar antes de tener Textract habilitado en la cuenta.
+  MaxPaginasOcr:
+    Type: Number
+    Default: 15
+    Description: Tope de páginas por documento que se mandan al OCR. Las páginas con capa de texto no cuentan.
+  MaxDocumentos:
+    Type: Number
+    Default: 12
+    Description: Tope de documentos por petición.
+  DominiosUrlPermitidos:
+    Type: String
+    Default: ''
+    Description: >
+      Dominios separados por coma desde los que se acepta bajar un documento por URL.
+      Vacío desactiva la descarga por URL (default). Sin lista, el servicio sería un SSRF.
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Architectures: [arm64]
+
+Resources:
+  LensApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      # `lens-api` NO se puede usar: quedó reservado por un stack en
+      # ROLLBACK_FAILED que nadie con `compliance-admin` puede borrar.
+      FunctionName: lens-analisis
+      CodeUri: src/
+      Handler: app.lambda_handler
+      # 300 s de techo con 260 s de presupuesto interno: el margen existe para
+      # que el corte lo haga el servicio —devolviendo el resultado parcial con
+      # estado INCOMPLETO— y no AWS con un 502 sin cuerpo.
+      Timeout: 300
+      # 3008 MB no es por memoria sino por CPU: Lambda asigna vCPU en
+      # proporción, y la extracción de la capa de texto y el armado de las
+      # páginas para Textract son trabajo de CPU.
+      MemorySize: 3008
+      Environment:
+        Variables:
+          API_SECRET: !Ref ApiSecretValue
+          GEMINI_API_KEY: !Ref GeminiApiKey
+          MOTOR_OCR: !Ref MotorOcr
+          MAX_PAGINAS_OCR: !Ref MaxPaginasOcr
+          MAX_DOCUMENTOS: !Ref MaxDocumentos
+          DOMINIOS_URL_PERMITIDOS: !Ref DominiosUrlPermitidos
+          PRESUPUESTO_S: 260
+          LOG_LEVEL: INFO
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: textract:DetectDocumentText
+              Resource: '*'
+      # Endpoint HTTPS nativo de la Lambda. NO API Gateway: el rol
+      # `compliance-admin` no tiene `apigateway:POST`. Auth NONE a nivel infra;
+      # la protección real es el header x-api-secret que valida el handler,
+      # mismo patrón que `casos-receptor`.
+      FunctionUrlConfig:
+        AuthType: NONE
+        Cors:
+          AllowOrigins: ['*']
+          AllowMethods: [POST, GET]
+          AllowHeaders: [content-type, x-api-secret]
+
+  # NO se declara un AWS::Logs::LogGroup para fijar la retención.
+  #
+  # Se intentó y CloudFormation lo rechaza: el rol `compliance-admin` no tiene
+  # `logs:CreateLogGroup`. Peor, el rollback tampoco puede borrarlo
+  # (`logs:DeleteLogGroup`), así que el stack queda en ROLLBACK_FAILED y hay que
+  # cambiarle el nombre. Las otras cuatro Lambdas del proyecto tampoco lo
+  # declaran: Lambda crea el grupo sola en la primera invocación, con su propio
+  # rol de ejecución.
+  #
+  # Consecuencia: los logs quedan con retención "nunca expira". Es aceptable
+  # porque el servicio NO registra el contenido de los documentos —solo códigos
+  # de respuesta, mensajes de error y trazas—, pero conviene fijar 30 días
+  # cuando se habiliten los permisos:
+  #
+  #   aws logs put-retention-policy --log-group-name /aws/lambda/lens-api \
+  #     --retention-in-days 30
+
+Outputs:
+  EndpointUrl:
+    Description: URL base del servicio. El análisis es POST {url}v1/analisis
+    Value: !GetAtt LensApiFunctionUrl.FunctionUrl
+  FunctionName:
+    Description: Nombre de la Lambda
+    Value: !Ref LensApiFunction
