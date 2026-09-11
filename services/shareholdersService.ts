@@ -17,7 +17,7 @@
 
 import { Type } from '@google/genai';
 import { generarConArchivo } from './geminiService';
-import { GEMINI_SHAREHOLDERS_PROMPT } from '../constants';
+import { GEMINI_SHAREHOLDERS_PROMPT, GEMINI_SHAREHOLDERS_CADENA_PROMPT } from '../constants';
 
 export type TipoPersona = 'NATURAL' | 'JURIDICA';
 
@@ -41,21 +41,16 @@ export interface ResultadoShareholders {
   indirectShareholders: PersonaContrato[];
 }
 
-// El esquema tiene UN solo nivel de anidación a propósito, no recursión: el
-// modelo de datos define `nivel` 0 y 1, y los esquemas recursivos no son
-// confiables en la API. Una cadena más profunda que eso se aplana al nivel 1,
-// que es lo que el contrato consume hoy.
-// El tipo se anota a mano porque la función se referencia a sí misma
-// (`persona(false)` dentro de `persona(true)`) y TypeScript no puede inferirla.
-interface EsquemaGemini {
-  type: unknown;
-  properties?: Record<string, unknown>;
-  items?: EsquemaGemini;
-  required?: string[];
-  enum?: string[];
-  nullable?: boolean;
-}
-const persona = (conAnidados: boolean): EsquemaGemini => ({
+// ── El esquema es PLANO. No hay anidación en ninguna llamada. ──────────────
+// Medido sobre 8 corridas del mismo documento: con el esquema anidado la cadena
+// salía 6 de 8 veces y una de cada cinco corridas se desbocaba hasta 45.358
+// tokens de salida devolviendo JSON truncado. Las corridas malas eran
+// EXACTAMENTE las que tocaban el tope de salida: el desborde y la pérdida de la
+// cadena eran el mismo problema.
+//
+// Con dos pasadas planas: 8 de 8, cero JSON roto, y la salida estable en ~640
+// tokens (antes iba de 775 a 8.177). Sin anidación no hay dónde desbocarse.
+const PERSONA_PLANA = {
   type: Type.OBJECT,
   properties: {
     personType: { type: Type.STRING, enum: ['NATURAL', 'JURIDICA'] },
@@ -68,66 +63,152 @@ const persona = (conAnidados: boolean): EsquemaGemini => ({
     ownershipPercentage: { type: Type.NUMBER, nullable: true },
     isPEP: { type: Type.BOOLEAN, nullable: true },
     position: { type: Type.STRING },
-    ...(conAnidados
-      ? { indirectShareholders: { type: Type.ARRAY, items: persona(false) } }
-      : {}),
   },
   required: ['personType', 'shareholderName'],
-});
+};
 
+/** Pasada 1: representantes y todos los dueños de la tabla, sin anidar. */
 export const ESQUEMA_SHAREHOLDERS = {
   type: Type.OBJECT,
   properties: {
-    legalRepresentatives: { type: Type.ARRAY, items: persona(false) },
-    directOwnership: { type: Type.ARRAY, items: persona(false) },
-    indirectShareholders: { type: Type.ARRAY, items: persona(true) },
+    legalRepresentatives: { type: Type.ARRAY, items: PERSONA_PLANA },
+    owners: { type: Type.ARRAY, items: PERSONA_PLANA },
   },
-  required: ['legalRepresentatives', 'directOwnership', 'indirectShareholders'],
+  required: ['legalRepresentatives', 'owners'],
 };
 
-/** Violaciones de la regla de oro. Vacío = el modelo la respetó. */
-export interface ViolacionesReglaOro {
-  directoConJuridica: number;   // una jurídica colada en directOwnership
-  indirectoConNatural: number;  // una natural en la raíz de indirectShareholders
-  anidadoSinPadre: number;      // imposible por construcción, se verifica igual
-  total: number;
-}
+/** Pasada 2: los socios de UNA jurídica. */
+export const ESQUEMA_CADENA = {
+  type: Type.OBJECT,
+  properties: { members: { type: Type.ARRAY, items: PERSONA_PLANA } },
+  required: ['members'],
+};
 
-export function verificarReglaOro(r: ResultadoShareholders): ViolacionesReglaOro {
-  const directoConJuridica = (r.directOwnership ?? []).filter(p => p.personType === 'JURIDICA').length;
-  const indirectoConNatural = (r.indirectShareholders ?? []).filter(p => p.personType === 'NATURAL').length;
-  return { directoConJuridica, indirectoConNatural, anidadoSinPadre: 0,
-           total: directoConJuridica + indirectoConNatural };
+/**
+ * Señales para calibrar. Ya NO cuenta violaciones de la regla de oro: el
+ * reparto entre `directOwnership` e `indirectShareholders` ahora lo hace ESTE
+ * código a partir de `personType`, así que la regla se cumple por construcción
+ * y contarla sería contar cero siempre.
+ *
+ * Lo que sí importa medir es lo que el modelo puede equivocar o lo que el
+ * modelo de datos no cubre.
+ */
+export interface SenalesShareholders {
+  /** Jurídicas encontradas en la tabla de propiedad. */
+  juridicas: number;
+  /** De esas, cuántas revelaron su composición. El resto queda con [] — y eso
+   *  puede ser "el documento no lo dice" o "el modelo no lo encontró". */
+  juridicasConCadena: number;
+  /** Una jurídica DETRÁS de otra jurídica: la cadena sigue más abajo de lo que
+   *  el modelo de datos representa (nivel 0 y 1). Se aplana y se avisa. */
+  juridicasEnNivel1: number;
+  /** Llamadas al modelo que costó este análisis. */
+  llamadas: number;
+  /**
+   * Suma de participación de los dueños directos (naturales + jurídicas raíz).
+   * Tiene que dar ~100.
+   *
+   * Es el chequeo más barato que existe para el error que más se repite: que el
+   * modelo meta en la tabla principal a los socios de OTRA empresa que el
+   * documento también describe. Medido: pasaba, y la suma daba 200 con las
+   * mismas dos personas duplicadas como directas y como nivel 1.
+   */
+  sumaParticipacion: number | null;
+  /** true cuando la suma se aleja más de 0,5 puntos de 100. */
+  participacionSospechosa: boolean;
 }
 
 const vacio = (): ResultadoShareholders =>
   ({ legalRepresentatives: [], directOwnership: [], indirectShareholders: [] });
 
+const comoJson = (texto: string, que: string): Record<string, unknown> => {
+  try {
+    return JSON.parse(texto);
+  } catch {
+    throw new Error(`El análisis falló. Error: la respuesta de ${que} no es JSON válido.`);
+  }
+};
+
 /**
- * Extrae la composición societaria del archivo. Devuelve siempre las tres
- * claves, aunque queden vacías — es parte del contrato.
+ * Extrae la composición societaria en DOS PASADAS PLANAS.
+ *
+ *   1. representantes + todos los dueños de la tabla (naturales y jurídicas)
+ *   2. por CADA jurídica, una pregunta propia: ¿quiénes son sus socios?
+ *
+ * El resultado se arma acá con la forma del contrato —las tres claves, con la
+ * cadena anidada— así que lo que consume ms-company no cambia. Lo que cambió es
+ * cómo se consigue.
+ *
+ * El reparto sale de `personType`, no de dónde el modelo puso a cada uno: NATURAL
+ * va a `directOwnership`, JURIDICA a la raíz de `indirectShareholders`. La regla
+ * de oro deja de depender de que el modelo la respete.
  */
 export async function extraerShareholders(
   archivo: File,
-): Promise<{ resultado: ResultadoShareholders; violaciones: ViolacionesReglaOro; uso?: { promptTokenCount?: number; candidatesTokenCount?: number } }> {
-  const { texto, uso } = await generarConArchivo(archivo, GEMINI_SHAREHOLDERS_PROMPT, {
-    responseSchema: ESQUEMA_SHAREHOLDERS,
-    operacion: 'Shareholders',
+): Promise<{ resultado: ResultadoShareholders; senales: SenalesShareholders; uso?: { promptTokenCount?: number; candidatesTokenCount?: number } }> {
+  const r1 = await generarConArchivo(archivo, GEMINI_SHAREHOLDERS_PROMPT, {
+    responseSchema: ESQUEMA_SHAREHOLDERS, operacion: 'Shareholders',
   });
-  let crudo: Partial<ResultadoShareholders>;
-  try {
-    crudo = JSON.parse(texto);
-  } catch {
-    throw new Error('El análisis falló. Error: la respuesta de shareholders no es JSON válido.');
+  const p1 = comoJson(r1.texto, 'shareholders') as {
+    legalRepresentatives?: PersonaContrato[]; owners?: PersonaContrato[];
+  };
+
+  const duenos = p1.owners ?? [];
+  const naturales = duenos.filter(p => p.personType !== 'JURIDICA');
+  const juridicas = duenos.filter(p => p.personType === 'JURIDICA');
+
+  let entrada = r1.uso?.promptTokenCount ?? 0;
+  let salida = r1.uso?.candidatesTokenCount ?? 0;
+  let llamadas = 1;
+  let juridicasConCadena = 0;
+  let juridicasEnNivel1 = 0;
+
+  const indirectos: PersonaContrato[] = [];
+  for (const j of juridicas) {
+    let miembros: PersonaContrato[] = [];
+    try {
+      const r2 = await generarConArchivo(
+        archivo,
+        GEMINI_SHAREHOLDERS_CADENA_PROMPT(j.shareholderName ?? '', j.shareholderId),
+        { responseSchema: ESQUEMA_CADENA, operacion: 'Shareholders cadena' },
+      );
+      llamadas++;
+      entrada += r2.uso?.promptTokenCount ?? 0;
+      salida += r2.uso?.candidatesTokenCount ?? 0;
+      miembros = (comoJson(r2.texto, 'la cadena societaria').members as PersonaContrato[]) ?? [];
+    } catch {
+      // Que falle la cadena de UNA jurídica no puede tirar abajo el análisis
+      // entero: queda con [] y se cuenta como no revelada.
+      miembros = [];
+    }
+    if (miembros.length > 0) juridicasConCadena++;
+    juridicasEnNivel1 += miembros.filter(m => m.personType === 'JURIDICA').length;
+    indirectos.push({ ...j, indirectShareholders: miembros });
   }
+
   const resultado: ResultadoShareholders = {
     ...vacio(),
-    ...crudo,
-    legalRepresentatives: crudo.legalRepresentatives ?? [],
-    directOwnership: crudo.directOwnership ?? [],
-    indirectShareholders: crudo.indirectShareholders ?? [],
+    legalRepresentatives: p1.legalRepresentatives ?? [],
+    directOwnership: naturales,
+    indirectShareholders: indirectos,
   };
-  return { resultado, violaciones: verificarReglaOro(resultado), uso };
+  // La suma solo se evalúa si TODOS los directos traen porcentaje: con uno en
+  // null, el total no significa nada y marcarlo sospechoso sería ruido.
+  const directos = [...naturales, ...juridicas];
+  const todosConPct = directos.length > 0 && directos.every(p => typeof p.ownershipPercentage === 'number');
+  const sumaParticipacion = todosConPct
+    ? Math.round(directos.reduce((a, p) => a + (p.ownershipPercentage ?? 0), 0) * 100) / 100
+    : null;
+
+  return {
+    resultado,
+    senales: {
+      juridicas: juridicas.length, juridicasConCadena, juridicasEnNivel1, llamadas,
+      sumaParticipacion,
+      participacionSospechosa: sumaParticipacion !== null && Math.abs(sumaParticipacion - 100) > 0.5,
+    },
+    uso: { promptTokenCount: entrada, candidatesTokenCount: salida },
+  };
 }
 
 // ── Aplanado a filas de `lens.analisis_persona` ────────────────────────────

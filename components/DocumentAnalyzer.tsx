@@ -386,15 +386,22 @@ export const DocumentAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> =
         if (archivoNativo) {
           void (async () => {
             try {
-              const { resultado, violaciones } = await extraerShareholders(archivoNativo);
+              const { resultado, senales } = await extraerShareholders(archivoNativo);
               const filas = filasDePersonas(analisisId, resultado, {
                 origen: 'analizador', ejecutadoEn: analisisEn,
               });
-              if (violaciones.total > 0) {
-                // No se corrige moviendo gente de lugar: eso escondería el error
-                // que hay que medir. Se deja registrado y la fila persiste con el
-                // rol del lugar donde el modelo la puso.
-                console.warn('[shareholders] la regla de oro no se cumplió', violaciones);
+              // La participación que no cierra en 100 es la señal más barata de
+              // que el modelo mezcló la tabla de OTRA empresa con la principal.
+              // Medido: cuando pasaba, la suma daba 200 y las mismas personas
+              // aparecían duplicadas como directas y como nivel 1.
+              if (senales.participacionSospechosa) {
+                console.warn('[shareholders] la participación directa no cierra en 100', senales);
+              }
+              if (senales.juridicasEnNivel1 > 0) {
+                // Una jurídica detrás de otra jurídica: la cadena real sigue más
+                // abajo de lo que el modelo de datos representa (nivel 0 y 1).
+                // Se aplana y se avisa en vez de perderlo en silencio.
+                console.warn('[shareholders] la cadena sigue más abajo del nivel 1', senales);
               }
               await persistirPersonas(filas as unknown as Array<Record<string, unknown>>);
             } catch (e) {

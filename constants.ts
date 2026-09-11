@@ -730,7 +730,7 @@ El nivelCumplimientoGlobal debe calcularse como el porcentaje de pilares que "Cu
 // Se manda con el ARCHIVO NATIVO (ver `generarConArchivo`), no con su texto: el
 // porcentaje de cada socio sale de la estructura de la tabla, que es
 // exactamente lo que el OCR aplana.
-export const GEMINI_SHAREHOLDERS_PROMPT = `Eres un analista de KYC. Del documento adjunto extrae la COMPOSICIÓN SOCIETARIA y los REPRESENTANTES LEGALES.
+export const GEMINI_SHAREHOLDERS_PROMPT = `Eres un analista de KYC. Del documento adjunto extrae los REPRESENTANTES LEGALES y TODOS los dueños que figuren en la tabla de propiedad.
 
 Devuelve SOLO JSON con el esquema pedido. No expliques nada.
 
@@ -747,27 +747,30 @@ PROHIBIDO excluir a una entidad por su tipo legal. Las ESAL, cooperativas,
 asociaciones y fundaciones SÍ entran: sus asociados y miembros fundadores son
 equivalentes a accionistas para KYC.
 
-═══ DÓNDE VA CADA UNO — regla de oro ═══
-1. Persona NATURAL que aparece en la tabla de propiedad → "directOwnership"
-2. Persona JURÍDICA que aparece en la tabla de propiedad → "indirectShareholders", en la RAÍZ
-3. Persona NATURAL que está detrás de una jurídica → "indirectShareholders", ANIDADA dentro de esa jurídica
+═══ UNA SOLA SOCIEDAD: LA PRINCIPAL ═══
+Primero identificá cuál es la sociedad PRINCIPAL del documento: la que se
+constituye, se modifica o se certifica. Es la del encabezado.
 
-"directOwnership" NUNCA lleva personas jurídicas.
-La raíz de "indirectShareholders" NUNCA lleva personas naturales.
-Las dos claves aparecen SIEMPRE, aunque queden vacías.
+"owners" lleva ÚNICAMENTE a los dueños de ESA sociedad.
 
-═══ BUSCÁ LA CADENA — no esperes que venga servida ═══
-Por CADA persona jurídica que pongas en "indirectShareholders", RECORRÉ EL
-DOCUMENTO COMPLETO buscando si en otra parte se detalla quiénes son sus socios,
-asociados o accionistas. Casi nunca está en la misma tabla: suele venir en una
-cláusula aparte, en un anexo o en un certificado de cámara de comercio, con su
-propio encabezado y su propia tabla.
+ESTO ES LO QUE MÁS SE FALLA: un documento puede traer TAMBIÉN la composición de
+OTRA empresa —una que es socia de la principal, su matriz, o una relacionada—,
+normalmente en una cláusula aparte con su propia tabla y su propio encabezado.
+Los socios de ESA OTRA empresa NO son dueños de la principal y NO van en
+"owners". Ignoralos por completo en esta respuesta; se preguntan aparte.
 
-Si la encontrás, esas personas van ANIDADAS dentro de esa jurídica.
+Regla para no equivocarse: si una tabla está encabezada por el nombre de una
+empresa distinta a la principal, esa tabla NO es de "owners".
 
-Si el documento no revela quién está detrás de una jurídica, su arreglo anidado
-va vacío: []. NO INVENTES PERSONAS. Nunca completes una cadena que el documento
-no muestra.
+Verificación antes de responder: los "ownershipPercentage" de "owners" tienen
+que sumar aproximadamente 100. Si te da más, metiste gente de otra tabla.
+
+═══ TODO PLANO, SIN ANIDAR ═══
+Poné a los dueños en "owners", naturales y jurídicas por igual, marcando cada
+uno con su "personType".
+
+NO anides nada. NO busques quién está detrás de las jurídicas: eso se pregunta
+aparte.
 
 ═══ name / lastName — leelo con cuidado ═══
 "shareholderName" es el nombre completo TAL CUAL figura en el documento.
@@ -804,3 +807,37 @@ Para los REPRESENTANTES LEGALES, además: "position" con el cargo (Gerente
 General, Representante Legal, Administrador…).
 
 Extraé lo que el documento dice. Si un dato no está, va vacío o null.`;
+
+// Segunda pasada: la composición de UNA jurídica concreta.
+//
+// Se pregunta por separado, y de a una, porque el esquema anidado no funciona:
+// medido sobre 8 corridas del mismo documento, pedir la cadena dentro del mismo
+// JSON la traía 6 de 8 veces y una de cada cinco corridas se desbocaba hasta
+// 45.358 tokens de salida devolviendo JSON truncado. Con dos pasadas planas:
+// 8 de 8, cero JSON roto y la salida estable en ~640 tokens.
+export const GEMINI_SHAREHOLDERS_CADENA_PROMPT = (razonSocial: string, documento?: string): string => `Del documento adjunto, extrae ÚNICAMENTE los socios, accionistas o asociados de esta empresa:
+
+  ${razonSocial}${documento ? ` (documento ${documento})` : ''}
+
+Devuelve SOLO JSON con el esquema pedido.
+
+Buscá en TODO el documento: la información suele estar en una cláusula aparte, un
+anexo o un certificado de cámara de comercio, con su propio encabezado y su
+propia tabla. NO es la tabla de accionistas de la sociedad principal.
+
+Si el documento NO dice quiénes son sus socios, devolvé "members" vacío: [].
+NO INVENTES PERSONAS. Nunca completes una cadena que el documento no muestra.
+
+"shareholderName" va TAL CUAL figura en el documento, SIN REORDENAR. Si el
+documento dice "PEREZ GOMEZ ANGELA VIVIANA", eso es lo que va — no lo pases a
+"ANGELA VIVIANA PEREZ GOMEZ". El orden registral es un dato, y quien después
+cruce contra el registro necesita el nombre como está escrito.
+
+El reordenamiento va SOLO en "name" y "lastName", que son la partición:
+  "PEREZ GOMEZ ANGELA VIVIANA"  → shareholderName: "PEREZ GOMEZ ANGELA VIVIANA"
+                                  name: "ANGELA VIVIANA"  lastName: "PEREZ GOMEZ"
+
+Y las mismas para el resto: "personType" NATURAL o JURIDICA, "shareholderId" con
+el documento tal como figura, "identificationType", "countryOfOrigin",
+"ownershipPercentage" como número sin el signo % (null si no se puede saber, NO
+lo estimes) e "isPEP" en true/false/null.`;
