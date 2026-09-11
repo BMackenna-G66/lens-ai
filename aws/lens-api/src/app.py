@@ -50,6 +50,9 @@ import time
 from urllib.parse import urlparse
 
 import extraccion
+import contrato
+import almacen
+import ingesta_s3
 import gemini
 from extraccion import Presupuesto, extraer_texto
 
@@ -280,6 +283,122 @@ def _autorizado(evento: dict) -> bool:
     return hmac.compare_digest(str(headers.get("x-api-secret", "")), API_SECRET)
 
 
+def _analyses(evento: dict, ruta: str, metodo: str) -> dict:
+    """`POST /v1/analyses` y `GET /v1/analyses/{analysisId}`.
+
+    Los errores de este contrato viajan con **HTTP 200** y el statusCode real en
+    el cuerpo: es como responde el bot que se reemplaza, y el consumidor lo lee
+    de ahí. Devolver un 400 de verdad rompería a quien ya está integrado.
+    """
+    # GET: solo devuelve lo guardado. Nunca analiza.
+    if metodo == "GET":
+        analysis_id = ruta.rsplit("/", 1)[-1]
+        if not analysis_id or analysis_id == "analyses":
+            return _resp(200, contrato.error("MISSING_FOLDER_PATH", "Falta el analysisId en la ruta."))
+        guardado = almacen.leer(analysis_id)
+        if guardado is None:
+            return _resp(200, contrato.error("NO_DOCUMENTS_FOUND", f"No hay un análisis guardado con id {analysis_id}."))
+        return _resp(200, guardado)
+
+    if metodo != "POST":
+        return _resp(200, contrato.error("AWS_ERROR", f"{metodo} no permitido en /v1/analyses."))
+
+    try:
+        cuerpo = json.loads(evento.get("body") or "{}")
+        if not isinstance(cuerpo, dict):
+            raise ValueError("el cuerpo no es un objeto")
+    except Exception as e:  # noqa: BLE001
+        return _resp(200, contrato.error("AWS_ERROR", f"No se pudo leer la petición: {e}"))
+
+    # `session_id` viaja de ida y vuelta SIN interpretarse: el consumidor lo usa
+    # para correlacionar con su WebSocket.
+    session_id = str(cuerpo.get("session_id") or cuerpo.get("sessionId") or "")
+    analysis_id = str(cuerpo.get("analysisId") or cuerpo.get("analysis_id") or "").strip()
+
+    # ── Idempotencia ──────────────────────────────────────────────────────
+    # El contrato dice que ms-company genera el UUID justamente para esto. Un
+    # segundo POST con el mismo id devuelve lo guardado y NO vuelve a analizar
+    # ni a cobrar tokens. El session_id SÍ se refresca: la segunda llamada puede
+    # venir de otra sesión del consumidor.
+    if analysis_id:
+        guardado = almacen.leer(analysis_id)
+        if guardado is not None:
+            if session_id:
+                guardado = {**guardado, "session_id": session_id}
+            return _resp(200, guardado)
+
+    motivo = contrato.validar_entrada(cuerpo)
+    if motivo:
+        return _resp(200, contrato.error(motivo, "Falta folderPath o files.", session_id))
+
+    return _resp(200, _correr_analyses(cuerpo, analysis_id, session_id))
+
+
+def _correr_analyses(cuerpo: dict, analysis_id: str, session_id: str) -> dict:
+    """Resuelve S3, analiza y arma la respuesta del contrato."""
+    import uuid
+    analysis_id = analysis_id or str(uuid.uuid4())
+
+    folder_path = str(cuerpo.get("folderPath") or cuerpo.get("folder_path") or "").strip()
+    archivos_pedidos = cuerpo.get("files") or []
+    opciones = cuerpo.get("options") or {}
+
+    try:
+        import boto3
+        s3 = boto3.client("s3")
+    except Exception as e:  # noqa: BLE001
+        return contrato.error("AWS_ERROR", f"No se pudo crear el cliente de S3: {e}", session_id)
+
+    ing = ingesta_s3.ingerir(s3, folder_path=folder_path, archivos=archivos_pedidos)
+
+    # Los dos casos que el bot distingue, y que NO son lo mismo:
+    #   · la carpeta no tenía nada        → NO_DOCUMENTS_FOUND
+    #   · tenía cosas y ninguna servía    → NO_VALID_FILES
+    # Mezclarlos dejaría a quien depura sin saber si el path está mal o si los
+    # archivos están mal nombrados.
+    if not ing.archivos:
+        motivo = "NO_VALID_FILES" if ing.vistos > 0 else "NO_DOCUMENTS_FOUND"
+        return contrato.error(
+            motivo,
+            f"{ing.vistos} objeto(s) encontrados, {ing.descartados} descartados.",
+            session_id, warnings=ing.avisos,
+        )
+
+    documentos = [(a.nombre, a.contenido) for a in ing.archivos]
+    incluir_texto = bool(opciones.get("includeRawText"))
+    try:
+        resultado = analizar(documentos, incluir_texto, str(cuerpo.get("country") or ""))
+    except Exception as e:  # noqa: BLE001
+        log.exception("fallo en el análisis de /v1/analyses")
+        return contrato.error("AWS_ERROR", f"Error interno durante el análisis: {e}", session_id,
+                              warnings=ing.avisos)
+
+    campos = {c["field"]: c["value"] for c in (resultado.get("campos") or [])}
+    respuesta = contrato.respuesta(
+        analysis_id=analysis_id,
+        company={
+            "companyId": str(cuerpo.get("companyId") or cuerpo.get("company_id") or ""),
+            "companyName": campos.get("Razón Social", ""),
+            "identification": campos.get("RUT de la sociedad", ""),
+            "country": resultado.get("pais_detectado", ""),
+            "constitutionDate": campos.get("Fecha de Constitución", ""),
+            "capital": campos.get("Capital Social", ""),
+        },
+        # La composición societaria estructurada todavía NO se extrae en la API:
+        # el prompt de shareholders corre hoy en la SPA. Las claves van vacías,
+        # que es una respuesta válida del contrato, y no inventadas.
+        legal_representatives=[],
+        direct_ownership=[],
+        indirect_shareholders=[],
+        economic_activities=[],
+        raw_text=[d.get("texto", "") for d in (resultado.get("documentos") or [])] if incluir_texto else None,
+        avisos=(ing.avisos + list(resultado.get("avisos") or [])) or None,
+        session_id=session_id,
+    )
+    almacen.guardar(analysis_id, respuesta)
+    return respuesta
+
+
 def lambda_handler(evento: dict, contexto=None) -> dict:
     ctx = (evento.get("requestContext") or {}).get("http") or {}
     metodo = (ctx.get("method") or evento.get("httpMethod") or "GET").upper()
@@ -297,10 +416,21 @@ def lambda_handler(evento: dict, contexto=None) -> dict:
             "max_documentos": MAX_DOCUMENTOS,
             "max_paginas_ocr": extraccion.MAX_PAGINAS_OCR,
             "presupuesto_s": PRESUPUESTO_S,
+            # Si esto es false, la idempotencia de /v1/analyses NO persiste
+            # entre invocaciones. Se expone para no tener que adivinarlo.
+            "almacen_idempotencia": almacen.disponible(),
         })
 
-    if ruta != "/v1/analisis":
-        return _error(404, f"Ruta no encontrada: {ruta}. Disponibles: GET /salud, POST /v1/analisis")
+    # ── Contrato BusinessShareholders (Fase 5) ─────────────────────────────
+    # SE AGREGA. `/v1/analisis` sigue igual y sin cambios: es lo que permite
+    # migrar a ms-company sin ventana de corte, con las dos rutas vivas.
+    if ruta == "/v1/analyses" or ruta.startswith("/v1/analyses/"):
+        if not _autorizado(evento):
+            return _error(401, "Falta o no coincide el header x-api-secret.")
+        return _analyses(evento, ruta, metodo)
+
+    if ruta not in ("/v1/analisis",):
+        return _error(404, f"Ruta no encontrada: {ruta}. Disponibles: GET /salud, POST /v1/analisis, POST /v1/analyses")
     if metodo != "POST":
         return _error(405, f"{metodo} no permitido en /v1/analisis. Usá POST.")
     if not _autorizado(evento):
