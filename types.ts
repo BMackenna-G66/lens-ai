@@ -114,6 +114,11 @@ export interface ProcessedDocument {
   analisisId?: string;
   analisisEn?: string;        // ISO de la ejecución
   hashDocumentos?: string;    // sha256 del texto fuente
+  // Resultado de la extracción estructurada de shareholders: `{ok, personas,
+  // senales}` o `{ok:false, error}`. Se guarda para que la ficha en Redshift
+  // diga si corrió y con qué resultado — sin esto, `analisis_persona` vacía
+  // podía ser "falló" o "el código nunca llegó a esa pestaña".
+  shareholdersResultado?: unknown;
 }
 
 // Type for items in the processing queue, can be a single File or a consolidated job
