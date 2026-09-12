@@ -422,9 +422,20 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   // tipificación de remesa y se libera la TRANSACCIÓN en Admin (no se toca al
   // cliente). Se manda todo en una sola llamada por lote.
   const [remesaMasivoTipo, setRemesaMasivoTipo] = useState('');
-  const [remesaMasivoConfirm, setRemesaMasivoConfirm] = useState(false);
-  const [remesaMasivoSending, setRemesaMasivoSending] = useState(false);
   const [remesaMasivoResult, setRemesaMasivoResult] = useState<string | null>(null);
+
+  // Las tres acciones del masivo de remesa. Un solo estado y no tres booleanos
+  // sueltos: así son mutuamente excluyentes por construcción y no hay forma de
+  // quedar con dos confirmaciones abiertas a la vez.
+  //
+  //   'ambos'  Admin + Salesforce, el flujo de siempre
+  //   'admin'  solo la transacción: libera o rechaza sin cerrar el caso
+  //   'sf'     solo el caso: lo cierra sin tocar la plata
+  type AccionRemesa = '' | 'ambos' | 'admin' | 'sf';
+  const [remesaConfirm, setRemesaConfirm] = useState<AccionRemesa>('');
+  const [remesaEnCurso, setRemesaEnCurso] = useState<AccionRemesa>('');
+  // Mientras corre cualquiera de las tres, las tres quedan deshabilitadas.
+  const remesaMasivoSending = remesaEnCurso !== '';
 
   // ── Cerrojos contra el doble envío a Admin ─────────────────────────────────
   // Son `useRef` y no estados a propósito: `setState` es asíncrono, así que
@@ -455,7 +466,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     const tipo = tipoRemesaPorId(remesaMasivoTipo);
     if (!tipo || seleccion.size === 0) return;
     remesaMasivoLock.current = true;
-    setRemesaMasivoSending(true); setRemesaMasivoResult(null);
+    setRemesaEnCurso('ambos'); setRemesaMasivoResult(null);
     const seleccionados = [...seleccion]
       .map(id => colas.remesa.find(c => c.id === id))
       .filter((c): c is QueuedCaso => !!c);
@@ -533,10 +544,170 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     } catch (e) {
       setRemesaMasivoResult(`❌ ${e instanceof Error ? e.message : String(e)}`);
     } finally {
-      setRemesaMasivoSending(false);
-      setRemesaMasivoConfirm(false);
+      setRemesaEnCurso('');
+      setRemesaConfirm('');
       // Acá sí se reabre: un lote parcial hay que poder reintentarlo. Lo que ya
       // se aplicó no se reenvía, porque quedó en `remesaAdminHechos`.
+      remesaMasivoLock.current = false;
+    }
+  };
+
+  // ── Las dos mitades del masivo, por separado ───────────────────────────────
+  // A veces hace falta solo una parte del flujo: liberar la transacción sin
+  // cerrar el caso todavía, o cerrar el caso de algo que ya se resolvió en Admin
+  // por otro camino.
+  //
+  // Están ESCRITAS APARTE y no como parámetros del combinado a propósito: el de
+  // arriba mueve plata y funciona, y meterle ramas para cubrir tres casos es la
+  // forma más fácil de romperlo. Comparten los datos que importan —el registro
+  // de lo ya aplicado y la tipología— pero no el camino.
+  //
+  // Las tres comparten el MISMO cerrojo `remesaMasivoLock`, y es a propósito.
+  //
+  // Con un cerrojo por función, cada una queda protegida de sí misma pero no de
+  // las otras: `setRemesaEnCurso` es asíncrono, así que entre el clic en una y
+  // el re-render que deshabilita todo hay una ventana en la que un clic en otra
+  // entra igual. Y dos de estas corriendo a la vez es lo mismo que el combinado
+  // pero SIN el orden que lo hace seguro —Admin primero, y si falla no se cierra
+  // el caso—, que es justamente la garantía que no se puede perder.
+  //
+  // Nunca hace falta correr dos a la vez, así que compartir el cerrojo no cuesta
+  // nada y cierra la ventana entera.
+
+  // SOLO Admin: cambia el estado de la transacción y NO toca Salesforce. El caso
+  // queda abierto en la cola, que es justamente para lo que sirve.
+  const cerrarMasivoRemesaSoloAdmin = async () => {
+    if (remesaMasivoLock.current) return;
+    const tipo = tipoRemesaPorId(remesaMasivoTipo);
+    if (!tipo || seleccion.size === 0) return;
+    remesaMasivoLock.current = true;
+    setRemesaEnCurso('admin'); setRemesaMasivoResult(null);
+    const seleccionados = [...seleccion]
+      .map(id => colas.remesa.find(c => c.id === id))
+      .filter((c): c is QueuedCaso => !!c);
+
+    try {
+      const conTx = seleccionados.filter(c => c.remesa);
+      const sinTx = seleccionados.length - conTx.length;
+      // Misma doble exclusión que el combinado: lo persistido en el caso y lo
+      // aplicado en esta sesión. `remesaAdminHechos` es el MISMO ref, así que
+      // aplicar por acá bloquea el combinado y al revés.
+      const pendientes = conTx.filter(c =>
+        c.cierres?.admin?.ok !== true && !remesaAdminHechos.current.has(c.id));
+
+      let rAdmin: Awaited<ReturnType<typeof enviarCierreRemesaAdmin>> = { ok: true, results: [] };
+      if (pendientes.length > 0) {
+        rAdmin = await enviarCierreRemesaAdmin({
+          transactionIds: pendientes.map(c => c.remesa),
+          targetStatusDB: tipo.statusDB,
+          targetStatusLabel: tipo.statusLabel,
+          requestedBy: actor?.nombre ?? '',
+        });
+      }
+      const resPorTx = new Map(rAdmin.results.map(x => [String(x.transactionId), x]));
+      for (const c of pendientes) {
+        const res = resPorTx.get(String(c.remesa));
+        if (!res?.ok) continue;
+        remesaAdminHechos.current.add(c.id);
+        await registrarCierreCanal(c.id, 'admin', { ok: true, tipologia: tipo.id }, actor ?? undefined).catch(() => {});
+        logCierre(c, 'remesa', { canal: 'ADMIN', ok: true, tipologia: tipo.id, statusEnviado: tipo.statusDB }, actor ?? undefined);
+      }
+
+      // La auditoría va igual que en el combinado: lo que cambia es que `sfOk`
+      // queda en undefined, porque Salesforce no se tocó.
+      for (const c of seleccionados) {
+        const res = resPorTx.get(String(c.remesa));
+        logLiberacionRemesa(c, {
+          transaccionId: c.remesa || null,
+          tipologia: tipo.id,
+          adminOk: c.cierres?.admin?.ok === true || res?.ok === true,
+          adminOmitido: res?.omitido ?? false,
+          estadoAnterior: res?.estadoAnterior ?? null,
+          estadoNuevo: res?.ok ? tipo.statusDB : null,
+          sfOk: undefined,
+          requestedBy: actor?.nombre ?? null,
+          detalleError: res && !res.ok ? (res.detalle ?? `paso ${res.paso}`) : null,
+        }, remesaMap[c.remesa], benefMap[c.id], actor ?? undefined);
+      }
+
+      const partes = [
+        resumenRemesaAdmin(rAdmin, tipo.participio),
+        'el caso queda ABIERTO en Salesforce',
+        sinTx ? `${sinTx} sin N° de transacción` : '',
+      ].filter(Boolean);
+      setRemesaMasivoResult(partes.join(' · '));
+      // NO se limpia la selección: lo normal después de esto es cerrar el caso
+      // con el otro botón, sobre los mismos casos.
+    } catch (e) {
+      setRemesaMasivoResult(`❌ ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setRemesaEnCurso('');
+      setRemesaConfirm('');
+      remesaMasivoLock.current = false;
+    }
+  };
+
+  // SOLO Salesforce: cierra el caso con la tipificación y NO toca la transacción.
+  //
+  // Ojo con lo que esto significa y por qué el combinado no lo hace: ahí, si
+  // Admin falla, el caso se SALTEA en Salesforce a propósito —cerrar diciendo
+  // «resuelto» algo cuya plata sigue retenida es peor que no cerrarlo—. Acá esa
+  // guarda no aplica, porque pedirlo explícitamente es el caso de uso: la
+  // transacción se resolvió por otra vía y falta cerrar el caso. Por eso la
+  // confirmación lo dice con todas las letras.
+  const cerrarMasivoRemesaSoloSF = async () => {
+    if (remesaMasivoLock.current) return;
+    const tipo = tipoRemesaPorId(remesaMasivoTipo);
+    if (!tipo || seleccion.size === 0) return;
+    remesaMasivoLock.current = true;
+    setRemesaEnCurso('sf'); setRemesaMasivoResult(null);
+    const seleccionados = [...seleccion]
+      .map(id => colas.remesa.find(c => c.id === id))
+      .filter((c): c is QueuedCaso => !!c);
+
+    try {
+      // Lo ya cerrado en SF no se reenvía. `enviarResolucion` además devuelve
+      // `yaEnviada`, que es la red de atrás.
+      const paraSF = seleccionados.filter(c => c.cierres?.sf?.ok !== true);
+      const yaCerrados = seleccionados.length - paraSF.length;
+      let sfOk = 0, sfErr = 0;
+      // Los que EFECTIVAMENTE quedaron cerrados. Se juntan acá y no se cuentan
+      // sobre `paraSF` porque ahí también están los que fallaron, y un caso que
+      // no se cerró no es un caso cerrado sin liberar.
+      const cerrados: QueuedCaso[] = [];
+      await runPool(paraSF, async c => {
+        try {
+          const payload = { CaseNumber: c.numeroCaso, ...camposDeCierreRemesa(tipo, c.pais) } as SFCaseUpdate;
+          const r = await enviarResolucion(c.id, payload, actor ?? undefined);
+          if (r.yaEnviada || r.sf?.ok) {
+            sfOk++;
+            cerrados.push(c);
+            await registrarCierreCanal(c.id, 'sf', { ok: true, tipologia: tipo.id }, actor ?? undefined).catch(() => {});
+            logCierre(c, 'remesa', { canal: 'SF', ok: true, tipologia: tipo.id }, actor ?? undefined);
+          } else sfErr++;
+        } catch { sfErr++; }
+      }, 3);
+
+      // Cuántos quedaron CERRADOS sin que su transacción se haya liberado o
+      // rechazado. Es la pregunta que va a hacer cualquiera que audite esto, y
+      // el número tiene que ser exacto: se cuenta sobre los que se cerraron de
+      // verdad, no sobre los que se intentaron.
+      const sinAdmin = cerrados.filter(c => c.cierres?.admin?.ok !== true
+        && !remesaAdminHechos.current.has(c.id)).length;
+
+      const partes = [
+        `${sfOk} cerrado(s) en Salesforce${sfErr ? `, ${sfErr} con error` : ''}`,
+        'la transacción NO se tocó',
+        sinAdmin ? `⚠️ ${sinAdmin} sin liberar/rechazar en Admin` : '',
+        yaCerrados ? `${yaCerrados} ya estaba(n) cerrado(s)` : '',
+      ].filter(Boolean);
+      setRemesaMasivoResult(partes.join(' · '));
+      if (sfErr === 0) limpiarSeleccion();
+    } catch (e) {
+      setRemesaMasivoResult(`❌ ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setRemesaEnCurso('');
+      setRemesaConfirm('');
       remesaMasivoLock.current = false;
     }
   };
@@ -2726,21 +2897,34 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
           {seleccion.size > 0 && activeQueue === 'remesa' && (
             <div className="flex flex-wrap items-center gap-3 mb-3 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/50 rounded-xl px-4 py-2 text-sm">
               <span className="font-semibold text-amber-800 dark:text-amber-300">Cerrar remesas</span>
-              <span className="text-xs text-amber-700 dark:text-amber-400">Admin + Salesforce en un paso</span>
               <select
                 value={remesaMasivoTipo}
-                onChange={e => { setRemesaMasivoTipo(e.target.value); setRemesaMasivoConfirm(false); setRemesaMasivoResult(null); }}
+                onChange={e => { setRemesaMasivoTipo(e.target.value); setRemesaConfirm(''); setRemesaMasivoResult(null); }}
                 className="px-2 py-1 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800"
               >
                 <option value="">Tipología…</option>
                 {TIPOS_CIERRE_REMESA.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
               </select>
-              {remesaMasivoTipo && !remesaMasivoConfirm && (
-                <button onClick={() => setRemesaMasivoConfirm(true)} disabled={remesaMasivoSending} className="font-bold text-amber-800 dark:text-amber-300 hover:underline disabled:opacity-50">
-                  Aplicar a {seleccion.size} caso(s)
-                </button>
+
+              {/* Las tres acciones. El combinado queda PRIMERO y destacado: es el
+                  camino normal, y los otros dos son para cuando hace falta una
+                  mitad sola. Mientras corre cualquiera, las tres se deshabilitan. */}
+              {remesaMasivoTipo && remesaConfirm === '' && (
+                <>
+                  <button onClick={() => setRemesaConfirm('ambos')} disabled={remesaMasivoSending} className="font-bold text-amber-800 dark:text-amber-300 hover:underline disabled:opacity-50">
+                    Admin + Salesforce ({seleccion.size})
+                  </button>
+                  <span className="text-amber-300 dark:text-amber-700">|</span>
+                  <button onClick={() => setRemesaConfirm('admin')} disabled={remesaMasivoSending} title="Cambia el estado de la transacción y deja el caso abierto" className="text-amber-800 dark:text-amber-300 hover:underline disabled:opacity-50">
+                    Solo la remesa
+                  </button>
+                  <button onClick={() => setRemesaConfirm('sf')} disabled={remesaMasivoSending} title="Cierra el caso en Salesforce sin tocar la transacción" className="text-amber-800 dark:text-amber-300 hover:underline disabled:opacity-50">
+                    Solo el caso
+                  </button>
+                </>
               )}
-              {remesaMasivoConfirm && (
+
+              {remesaConfirm === 'ambos' && (
                 <div className="flex items-center gap-2 text-xs">
                   <span className="text-amber-900 dark:text-amber-200">
                     ¿Aplicar «{tipoRemesaPorId(remesaMasivoTipo)?.label}» a {seleccion.size} caso(s)?
@@ -2750,9 +2934,37 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                   <button onClick={cerrarMasivoRemesa} disabled={remesaMasivoSending} className="px-3 py-1 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold disabled:opacity-50">
                     {remesaMasivoSending ? 'Enviando…' : 'Sí, aplicar'}
                   </button>
-                  <button onClick={() => setRemesaMasivoConfirm(false)} disabled={remesaMasivoSending} className="px-3 py-1 rounded-lg border border-slate-300 dark:border-slate-600">Cancelar</button>
+                  <button onClick={() => setRemesaConfirm('')} disabled={remesaMasivoSending} className="px-3 py-1 rounded-lg border border-slate-300 dark:border-slate-600">Cancelar</button>
                 </div>
               )}
+
+              {remesaConfirm === 'admin' && (
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="text-amber-900 dark:text-amber-200">
+                    ¿Aplicar «{tipoRemesaPorId(remesaMasivoTipo)?.label}» a la transacción de {seleccion.size} caso(s)?
+                    Los casos quedan <b>ABIERTOS</b> en Salesforce.{' '}
+                    <b>{tipoRemesaPorId(remesaMasivoTipo)?.advertencia}</b>
+                  </span>
+                  <button onClick={cerrarMasivoRemesaSoloAdmin} disabled={remesaMasivoSending} className="px-3 py-1 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold disabled:opacity-50">
+                    {remesaMasivoSending ? 'Enviando…' : 'Sí, solo la remesa'}
+                  </button>
+                  <button onClick={() => setRemesaConfirm('')} disabled={remesaMasivoSending} className="px-3 py-1 rounded-lg border border-slate-300 dark:border-slate-600">Cancelar</button>
+                </div>
+              )}
+
+              {remesaConfirm === 'sf' && (
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="text-amber-900 dark:text-amber-200">
+                    ¿Cerrar {seleccion.size} caso(s) en Salesforce como «{tipoRemesaPorId(remesaMasivoTipo)?.label}»?
+                    <b> La transacción NO se toca</b>: si todavía está retenida, el caso va a quedar cerrado igual.
+                  </span>
+                  <button onClick={cerrarMasivoRemesaSoloSF} disabled={remesaMasivoSending} className="px-3 py-1 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold disabled:opacity-50">
+                    {remesaMasivoSending ? 'Enviando…' : 'Sí, solo el caso'}
+                  </button>
+                  <button onClick={() => setRemesaConfirm('')} disabled={remesaMasivoSending} className="px-3 py-1 rounded-lg border border-slate-300 dark:border-slate-600">Cancelar</button>
+                </div>
+              )}
+
               {remesaMasivoResult && <span className="text-xs text-amber-900 dark:text-amber-200 font-medium">{remesaMasivoResult}</span>}
             </div>
           )}
