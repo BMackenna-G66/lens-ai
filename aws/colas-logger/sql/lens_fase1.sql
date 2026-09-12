@@ -143,3 +143,36 @@ SELECT
   MAX(CASE WHEN campo = 'Análisis de Facultades Específicas' THEN valor END) AS analisis_de_facultades_especificas
 FROM lens.analisis_campo c
 GROUP BY c.analisis_id;
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Análisis marcados para revisión humana (12-09-2026)
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Existe porque dos bugs de extracción societaria se arreglaron HACIA ADELANTE
+-- (PR #161 y #165) y lo ya cargado quedó como estaba. Sin esta tabla, una fila
+-- con datos incompletos es indistinguible de una buena para quien la consulte.
+--
+-- NO se corrigen los datos: se marca cuál mirar y por qué. Corregir a mano sobre
+-- una de las dos lecturas sería elegir un ganador sin volver al documento, que
+-- es exactamente lo que el contraste de las dos lecturas existe para no hacer.
+--
+-- El `revision_uid` es sintético (`analisis_id|motivo`) y no compuesto: el
+-- camino batcheado del logger borra por `pk[0]`, así que una PK compuesta
+-- borraría las otras filas del mismo análisis al escribir una.
+--
+-- `resuelto` se pone en TRUE cuando alguien revisó, no cuando se re-analizó: un
+-- re-análisis genera un `analisis_id` nuevo y esta fila sigue describiendo al
+-- viejo.
+CREATE TABLE IF NOT EXISTS lens.analisis_revision (
+  revision_uid   VARCHAR(128) NOT NULL,   -- analisis_id|motivo
+  analisis_id    VARCHAR(64)  NOT NULL,
+  motivo         VARCHAR(64),             -- accionistas_faltantes | documento_discrepante | documento_faltante
+  severidad      VARCHAR(16),             -- alta | media | baja
+  detalle        VARCHAR(2000),           -- qué se vio, con las dos lecturas
+  detectado_en   TIMESTAMP,
+  detectado_por  VARCHAR(128),
+  resuelto       BOOLEAN DEFAULT FALSE,
+  PRIMARY KEY (revision_uid)
+)
+DISTSTYLE KEY DISTKEY (analisis_id)
+SORTKEY (detectado_en);
