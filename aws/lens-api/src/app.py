@@ -375,11 +375,39 @@ def _rango_doc(nombre: str) -> int:
     return 2
 
 
-def _extraer_socios(archivos, t0: float) -> tuple[dict, list[str]]:
-    """La composición societaria del documento que más se parece a la escritura.
+def elegir_documentos(archivos, tope_bytes: int = gemini.TOPE_INLINE_BYTES) -> list:
+    """Los documentos que se le mandan al modelo, en el orden en que los lee.
 
-    Corre sobre el archivo NATIVO, no sobre el texto: las tablas de propiedad se
-    leen mucho mejor con el PDF a la vista.
+    Van TODOS los que pueda ver, no solo el mejor. Medido sobre 87 análisis de
+    producción en los que el camino de texto SÍ encontró accionistas —o sea, el
+    documento demostrablemente los tenía— la extracción estructurada los perdió
+    en el 5 % de los de un archivo y en el **63 % de los consolidados de
+    varios**: el camino de texto concatena todo y este mandaba uno.
+
+    Se acota por peso acumulado porque el tope de Gemini es sobre el request
+    entero. Como van ordenados, lo que queda afuera es lo menos parecido a una
+    escritura. El primero entra siempre: si ni él cabe, que falle abajo con el
+    mensaje de tamaño y no con una lista vacía, que se leería como «no había
+    documentos».
+    """
+    nativos = [a for a in archivos if gemini.mime_de(a.nombre)]
+    # El desempate es el orden de llegada, que `ingesta_s3` ya deja
+    # determinista: dos corridas sobre la misma carpeta mandan lo mismo.
+    ordenados = sorted(nativos, key=lambda a: (_rango_doc(a.nombre), nativos.index(a)))
+
+    salida, acumulado = [], 0
+    for a in ordenados:
+        peso = len(a.contenido)
+        if salida and acumulado + peso > tope_bytes:
+            break
+        salida.append(a)
+        acumulado += peso
+    return salida
+
+
+def _extraer_socios(archivos, t0: float) -> tuple[dict, list[str]]:
+    """La composición societaria de los documentos NATIVOS, no de su texto: las
+    tablas de propiedad se leen mucho mejor con el PDF a la vista.
 
     Nunca lanza. Si algo falla, las tres claves quedan vacías y el motivo va en
     los avisos: la ficha de 18 campos ya está lista y perderla por esto sería
@@ -387,13 +415,8 @@ def _extraer_socios(archivos, t0: float) -> tuple[dict, list[str]]:
     """
     vacio = {"legalRepresentatives": [], "directOwnership": [], "indirectShareholders": []}
 
-    nativos = [a for a in archivos if gemini.mime_de(a.nombre)]
-    # Desempata por el orden de llegada, que `ingesta_s3` ya deja determinista:
-    # dos corridas sobre la misma carpeta tienen que elegir el mismo archivo.
-    nativo = min(
-        (a for a in nativos), key=lambda a: (_rango_doc(a.nombre), nativos.index(a)), default=None
-    )
-    if nativo is None:
+    docs = elegir_documentos(archivos)
+    if not docs:
         return vacio, ["Ningún documento es PDF, JPG o PNG: no se extrajo la composición societaria."]
 
     def queda_tiempo() -> bool:
@@ -403,7 +426,7 @@ def _extraer_socios(archivos, t0: float) -> tuple[dict, list[str]]:
         return vacio, ["No quedó tiempo para extraer la composición societaria."]
 
     try:
-        socios, senales = gemini.extraer_shareholders(nativo.nombre, nativo.contenido, queda_tiempo)
+        socios, senales = gemini.extraer_shareholders(docs, queda_tiempo)
     except gemini.ErrorGemini as e:
         return vacio, [f"No se pudo extraer la composición societaria ({e})."]
     except Exception as e:  # noqa: BLE001
@@ -412,7 +435,7 @@ def _extraer_socios(archivos, t0: float) -> tuple[dict, list[str]]:
 
     # Las señales van al log, no a la respuesta: son para calibrar el modelo,
     # no para el consumidor, que tiene su propio contrato.
-    log.info("shareholders %s: %s", nativo.nombre, json.dumps(senales, ensure_ascii=False))
+    log.info("shareholders %s: %s", [d.nombre for d in docs], json.dumps(senales, ensure_ascii=False))
 
     avisos = []
     if senales["participacion_sospechosa"]:
