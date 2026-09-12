@@ -45,7 +45,29 @@ Sin AWS ni dependencias (stubea boto3):
 
 ```bash
 python3 tests/test_app.py
+python3 tests/test_verificar_vistas.py
 ```
+
+## Vistas en inglés: el guardia contra la deriva
+
+Las vistas de `sql/lens_vistas_en.sql` se generaron desde las columnas reales
+del cluster. Eso las dejó correctas ese día y con un agujero para el siguiente:
+**si alguien agrega una columna y no regenera la vista, la vista simplemente no
+la expone.** No falla, no avisa. Tech consulta `lens.analysis`, no ve el campo
+nuevo y concluye que el dato no existe.
+
+```bash
+python3 scripts/verificar_vistas.py           # informe
+python3 scripts/verificar_vistas.py --check   # solo el veredicto (CI)
+```
+
+Compara el DDL versionado contra las vistas y falla si encuentra una columna sin
+exponer, una vista apuntando a algo que ya no está, un nombre repetido, o una
+tabla —sobre todo una que el logger ya está llenando— sin vista en inglés.
+
+Corre **sin credenciales y con el cluster pausado**, que lo está de 18:30 a
+04:00. El cluster es la verdad en ejecución; el DDL es la verdad en revisión, y
+ahí es donde la deriva sale barata de arreglar.
 
 ## Cómo escribe (verificado contra el cluster)
 
