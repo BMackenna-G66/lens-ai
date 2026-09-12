@@ -223,6 +223,19 @@ SELECT
 FROM lens.analisis_pivote;
 
 
+CREATE OR REPLACE VIEW lens.analysis_review AS
+SELECT
+  revision_uid AS review_uid,
+  analisis_id AS analysis_id,
+  motivo AS reason,
+  severidad AS severity,
+  detalle AS details,
+  detectado_en AS detected_at,
+  detectado_por AS detected_by,
+  resuelto AS resolved
+FROM lens.analisis_revision;
+
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Permisos: escritos, SIN EJECUTAR. Decidido así el 12-09-2026.
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -259,6 +272,7 @@ FROM lens.analisis_pivote;
 --   GRANT SELECT ON lens.batch_document        TO GROUP lens_lectura;
 --   GRANT SELECT ON lens.api_request           TO GROUP lens_lectura;
 --   GRANT SELECT ON lens.analysis_pivot        TO GROUP lens_lectura;
+--   GRANT SELECT ON lens.analysis_review       TO GROUP lens_lectura;
 --
 -- Y recién entonces sumar a cada quien, que es una línea por principal. El
 -- nombre exacto del rol SSO NO se escribe acá —este repo es público— y se saca

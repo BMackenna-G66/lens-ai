@@ -25,10 +25,13 @@ def test_el_repo_no_tiene_deriva():
     assert v.revisar() == []
 
 
-def test_las_nueve_tablas_tienen_vista():
+def test_toda_tabla_del_ddl_tiene_su_vista():
+    """Sin número fijo a propósito: el schema crece, y un test que dice «nueve»
+    falla el día que se agrega una tabla legítima en vez de detectar deriva.
+    Lo que importa es la correspondencia, no el tamaño."""
     tablas = v.columnas_de_tablas([v.leer(p) for p in v.DDL])
     vistas = v.vistas_en(v.leer(v.VISTAS))
-    assert len(tablas) == 9
+    assert tablas, "no se leyó ninguna tabla del DDL"
     assert {d["tabla"] for d in vistas.values()} == set(tablas)
 
 
@@ -174,13 +177,12 @@ def test_detecta_un_grant_sobre_una_vista_que_ya_no_existe(monkeypatch):
     assert any("ya no es una vista de este archivo" in x for x in p)
 
 
-def test_el_repo_tiene_las_nueve_vistas_con_grant():
+def test_toda_vista_del_repo_tiene_su_grant():
     """Hoy el bloque está comentado —se decidió no ejecutarlo todavía— pero la
     lista tiene que estar completa igual, para que el día que se ejecute no
     falte ninguna."""
     src = v.leer(v.VISTAS)
     assert v.vistas_con_grant(src) == set(v.vistas_en(src))
-    assert len(v.vistas_con_grant(src)) == 9
 
 
 def test_el_bloque_de_grant_sigue_comentado():
