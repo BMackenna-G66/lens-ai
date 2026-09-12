@@ -12,9 +12,14 @@
 -- dos formas y no hay que mantener permisos duplicados. Conviven
 -- `lens.analisis` (la tabla) y `lens.analysis` (la vista).
 --
--- Se generaron DESDE las columnas reales del cluster, no a mano: si mañana se
--- agrega una columna y no se regenera, la vista simplemente no la expone —
--- nunca puede quedar apuntando a algo que no existe.
+-- Se generaron DESDE las columnas reales del cluster, no a mano: nunca pueden
+-- quedar apuntando a algo que no existe el día que se crean.
+--
+-- Lo que NO resuelve generarlas es el día siguiente: si alguien agrega una
+-- columna y no regenera, la vista simplemente no la expone. No falla, no avisa,
+-- y tech concluye que el dato no existe. Para eso está
+-- `scripts/verificar_vistas.py --check`, que compara este archivo contra el DDL
+-- versionado y falla en CI. Si tocás una tabla de `lens`, corrélo.
 --
 -- NO llevan `WITH NO SCHEMA BINDING`, y es a propósito. Una vista de enlace
 -- tardío NO aparece en `information_schema.columns`: no la ve un catálogo, ni

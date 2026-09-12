@@ -241,3 +241,14 @@ SORTKEY (recibido_en);
 --
 --   -- GRANT USAGE ON SCHEMA lens TO GROUP <grupo>;
 --   -- GRANT SELECT ON ALL TABLES IN SCHEMA lens TO GROUP <grupo>;
+--
+-- OJO con `ON ALL TABLES`: aplica solo a lo que EXISTE en ese momento. Las
+-- vistas en inglés de la Fase 6 viven en este mismo schema, así que el GRANT de
+-- arriba las cubre — pero una vista o una tabla creada DESPUÉS nace sin
+-- permiso, y el síntoma es "a tech le falta una de las nueve" sin ningún error
+-- que lo explique. Para que valga también a futuro hace falta, además:
+--
+--   -- ALTER DEFAULT PRIVILEGES IN SCHEMA lens GRANT SELECT ON TABLES TO GROUP <grupo>;
+--
+-- Y eso solo cubre lo que cree el MISMO usuario que corre el ALTER: los objetos
+-- que cree otro usuario vuelven a nacer sin permiso.
