@@ -26,7 +26,7 @@ import { DocumentChat } from './DocumentChat';
 import { KEYWORDS_BY_COUNTRY } from '../services/countryKeywords';
 import { nuevoAnalisisId, persistirAnalisis, persistirFicha, sha256Hex } from '../services/lensPersistenciaService';
 import { pendientesEnBuffer, reintentarPendientes } from '../services/colasLogService';
-import { extraerShareholders, filasDePersonas, elegirDocumentosSocietarios } from '../services/shareholdersService';
+import { extraerShareholders, filasDePersonas, elegirDocumentosSocietarios, contrastarLecturas } from '../services/shareholdersService';
 import { persistirPersonas } from '../services/lensPersistenciaService';
 import { useAuth } from '../context/AuthContext';
 import { db } from '../services/dbService';
@@ -408,9 +408,8 @@ export const DocumentAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> =
         // Sin await y con su propio try: si esto falla, el análisis que el
         // analista está mirando ya terminó y no se entera.
         //
-        // Sobre el primer archivo soportado: el contrato es por análisis, no
-        // por archivo, y en un consolidado la escritura es la que manda.
-        // Fusionar la composición de varios documentos es otro problema.
+        // El contrato es por ANÁLISIS, no por archivo: van todos los documentos
+        // que el modelo pueda leer, ordenados, y la escritura primero.
         if (archivoNativo) {
           void (async () => {
             try {
@@ -431,11 +430,33 @@ export const DocumentAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> =
                 // Se aplana y se avisa en vez de perderlo en silencio.
                 console.warn('[shareholders] la cadena sigue más abajo del nivel 1', senales);
               }
+              // El MISMO documento leído por dos caminos independientes: los 18
+              // campos salen del texto, esto sale del PDF nativo. Donde los dos
+              // coinciden hay confianza; donde difieren, alguno adivinó.
+              //
+              // Medido sobre 104 análisis: 44 coincidían y 3 no, y dos de esos
+              // tres diferían en UN SOLO DÍGITO de un documento de identidad.
+              // Eso no es un typo: a la hora de screenear es otra persona.
+              const contraste = contrastarLecturas(
+                extractedData.find(c => c.field === 'Accionistas y aportes')?.value, resultado);
+              if (contraste.posibleDigito.length > 0) {
+                console.warn('[shareholders] las dos lecturas difieren en un dígito',
+                  contraste.posibleDigito);
+              } else if (contraste.revisar) {
+                console.warn('[shareholders] las dos lecturas no dan los mismos documentos', contraste);
+              }
               const r = await persistirPersonas(filas as unknown as Array<Record<string, unknown>>);
               // La marca va a la FICHA, que es la fila que sí se puede reescribir
               // entera sin perder columnas. Así queda por escrito que esto corrió
               // y con qué resultado, en vez de deducirlo de una tabla vacía.
-              const marca = { ok: true, personas: filas.length, senales: r.error ? { ...senales, errorEscritura: r.error } : senales };
+              const marca = {
+                ok: true,
+                personas: filas.length,
+                senales: r.error ? { ...senales, errorEscritura: r.error } : senales,
+                // Queda EN LA FICHA, no solo en la consola: sin esto el contraste
+                // se pierde al cerrar la pestaña y no se puede calibrar después.
+                contraste,
+              };
               updateDoc(FileProcessingStatus.COMPLETED, { shareholdersResultado: marca });
               void sha256Hex(combinedText).then(sha => persistirFicha(analisisId, 'analizador',
                 fichaLens({ campos: extractedData, pais: country, proposito: docToProcess.purpose,

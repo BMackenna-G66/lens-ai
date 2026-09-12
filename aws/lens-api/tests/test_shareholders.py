@@ -635,3 +635,107 @@ def test_lo_extraido_pasa_por_el_contrato_sin_perder_la_cadena(monkeypatch):
     raiz = r["shareholders"]["indirectShareholders"][0]
     assert raiz["shareholderName"] == "INV SpA"
     assert raiz["indirectShareholders"][0]["shareholderName"] == "PEDRO"
+
+
+# ── El contraste entre las dos lecturas ─────────────────────────────────────
+# El mismo documento se lee dos veces por caminos independientes: los 18 campos
+# salen del texto extraído, la composición societaria sale del PDF nativo. Donde
+# coinciden hay confianza; donde difieren, alguno adivinó.
+#
+# Los casos de acá son REALES, sacados de producción cruzando
+# `lens.analisis_campo` contra `lens.analisis_persona` sobre 104 análisis: 44
+# coincidían y 3 no. Dos de esos tres diferían en un solo dígito.
+
+def _contraste(texto, documentos):
+    return app.contrastar_lecturas(
+        texto, {"directOwnership": [{"shareholderId": d} for d in documentos],
+                "indirectShareholders": []})
+
+
+def test_las_dos_lecturas_coinciden():
+    c = _contraste("A | 18.641.710-0 | 99%\nB | 9.810.248-5 | 1%",
+                   ["18.641.710-0", "9.810.248-5"])
+    assert c["coinciden"] == 2
+    assert c["revisar"] is False
+    assert c["posible_digito"] == []
+
+
+def test_caso_real_MTX3PT3N_un_digito():
+    """texto 27.334.038-6  ·  estructurada 22.334.038-6. No son dos personas:
+    es una de las dos lecturas inventando un dígito."""
+    c = _contraste("X | 18.459.364-5 | 50%\nY | 27.334.038-6 | 50%",
+                   ["18.459.364-5", "22.334.038-6"])
+    assert c["posible_digito"] == [["273340386", "223340386"]]
+    assert c["revisar"] is True
+    assert c["coinciden"] == 1
+
+
+def test_caso_real_MTYGWYJP_un_digito_y_un_faltante():
+    """Dos cosas distintas a la vez: un dígito cambiado y un documento que la
+    estructurada no vio. Se reportan por separado."""
+    c = _contraste("A | 6.089.449-3 | 40%\nB | 6.553.729-K | 30%\nC | 76.198.910-3 | 30%",
+                   ["6.089.441-3", "6.553.729-K"])
+    assert c["posible_digito"] == [["60894493", "60894413"]]
+    assert "761989103" in c["solo_texto"]
+
+
+def test_caso_real_MTX2IKTQ_documentos_sin_relacion():
+    """Cuando los documentos no se parecen en nada NO se inventa un par: se dice
+    que hay que revisar, sin señalar un dígito que no existe."""
+    c = _contraste("Z | 1.144.162.573 | 100%", ["902.099.643-3"])
+    assert c["revisar"] is True
+    assert c["posible_digito"] == []
+    assert c["coinciden"] == 0
+
+
+def test_sin_documento_no_genera_falso_positivo():
+    """El campo de texto escribe «sin documento» cuando no lo encuentra. No hay
+    con qué cruzar, así que no hay discrepancia que reportar."""
+    c = _contraste("SEBASTIAN JIMENEZ AGUDELO | sin documento | 100%", [""])
+    assert c["revisar"] is False
+
+
+def test_la_puntuacion_no_cuenta():
+    """`18.641.710-0` y `186417100` son el mismo documento escrito distinto."""
+    c = _contraste("A | 18.641.710-0 | 100%", ["186417100"])
+    assert c["coinciden"] == 1 and c["revisar"] is False
+
+
+def test_un_rut_deletreado_en_palabras_no_inventa_clave():
+    """Hay escrituras que escriben el RUT en letras. Canonizar esa prosa
+    produciría una clave inventada que nunca cruzaría con nada."""
+    c = _contraste("A | doce millones trescientos mil | 100%", [""])
+    assert c["revisar"] is False
+
+
+def test_largos_distintos_no_son_un_digito():
+    """`123456` y `1234567` no difieren en un dígito: falta uno. Tratarlo como
+    dígito cambiado señalaría el carácter equivocado."""
+    c = _contraste("A | 123456-7 | 100%", ["1234567-8"])
+    assert c["posible_digito"] == []
+
+
+def test_dos_digitos_distintos_tampoco():
+    c = _contraste("A | 11.111.111-1 | 100%", ["11.111.122-1"])
+    assert c["posible_digito"] == []
+    assert c["revisar"] is True
+
+
+def test_el_aviso_dice_que_mirar():
+    c = _contraste("Y | 27.334.038-6 | 100%", ["22.334.038-6"])
+    av = app.avisos_del_contraste(c)
+    assert len(av) == 1
+    assert "273340386 vs 223340386" in av[0]
+
+
+def test_sin_discrepancia_no_hay_aviso():
+    assert app.avisos_del_contraste(_contraste("A | 1-9 | 100%", ["1-9"])) == []
+
+
+def test_tambien_cruza_contra_los_indirectos():
+    """Una jurídica dueña va a `indirectShareholders`, pero es dueña DIRECTA y
+    el campo de texto la lista. Si no se cruzara, daría discrepancia siempre."""
+    c = app.contrastar_lecturas(
+        "INV SpA | 76.554.221-8 | 100%",
+        {"directOwnership": [], "indirectShareholders": [{"shareholderId": "76.554.221-8"}]})
+    assert c["coinciden"] == 1 and c["revisar"] is False
