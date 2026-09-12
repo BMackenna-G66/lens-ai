@@ -37,6 +37,17 @@ Parameters:
     Description: >
       Dominios separados por coma desde los que se acepta bajar un documento por URL.
       Vacío desactiva la descarga por URL (default). Sin lista, el servicio sería un SSRF.
+  CrearTablaIdempotencia:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >
+      Si se crea la tabla DynamoDB que da idempotencia a POST /v1/analyses.
+      Arranca en `false` porque `compliance-admin` NO tiene `dynamodb:CreateTable`
+      —probado: el despliegue falla y revierte el stack entero—, y sin esto no se
+      podría desplegar NADA del resto. En `false` el almacén corre en memoria: la
+      idempotencia no sobrevive entre invocaciones y `/salud` lo dice en
+      `almacen_idempotencia`. Poner en `true` apenas exista el permiso.
   BucketDocumentos:
     Type: String
     Default: g66-company
@@ -44,6 +55,9 @@ Parameters:
       Bucket del que `POST /v1/analyses` resuelve el folderPath. ES DE OTRA CUENTA:
       el permiso necesita las DOS puntas — la bucket policy allá y esta política acá.
       Con una sola, el listado falla y la respuesta trae el aviso en `warnings`.
+
+Conditions:
+  ConTabla: !Equals [!Ref CrearTablaIdempotencia, 'true']
 
 Globals:
   Function:
@@ -59,17 +73,6 @@ Resources:
       FunctionName: lens-analisis
       CodeUri: src/
       Handler: app.lambda_handler
-      # El rol se nombra a mano y no se deja al hash de CloudFormation.
-      #
-      # Motivo concreto: el bucket de documentos es de OTRA cuenta, y para que
-      # su dueño escriba la bucket policy necesita el ARN exacto de este rol.
-      # Con el nombre autogenerado ese ARN recién existe DESPUÉS del primer
-      # despliegue, así que había que desplegar para poder pedir el permiso, y
-      # el permiso para que el despliegue sirviera. Con el nombre fijo, el ARN
-      # se conoce de antemano y las dos cosas avanzan en paralelo.
-      #
-      # Requiere CAPABILITY_NAMED_IAM en el deploy (ya está en samconfig.toml).
-      Role: !GetAtt RolLensApi.Arn
       # 300 s de techo con 260 s de presupuesto interno: el margen existe para
       # que el corte lo haga el servicio —devolviendo el resultado parcial con
       # estado INCOMPLETO— y no AWS con un 502 sin cuerpo.
@@ -80,7 +83,9 @@ Resources:
       MemorySize: 3008
       Environment:
         Variables:
-          ALMACEN_TABLA: !Ref TablaAnalisis
+          # Vacío cuando no hay tabla: `almacen.py` cae a memoria y lo
+          # reporta en /salud en vez de fingir que hay idempotencia.
+          ALMACEN_TABLA: !If [ConTabla, !Ref TablaAnalisis, '']
           API_SECRET: !Ref ApiSecretValue
           GEMINI_API_KEY: !Ref GeminiApiKey
           MOTOR_OCR: !Ref MotorOcr
@@ -98,60 +103,39 @@ Resources:
       # `compliance-admin` no tiene `apigateway:POST`. Auth NONE a nivel infra;
       # la protección real es el header x-api-secret que valida el handler,
       # mismo patrón que `casos-receptor`.
+      Policies:
+        # OCR de las páginas sin capa de texto.
+        - Statement:
+            - Effect: Allow
+              Action: textract:DetectDocumentText
+              Resource: '*'
+        # Lectura del bucket de documentos, para `POST /v1/analyses`. Solo
+        # lectura y solo ese bucket: el servicio nunca escribe en S3.
+        #
+        # Esto es la MITAD del permiso. El bucket es de otra cuenta, así que sin
+        # la bucket policy del lado dueño esto no alcanza — y al revés tampoco.
+        # Ver `bucket-policy-g66-company.json`.
+        - Statement:
+            - Effect: Allow
+              Action: [s3:GetObject, s3:ListBucket]
+              Resource:
+                - !Sub 'arn:aws:s3:::${BucketDocumentos}'
+                - !Sub 'arn:aws:s3:::${BucketDocumentos}/*'
+        # Idempotencia. Solo GetItem/PutItem, que es lo único que llama
+        # `almacen.py`; sin tabla, la sentencia no existe.
+        - !If
+          - ConTabla
+          - Statement:
+              - Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:PutItem]
+                Resource: !GetAtt TablaAnalisis.Arn
+          - !Ref AWS::NoValue
       FunctionUrlConfig:
         AuthType: NONE
         Cors:
           AllowOrigins: ['*']
           AllowMethods: [POST, GET]
           AllowHeaders: [content-type, x-api-secret]
-
-  # ── El rol de la Lambda, con nombre fijo ──────────────────────────────────
-  # Se define a mano —en vez de dejar que SAM lo genere— solo para que su ARN
-  # sea conocido ANTES del primer despliegue. Es lo que permite pedirle al dueño
-  # de `g66-company` la bucket policy sin tener que desplegar primero.
-  #
-  # Ojo: al pasar `Role:` explícito, SAM deja de honrar `Policies:` en la
-  # función. Por eso los tres permisos viven acá y no allá.
-  RolLensApi:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: lens-analisis-rol
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal: { Service: lambda.amazonaws.com }
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-      Policies:
-        - PolicyName: lens-analisis-permisos
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              # OCR de las páginas sin capa de texto.
-              - Effect: Allow
-                Action: textract:DetectDocumentText
-                Resource: '*'
-              # Lectura del bucket de documentos, para `POST /v1/analyses`.
-              # Solo lectura y solo ese bucket: el servicio nunca escribe en S3.
-              #
-              # Esto es la MITAD del permiso. El bucket es de otra cuenta, así
-              # que sin la bucket policy del lado dueño esto no alcanza — y al
-              # revés tampoco. Ver `bucket-policy-g66-company.json`.
-              - Effect: Allow
-                Action: [s3:GetObject, s3:ListBucket]
-                Resource:
-                  - !Sub 'arn:aws:s3:::${BucketDocumentos}'
-                  - !Sub 'arn:aws:s3:::${BucketDocumentos}/*'
-              # Almacén de idempotencia: el contrato dice que ms-company genera
-              # el analysisId justamente para que un segundo POST devuelva lo
-              # guardado en vez de re-analizar y volver a cobrar tokens.
-              - Effect: Allow
-                Action:
-                  - dynamodb:GetItem
-                  - dynamodb:PutItem
-                Resource: !GetAtt TablaAnalisis.Arn
 
   # ── Almacén de idempotencia ───────────────────────────────────────────────
   # NO va en Redshift a propósito: el cluster se pausa de 18:30 a 04:00 y un
@@ -165,6 +149,7 @@ Resources:
   # base operacional, no un archivo histórico. Lo analítico va a `lens.*`.
   TablaAnalisis:
     Type: AWS::DynamoDB::Table
+    Condition: ConTabla
     Properties:
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
