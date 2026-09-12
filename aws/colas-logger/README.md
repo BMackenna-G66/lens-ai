@@ -62,8 +62,25 @@ python3 scripts/verificar_vistas.py --check   # solo el veredicto (CI)
 ```
 
 Compara el DDL versionado contra las vistas y falla si encuentra una columna sin
-exponer, una vista apuntando a algo que ya no está, un nombre repetido, o una
-tabla —sobre todo una que el logger ya está llenando— sin vista en inglés.
+exponer, una vista apuntando a algo que ya no está, un nombre repetido, una
+tabla —sobre todo una que el logger ya está llenando— sin vista en inglés, o
+**una vista sin su `GRANT`**.
+
+Ese último es la misma clase de falla silenciosa: el alcance decidido es dar
+lectura solo sobre las vistas, así que no se puede usar
+`GRANT SELECT ON ALL TABLES` —abarcaría las tablas en español— y hay que
+enumerarlas. Una vista nueva sin su línea nace sin permiso y el síntoma es "me
+falta una de las nueve", sin ningún error que lo explique.
+
+### Estado de los permisos (12-09-2026)
+
+**Nadie puede leer `lens` salvo `awsuser`.** Medido: en el cluster no hay ningún
+grupo creado, y los únicos usuarios son `awsuser`, `rdsdb` (interno de AWS) y un
+rol SSO — que **no** tiene ni `USAGE` sobre el schema.
+
+El bloque para habilitarlo está escrito al final de `sql/lens_vistas_en.sql`,
+**comentado y sin ejecutar** por decisión explícita. Hay un test que falla si
+alguien lo descomenta sin querer.
 
 Corre **sin credenciales y con el cluster pausado**, que lo está de 18:30 a
 04:00. El cluster es la verdad en ejecución; el DDL es la verdad en revisión, y
