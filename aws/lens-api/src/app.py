@@ -405,6 +405,85 @@ def elegir_documentos(archivos, tope_bytes: int = gemini.TOPE_INLINE_BYTES) -> l
     return salida
 
 
+def _canon(v: str) -> str:
+    """La clave de cruce de un documento. Solo si tiene DÍGITOS: hay escrituras
+    que deletrean el RUT en palabras, y canonizar esa prosa inventa una clave."""
+    t = (v or "").strip()
+    if not t or not any(c.isdigit() for c in t):
+        return ""
+    return re.sub(r"[^0-9A-Z]", "", t.upper())
+
+
+def _difiere_en_uno(a: str, b: str) -> bool:
+    """Un solo carácter distinto: casi siempre un dígito mal leído, no otra
+    persona."""
+    if len(a) != len(b) or a == b:
+        return False
+    return sum(1 for x, y in zip(a, b) if x != y) == 1
+
+
+def contrastar_lecturas(accionistas_del_texto: str, socios: dict) -> dict:
+    """Cruza las DOS lecturas del mismo documento, por documento de identidad.
+
+    Los 18 campos salen del texto extraído; la composición societaria sale del
+    PDF nativo con otro prompt y otro esquema. Son independientes, así que donde
+    coinciden hay confianza y donde difieren alguna adivinó.
+
+    Medido sobre 104 análisis de producción: 44 coincidían y 3 no — y dos de
+    esos tres diferían en UN SOLO DÍGITO de un documento de identidad. Eso no es
+    un typo: a la hora de screenear es otra persona.
+
+    Se cruza por documento y no por nombre porque el nombre admite variantes
+    legítimas (tildes, orden de apellidos) y el documento no.
+
+    NO corrige ni elige ganador: sin volver al papel no hay forma de saber cuál
+    tiene razón, y elegir en silencio sería fabricar certeza.
+    """
+    del_texto = set()
+    for linea in (accionistas_del_texto or "").splitlines():
+        partes = linea.split("|")
+        if len(partes) > 1:
+            d = _canon(partes[1])
+            if d:
+                del_texto.add(d)
+
+    del_estructurado = set()
+    for p in (socios.get("directOwnership") or []) + (socios.get("indirectShareholders") or []):
+        d = _canon(p.get("shareholderId", ""))
+        if d:
+            del_estructurado.add(d)
+
+    solo_texto = sorted(del_texto - del_estructurado)
+    solo_estructurada = sorted(del_estructurado - del_texto)
+
+    posible_digito = []
+    for t in solo_texto:
+        par = next((e for e in solo_estructurada if _difiere_en_uno(t, e)), None)
+        if par:
+            posible_digito.append([t, par])
+
+    return {
+        "coinciden": len(del_texto & del_estructurado),
+        "solo_texto": solo_texto,
+        "solo_estructurada": solo_estructurada,
+        "posible_digito": posible_digito,
+        "revisar": bool(solo_texto or solo_estructurada),
+    }
+
+
+def avisos_del_contraste(c: dict) -> list[str]:
+    """El contraste, dicho para quien consume la API."""
+    if c["posible_digito"]:
+        pares = "; ".join(f"{a} vs {b}" for a, b in c["posible_digito"])
+        return [f"Las dos lecturas del documento difieren en un dígito ({pares}): "
+                "revisar contra el documento antes de usar estas identidades."]
+    if c["revisar"]:
+        return ["Las dos lecturas no devolvieron los mismos documentos de identidad "
+                f"({len(c['solo_texto'])} solo en el texto, "
+                f"{len(c['solo_estructurada'])} solo en la extracción estructurada)."]
+    return []
+
+
 def _extraer_socios(archivos, t0: float) -> tuple[dict, list[str]]:
     """La composición societaria de los documentos NATIVOS, no de su texto: las
     tablas de propiedad se leen mucho mejor con el PDF a la vista.
@@ -498,6 +577,15 @@ def _correr_analyses(cuerpo: dict, analysis_id: str, session_id: str) -> dict:
     socios, avisos_socios = _extraer_socios(ing.archivos, t0)
 
     campos = {c["field"]: c["value"] for c in (resultado.get("campos") or [])}
+
+    # Las dos lecturas del mismo documento, cruzadas. Va a `warnings` y no a una
+    # clave nueva: el contrato con ms-company es cerrado, y una discrepancia de
+    # identidades es exactamente lo que `warnings` existe para decir.
+    contraste = contrastar_lecturas(campos.get("Accionistas y aportes", ""), socios)
+    if contraste["revisar"]:
+        log.warning("contraste de lecturas %s: %s", analysis_id,
+                    json.dumps(contraste, ensure_ascii=False))
+    avisos_socios = avisos_socios + avisos_del_contraste(contraste)
     respuesta = contrato.respuesta(
         analysis_id=analysis_id,
         company={

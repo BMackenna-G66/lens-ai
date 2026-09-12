@@ -209,6 +209,103 @@ export function elegirDocumentosSocietarios<T extends { name: string; size?: num
   return salida;
 }
 
+// ── Contraste entre las dos lecturas ───────────────────────────────────────
+//
+// El mismo documento se lee DOS veces por caminos independientes: los 18 campos
+// salen del texto extraído, y la composición societaria sale del PDF nativo con
+// otro prompt y otro esquema. Donde las dos coinciden hay confianza alta; donde
+// difieren, alguna está adivinando.
+//
+// Hasta ahora las dos lecturas caían en Redshift y nadie las cruzaba. Al
+// cruzarlas sobre 104 análisis de producción: 44 con los mismos documentos y
+// **3 que discrepaban**. Dos de esos tres diferían en UN SOLO DÍGITO:
+//
+//     texto 273340386   estructurada 223340386
+//     texto  60894493   estructurada  60894413
+//
+// No son dos personas distintas: es una de las dos lecturas inventando un
+// dígito. Y es la peor clase de error posible acá — un dígito de más o de menos
+// en un RUT no es un typo, es una persona distinta a la hora de screenear.
+//
+// Esto NO corrige nada ni elige un ganador. No hay forma de saber cuál de las
+// dos tiene razón sin volver al documento, y elegir en silencio sería fabricar
+// certeza. Marca, cuenta, y deja que lo mire un humano.
+
+/** Diferencia de un solo carácter: casi siempre un dígito mal leído, no otra
+ *  persona. Se mide sobre la forma canónica, sin puntos ni guiones. */
+const difiereEnUno = (a: string, b: string): boolean => {
+  if (a.length !== b.length || a === b) return false;
+  let d = 0;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i] && ++d > 1) return false;
+  return d === 1;
+};
+
+export interface ContrasteLecturas {
+  /** Documentos que las dos lecturas vieron igual. */
+  coinciden: number;
+  /** Los vio el camino de texto y no la extracción estructurada. */
+  soloTexto: string[];
+  /** Los vio la extracción estructurada y no el camino de texto. */
+  soloEstructurada: string[];
+  /**
+   * Pares que difieren en UN carácter, como `["273340386","223340386"]`.
+   * Es el hallazgo más grave y el más accionable: dice exactamente qué mirar.
+   */
+  posibleDigito: [string, string][];
+  /** true si hay algo que un humano tendría que revisar. */
+  revisar: boolean;
+}
+
+/**
+ * Cruza los accionistas del campo de texto contra los de la extracción
+ * estructurada, por DOCUMENTO.
+ *
+ * Se compara por documento y no por nombre porque el nombre admite variantes
+ * legítimas —tildes, orden de apellidos, abreviaturas— y el documento no: si
+ * dos lecturas del mismo papel dan documentos distintos, hay un error.
+ *
+ * Las personas sin documento se ignoran: el campo de texto escribe
+ * «sin documento» y no hay con qué cruzar.
+ */
+export function contrastarLecturas(
+  accionistasDelTexto: string | undefined,
+  r: ResultadoShareholders,
+): ContrasteLecturas {
+  const delTexto = new Set<string>();
+  for (const linea of (accionistasDelTexto ?? '').split('\n')) {
+    // Formato del campo: `NOMBRE | DOCUMENTO | PARTICIPACIÓN`.
+    const doc = canon(linea.split('|')[1]);
+    if (doc) delTexto.add(doc);
+  }
+
+  const delEstructurado = new Set<string>();
+  for (const p of [...(r.directOwnership ?? []), ...(r.indirectShareholders ?? [])]) {
+    const doc = canon(p.shareholderId);
+    if (doc) delEstructurado.add(doc);
+  }
+
+  const soloTexto = [...delTexto].filter(d => !delEstructurado.has(d));
+  const soloEstructurada = [...delEstructurado].filter(d => !delTexto.has(d));
+
+  // De lo que no cruza, ¿hay pares que difieren en un solo carácter? Eso no es
+  // "falta uno y sobra otro": es el mismo documento mal leído por un lado.
+  const posibleDigito: [string, string][] = [];
+  for (const t of soloTexto) {
+    const par = soloEstructurada.find(e => difiereEnUno(t, e));
+    if (par) posibleDigito.push([t, par]);
+  }
+
+  return {
+    coinciden: [...delTexto].filter(d => delEstructurado.has(d)).length,
+    soloTexto,
+    soloEstructurada,
+    posibleDigito,
+    // Un documento que aparece en una lectura y no en la otra ya amerita mirar;
+    // un dígito distinto, con más razón.
+    revisar: soloTexto.length > 0 || soloEstructurada.length > 0,
+  };
+}
+
 const vacio = (): ResultadoShareholders =>
   ({ legalRepresentatives: [], directOwnership: [], indirectShareholders: [] });
 
