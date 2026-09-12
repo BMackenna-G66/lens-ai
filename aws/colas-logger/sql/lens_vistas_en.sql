@@ -221,3 +221,57 @@ SELECT
   documento_contains_modificaciones AS contains_amendments,
   analisis_de_facultades_especificas AS specific_powers_analysis
 FROM lens.analisis_pivote;
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Permisos: escritos, SIN EJECUTAR. Decidido así el 12-09-2026.
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Estado medido ese día: en el cluster NO hay ningún grupo creado, y los únicos
+-- usuarios son `awsuser` (superusuario), `rdsdb` (interno de AWS) y un rol SSO
+-- (`IAMR:AWSReservedSSO_…`). Tech no tiene principal todavía.
+--
+-- Y el rol SSO NO puede leer nada de `lens`: ni USAGE sobre el schema, ni SELECT
+-- sobre las tablas, ni sobre estas vistas. Hoy el schema solo se consulta con
+-- `awsuser`, que es lo que usa el Data API.
+--
+-- El alcance decidido es **solo las vistas en inglés**. Las tablas en español
+-- quedan como detalle interno: menos superficie, y el día que se renombre una
+-- columna adentro nadie afuera se entera.
+--
+-- Por eso NO se usa `GRANT SELECT ON ALL TABLES IN SCHEMA lens`: eso abarcaría
+-- también las tablas en español. Hay que enumerar. El costo de enumerar es que
+-- **una vista nueva nace sin permiso** —y el síntoma es "a tech le falta una de
+-- las nueve", sin ningún error que lo explique—, así que
+-- `scripts/verificar_vistas.py` falla si una vista de este archivo no aparece
+-- también acá abajo.
+--
+-- Para habilitarlo, descomentar y ejecutar como `awsuser`:
+--
+--   CREATE GROUP lens_lectura;
+--   GRANT USAGE ON SCHEMA lens TO GROUP lens_lectura;
+--
+--   GRANT SELECT ON lens.analysis              TO GROUP lens_lectura;
+--   GRANT SELECT ON lens.analysis_field        TO GROUP lens_lectura;
+--   GRANT SELECT ON lens.analysis_record       TO GROUP lens_lectura;
+--   GRANT SELECT ON lens.analysis_text         TO GROUP lens_lectura;
+--   GRANT SELECT ON lens.analysis_person       TO GROUP lens_lectura;
+--   GRANT SELECT ON lens.analysis_activity     TO GROUP lens_lectura;
+--   GRANT SELECT ON lens.batch_document        TO GROUP lens_lectura;
+--   GRANT SELECT ON lens.api_request           TO GROUP lens_lectura;
+--   GRANT SELECT ON lens.analysis_pivot        TO GROUP lens_lectura;
+--
+-- Y recién entonces sumar a cada quien, que es una línea por principal. El
+-- nombre exacto del rol SSO NO se escribe acá —este repo es público— y se saca
+-- del cluster en el momento:
+--
+--   SELECT usename FROM pg_user WHERE usename LIKE 'IAMR:%';
+--   ALTER GROUP lens_lectura ADD USER "<lo que devuelva>";
+--
+-- El permiso va al GRUPO y no a cada usuario a propósito: sumar a tech mañana
+-- es un ALTER GROUP y no hay que volver a razonar sobre los permisos.
+--
+-- OJO con la vista sobre la materializada: `lens.analysis_pivot` lee de
+-- `lens.analisis_pivote`. En Redshift el SELECT sobre una vista se evalúa con
+-- los permisos del DUEÑO, así que con esto alcanza — pero si alguna vez se
+-- recrea una vista con `WITH NO SCHEMA BINDING`, deja de aparecer en
+-- `information_schema` y el descubrimiento se rompe. Ver la nota del encabezado.

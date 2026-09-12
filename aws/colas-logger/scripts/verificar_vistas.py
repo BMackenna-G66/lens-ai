@@ -155,6 +155,22 @@ def vistas_en(src: str) -> dict[str, dict]:
     return salida
 
 
+def vistas_con_grant(src: str) -> set[str]:
+    """Las vistas que aparecen en el bloque de permisos del final.
+
+    El alcance decidido es "solo las vistas en inglés", así que NO se puede usar
+    `GRANT SELECT ON ALL TABLES IN SCHEMA lens` —abarcaría las tablas en
+    español— y hay que enumerar una por una. El costo de enumerar es que una
+    vista nueva nace sin permiso, en silencio: tech ve ocho de nueve y no hay
+    ningún error que lo explique.
+
+    Se leen también las líneas COMENTADAS: hoy el bloque está escrito y sin
+    ejecutar, y la lista tiene que quedar completa igual para que el día que se
+    ejecute no falte ninguna.
+    """
+    return set(re.findall(r"GRANT SELECT ON\s+lens\.(\w+)\s+TO", src, re.I))
+
+
 def tablas_del_logger(src: str) -> set[str]:
     """Las tablas de `lens` en las que el logger escribe de verdad.
 
@@ -171,7 +187,9 @@ def tablas_del_logger(src: str) -> set[str]:
 # ── El informe ──────────────────────────────────────────────────────────────
 def revisar() -> list[str]:
     tablas = columnas_de_tablas([leer(p) for p in DDL])
-    vistas = vistas_en(leer(VISTAS))
+    src_vistas = leer(VISTAS)
+    vistas = vistas_en(src_vistas)
+    con_grant = vistas_con_grant(src_vistas)
     del_logger = tablas_del_logger(leer(APP))
 
     problemas: list[str] = []
@@ -214,6 +232,16 @@ def revisar() -> list[str]:
     # 5. Y el caso que más importa: el logger ya está ESCRIBIENDO ahí.
     for tabla in sorted(del_logger - cubiertas):
         problemas.append(f"lens.{tabla} recibe escrituras del logger y no tiene vista en inglés.")
+
+    # 6. Una vista sin su GRANT nace sin permiso, en silencio: quien consulta ve
+    #    ocho de nueve y no hay ningún error que lo explique.
+    for vista in sorted(set(vistas) - con_grant):
+        problemas.append(f"lens.{vista} no está en el bloque de GRANT del final. "
+                         "Nacería sin permiso y nadie la vería.")
+
+    # Y al revés: un GRANT sobre una vista que ya no existe falla al ejecutarlo.
+    for sobrante in sorted(con_grant - set(vistas)):
+        problemas.append(f"hay un GRANT sobre lens.{sobrante}, que ya no es una vista de este archivo.")
 
     return problemas
 

@@ -95,13 +95,17 @@ def _revisar(monkeypatch, ddl: str, vistas: str, app: str = '"schema": "lens", "
     return v.revisar()
 
 
-VISTA_OK = """
+# Una vista sana lleva SIEMPRE su GRANT: es parte de estar completa, igual que
+# exponer todas las columnas. El fixture sin GRANT vive aparte, abajo.
+VISTA_SIN_GRANT = """
 CREATE OR REPLACE VIEW lens.thing AS
 SELECT
   cosa_id AS thing_id,
   nombre AS name
 FROM lens.cosa;
 """
+
+VISTA_OK = VISTA_SIN_GRANT + "\n-- GRANT SELECT ON lens.thing TO GROUP lens_lectura;\n"
 
 
 def test_la_combinacion_sana_no_reporta_nada(monkeypatch):
@@ -153,6 +157,53 @@ def test_detecta_una_vista_sobre_una_tabla_inexistente(monkeypatch):
     vista = VISTA_OK.replace("FROM lens.cosa", "FROM lens.no_existe")
     p = _revisar(monkeypatch, DDL_MINIMO, vista)
     assert any("no está en el DDL" in x for x in p)
+
+
+def test_detecta_una_vista_sin_su_grant(monkeypatch):
+    """El alcance es "solo las vistas", así que no se puede usar
+    `ON ALL TABLES` y hay que enumerar. Una vista nueva sin su GRANT nace sin
+    permiso EN SILENCIO: quien consulta ve ocho de nueve y no hay error."""
+    p = _revisar(monkeypatch, DDL_MINIMO, VISTA_SIN_GRANT)
+    assert any("no está en el bloque de GRANT" in x for x in p)
+
+
+def test_detecta_un_grant_sobre_una_vista_que_ya_no_existe(monkeypatch):
+    """Al revés: ejecutar ese bloque fallaría."""
+    vista = VISTA_OK + "\n-- GRANT SELECT ON lens.borrada TO GROUP lens_lectura;\n"
+    p = _revisar(monkeypatch, DDL_MINIMO, vista)
+    assert any("ya no es una vista de este archivo" in x for x in p)
+
+
+def test_el_repo_tiene_las_nueve_vistas_con_grant():
+    """Hoy el bloque está comentado —se decidió no ejecutarlo todavía— pero la
+    lista tiene que estar completa igual, para que el día que se ejecute no
+    falte ninguna."""
+    src = v.leer(v.VISTAS)
+    assert v.vistas_con_grant(src) == set(v.vistas_en(src))
+    assert len(v.vistas_con_grant(src)) == 9
+
+
+def test_el_bloque_de_grant_sigue_comentado():
+    """Se decidió el 12-09-2026 no habilitar lectura todavía. Si alguien lo
+    descomenta sin querer, esto lo dice."""
+    for linea in v.leer(v.VISTAS).splitlines():
+        t = linea.strip()
+        if t.upper().startswith(("GRANT ", "CREATE GROUP", "ALTER GROUP")):
+            raise AssertionError(f"hay un permiso SIN comentar: {t}")
+
+
+def test_no_se_cuela_un_grant_sobre_todo_el_schema():
+    """`ON ALL TABLES` abarcaría también las tablas en español, que es
+    justamente lo que el alcance decidido deja afuera.
+
+    Se miran las SENTENCIAS, comentadas incluidas —alguien va a copiar y pegar
+    de ahí— y no el texto suelto: el archivo explica en prosa por qué NO se usa
+    `ALL TABLES`, y buscar la frase pelada marcaría esa explicación como si
+    fuera el problema. (Pasó al escribir este test.)"""
+    for linea in v.leer(v.VISTAS).splitlines():
+        t = linea.strip().lstrip("-").strip().lstrip("`").upper()
+        if t.startswith("GRANT ") and "ALL TABLES" in t:
+            raise AssertionError(f"hay un GRANT sobre todo el schema: {linea.strip()}")
 
 
 def test_una_columna_oculta_a_proposito_no_es_deriva(monkeypatch):
