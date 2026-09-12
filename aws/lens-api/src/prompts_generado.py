@@ -183,3 +183,110 @@ DOCUMENTO:
 {texto_documento}
 ---
 '''
+
+PROMPT_SHAREHOLDERS = '''\
+Eres un analista de KYC. Del documento adjunto extrae los REPRESENTANTES LEGALES y TODOS los dueños que figuren en la tabla de propiedad.
+
+Devuelve SOLO JSON con el esquema pedido. No expliques nada.
+
+═══ QUIÉN CUENTA COMO DUEÑO ═══
+Trata como DUEÑO a quien figure con cualquiera de estas etiquetas:
+Accionista · Socio · Asociado · Miembro · Miembro Fundador · Fundador ·
+Aportante · Constituyente · Cooperado · Adherente ·
+Beneficiario (solo cuando figura como dueño directo).
+
+Si hay una columna TIPO DE ASOCIADO, TIPO DE SOCIO o CALIDAD con valores como
+"Fundador", "Activo" u "Honorario", esa fila ES un dueño directo.
+
+PROHIBIDO excluir a una entidad por su tipo legal. Las ESAL, cooperativas,
+asociaciones y fundaciones SÍ entran: sus asociados y miembros fundadores son
+equivalentes a accionistas para KYC.
+
+═══ UNA SOLA SOCIEDAD: LA PRINCIPAL ═══
+Primero identificá cuál es la sociedad PRINCIPAL del documento: la que se
+constituye, se modifica o se certifica. Es la del encabezado.
+
+"owners" lleva ÚNICAMENTE a los dueños de ESA sociedad.
+
+ESTO ES LO QUE MÁS SE FALLA: un documento puede traer TAMBIÉN la composición de
+OTRA empresa —una que es socia de la principal, su matriz, o una relacionada—,
+normalmente en una cláusula aparte con su propia tabla y su propio encabezado.
+Los socios de ESA OTRA empresa NO son dueños de la principal y NO van en
+"owners". Ignoralos por completo en esta respuesta; se preguntan aparte.
+
+Regla para no equivocarse: si una tabla está encabezada por el nombre de una
+empresa distinta a la principal, esa tabla NO es de "owners".
+
+Verificación antes de responder: los "ownershipPercentage" de "owners" tienen
+que sumar aproximadamente 100. Si te da más, metiste gente de otra tabla.
+
+═══ TODO PLANO, SIN ANIDAR ═══
+Poné a los dueños en "owners", naturales y jurídicas por igual, marcando cada
+uno con su "personType".
+
+NO anides nada. NO busques quién está detrás de las jurídicas: eso se pregunta
+aparte.
+
+═══ name / lastName — leelo con cuidado ═══
+"shareholderName" es el nombre completo TAL CUAL figura en el documento.
+Además hay que partirlo:
+  · "name"     = TODOS los nombres de pila
+  · "lastName" = TODOS los apellidos
+
+En los registros de Colombia el orden es APELLIDOS PRIMERO. En Chile suele ser
+nombres primero. Decidí por el contexto del documento, no por la posición fija.
+
+Ejemplos correctos:
+  "PEREZ GOMEZ ANGELA VIVIANA"  → name: "ANGELA VIVIANA"  lastName: "PEREZ GOMEZ"
+  "JUAN ANDRES PEREZ SOTO"      → name: "JUAN ANDRES"     lastName: "PEREZ SOTO"
+  "MARIA JOSE GONZALEZ RUIZ"    → name: "MARIA JOSE"      lastName: "GONZALEZ RUIZ"
+
+Fijate en el primero: es orden registral colombiano, y "VIVIANA" es un segundo
+NOMBRE, no un apellido. Un error acá se repite en todo el registro colombiano.
+
+Para personas JURÍDICAS: "shareholderName" es la razón social, y "name" y
+"lastName" van vacíos.
+
+═══ EL RESTO DE LOS CAMPOS ═══
+· personType: "NATURAL" o "JURIDICA"
+· shareholderId: el documento tal como figura (RUT, cédula, NIT, DNI, pasaporte).
+  Si el documento lo escribe en palabras, transcribí los DÍGITOS.
+  Si no aparece, dejalo vacío.
+· identificationType: CC, NIT, RUT, CE, PASAPORTE, DNI… lo que corresponda
+· countryOfOrigin: país de la persona o de constitución de la jurídica
+· ownershipPercentage: número, sin el signo %. Si el documento da acciones y el
+  total, calculalo. Si no se puede saber, dejalo en null — NO lo estimes.
+· isPEP: true solo si el documento lo dice; false si dice que no; null si no lo menciona.
+
+Para los REPRESENTANTES LEGALES, además: "position" con el cargo (Gerente
+General, Representante Legal, Administrador…).
+
+Extraé lo que el documento dice. Si un dato no está, va vacío o null.'''
+
+PROMPT_SHAREHOLDERS_CADENA = '''\
+Del documento adjunto, extrae ÚNICAMENTE los socios, accionistas o asociados de esta empresa:
+
+  {empresa}
+
+Devuelve SOLO JSON con el esquema pedido.
+
+Buscá en TODO el documento: la información suele estar en una cláusula aparte, un
+anexo o un certificado de cámara de comercio, con su propio encabezado y su
+propia tabla. NO es la tabla de accionistas de la sociedad principal.
+
+Si el documento NO dice quiénes son sus socios, devolvé "members" vacío: [].
+NO INVENTES PERSONAS. Nunca completes una cadena que el documento no muestra.
+
+"shareholderName" va TAL CUAL figura en el documento, SIN REORDENAR. Si el
+documento dice "PEREZ GOMEZ ANGELA VIVIANA", eso es lo que va — no lo pases a
+"ANGELA VIVIANA PEREZ GOMEZ". El orden registral es un dato, y quien después
+cruce contra el registro necesita el nombre como está escrito.
+
+El reordenamiento va SOLO en "name" y "lastName", que son la partición:
+  "PEREZ GOMEZ ANGELA VIVIANA"  → shareholderName: "PEREZ GOMEZ ANGELA VIVIANA"
+                                  name: "ANGELA VIVIANA"  lastName: "PEREZ GOMEZ"
+
+Y las mismas para el resto: "personType" NATURAL o JURIDICA, "shareholderId" con
+el documento tal como figura, "identificationType", "countryOfOrigin",
+"ownershipPercentage" como número sin el signo % (null si no se puede saber, NO
+lo estimes) e "isPEP" en true/false/null.'''

@@ -334,9 +334,72 @@ def _analyses(evento: dict, ruta: str, metodo: str) -> dict:
     return _resp(200, _correr_analyses(cuerpo, analysis_id, session_id))
 
 
+# Cuánto tiempo se le reserva a la composición societaria. Es la SEGUNDA
+# extracción de la corrida: los 18 campos ya corrieron y el reloj de la Lambda
+# sigue andando. Con el presupuesto agotado se devuelven las tres claves vacías
+# con un aviso — que es una respuesta válida del contrato— en vez de dejar que
+# AWS corte con un 502 sin cuerpo y el consumidor se quede sin nada.
+MARGEN_SOCIOS_S = float(os.environ.get("MARGEN_SOCIOS_S", "35"))
+
+
+def _extraer_socios(archivos, t0: float) -> tuple[dict, list[str]]:
+    """La composición societaria del primer documento que el modelo pueda ver.
+
+    Corre sobre el archivo NATIVO, no sobre el texto: las tablas de propiedad se
+    leen mucho mejor con el PDF a la vista. Se elige el primero soportado, igual
+    que la SPA, y el orden de `ingesta_s3` es determinista, así que dos corridas
+    sobre la misma carpeta eligen el mismo archivo.
+
+    Nunca lanza. Si algo falla, las tres claves quedan vacías y el motivo va en
+    los avisos: la ficha de 18 campos ya está lista y perderla por esto sería
+    peor que devolverla sin socios.
+    """
+    vacio = {"legalRepresentatives": [], "directOwnership": [], "indirectShareholders": []}
+
+    nativo = next((a for a in archivos if gemini.mime_de(a.nombre)), None)
+    if nativo is None:
+        return vacio, ["Ningún documento es PDF, JPG o PNG: no se extrajo la composición societaria."]
+
+    def queda_tiempo() -> bool:
+        return (time.monotonic() - t0) < (PRESUPUESTO_S - MARGEN_SOCIOS_S)
+
+    if not queda_tiempo():
+        return vacio, ["No quedó tiempo para extraer la composición societaria."]
+
+    try:
+        socios, senales = gemini.extraer_shareholders(nativo.nombre, nativo.contenido, queda_tiempo)
+    except gemini.ErrorGemini as e:
+        return vacio, [f"No se pudo extraer la composición societaria ({e})."]
+    except Exception as e:  # noqa: BLE001
+        log.exception("fallo inesperado extrayendo la composición societaria")
+        return vacio, [f"No se pudo extraer la composición societaria ({e})."]
+
+    # Las señales van al log, no a la respuesta: son para calibrar el modelo,
+    # no para el consumidor, que tiene su propio contrato.
+    log.info("shareholders %s: %s", nativo.nombre, json.dumps(senales, ensure_ascii=False))
+
+    avisos = []
+    if senales["participacion_sospechosa"]:
+        avisos.append(
+            f"La participación de los dueños directos suma {senales['suma_participacion']} y no ~100: "
+            "revisá si se mezcló la tabla de otra sociedad."
+        )
+    if senales["juridicas_sin_tiempo"]:
+        avisos.append(
+            f"{senales['juridicas_sin_tiempo']} sociedad(es) quedaron sin su cadena por falta de tiempo."
+        )
+    if senales["juridicas_en_nivel1"]:
+        avisos.append(
+            f"{senales['juridicas_en_nivel1']} socio(s) del segundo nivel son sociedades: "
+            "la cadena sigue más abajo de lo que el contrato representa."
+        )
+    return socios, avisos
+
+
 def _correr_analyses(cuerpo: dict, analysis_id: str, session_id: str) -> dict:
     """Resuelve S3, analiza y arma la respuesta del contrato."""
     import uuid
+    t0 = time.monotonic()
     analysis_id = analysis_id or str(uuid.uuid4())
 
     folder_path = str(cuerpo.get("folderPath") or cuerpo.get("folder_path") or "").strip()
@@ -373,6 +436,8 @@ def _correr_analyses(cuerpo: dict, analysis_id: str, session_id: str) -> dict:
         return contrato.error("AWS_ERROR", f"Error interno durante el análisis: {e}", session_id,
                               warnings=ing.avisos)
 
+    socios, avisos_socios = _extraer_socios(ing.archivos, t0)
+
     campos = {c["field"]: c["value"] for c in (resultado.get("campos") or [])}
     respuesta = contrato.respuesta(
         analysis_id=analysis_id,
@@ -384,15 +449,12 @@ def _correr_analyses(cuerpo: dict, analysis_id: str, session_id: str) -> dict:
             "constitutionDate": campos.get("Fecha de Constitución", ""),
             "capital": campos.get("Capital Social", ""),
         },
-        # La composición societaria estructurada todavía NO se extrae en la API:
-        # el prompt de shareholders corre hoy en la SPA. Las claves van vacías,
-        # que es una respuesta válida del contrato, y no inventadas.
-        legal_representatives=[],
-        direct_ownership=[],
-        indirect_shareholders=[],
+        legal_representatives=socios["legalRepresentatives"],
+        direct_ownership=socios["directOwnership"],
+        indirect_shareholders=socios["indirectShareholders"],
         economic_activities=[],
         raw_text=[d.get("texto", "") for d in (resultado.get("documentos") or [])] if incluir_texto else None,
-        avisos=(ing.avisos + list(resultado.get("avisos") or [])) or None,
+        avisos=(ing.avisos + list(resultado.get("avisos") or []) + avisos_socios) or None,
         session_id=session_id,
     )
     almacen.guardar(analysis_id, respuesta)

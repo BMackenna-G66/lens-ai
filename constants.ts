@@ -815,9 +815,14 @@ Extraé lo que el documento dice. Si un dato no está, va vacío o null.`;
 // JSON la traía 6 de 8 veces y una de cada cinco corridas se desbocaba hasta
 // 45.358 tokens de salida devolviendo JSON truncado. Con dos pasadas planas:
 // 8 de 8, cero JSON roto y la salida estable en ~640 tokens.
-export const GEMINI_SHAREHOLDERS_CADENA_PROMPT = (razonSocial: string, documento?: string): string => `Del documento adjunto, extrae ÚNICAMENTE los socios, accionistas o asociados de esta empresa:
+// Toma la empresa YA COMPUESTA ("RAZÓN SOCIAL (documento 76.222.333-4)") en vez
+// de armarla con un ternario adentro del template. El ternario llevaba backticks
+// anidados y el extractor que sincroniza los prompts con la API no puede leer
+// eso — y si el prompt no se puede extraer, la API deja de compartir la fuente
+// de verdad, que es lo único que garantiza que las dos devuelvan lo mismo.
+export const GEMINI_SHAREHOLDERS_CADENA_PROMPT = (empresa: string): string => `Del documento adjunto, extrae ÚNICAMENTE los socios, accionistas o asociados de esta empresa:
 
-  ${razonSocial}${documento ? ` (documento ${documento})` : ''}
+  ${empresa}
 
 Devuelve SOLO JSON con el esquema pedido.
 

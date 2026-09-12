@@ -37,6 +37,13 @@ Parameters:
     Description: >
       Dominios separados por coma desde los que se acepta bajar un documento por URL.
       Vacío desactiva la descarga por URL (default). Sin lista, el servicio sería un SSRF.
+  BucketDocumentos:
+    Type: String
+    Default: g66-company
+    Description: >
+      Bucket del que `POST /v1/analyses` resuelve el folderPath. ES DE OTRA CUENTA:
+      el permiso necesita las DOS puntas — la bucket policy allá y esta política acá.
+      Con una sola, el listado falla y la respuesta trae el aviso en `warnings`.
 
 Globals:
   Function:
@@ -69,13 +76,29 @@ Resources:
           MAX_PAGINAS_OCR: !Ref MaxPaginasOcr
           MAX_DOCUMENTOS: !Ref MaxDocumentos
           DOMINIOS_URL_PERMITIDOS: !Ref DominiosUrlPermitidos
+          S3_BUCKET_DOCUMENTOS: !Ref BucketDocumentos
           PRESUPUESTO_S: 260
+          # Reserva para la composición societaria, que es la SEGUNDA extracción
+          # de la corrida: los 18 campos ya corrieron y el reloj sigue andando.
+          # Cada sociedad entre los dueños cuesta una llamada más al modelo.
+          MARGEN_SOCIOS_S: 35
           LOG_LEVEL: INFO
       Policies:
         - Statement:
             - Effect: Allow
               Action: textract:DetectDocumentText
               Resource: '*'
+        # Lectura del bucket de documentos, para `POST /v1/analyses`. Solo
+        # lectura y solo ese bucket: el servicio nunca escribe en S3.
+        #
+        # Esto es la MITAD del permiso. El bucket es de otra cuenta, así que sin
+        # la bucket policy del lado dueño esto no alcanza — y al revés tampoco.
+        - Statement:
+            - Effect: Allow
+              Action: [s3:GetObject, s3:ListBucket]
+              Resource:
+                - !Sub 'arn:aws:s3:::${BucketDocumentos}'
+                - !Sub 'arn:aws:s3:::${BucketDocumentos}/*'
         # Almacén de idempotencia. El contrato dice que ms-company genera el
         # analysisId justamente para que un segundo POST devuelva lo guardado en
         # vez de re-analizar y volver a cobrar tokens.

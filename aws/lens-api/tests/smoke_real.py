@@ -3,18 +3,22 @@
     export GEMINI_API_KEY=...            # o se lee de .env.local
     python3 tests/smoke_real.py
 
-Hace dos cosas que los tests con mocks no pueden hacer:
+Hace tres cosas que los tests con mocks no pueden hacer:
 
   1. Lee un PDF real por capa de texto y confirma que sale sin tocar el OCR.
   2. Manda una escritura sintética al modelo y verifica que vuelven los 18
      campos y que las personas salen en el formato `NOMBRE | DOCUMENTO | DATO`.
+  3. Corre la composición societaria sobre un PDF sintético con una sociedad
+     entre los dueños, que es lo único que ejercita las DOS pasadas: la tabla
+     de propiedad y, por cada jurídica, su propia cadena.
 
-La escritura es inventada. No usar documentos de clientes acá.
+Las escrituras son inventadas. No usar documentos de clientes acá.
 """
 
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import sys
@@ -100,6 +104,86 @@ pagadas por cada accionista.
 DECIMO: Las comunicaciones entre la sociedad y los accionistas se haran por
 carta certificada al domicilio registrado.
 """
+
+
+# Segunda escritura: la de arriba solo tiene personas naturales, así que nunca
+# dispara la pasada 2. Esta tiene una SOCIEDAD entre los dueños y, en una
+# cláusula aparte con su propia tabla, quiénes son los socios de ESA sociedad.
+# Es exactamente la trampa que el prompt advierte: los socios de la otra empresa
+# NO son dueños de la principal, y si el modelo los mezcla la suma da 160.
+ESCRITURA_CADENA = """
+REPERTORIO N° 8.877-2024
+
+CONSTITUCION DE SOCIEDAD POR ACCIONES
+"NORTE ANDINO LOGISTICA SpA"
+
+En Santiago de Chile, a cinco de julio de dos mil veinticuatro, ante mi, PEDRO
+IGNACIO VALDES MUNOZ, Notario Publico Titular de la Quinta Notaria de Santiago,
+comparecen: dona CLAUDIA ANDREA SILVA MORALES, chilena, casada, contadora
+auditora, cedula nacional de identidad numero 15.223.981-4, domiciliada en
+Avenida Vitacura 2939, oficina 1201, comuna de Las Condes; y en representacion
+de "INVERSIONES CORDILLERA LIMITADA", sociedad del giro de su denominacion, Rol
+Unico Tributario numero 76.554.221-8, don RODRIGO ESTEBAN TAPIA FUENTES, cedula
+nacional de identidad numero 13.887.004-1; ambos mayores de edad y exponen:
+
+PRIMERO: Constituyese una sociedad por acciones que girara bajo la razon social
+"NORTE ANDINO LOGISTICA SpA". El Rol Unico Tributario de la sociedad es
+77.902.331-5.
+
+SEGUNDO: El domicilio de la sociedad sera la comuna de Las Condes, Region
+Metropolitana, Republica de Chile.
+
+TERCERO: El objeto social sera el transporte de carga por carretera, el
+almacenamiento y deposito de mercaderias, y los servicios de logistica.
+
+CUARTO: El capital social asciende a la suma de $80.000.000 (ochenta millones de
+pesos), dividido en 2.000 acciones nominativas, sin valor nominal, suscritas y
+pagadas de la siguiente forma:
+
+  ACCIONISTA                              DOCUMENTO        ACCIONES   PARTICIPACION
+  CLAUDIA ANDREA SILVA MORALES            15.223.981-4          600            30%
+  INVERSIONES CORDILLERA LIMITADA         76.554.221-8        1.400            70%
+
+QUINTO: La administracion correspondera a dona CLAUDIA ANDREA SILVA MORALES, en
+calidad de Gerente General, quien tendra la representacion judicial y
+extrajudicial de la sociedad.
+
+SEXTO: Se deja constancia, para los efectos de lo dispuesto en la normativa
+sobre conocimiento del cliente, de la composicion accionaria de la socia
+INVERSIONES CORDILLERA LIMITADA, Rol Unico Tributario 76.554.221-8, la que a la
+fecha de este instrumento es la siguiente:
+
+  SOCIO DE INVERSIONES CORDILLERA LIMITADA   DOCUMENTO        PARTICIPACION
+  RODRIGO ESTEBAN TAPIA FUENTES              13.887.004-1              55%
+  PAOLA FERNANDA CASTRO LEIVA                16.440.772-K              45%
+
+SEPTIMO: La duracion de la sociedad sera indefinida.
+"""
+
+
+def _pdf(texto: str) -> bytes:
+    """La escritura como PDF con capa de texto.
+
+    El modelo lee el ARCHIVO NATIVO en la ruta de composición societaria, así
+    que un .txt no sirve para probarla: hay que mandarle un PDF de verdad.
+    """
+    from reportlab.lib.pagesizes import letter
+    from reportlab.pdfgen import canvas
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=letter)
+    ancho, alto = letter
+    y = alto - 60
+    c.setFont("Courier", 8.5)
+    for linea in texto.splitlines():
+        if y < 60:
+            c.showPage()
+            c.setFont("Courier", 8.5)
+            y = alto - 60
+        c.drawString(50, y, linea[:110])
+        y -= 11
+    c.save()
+    return buf.getvalue()
 
 
 def _evento(documentos, **extra):
@@ -194,7 +278,86 @@ def prueba_extraccion_real() -> None:
     print("\n   OK: la ficha salió completa y con el formato que espera la comparación automática.")
 
 
+def prueba_shareholders_real() -> None:
+    print("\n=== 3. Composición societaria (dos pasadas) contra Gemini ===")
+    import gemini
+
+    pdf = _pdf(ESCRITURA_CADENA)
+    print(f"   PDF sintético: {len(pdf):,} bytes")
+
+    socios, senales = gemini.extraer_shareholders("escritura_norte_andino.pdf", pdf)
+
+    print(f"\n   llamadas al modelo : {senales['llamadas']}")
+    print(f"   tokens in/out      : {senales['tokens_entrada']:,} / {senales['tokens_salida']:,}")
+    print(f"   suma participación : {senales['suma_participacion']}"
+          f"{'  ← SOSPECHOSA' if senales['participacion_sospechosa'] else ''}")
+
+    def _linea(p, sangria=5):
+        pct = p.get("ownershipPercentage")
+        print(f"{' ' * sangria}{p.get('personType', '?'):<9} {str(p.get('shareholderName'))[:42]:<42} "
+              f"{str(p.get('shareholderId') or '-'):<14} {pct if pct is not None else '-'}"
+              f"{'  · ' + p['position'] if p.get('position') else ''}")
+
+    print("\n   legalRepresentatives:")
+    for p in socios["legalRepresentatives"]:
+        _linea(p)
+    print("   directOwnership:")
+    for p in socios["directOwnership"]:
+        _linea(p)
+    print("   indirectShareholders:")
+    for p in socios["indirectShareholders"]:
+        _linea(p)
+        for h in p.get("indirectShareholders") or []:
+            _linea(h, sangria=9)
+
+    print("\n   --- verificaciones ---")
+    fallos = []
+
+    def chequear(nombre: str, ok: bool, detalle: str = "") -> None:
+        print(f"   {'OK  ' if ok else 'FALLA'} {nombre}{f' — {detalle}' if detalle and not ok else ''}")
+        if not ok:
+            fallos.append(nombre)
+
+    directos = " ".join(str(p.get("shareholderName", "")).upper() for p in socios["directOwnership"])
+    indirectos = socios["indirectShareholders"]
+    nombres_ind = " ".join(str(p.get("shareholderName", "")).upper() for p in indirectos)
+
+    chequear("la natural va a directOwnership", "SILVA" in directos, directos[:60])
+    chequear("solo una dueña directa natural", len(socios["directOwnership"]) == 1,
+             f"{len(socios['directOwnership'])}")
+    chequear("la sociedad va a indirectShareholders", "CORDILLERA" in nombres_ind, nombres_ind[:60])
+    chequear("una sola jurídica en la raíz", len(indirectos) == 1, f"{len(indirectos)}")
+
+    # La pasada 2: los socios de la sociedad socia. Es lo que la SPA consiguió
+    # 8 de 8 veces con el esquema plano y 6 de 8 con el anidado.
+    hijos = indirectos[0].get("indirectShareholders") if indirectos else []
+    nombres_hijos = " ".join(str(h.get("shareholderName", "")).upper() for h in (hijos or []))
+    chequear("la cadena de la sociedad se resolvió", bool(hijos), "quedó vacía")
+    chequear("los dos socios de la cadena", len(hijos or []) == 2, f"{len(hijos or [])}")
+    chequear("TAPIA y CASTRO en la cadena",
+             "TAPIA" in nombres_hijos and "CASTRO" in nombres_hijos, nombres_hijos[:70])
+
+    # El chequeo que importa: los socios de la OTRA empresa no se colaron en la
+    # tabla principal. Si se cuelan, la suma da 160 en vez de 100.
+    chequear("la participación directa cierra en ~100",
+             senales["suma_participacion"] is not None
+             and abs(senales["suma_participacion"] - 100) <= 0.5,
+             str(senales["suma_participacion"]))
+    chequear("no se mezcló la tabla de la otra empresa",
+             "TAPIA" not in directos and "CASTRO" not in directos, directos[:70])
+    chequear("el representante legal salió con su cargo",
+             any("SILVA" in str(p.get("shareholderName", "")).upper() and p.get("position")
+                 for p in socios["legalRepresentatives"]),
+             str(socios["legalRepresentatives"])[:70])
+    chequear("dos llamadas: la tabla y una cadena", senales["llamadas"] == 2, str(senales["llamadas"]))
+
+    if fallos:
+        sys.exit(f"\n   {len(fallos)} verificación(es) fallaron: {', '.join(fallos)}")
+    print("\n   OK: las dos pasadas devolvieron el contrato completo y la suma cierra.")
+
+
 if __name__ == "__main__":
     prueba_pdf_real()
     prueba_extraccion_real()
+    prueba_shareholders_real()
     print("\nTodo OK.\n")

@@ -17,8 +17,8 @@ Este script es la tercera: **lee la SPA en modo solo lectura y genera el módulo
 Python**. La fuente de verdad sigue siendo `constants.ts`. Si alguien cambia un
 prompt allá, se corre esto de nuevo y el diff se ve.
 
-`verificar_prompts.py` corre lo mismo y falla si el archivo generado quedó
-viejo — es el guardia que se pone antes de desplegar.
+`--check` corre lo mismo y falla si el archivo generado quedó viejo — es el
+guardia que se pone antes de desplegar.
 
 Uso
 ---
@@ -70,6 +70,19 @@ def cuerpo_template(src: str, nombre: str) -> str:
         r"export const " + re.escape(nombre) + r"\s*=\s*\([^)]*\)(?::\s*string)?\s*=>\s*`(.*?)`;\s*$",
         src,
         re.S | re.M,
+    )
+    if not m:
+        _fallar(f"no se pudo leer {nombre} de constants.ts")
+    return m.group(1)
+
+
+def cuerpo_const(src: str, nombre: str) -> str:
+    """Igual que `cuerpo_template` pero para un const plano, sin función flecha.
+
+    `GEMINI_SHAREHOLDERS_PROMPT` no recibe parámetros: es un texto fijo."""
+    m = re.search(
+        r"export const " + re.escape(nombre) + r"\s*=\s*`(.*?)`;\s*$",
+        src, re.S | re.M,
     )
     if not m:
         _fallar(f"no se pudo leer {nombre} de constants.ts")
@@ -171,6 +184,29 @@ def emitir() -> str:
 
     partes.append("\nPROMPT_EXTRACCION = '''\\\n")
     partes.append(extraccion.replace("\\", "\\\\").replace("'''", "\\'\\'\\'"))
+    partes.append("'''\n")
+
+    # ── Shareholders (Fase 3) ───────────────────────────────────────────────
+    # Se extraen igual que los demás: la fuente de verdad es `constants.ts` y la
+    # API no tiene prompts propios. Si alguien toca uno allá, el `--check`
+    # falla el despliegue hasta que se regenere.
+    #
+    # El de la cadena recibe la empresa YA COMPUESTA. En la SPA armaba ese texto
+    # con un ternario dentro del template literal, y los backticks anidados no se
+    # pueden extraer: se movió la composición al llamador para que los dos lados
+    # puedan compartir el mismo prompt.
+    shareholders = a_python(cuerpo_const(src_const, "GEMINI_SHAREHOLDERS_PROMPT"), {})
+    cadena = a_python(
+        cuerpo_template(src_const, "GEMINI_SHAREHOLDERS_CADENA_PROMPT"),
+        {"${empresa}": "{empresa}"},
+    )
+
+    partes.append("\nPROMPT_SHAREHOLDERS = '''\\\n")
+    partes.append(shareholders.replace("\\", "\\\\").replace("'''", "\\'\\'\\'"))
+    partes.append("'''\n")
+
+    partes.append("\nPROMPT_SHAREHOLDERS_CADENA = '''\\\n")
+    partes.append(cadena.replace("\\", "\\\\").replace("'''", "\\'\\'\\'"))
     partes.append("'''\n")
 
     return "".join(partes)
