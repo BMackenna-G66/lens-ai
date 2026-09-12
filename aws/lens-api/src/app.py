@@ -46,6 +46,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import time
 from urllib.parse import urlparse
 
@@ -342,13 +343,43 @@ def _analyses(evento: dict, ruta: str, metodo: str) -> dict:
 MARGEN_SOCIOS_S = float(os.environ.get("MARGEN_SOCIOS_S", "35"))
 
 
+# Cuál de los documentos se le manda al modelo, ordenado por qué tan probable es
+# que sea la escritura. NO es "el primero soportado": medido en producción sobre
+# 45 análisis multi-archivo de la SPA, en 4 (9 %) el primer PDF era una cédula
+# teniendo la escritura al lado, y a esa cédula se le pedía la tabla de
+# propiedad.
+#
+# El nombre lo pone quien sube los documentos y es estable. Un nombre sin señal
+# queda en el medio: no hay con qué decidir y se respeta el orden de `ingesta_s3`,
+# que ya es determinista.
+#
+# El certificado de cámara de comercio entra ALTO a propósito: en Colombia es la
+# fuente canónica de la composición societaria, y el prompt de la cadena le dice
+# al modelo que la busque justamente ahí.
+#
+# Mismo orden que `elegirDocumentoSocietario` en la SPA. Si cambia uno, cambian
+# los dos: que las dos puntas elijan distinto sería peor que elegir mal.
+_RANGO_DOC = [
+    (re.compile(r"deeds|escritura|constituc", re.I), 0),                 # la escritura
+    (re.compile(r"trade_chamber|c[aá]mara_?de_?comercio", re.I), 1),     # cámara de comercio
+    (re.compile(r"complementary|anexo", re.I), 3),                       # anexos
+    (re.compile(r"_id_document|legal_representative_document|c[eé]dula|pasaporte|\bdni\b",
+                re.I), 4),                                               # identidad
+]
+
+
+def _rango_doc(nombre: str) -> int:
+    for rx, n in _RANGO_DOC:
+        if rx.search(nombre):
+            return n
+    return 2
+
+
 def _extraer_socios(archivos, t0: float) -> tuple[dict, list[str]]:
-    """La composición societaria del primer documento que el modelo pueda ver.
+    """La composición societaria del documento que más se parece a la escritura.
 
     Corre sobre el archivo NATIVO, no sobre el texto: las tablas de propiedad se
-    leen mucho mejor con el PDF a la vista. Se elige el primero soportado, igual
-    que la SPA, y el orden de `ingesta_s3` es determinista, así que dos corridas
-    sobre la misma carpeta eligen el mismo archivo.
+    leen mucho mejor con el PDF a la vista.
 
     Nunca lanza. Si algo falla, las tres claves quedan vacías y el motivo va en
     los avisos: la ficha de 18 campos ya está lista y perderla por esto sería
@@ -356,7 +387,12 @@ def _extraer_socios(archivos, t0: float) -> tuple[dict, list[str]]:
     """
     vacio = {"legalRepresentatives": [], "directOwnership": [], "indirectShareholders": []}
 
-    nativo = next((a for a in archivos if gemini.mime_de(a.nombre)), None)
+    nativos = [a for a in archivos if gemini.mime_de(a.nombre)]
+    # Desempata por el orden de llegada, que `ingesta_s3` ya deja determinista:
+    # dos corridas sobre la misma carpeta tienen que elegir el mismo archivo.
+    nativo = min(
+        (a for a in nativos), key=lambda a: (_rango_doc(a.nombre), nativos.index(a)), default=None
+    )
     if nativo is None:
         return vacio, ["Ningún documento es PDF, JPG o PNG: no se extrajo la composición societaria."]
 
