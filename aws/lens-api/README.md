@@ -128,6 +128,53 @@ en la página que no se leyó, quien revisa tiene que saberlo.
 Sin auth. Devuelve la configuración efectiva: modelo, motor de OCR y topes.
 Sirve para confirmar contra qué se está hablando.
 
+### `POST /v1/analyses` — el contrato `BusinessShareholders`
+
+Ruta **aparte**, para ms-company. `/v1/analisis` sigue igual y sin cambios: que
+las dos convivan es lo que permite migrar sin ventana de corte.
+
+No recibe el documento: recibe **dónde está en S3**.
+
+```jsonc
+{
+  "analysisId": "uuid que genera el consumidor",   // idempotencia
+  "folderPath": "empresas/76123456/escrituras/",   // o "files": ["a/b.pdf"]
+  "companyId": "...",
+  "session_id": "...",                             // opaco, vuelve tal cual
+  "options": { "includeRawText": false }
+}
+```
+
+Tres cosas que parecen errores y no lo son:
+
+1. **Los errores viajan con HTTP 200.** El `statusCode` real va en el cuerpo.
+   Es como responde el bot que se reemplaza y el consumidor lo lee de ahí.
+2. **`AWS_ERROR` no lleva `msg_type`.** Tampoco lo lleva el bot, y el consumidor
+   distingue por su ausencia.
+3. **Un segundo POST con el mismo `analysisId` no vuelve a analizar.** Devuelve
+   lo guardado, con el `session_id` refrescado.
+
+La composición societaria sale de **dos pasadas planas** sobre el PDF nativo: la
+tabla de propiedad primero y, por cada sociedad que aparezca entre los dueños,
+una pregunta propia por sus socios. El reparto entre `directOwnership` e
+`indirectShareholders` lo decide `personType`, no dónde el modelo puso a cada
+uno — la regla de oro del contrato deja de depender de que el modelo la respete.
+
+Medido contra Gemini sobre una escritura sintética con una sociedad entre los
+dueños: 2 llamadas, 593 tokens de salida, la cadena resuelta y la participación
+directa cerrando en **100,0** sin que se cuele la tabla de la otra empresa.
+
+> **Por qué dos pasadas y no un esquema anidado.** Con el anidado, sobre 8
+> corridas del mismo documento la cadena salía 6 de 8, y una de cada cinco se
+> desbocaba hasta 45.358 tokens devolviendo JSON truncado. Las corridas malas
+> eran exactamente las que tocaban el tope de salida. Hay un test que falla si
+> alguien vuelve a anidar el esquema.
+
+Si la composición societaria falla, las tres claves van vacías y el motivo va en
+`warnings`: la ficha de 18 campos ya está lista y perderla por esto sería peor
+que devolverla sin socios. Lo mismo si se acaba el presupuesto de tiempo — cada
+sociedad entre los dueños cuesta una llamada más.
+
 ---
 
 ## 3. Por qué es síncrono
@@ -337,7 +384,7 @@ python3 -m venv .venv
 ```
 
 ```bash
-.venv/bin/python -m pytest tests -q # 40 tests, sin AWS y sin gastar tokens
+.venv/bin/python -m pytest tests -q # 109 tests, sin AWS y sin gastar tokens
 .venv/bin/python tests/smoke_real.py # contra Gemini de verdad (gasta tokens)
 ```
 
@@ -346,9 +393,16 @@ formas de entrada, el relleno a 18 campos, el descarte de campos inventados
 por el modelo, la sustitución de marcadores en un prompt que tiene llaves
 literales, y que un documento ilegible no tumbe al resto del lote.
 
-`smoke_real.py` manda una escritura sintética —inventada, **nunca documentos de
-clientes**— y verifica que las personas salgan como
-`NOMBRE | DOCUMENTO | DATO`, que es lo que necesita la comparación automática.
+De la composición societaria se verifica sobre todo lo que costó medirse: que
+los esquemas sigan **planos**, que el reparto salga de `personType` y no de
+dónde puso el modelo a cada uno, que una cadena rota no tire abajo el análisis,
+y que la suma de participación detecte la tabla de otra empresa colada en la
+principal.
+
+`smoke_real.py` manda escrituras sintéticas —inventadas, **nunca documentos de
+clientes**— y verifica que las personas salgan como `NOMBRE | DOCUMENTO | DATO`,
+que es lo que necesita la comparación automática, y que las dos pasadas de
+shareholders devuelvan el contrato completo con la participación cerrando en 100.
 
 ---
 
@@ -358,9 +412,15 @@ clientes**— y verifica que las personas salgan como
 |---|---|
 | `src/app.py` | Handler: ruteo, auth, parseo de entrada, orquestación |
 | `src/extraccion.py` | Documento → texto. Capa de texto primero, OCR después |
-| `src/gemini.py` | Las dos llamadas al modelo, reintentos, relleno a 18 |
+| `src/gemini.py` | Las llamadas al modelo: país, 18 campos y composición societaria |
+| `src/contrato.py` | La forma exacta de la respuesta de `BusinessShareholders` |
+| `src/ingesta_s3.py` | `folderPath` → archivos, con los tres filtros del bot |
+| `src/almacen.py` | DynamoDB para la idempotencia por `analysisId` |
 | `src/prompts_generado.py` | **Generado.** No editar a mano |
-| `scripts/generar_prompts.py` | Lee la SPA y regenera lo anterior |
+| `scripts/generar_prompts.py` | Lee la SPA y regenera lo anterior (`--check` en el deploy) |
 | `template.yaml` | SAM: Lambda + Function URL + permiso de Textract + logs |
-| `tests/test_app.py` | 40 tests sin red |
+| `tests/test_app.py` | Ruteo, auth y el pipeline de los 18 campos |
+| `tests/test_shareholders.py` | Las dos pasadas, el reparto y el presupuesto |
+| `tests/test_contrato.py` | Los 4 códigos del bot y la idempotencia |
+| `tests/test_ingesta_s3.py` | Filtros, paginación y tope, contra un S3 simulado |
 | `tests/smoke_real.py` | Prueba de humo contra Gemini |

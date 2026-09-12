@@ -169,7 +169,11 @@ export async function extraerShareholders(
     try {
       const r2 = await generarConArchivo(
         archivo,
-        GEMINI_SHAREHOLDERS_CADENA_PROMPT(j.shareholderName ?? '', j.shareholderId),
+        // La empresa se compone ACÁ, no dentro del prompt: el extractor que
+        // sincroniza los prompts con la API no puede leer un ternario con
+        // backticks anidados.
+        GEMINI_SHAREHOLDERS_CADENA_PROMPT(
+          `${j.shareholderName ?? ''}${j.shareholderId ? ` (documento ${j.shareholderId})` : ''}`),
         { responseSchema: ESQUEMA_CADENA, operacion: 'Shareholders cadena' },
       );
       llamadas++;
