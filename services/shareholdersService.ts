@@ -118,6 +118,57 @@ export interface SenalesShareholders {
   participacionSospechosa: boolean;
 }
 
+// ── Cuál de los archivos se le manda al modelo ─────────────────────────────
+//
+// El contrato es por ANÁLISIS, no por archivo: en un consolidado la escritura
+// es la que manda. Elegir "el primer PDF" cumple eso solo si la escritura vino
+// primera, y muchas veces no viene primera.
+//
+// Medido en producción sobre 45 análisis multi-archivo: en 4 (9 %) el primer
+// PDF era `company_id_document_*` —una cédula— teniendo al lado el
+// `company_deeds_document_*`. A esos análisis se les pidió la tabla de
+// propiedad a un documento de identidad. Uno de ellos es MTYF8PY7, que quedó
+// con `{"ok":false,"error":"...no es JSON válido"}` en la ficha.
+//
+// El nombre lo pone el descargador por lote y es estable. Censo completo del
+// corpus (507 archivos): 162 `deeds`, 24 `complementary`, 12 `id`, 5
+// `trade_chamber_sedpe`, 1 `legal_representative`, y 303 con nombre libre —
+// subidas manuales, donde no hay ninguna señal y se respeta el orden, que es
+// exactamente lo que se hacía antes.
+//
+// El certificado de cámara de comercio entra ALTO y no es un detalle: en
+// Colombia es la fuente canónica de la composición societaria, y el propio
+// prompt de la cadena le dice al modelo que la busque ahí.
+const RANGO: [RegExp, number][] = [
+  [/company_deeds_document|escritura|constituc/i, 0],    // la escritura
+  [/trade_chamber|c[aá]mara_?de_?comercio/i, 1],         // certificado de cámara
+  [/company_complementary_document|anexo/i, 3],          // anexos: sirven, después
+  [/(company_id_document|legal_representative_document|c[eé]dula|pasaporte|\bdni\b)/i, 4],
+];
+
+const rango = (nombre: string): number => {
+  for (const [re, n] of RANGO) if (re.test(nombre)) return n;
+  return 2;   // sin señal en el nombre: subida manual, se respeta el orden
+};
+
+/**
+ * El documento al que se le pide la composición societaria.
+ *
+ * Ordena por qué TAN PROBABLE es que sea la escritura, no por orden de subida,
+ * y desempata por el orden original para que dos corridas sobre los mismos
+ * archivos elijan siempre el mismo.
+ *
+ * Devuelve `undefined` si ninguno es PDF, JPG o PNG — el modelo no puede ver
+ * otra cosa por la ruta nativa.
+ */
+export function elegirDocumentoSocietario<T extends { name: string }>(archivos: T[]): T | undefined {
+  const nativos = archivos.filter(a => /\.(pdf|jpe?g|png)$/i.test(a.name));
+  if (nativos.length === 0) return undefined;
+  return nativos
+    .map((a, i) => ({ a, r: rango(a.name), i }))
+    .sort((x, y) => x.r - y.r || x.i - y.i)[0].a;
+}
+
 const vacio = (): ResultadoShareholders =>
   ({ legalRepresentatives: [], directOwnership: [], indirectShareholders: [] });
 

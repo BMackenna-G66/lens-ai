@@ -26,7 +26,7 @@ import { DocumentChat } from './DocumentChat';
 import { KEYWORDS_BY_COUNTRY } from '../services/countryKeywords';
 import { nuevoAnalisisId, persistirAnalisis, persistirFicha, sha256Hex } from '../services/lensPersistenciaService';
 import { pendientesEnBuffer, reintentarPendientes } from '../services/colasLogService';
-import { extraerShareholders, filasDePersonas } from '../services/shareholdersService';
+import { extraerShareholders, filasDePersonas, elegirDocumentoSocietario } from '../services/shareholdersService';
 import { persistirPersonas } from '../services/lensPersistenciaService';
 import { useAuth } from '../context/AuthContext';
 import { db } from '../services/dbService';
@@ -335,7 +335,11 @@ export const DocumentAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> =
         const analisisEn = new Date().toISOString();
         // Se resuelve ACÁ, antes de persistir, porque decide QUIÉN escribe la
         // ficha. Dos escritores para la misma fila se pisan: ver `omitirFicha`.
-        const archivoNativo = files.find(f => /\.(pdf|jpe?g|png)$/i.test(f.name));
+        //
+        // NO es "el primer PDF": es el que más se parece a la escritura. En
+        // producción, 4 de 45 consolidados tenían una cédula como primer PDF y
+        // se le pedía a ella la tabla de propiedad.
+        const archivoNativo = elegirDocumentoSocietario(files);
         void persistirAnalisis({
           analisisId,
           ejecutadoEn: analisisEn,

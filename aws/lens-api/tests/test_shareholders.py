@@ -384,9 +384,8 @@ def test_sin_un_documento_que_el_modelo_pueda_ver(monkeypatch):
     assert any("PDF, JPG o PNG" in a for a in avisos)
 
 
-def test_elige_el_primer_archivo_que_el_modelo_puede_ver(monkeypatch):
-    """El orden de `ingesta_s3` es determinista, así que dos corridas sobre la
-    misma carpeta eligen el mismo archivo."""
+def _espiar_eleccion(monkeypatch, nombres):
+    """Qué archivo termina recibiendo el modelo."""
     visto = {}
 
     def espiar(nombre, contenido, prompt, config):
@@ -394,13 +393,109 @@ def test_elige_el_primer_archivo_que_el_modelo_puede_ver(monkeypatch):
         return json.dumps({"legalRepresentatives": [], "owners": []}), {}
 
     monkeypatch.setattr(gemini, "_llamar_con_archivo", espiar)
-    docs = [
-        Descargado(clave="c/notas.docx", nombre="notas.docx", contenido=b"x"),
-        Descargado(clave="c/uno.pdf", nombre="uno.pdf", contenido=b"%PDF"),
-        Descargado(clave="c/dos.pdf", nombre="dos.pdf", contenido=b"%PDF"),
-    ]
-    app._extraer_socios(docs, time.monotonic())
-    assert visto["nombre"] == "uno.pdf"
+    app._extraer_socios(
+        [Descargado(clave=f"c/{n}", nombre=n, contenido=b"%PDF") for n in nombres],
+        time.monotonic(),
+    )
+    return visto.get("nombre")
+
+
+def test_sin_senal_en_el_nombre_se_respeta_el_orden(monkeypatch):
+    """El orden de `ingesta_s3` es determinista, así que dos corridas sobre la
+    misma carpeta eligen el mismo archivo."""
+    assert _espiar_eleccion(monkeypatch, ["notas.docx", "uno.pdf", "dos.pdf"]) == "uno.pdf"
+
+
+def test_la_escritura_le_gana_a_la_cedula_aunque_venga_despues(monkeypatch):
+    """LA regresión. Medido en producción: 4 de 45 consolidados tenían el
+    `company_id_document` primero y se le pedía a una cédula la tabla de
+    propiedad. Uno de ellos quedó con `ok:false` en la ficha."""
+    elegido = _espiar_eleccion(monkeypatch, [
+        "company_id_document_1789130963319.pdf",
+        "company_deeds_document_1789042109217.pdf",
+    ])
+    assert elegido == "company_deeds_document_1789042109217.pdf"
+
+
+def test_el_caso_real_de_produccion_con_cuatro_archivos(monkeypatch):
+    """Tal cual salió de Redshift: cédula, anexo y dos escrituras."""
+    elegido = _espiar_eleccion(monkeypatch, [
+        "company_id_document_1787954908243.pdf",
+        "company_complementary_document_1788963242795.pdf",
+        "company_deeds_document_1787954908035.pdf",
+        "company_deeds_document_1787954908155.pdf",
+    ])
+    # La primera escritura, no la segunda: entre iguales manda el orden.
+    assert elegido == "company_deeds_document_1787954908035.pdf"
+
+
+def test_el_anexo_le_gana_a_la_cedula(monkeypatch):
+    """Sin escritura, un complementario sigue siendo mejor que un documento de
+    identidad: al menos puede traer la tabla."""
+    assert _espiar_eleccion(monkeypatch, [
+        "company_id_document_1.pdf", "company_complementary_document_2.pdf",
+    ]) == "company_complementary_document_2.pdf"
+
+
+def test_un_nombre_libre_le_gana_a_la_cedula(monkeypatch):
+    """Una subida manual no tiene señal, pero una cédula SÍ tiene señal de que
+    no sirve. Ante la duda, la que no sabemos."""
+    assert _espiar_eleccion(monkeypatch, [
+        "company_id_document_1.pdf", "escaneo.pdf",
+    ]) == "escaneo.pdf"
+
+
+def test_si_todo_es_cedula_igual_se_elige_una(monkeypatch):
+    """Rankear no es descartar: con un solo documento malo, se intenta igual y
+    el resultado queda registrado. Descartar dejaría las tres claves vacías sin
+    haber preguntado."""
+    assert _espiar_eleccion(monkeypatch, ["company_id_document_1.pdf"]) == "company_id_document_1.pdf"
+
+
+def test_la_camara_de_comercio_entra_alto(monkeypatch):
+    """En Colombia el certificado de cámara ES la fuente canónica de la
+    composición, y el prompt de la cadena le dice al modelo que la busque ahí."""
+    assert _espiar_eleccion(monkeypatch, [
+        "company_complementary_document_1.pdf",
+        "company_trade_chamber_sedpe_document_2.pdf",
+    ]) == "company_trade_chamber_sedpe_document_2.pdf"
+
+
+def test_la_escritura_le_gana_a_la_camara(monkeypatch):
+    assert _espiar_eleccion(monkeypatch, [
+        "company_trade_chamber_sedpe_document_1.pdf",
+        "company_deeds_document_2.pdf",
+    ]) == "company_deeds_document_2.pdf"
+
+
+def test_el_documento_del_representante_cuenta_como_identidad(monkeypatch):
+    """Es la cédula del representante, no la escritura. Estaba sin rankear y en
+    producción una vez ganó por venir de un `.JPG` con nombre libre."""
+    assert _espiar_eleccion(monkeypatch, [
+        "company_legal_representative_document_1.JPG", "company_deeds_document_2.pdf",
+    ]) == "company_deeds_document_2.pdf"
+
+
+def test_un_anexo_conocido_pierde_contra_un_nombre_desconocido(monkeypatch):
+    """No es arbitrario: de un `complementary` SABEMOS que es secundario; de un
+    nombre libre no sabemos nada, y bien puede ser el documento principal.
+
+    Caso real de producción: dos `complementary` y un
+    «MATRICULA DE COMERCIO VALIDADO.pdf», que es el que trae la composición."""
+    assert _espiar_eleccion(monkeypatch, [
+        "company_complementary_document_1788290889998.pdf",
+        "company_complementary_document_1788290890187.pdf",
+        "MATRICULA DE COMERCIO VALIDADO.pdf",
+    ]) == "MATRICULA DE COMERCIO VALIDADO.pdf"
+
+
+def test_el_caso_MTYF8PY7_que_fallo_en_produccion(monkeypatch):
+    """El análisis del 12-09 que quedó con `{"ok":false,"error":"...no es JSON
+    válido"}`: se le pedía la tabla de propiedad a una cédula teniendo al lado
+    la escritura del Conservador, que tiene nombre libre."""
+    assert _espiar_eleccion(monkeypatch, [
+        "company_id_document_1789130963319.pdf", "CR90BiZzWtBS.pdf",
+    ]) == "CR90BiZzWtBS.pdf"
 
 
 def test_con_el_presupuesto_agotado_ni_se_intenta(monkeypatch):
