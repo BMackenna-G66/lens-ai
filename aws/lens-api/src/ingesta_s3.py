@@ -15,18 +15,24 @@ avisos junto con el resultado.
 
 Dependencia de infra que NO está resuelta
 -----------------------------------------
-El bucket `g66-company` **es de otra cuenta**: `head_bucket` desde la cuenta
-561521480266 devuelve 403, no 404. Y el rol de `lens-analisis` no tiene hoy
-NINGÚN permiso de S3 — solo `AWSLambdaBasicExecutionRole` y la política de
-Textract.
+El bucket `g66-company` **es de otra cuenta**. S3 entre cuentas necesita las dos
+puntas y con una sola no alcanza:
 
-Para que esto funcione hacen falta dos cosas, y la primera no se puede hacer
-desde nuestra cuenta:
+  1. En la cuenta dueña: una bucket policy que permita `s3:GetObject` y
+     `s3:ListBucket` al rol `arn:aws:iam::561521480266:role/lens-analisis-rol`.
+     **FALTA.** Está escrita y lista para reenviar en
+     `bucket-policy-g66-company.json`.
+  2. En la nuestra: la política IAM equivalente. **Ya está** en `template.yaml`
+     (pendiente de que se despliegue el stack).
 
-  1. En la cuenta dueña del bucket: una bucket policy que permita
-     `s3:GetObject` y `s3:ListBucket` al rol
-     `arn:aws:iam::561521480266:role/lens-analisis-fnurl-LensApiFunctionRole-*`
-  2. En la nuestra: la política IAM equivalente en ese rol.
+Verificado el 12-09-2026 desde la cuenta 561521480266:
+
+    AccessDenied … is not authorized to perform: s3:ListBucket on
+    "arn:aws:s3:::g66-company" because no resource-based policy allows
+    the s3:ListBucket action
+
+El motivo que devuelve AWS es explícito —«no resource-based policy»— y confirma
+que lo que falta es (1), del lado del dueño.
 
 Hasta entonces este módulo está completo y probado contra un cliente simulado,
 pero cualquier llamada real va a devolver AccessDenied — que se reporta como

@@ -9,7 +9,10 @@ stack_name = "lens-analisis-fnurl"
 resolve_s3 = true
 s3_prefix = "lens-api"
 region = "us-east-1"
-capabilities = "CAPABILITY_IAM"
+# NAMED_IAM y no solo IAM: el rol de la Lambda se llama `lens-analisis-rol` a
+# propósito, para que su ARN se conozca antes de desplegar y se le pueda pedir
+# al dueño de `g66-company` la bucket policy en paralelo. Ver template.yaml.
+capabilities = "CAPABILITY_NAMED_IAM"
 confirm_changeset = true
 # Perfil AWS SSO de compliance (cuenta 561521480266). Único con CloudFormation.
 profile = "compliance-admin"
