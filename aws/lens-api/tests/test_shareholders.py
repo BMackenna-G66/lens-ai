@@ -40,7 +40,8 @@ class ModeloFalso:
         self.rompe = set(rompe)
         self.prompts = []
 
-    def __call__(self, nombre, contenido, prompt, config):
+    def __call__(self, docs, prompt, config):
+        self.docs = docs
         self.prompts.append(prompt)
         if len(self.prompts) == 1:
             return json.dumps(self.pase1), {"promptTokenCount": 10, "candidatesTokenCount": 5}
@@ -53,9 +54,9 @@ class ModeloFalso:
         return json.dumps({"members": []}), {}
 
 
-def _correr(monkeypatch, modelo, **kw):
-    monkeypatch.setattr(gemini, "_llamar_con_archivo", modelo)
-    return gemini.extraer_shareholders("escritura.pdf", b"%PDF-fake", **kw)
+def _correr(monkeypatch, modelo, docs=None, **kw):
+    monkeypatch.setattr(gemini, "_llamar_con_archivos", modelo)
+    return gemini.extraer_shareholders(docs or [("escritura.pdf", b"%PDF-fake")], **kw)
 
 
 # ── El esquema tiene que seguir PLANO ───────────────────────────────────────
@@ -160,18 +161,18 @@ def test_si_falla_la_pasada_1_si_lanza(monkeypatch):
     def revienta(*a, **k):
         raise gemini.ErrorGemini("sin API key")
 
-    monkeypatch.setattr(gemini, "_llamar_con_archivo", revienta)
+    monkeypatch.setattr(gemini, "_llamar_con_archivos", revienta)
     try:
-        gemini.extraer_shareholders("x.pdf", b"x")
+        gemini.extraer_shareholders([("x.pdf", b"x")])
     except gemini.ErrorGemini:
         return
     raise AssertionError("tenía que lanzar ErrorGemini")
 
 
 def test_una_respuesta_que_no_es_json_se_traduce(monkeypatch):
-    monkeypatch.setattr(gemini, "_llamar_con_archivo", lambda *a, **k: ("no soy json", {}))
+    monkeypatch.setattr(gemini, "_llamar_con_archivos", lambda *a, **k: ("no soy json", {}))
     try:
-        gemini.extraer_shareholders("x.pdf", b"x")
+        gemini.extraer_shareholders([("x.pdf", b"x")])
     except gemini.ErrorGemini as e:
         assert "no es JSON válido" in str(e)
         return
@@ -345,7 +346,7 @@ def _doc(nombre="escritura.pdf"):
 
 
 def test_socios_ok_llena_las_tres_claves(monkeypatch):
-    monkeypatch.setattr(gemini, "_llamar_con_archivo", ModeloFalso({
+    monkeypatch.setattr(gemini, "_llamar_con_archivos", ModeloFalso({
         "legalRepresentatives": [_persona("ANA GERENTA")],
         "owners": [_persona("JUAN", pct=40), _persona("INV SpA", "JURIDICA", pct=60)],
     }, cadenas={"INV SpA": [_persona("PEDRO", pct=100)]}))
@@ -360,7 +361,7 @@ def test_un_fallo_del_modelo_no_rompe_la_respuesta(monkeypatch):
     def revienta(*a, **k):
         raise gemini.ErrorGemini("se excedió la cuota")
 
-    monkeypatch.setattr(gemini, "_llamar_con_archivo", revienta)
+    monkeypatch.setattr(gemini, "_llamar_con_archivos", revienta)
     socios, avisos = app._extraer_socios(_doc(), time.monotonic())
     assert socios == {"legalRepresentatives": [], "directOwnership": [], "indirectShareholders": []}
     assert any("cuota" in a for a in avisos)
@@ -371,7 +372,7 @@ def test_un_fallo_inesperado_tampoco_rompe(monkeypatch):
     def revienta(*a, **k):
         raise ZeroDivisionError("algo raro")
 
-    monkeypatch.setattr(gemini, "_llamar_con_archivo", revienta)
+    monkeypatch.setattr(gemini, "_llamar_con_archivos", revienta)
     socios, avisos = app._extraer_socios(_doc(), time.monotonic())
     assert socios["directOwnership"] == []
     assert len(avisos) == 1
@@ -384,20 +385,27 @@ def test_sin_un_documento_que_el_modelo_pueda_ver(monkeypatch):
     assert any("PDF, JPG o PNG" in a for a in avisos)
 
 
-def _espiar_eleccion(monkeypatch, nombres):
-    """Qué archivo termina recibiendo el modelo."""
+def _espiar_orden(monkeypatch, nombres, pesos=None):
+    """En qué ORDEN recibe el modelo los documentos."""
     visto = {}
 
-    def espiar(nombre, contenido, prompt, config):
-        visto["nombre"] = nombre
+    def espiar(docs, prompt, config):
+        visto["orden"] = [n for n, _ in docs]
         return json.dumps({"legalRepresentatives": [], "owners": []}), {}
 
-    monkeypatch.setattr(gemini, "_llamar_con_archivo", espiar)
+    monkeypatch.setattr(gemini, "_llamar_con_archivos", espiar)
     app._extraer_socios(
-        [Descargado(clave=f"c/{n}", nombre=n, contenido=b"%PDF") for n in nombres],
+        [Descargado(clave=f"c/{n}", nombre=n, contenido=b"x" * ((pesos or {}).get(n, 4)))
+         for n in nombres],
         time.monotonic(),
     )
-    return visto.get("nombre")
+    return visto.get("orden", [])
+
+
+def _espiar_eleccion(monkeypatch, nombres):
+    """El PRIMERO, que es el que manda para decidir la sociedad principal."""
+    orden = _espiar_orden(monkeypatch, nombres)
+    return orden[0] if orden else None
 
 
 def test_sin_senal_en_el_nombre_se_respeta_el_orden(monkeypatch):
@@ -489,6 +497,94 @@ def test_un_anexo_conocido_pierde_contra_un_nombre_desconocido(monkeypatch):
     ]) == "MATRICULA DE COMERCIO VALIDADO.pdf"
 
 
+def test_van_TODOS_los_documentos_no_solo_el_mejor(monkeypatch):
+    """LA regresión de este cambio. Medido sobre 87 análisis en los que el
+    camino de texto SÍ encontró accionistas: mandando un solo archivo, la
+    extracción estructurada los perdía en el 63 % de los consolidados de varios
+    contra el 5 % de los de uno. La tabla vive en la escritura, pero la
+    composición vigente suele estar en un anexo."""
+    orden = _espiar_orden(monkeypatch, [
+        "company_id_document_1.pdf",
+        "company_complementary_document_2.pdf",
+        "company_deeds_document_3.pdf",
+    ])
+    assert len(orden) == 3, "se perdió algún documento por el camino"
+    # Y van ORDENADOS: el primero decide cuál es la sociedad principal.
+    assert orden == ["company_deeds_document_3.pdf",
+                     "company_complementary_document_2.pdf",
+                     "company_id_document_1.pdf"]
+
+
+def test_lo_que_el_modelo_no_puede_ver_no_va(monkeypatch):
+    orden = _espiar_orden(monkeypatch, ["notas.docx", "planilla.xlsx", "escritura.pdf"])
+    assert orden == ["escritura.pdf"]
+
+
+def test_la_cadena_recibe_los_mismos_documentos_que_la_tabla(monkeypatch):
+    """La pasada 2 pregunta por los socios de una jurídica: si viera menos
+    documentos que la pasada 1, podría no encontrar la cláusula que los lista."""
+    modelo = ModeloFalso(
+        {"legalRepresentatives": [], "owners": [_persona("INV SpA", "JURIDICA")]},
+        cadenas={"INV SpA": [_persona("ANA")]},
+    )
+    docs = [("company_deeds_document_1.pdf", b"%PDF"), ("anexo.pdf", b"%PDF")]
+    _correr(monkeypatch, modelo, docs=docs)
+    assert modelo.docs == docs          # los de la ÚLTIMA llamada, la de la cadena
+    assert len(modelo.prompts) == 2
+
+
+def test_el_tope_de_peso_es_sobre_la_suma_no_sobre_cada_uno(monkeypatch):
+    """El límite de Gemini es sobre el request entero. Se corta por peso
+    acumulado y, como van ordenados, lo que queda afuera es lo menos parecido a
+    una escritura."""
+    tope = gemini.TOPE_INLINE_BYTES
+    orden = _espiar_orden(
+        monkeypatch,
+        ["company_deeds_document_1.pdf", "company_id_document_2.pdf"],
+        pesos={"company_deeds_document_1.pdf": tope - 10, "company_id_document_2.pdf": 100},
+    )
+    assert orden == ["company_deeds_document_1.pdf"]      # la cédula no entró
+
+
+def test_el_primero_entra_aunque_solo_no_quepa(monkeypatch):
+    """Devolver una lista vacía se leería como «no había documentos», que es
+    otra cosa. Que falle abajo con el mensaje de tamaño, que sí explica."""
+    docs = [Descargado(clave="c/gigante.pdf", nombre="gigante.pdf",
+                       contenido=b"x" * (gemini.TOPE_INLINE_BYTES + 50))]
+    assert [d.nombre for d in app.elegir_documentos(docs)] == ["gigante.pdf"]
+
+
+def test_un_documento_gigante_no_llega_a_la_red():
+    grande = b"x" * (gemini.TOPE_INLINE_BYTES + 1)
+    try:
+        gemini._llamar_con_archivos([("a.pdf", grande)], "prompt", {})
+    except gemini.ErrorGemini as e:
+        assert "suman" in str(e) and "MB" in str(e)
+        return
+    raise AssertionError("tenía que rechazar por tamaño")
+
+
+def test_dos_medianos_que_juntos_pasan_el_tope_tampoco(monkeypatch):
+    """Cada uno cabe; los dos juntos no. Si el chequeo fuera por archivo, esto
+    saldría a la red y volvería un error críptico de Google."""
+    mitad = b"x" * (gemini.TOPE_INLINE_BYTES // 2 + 100)
+    try:
+        gemini._llamar_con_archivos([("a.pdf", mitad), ("b.pdf", mitad)], "prompt", {})
+    except gemini.ErrorGemini as e:
+        assert "2 archivo(s) suman" in str(e)
+        return
+    raise AssertionError("tenía que sumar los dos")
+
+
+def test_sin_documentos_no_sale_a_la_red():
+    try:
+        gemini._llamar_con_archivos([], "prompt", {})
+    except gemini.ErrorGemini as e:
+        assert "ningún archivo" in str(e)
+        return
+    raise AssertionError("tenía que rechazar la lista vacía")
+
+
 def test_el_caso_MTYF8PY7_que_fallo_en_produccion(monkeypatch):
     """El análisis del 12-09 que quedó con `{"ok":false,"error":"...no es JSON
     válido"}`: se le pedía la tabla de propiedad a una cédula teniendo al lado
@@ -502,7 +598,7 @@ def test_con_el_presupuesto_agotado_ni_se_intenta(monkeypatch):
     def no_deberia_llamarse(*a, **k):
         raise AssertionError("no tenía que llamar al modelo")
 
-    monkeypatch.setattr(gemini, "_llamar_con_archivo", no_deberia_llamarse)
+    monkeypatch.setattr(gemini, "_llamar_con_archivos", no_deberia_llamarse)
     # Un t0 muy viejo: el presupuesto de la corrida ya se consumió entero.
     socios, avisos = app._extraer_socios(_doc(), time.monotonic() - app.PRESUPUESTO_S)
     assert socios["directOwnership"] == []
@@ -510,7 +606,7 @@ def test_con_el_presupuesto_agotado_ni_se_intenta(monkeypatch):
 
 
 def test_la_suma_sospechosa_llega_al_consumidor_como_aviso(monkeypatch):
-    monkeypatch.setattr(gemini, "_llamar_con_archivo", ModeloFalso({
+    monkeypatch.setattr(gemini, "_llamar_con_archivos", ModeloFalso({
         "legalRepresentatives": [],
         "owners": [_persona("ANA", pct=100), _persona("BETO", pct=100)],
     }))
@@ -521,7 +617,7 @@ def test_la_suma_sospechosa_llega_al_consumidor_como_aviso(monkeypatch):
 def test_lo_extraido_pasa_por_el_contrato_sin_perder_la_cadena(monkeypatch):
     """El puente completo: lo que devuelve el modelo sale con las claves del
     contrato y la anidación intacta."""
-    monkeypatch.setattr(gemini, "_llamar_con_archivo", ModeloFalso({
+    monkeypatch.setattr(gemini, "_llamar_con_archivos", ModeloFalso({
         "legalRepresentatives": [{"shareholderName": "ANA", "personType": "NATURAL",
                                   "position": "Gerente General"}],
         "owners": [_persona("INV SpA", "JURIDICA", pct=100)],

@@ -177,23 +177,48 @@ def mime_de(nombre: str) -> str | None:
     return MIME_POR_EXTENSION.get(ext)
 
 
-def _llamar_con_archivo(nombre: str, contenido: bytes, prompt: str, config: dict) -> tuple[str, dict]:
-    mime = mime_de(nombre)
-    if not mime:
-        raise ErrorGemini(f"Tipo de archivo no soportado para la ruta multimodal ({nombre}). Se aceptan PDF, JPG y PNG.")
-    if len(contenido) > TOPE_INLINE_BYTES:
+def _llamar_con_archivos(docs: list[tuple[str, bytes]], prompt: str, config: dict) -> tuple[str, dict]:
+    """Varios archivos en la MISMA llamada, en el orden en que se pasan.
+
+    Van todos y no solo el mejor: medido sobre 87 análisis de producción donde
+    el camino de texto SÍ encontró accionistas, mandar uno solo los perdía en el
+    63 % de los consolidados de varios archivos.
+
+    El orden importa — el primero es el que manda para decidir cuál es la
+    sociedad principal — y lo decide el llamador.
+    """
+    if not docs:
+        raise ErrorGemini("No se recibió ningún archivo para la ruta multimodal.")
+
+    partes = []
+    total = 0
+    for nombre, contenido in docs:
+        mime = mime_de(nombre)
+        if not mime:
+            raise ErrorGemini(
+                f"Tipo de archivo no soportado para la ruta multimodal ({nombre}). Se aceptan PDF, JPG y PNG.")
+        total += len(contenido)
+        partes.append({"inlineData": {"mimeType": mime,
+                                      "data": base64.b64encode(contenido).decode("ascii")}})
+
+    # El tope de Google es sobre el REQUEST entero, no sobre cada archivo.
+    if total > TOPE_INLINE_BYTES:
         raise ErrorGemini(
-            f"{nombre} pesa {len(contenido) / 1024 / 1024:.1f} MB y el tope para mandarlo en línea "
-            f"es {TOPE_INLINE_BYTES // (1024 * 1024)} MB."
+            f"Los {len(docs)} archivo(s) suman {total / 1024 / 1024:.1f} MB y el tope para mandarlos "
+            f"en línea es {TOPE_INLINE_BYTES // (1024 * 1024)} MB."
         )
-    # El archivo PRIMERO y el prompt después: es el orden que recomienda Google
-    # para que las instrucciones se lean con el documento ya en contexto, y es
-    # el mismo que usa la SPA.
-    partes = [
-        {"inlineData": {"mimeType": mime, "data": base64.b64encode(contenido).decode("ascii")}},
-        {"text": prompt},
-    ]
+
+    # Los archivos PRIMERO y el prompt después: es el orden que recomienda
+    # Google para que las instrucciones se lean con los documentos ya en
+    # contexto, y es el mismo que usa la SPA.
+    partes.append({"text": prompt})
     return _generar(partes, config)
+
+
+def _llamar_con_archivo(nombre: str, contenido: bytes, prompt: str, config: dict) -> tuple[str, dict]:
+    """Un solo archivo. Se conserva porque es la forma que usan los tests y deja
+    el caso simple legible."""
+    return _llamar_con_archivos([(nombre, contenido)], prompt, config)
 
 
 def _rellenar(plantilla: str, **valores: str) -> str:
@@ -382,11 +407,7 @@ def _personas(valor) -> list[dict]:
     return [p for p in (valor or []) if isinstance(p, dict)]
 
 
-def extraer_shareholders(
-    nombre: str,
-    contenido: bytes,
-    quedan_llamadas=None,
-) -> tuple[dict, dict]:
+def extraer_shareholders(docs, quedan_llamadas=None) -> tuple[dict, dict]:
     """La composición societaria en DOS PASADAS PLANAS sobre el archivo nativo.
 
       1. representantes + todos los dueños de la tabla (naturales y jurídicas)
@@ -408,8 +429,12 @@ def extraer_shareholders(
     Devuelve `(resultado, senales)`. Las señales son para calibrar, no para el
     consumidor.
     """
-    texto1, uso1 = _llamar_con_archivo(
-        nombre, contenido, PROMPT_SHAREHOLDERS, _config_multimodal(ESQUEMA_SHAREHOLDERS)
+    # Acepta objetos con `.nombre`/`.contenido` (lo que devuelve `ingesta_s3`)
+    # o tuplas sueltas, que es como lo llaman los tests.
+    pares = [(d.nombre, d.contenido) if hasattr(d, "nombre") else d for d in docs]
+
+    texto1, uso1 = _llamar_con_archivos(
+        pares, PROMPT_SHAREHOLDERS, _config_multimodal(ESQUEMA_SHAREHOLDERS)
     )
     p1 = _objeto_de(texto1, "shareholders")
 
@@ -437,8 +462,8 @@ def extraer_shareholders(
             # backticks anidados, así que el prompt recibe el texto ya armado.
             doc = str(j.get("shareholderId") or "").strip()
             empresa = str(j.get("shareholderName") or "") + (f" (documento {doc})" if doc else "")
-            texto2, uso2 = _llamar_con_archivo(
-                nombre, contenido,
+            texto2, uso2 = _llamar_con_archivos(
+                pares,
                 _rellenar(PROMPT_SHAREHOLDERS_CADENA, empresa=empresa),
                 _config_multimodal(ESQUEMA_CADENA),
             )

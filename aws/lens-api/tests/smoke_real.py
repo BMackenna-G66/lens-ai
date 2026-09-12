@@ -356,8 +356,74 @@ def prueba_shareholders_real() -> None:
     print("\n   OK: las dos pasadas devolvieron el contrato completo y la suma cierra.")
 
 
+def prueba_varios_documentos_real() -> None:
+    """El caso que se perdía: la tabla de propiedad NO está en la escritura.
+
+    Es lo normal en un consolidado — la escritura constituye y un anexo trae la
+    composición vigente. Medido en producción: mandando un solo archivo, la
+    extracción perdía los accionistas en el 63 % de los consolidados de varios.
+    """
+    print("\n=== 4. La tabla de propiedad en OTRO archivo ===")
+    import gemini
+
+    i, j = ESCRITURA_CADENA.index("CUARTO:"), ESCRITURA_CADENA.index("QUINTO:")
+    escritura_sin_tabla = ESCRITURA_CADENA[:i] + ESCRITURA_CADENA[j:]
+    anexo_con_tabla = ("ANEXO DE COMPOSICION ACCIONARIA\n"
+                       "NORTE ANDINO LOGISTICA SpA\n\n" + ESCRITURA_CADENA[i:j])
+
+    a = ("company_deeds_document_1.pdf", _pdf(escritura_sin_tabla))
+    b = ("company_complementary_document_2.pdf", _pdf(anexo_con_tabla))
+
+    def correr(docs, etiqueta):
+        r, s = gemini.extraer_shareholders(docs)
+        gente = r["directOwnership"] + r["indirectShareholders"]
+        print(f"\n   {etiqueta}")
+        print(f"     dueños={len(gente)}  suma={s['suma_participacion']}  "
+              f"sospechosa={s['participacion_sospechosa']}")
+        for p in gente:
+            print(f"       {p.get('personType'):<9} {str(p.get('shareholderName'))[:38]:<38} "
+                  f"{p.get('ownershipPercentage')}")
+        return gente
+
+    solo = correr([a], "ANTES — solo la escritura (sin la tabla)")
+    ambos = correr([a, b], "AHORA — escritura + anexo, en la misma llamada")
+
+    print("\n   --- verificaciones ---")
+    fallos = []
+
+    def chequear(nombre, ok, detalle=""):
+        print(f"   {'OK  ' if ok else 'FALLA'} {nombre}{f' — {detalle}' if detalle and not ok else ''}")
+        if not ok:
+            fallos.append(nombre)
+
+    nom = lambda xs: " ".join(str(p.get("shareholderName", "")).upper() for p in xs)
+
+    chequear("con los dos archivos salen los 2 dueños", len(ambos) == 2, f"{len(ambos)}")
+    chequear("aparece la socia natural", "SILVA" in nom(ambos), nom(ambos)[:60])
+    chequear("y la sociedad", "CORDILLERA" in nom(ambos), nom(ambos)[:60])
+    pct = {str(p.get("shareholderName", "")).split()[0].upper(): p.get("ownershipPercentage")
+           for p in ambos}
+    chequear("los porcentajes son los de la tabla (30/70)",
+             any(abs((v or 0) - 30) < 0.5 for v in pct.values())
+             and any(abs((v or 0) - 70) < 0.5 for v in pct.values()), str(pct))
+
+    # Lo que hacía el camino viejo, y por qué era peor que "faltar": con un solo
+    # archivo el modelo no dice «no sé», INVENTA un reparto coherente. Da 100 y
+    # pasa el chequeo de participación, así que nada lo delata.
+    chequear("con un solo archivo la respuesta era incompleta",
+             len(solo) < len(ambos), f"solo={len(solo)} ambos={len(ambos)}")
+    if solo and len(solo) == 1 and (solo[0].get("ownershipPercentage") or 0) > 99:
+        print("   NOTA  con un archivo le adjudicó el 100 % a un solo dueño: no faltaba")
+        print("         un dato, había un dato INVENTADO que pasaba el chequeo de suma.")
+
+    if fallos:
+        sys.exit(f"\n   {len(fallos)} verificación(es) fallaron: {', '.join(fallos)}")
+    print("\n   OK: lo que un solo archivo perdía, los dos lo recuperan.")
+
+
 if __name__ == "__main__":
     prueba_pdf_real()
     prueba_extraccion_real()
     prueba_shareholders_real()
+    prueba_varios_documentos_real()
     print("\nTodo OK.\n")

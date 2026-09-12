@@ -26,7 +26,7 @@ import { DocumentChat } from './DocumentChat';
 import { KEYWORDS_BY_COUNTRY } from '../services/countryKeywords';
 import { nuevoAnalisisId, persistirAnalisis, persistirFicha, sha256Hex } from '../services/lensPersistenciaService';
 import { pendientesEnBuffer, reintentarPendientes } from '../services/colasLogService';
-import { extraerShareholders, filasDePersonas, elegirDocumentoSocietario } from '../services/shareholdersService';
+import { extraerShareholders, filasDePersonas, elegirDocumentosSocietarios } from '../services/shareholdersService';
 import { persistirPersonas } from '../services/lensPersistenciaService';
 import { useAuth } from '../context/AuthContext';
 import { db } from '../services/dbService';
@@ -336,10 +336,12 @@ export const DocumentAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> =
         // Se resuelve ACÁ, antes de persistir, porque decide QUIÉN escribe la
         // ficha. Dos escritores para la misma fila se pisan: ver `omitirFicha`.
         //
-        // NO es "el primer PDF": es el que más se parece a la escritura. En
-        // producción, 4 de 45 consolidados tenían una cédula como primer PDF y
-        // se le pedía a ella la tabla de propiedad.
-        const archivoNativo = elegirDocumentoSocietario(files);
+        // Van TODOS los que el modelo pueda leer, ordenados: primero el que
+        // más se parece a la escritura. Mandar uno solo perdía los accionistas
+        // en el 63 % de los consolidados de varios archivos — el camino de
+        // texto concatena todo y este mandaba uno.
+        const docsNativos = elegirDocumentosSocietarios(files);
+        const archivoNativo = docsNativos[0];
         void persistirAnalisis({
           analisisId,
           ejecutadoEn: analisisEn,
@@ -412,7 +414,7 @@ export const DocumentAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> =
         if (archivoNativo) {
           void (async () => {
             try {
-              const { resultado, senales } = await extraerShareholders(archivoNativo);
+              const { resultado, senales } = await extraerShareholders(docsNativos);
               const filas = filasDePersonas(analisisId, resultado, {
                 origen: 'analizador', ejecutadoEn: analisisEn,
               });

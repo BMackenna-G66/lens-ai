@@ -404,28 +404,61 @@ export async function generarConArchivo(
   prompt: string,
   opciones?: { responseSchema?: unknown; operacion?: string; maxSalida?: number },
 ): Promise<RespuestaMultimodal> {
-  const mime = mimeParaGemini(archivo);
-  if (!mime) {
+  return generarConArchivos([archivo], prompt, opciones);
+}
+
+/**
+ * Igual que `generarConArchivo` pero con VARIOS archivos en la misma llamada.
+ *
+ * Existe porque mandar uno solo perdía datos, y no de a poco: medido sobre 87
+ * análisis de producción en los que el camino de texto SÍ encontró accionistas,
+ * la extracción estructurada los perdió en el 5 % de los de un archivo y en el
+ * **63 % de los consolidados de varios**. La causa es esta: el camino de texto
+ * concatena todos los documentos y este mandaba uno.
+ *
+ * El orden importa y lo decide el llamador: el modelo lee los documentos en el
+ * orden en que se le pasan, y el primero es el que manda para decidir cuál es la
+ * sociedad principal.
+ */
+export async function generarConArchivos(
+  archivos: File[],
+  prompt: string,
+  opciones?: { responseSchema?: unknown; operacion?: string; maxSalida?: number },
+): Promise<RespuestaMultimodal> {
+  if (archivos.length === 0) {
+    throw new Error('El análisis falló. Error: no se recibió ningún archivo para la ruta multimodal.');
+  }
+  const mimes = archivos.map(a => {
+    const m = mimeParaGemini(a);
+    if (!m) {
+      throw new Error(
+        `El análisis falló. Error: tipo de archivo no soportado para la ruta multimodal (${a.name}). ` +
+        `Se aceptan PDF, JPG y PNG.`,
+      );
+    }
+    return m;
+  });
+  // El tope de Google es sobre el REQUEST entero, no sobre cada archivo: con
+  // varios hay que sumarlos.
+  const total = archivos.reduce((n, a) => n + a.size, 0);
+  if (total > TOPE_INLINE_BYTES) {
     throw new Error(
-      `El análisis falló. Error: tipo de archivo no soportado para la ruta multimodal (${archivo.name}). ` +
-      `Se aceptan PDF, JPG y PNG.`,
+      `El análisis falló. Error: los ${archivos.length} archivo(s) suman ${(total / 1024 / 1024).toFixed(1)} MB ` +
+      `y el tope para mandarlos en línea es ${(TOPE_INLINE_BYTES / 1024 / 1024).toFixed(0)} MB.`,
     );
   }
-  if (archivo.size > TOPE_INLINE_BYTES) {
-    throw new Error(
-      `El análisis falló. Error: el archivo pesa ${(archivo.size / 1024 / 1024).toFixed(1)} MB y el tope para mandarlo ` +
-      `en línea es ${(TOPE_INLINE_BYTES / 1024 / 1024).toFixed(0)} MB.`,
-    );
-  }
-  const datos = await archivoABase64(archivo);
+  const datos = await Promise.all(archivos.map(archivoABase64));
 
   return executeWithRetry(async (ai) => {
     const response = await ai.models.generateContent({
       model: primaryAnalysisModel,
-      // El archivo PRIMERO y el prompt después: es el orden que recomienda
-      // Google para que las instrucciones se lean con el documento ya en
+      // Los archivos PRIMERO y el prompt después: es el orden que recomienda
+      // Google para que las instrucciones se lean con los documentos ya en
       // contexto.
-      contents: [{ parts: [{ inlineData: { mimeType: mime, data: datos } }, { text: prompt }] }],
+      contents: [{ parts: [
+        ...datos.map((d, i) => ({ inlineData: { mimeType: mimes[i], data: d } })),
+        { text: prompt },
+      ] }],
       config: {
         thinkingConfig: { thinkingBudget: 0 },
         maxOutputTokens: opciones?.maxSalida ?? TOPE_SALIDA_MULTIMODAL,

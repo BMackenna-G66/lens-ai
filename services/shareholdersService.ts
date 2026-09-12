@@ -16,7 +16,7 @@
 // justamente el error que hay que medir para calibrar.
 
 import { Type } from '@google/genai';
-import { generarConArchivo } from './geminiService';
+import { generarConArchivos, TOPE_INLINE_BYTES } from './geminiService';
 import { GEMINI_SHAREHOLDERS_PROMPT, GEMINI_SHAREHOLDERS_CADENA_PROMPT } from '../constants';
 
 export type TipoPersona = 'NATURAL' | 'JURIDICA';
@@ -162,11 +162,51 @@ const rango = (nombre: string): number => {
  * otra cosa por la ruta nativa.
  */
 export function elegirDocumentoSocietario<T extends { name: string }>(archivos: T[]): T | undefined {
-  const nativos = archivos.filter(a => /\.(pdf|jpe?g|png)$/i.test(a.name));
-  if (nativos.length === 0) return undefined;
-  return nativos
+  return elegirDocumentosSocietarios(archivos)[0];
+}
+
+/**
+ * TODOS los documentos que se le mandan al modelo, en el orden en que los tiene
+ * que leer: primero el que más se parece a la escritura.
+ *
+ * Mandar uno solo perdía datos, y no de a poco. Medido sobre 87 análisis de
+ * producción en los que el camino de texto SÍ encontró accionistas —o sea, el
+ * documento demostrablemente los tenía—, la extracción estructurada los perdió:
+ *
+ *     1 archivo         3 de 60    5 %
+ *     varios archivos  17 de 27   63 %
+ *
+ * Doce veces peor en los consolidados, porque el camino de texto concatena
+ * todos los documentos y este mandaba uno. La tabla de propiedad vive en la
+ * escritura, pero el consolidado trae además anexos y modificaciones donde
+ * suele estar la composición vigente.
+ *
+ * Se acota por peso acumulado: el tope de Google es sobre el request entero.
+ * Como van ordenados, si algo queda afuera es siempre lo menos parecido a una
+ * escritura.
+ */
+export function elegirDocumentosSocietarios<T extends { name: string; size?: number }>(
+  archivos: T[],
+  topeBytes = TOPE_INLINE_BYTES,
+): T[] {
+  const ordenados = archivos
+    .filter(a => /\.(pdf|jpe?g|png)$/i.test(a.name))
     .map((a, i) => ({ a, r: rango(a.name), i }))
-    .sort((x, y) => x.r - y.r || x.i - y.i)[0].a;
+    .sort((x, y) => x.r - y.r || x.i - y.i)
+    .map(x => x.a);
+
+  const salida: T[] = [];
+  let acumulado = 0;
+  for (const a of ordenados) {
+    const peso = a.size ?? 0;
+    // El primero entra siempre: si ni él cabe, que falle abajo con el mensaje
+    // de tamaño en vez de devolver una lista vacía que parecería "no había
+    // documentos".
+    if (salida.length > 0 && acumulado + peso > topeBytes) break;
+    salida.push(a);
+    acumulado += peso;
+  }
+  return salida;
 }
 
 const vacio = (): ResultadoShareholders =>
@@ -195,9 +235,12 @@ const comoJson = (texto: string, que: string): Record<string, unknown> => {
  * de oro deja de depender de que el modelo la respete.
  */
 export async function extraerShareholders(
-  archivo: File,
+  archivos: File | File[],
 ): Promise<{ resultado: ResultadoShareholders; senales: SenalesShareholders; uso?: { promptTokenCount?: number; candidatesTokenCount?: number } }> {
-  const r1 = await generarConArchivo(archivo, GEMINI_SHAREHOLDERS_PROMPT, {
+  // Acepta uno o varios: la firma vieja tomaba un File suelto y así ningún
+  // llamador que no se haya migrado se rompe.
+  const docs = Array.isArray(archivos) ? archivos : [archivos];
+  const r1 = await generarConArchivos(docs, GEMINI_SHAREHOLDERS_PROMPT, {
     responseSchema: ESQUEMA_SHAREHOLDERS, operacion: 'Shareholders',
   });
   const p1 = comoJson(r1.texto, 'shareholders') as {
@@ -218,8 +261,8 @@ export async function extraerShareholders(
   for (const j of juridicas) {
     let miembros: PersonaContrato[] = [];
     try {
-      const r2 = await generarConArchivo(
-        archivo,
+      const r2 = await generarConArchivos(
+        docs,
         // La empresa se compone ACÁ, no dentro del prompt: el extractor que
         // sincroniza los prompts con la API no puede leer un ternario con
         // backticks anidados.
