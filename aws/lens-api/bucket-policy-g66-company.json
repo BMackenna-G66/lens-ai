@@ -1,0 +1,54 @@
+{
+  "_comentario": [
+    "Bucket policy que hay que agregarle a `g66-company`, EN LA CUENTA DUEÑA DEL",
+    "BUCKET. No se puede aplicar desde la 561521480266: probado, devuelve",
+    "AccessDenied con el motivo explícito «because no resource-based policy allows",
+    "the s3:ListBucket action».",
+    "",
+    "S3 entre cuentas necesita LAS DOS PUNTAS y con una sola no alcanza:",
+    "  · esta policy, del lado del bucket  ← lo que falta",
+    "  · la política IAM del rol que lee    ← ya está en template.yaml",
+    "",
+    "El rol se llama `lens-analisis-rol` a propósito, con nombre fijo en vez del",
+    "hash que genera CloudFormation: así este ARN se conoce ANTES de desplegar y",
+    "el permiso se puede pedir en paralelo, sin la espera de desplegar-para-pedir",
+    "y pedir-para-que-el-despliegue-sirva.",
+    "",
+    "Alcance: SOLO LECTURA y solo el prefijo de documentos societarios. El",
+    "servicio nunca escribe en S3. Si el prefijo real no es ese, cambiarlo en el",
+    "Resource del segundo Statement y en la Condition del primero — no conviene",
+    "abrir el bucket entero.",
+    "",
+    "Para aplicarla, en la cuenta dueña:",
+    "  aws s3api put-bucket-policy --bucket g66-company --policy file://bucket-policy-g66-company.json",
+    "",
+    "Borrar esta clave `_comentario` antes de aplicar: S3 rechaza claves que no",
+    "son del esquema de policy."
+  ],
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "LensListarSoloElPrefijoDeDocumentos",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::561521480266:role/lens-analisis-rol"
+      },
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::g66-company",
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": "company_shareholders_document/*"
+        }
+      }
+    },
+    {
+      "Sid": "LensLeerLosDocumentos",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::561521480266:role/lens-analisis-rol"
+      },
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::g66-company/company_shareholders_document/*"
+    }
+  ]
+}
