@@ -114,7 +114,20 @@ export interface SenalesShareholders {
    * mismas dos personas duplicadas como directas y como nivel 1.
    */
   sumaParticipacion: number | null;
-  /** true cuando la suma se aleja más de 0,5 puntos de 100. */
+  /**
+   * true cuando la suma se aleja más de 0,5 puntos de 100.
+   *
+   * LÍMITE, y hay que tenerlo presente antes de apoyarse en esta señal: **no
+   * detecta la alucinación de un solo socio**. Medido contra Gemini: cuando al
+   * modelo le falta la tabla de propiedad no dice «no sé», le adjudica el 100 %
+   * al único socio que ve. Eso suma 100, sale `false` acá, y cumple las tres
+   * restricciones de la regla de oro. El dato inventado es internamente
+   * consistente y ninguna de nuestras señales estructurales lo delata.
+   *
+   * Lo único que lo agarra es `contrastarLecturas`, comparando contra la otra
+   * lectura del mismo documento. Un `participacionSospechosa: false` NO es
+   * garantía de que la composición sea correcta, y no hay que presentarlo así.
+   */
   participacionSospechosa: boolean;
 }
 

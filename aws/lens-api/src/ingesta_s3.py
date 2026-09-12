@@ -47,6 +47,15 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 # ── Los tres filtros del bot, en este orden ─────────────────────────────────
+#
+# OJO: esto filtra el NOMBRE DEL ARCHIVO, no el prefijo de claves del bucket.
+# Se parecen y no son lo mismo. La ruta dentro del bucket la manda el llamador
+# en `folder_path` y se usa tal cual como `Prefix` (ver `listar_prefijo`); este
+# servicio no la conoce ni la impone.
+#
+# Confundir las dos ya pasó: la bucket policy se escribió pidiendo
+# `g66-company/company_shareholders_document/*` como si fuera una carpeta, y con
+# eso no habría alcanzado ningún objeto real.
 PREFIJO_NOMBRE = "company_shareholders_document_"
 EXTENSIONES = (".pdf", ".jpg", ".jpeg", ".png")
 MAX_BYTES_ARCHIVO = 10 * 1024 * 1024        # 10 MB por archivo
