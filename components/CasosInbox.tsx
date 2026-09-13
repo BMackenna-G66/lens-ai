@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import * as XLSX from 'xlsx';
 import { screeningVigente, SCREENING_SCHEMA, subscribeCasos, isCasosAvailable, guardarScreening, guardarRemesaRow, guardarRemesaRows, guardarScreeningBeneficiario, eliminarCasos, TOPE_COLA, CasoSF, InfoCola } from '../services/casosService';
 import { traerCasosCola, importarCasos, CasoSFRemoto } from '../services/salesforceColaService';
 import { TIPOS_CIERRE_REMESA, TIPOS_REMESA_AUTOMATICOS, tipoRemesaPorId, camposDeCierreRemesa } from '../services/cierreRemesaTipos';
@@ -549,6 +550,93 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       // Acá sí se reabre: un lote parcial hay que poder reintentarlo. Lo que ya
       // se aplicó no se reenvía, porque quedó en `remesaAdminHechos`.
       remesaMasivoLock.current = false;
+    }
+  };
+
+  // ── Descarga de la cola a Excel ────────────────────────────────────────────
+  // Una fila por caso, con las columnas fijas primero —lo que se mira— y después
+  // TODO el payload tal como llegó de Salesforce, que es distinto en cada cola.
+  //
+  // Exporta lo que está EN PANTALLA, no la cola entera: si hay casos tildados va
+  // la selección, y si no, lo que quedó después del buscador y los filtros. Es
+  // lo que espera cualquiera que filtró y después le da a descargar; bajar 900
+  // filas cuando en la tabla se ven 12 sería una sorpresa desagradable.
+  const [descargando, setDescargando] = useState(false);
+
+  const descargarExcel = () => {
+    // `ordenados` y no `filtrados`: es lo que la tabla recorre de verdad, ya con
+    // los filtros de columna y el orden aplicados. Exportar `filtrados` traería
+    // filas que en pantalla no están.
+    const base = seleccion.size > 0
+      ? ordenados.filter(c => seleccion.has(c.id))
+      : ordenados;
+    if (base.length === 0) return;
+    setDescargando(true);
+    try {
+      const filas = base.map(c => {
+        const op = vistaOp(c);
+        const sc = screenMap[c.id] ?? c.screening;
+        const fila: Record<string, unknown> = {
+          'N° de caso': c.numeroCaso,
+          'Asunto': c.asunto,
+          'Cuenta': c.nombreCuenta,
+          'Nombre completo': nombreCompleto(c),
+          'Id interno': idInterno(c),
+          'Correo': correoCliente(c),
+          'País': c.pais,
+          'País origen': paisOrigen(c),
+          'Recibido': fmtFecha(c.recibidoEn),
+          'Status': op.status,
+          'Estado': op.estado,
+          'Prioridad': op.prioridad,
+          'Asignado a': op.asignado,
+          'Cerrado en Salesforce': c.cierres?.sf?.ok === true ? 'Sí' : 'No',
+          'Cerrado en Admin': c.cierres?.admin?.ok === true ? 'Sí' : 'No',
+          'Tipología de cierre': c.cierres?.sf?.tipologia ?? c.cierres?.admin?.tipologia ?? '',
+        };
+        // Lo propio de cada cola. Se agrega solo donde aplica para no dejar
+        // columnas vacías en la otra.
+        if (activeQueue === 'remesa') {
+          fila['N° de transacción'] = c.remesa || '';
+          const tx = remesaMap[c.remesa];
+          fila['Beneficiario'] = tx?.beneficiary_name ?? '';
+          fila['Documento beneficiario'] = tx?.beneficiary_dni ?? '';
+          // El screening del BENEFICIARIO, que es distinto del del cliente y es
+          // lo que decide si la remesa se libera.
+          const b = (c.screeningBeneficiario as unknown as RemesaScreening | undefined) ?? benefMap[c.id];
+          fila['Benef. screening'] = b?.estado ?? '';
+          fila['Benef. flujo'] = b?.flujo ?? '';
+          fila['Benef. conclusión'] = b?.decision ?? '';
+          fila['Benef. delitos únicos'] = b?.delitosUnicos ?? '';
+          fila['Benef. listas con match'] = b?.listas?.length ?? '';
+          fila['Envío a sí mismo'] = b?.samePerson === true ? 'Sí' : b?.samePerson === false ? 'No' : '';
+          fila['Documento que coincidió'] = b?.evidenciaSamePerson?.documento ?? '';
+        }
+        // El screening del cliente. `screenMap` es lo vivo en pantalla y
+        // `c.screening` lo cacheado en el caso: el primero puede estar vacío
+        // todavía, y el segundo es el único que trae `screenedAt`.
+        if (sc) {
+          fila['Screening'] = sc.estado ?? '';
+          fila['Conclusión'] = sc.decision ?? '';
+          fila['Delitos únicos'] = sc.delitosUnicos ?? '';
+          fila['Precedentes'] = sc.precedentes ?? '';
+          fila['PEP'] = sc.pep === true ? 'Sí' : sc.pep === false ? 'No' : '';
+        }
+        fila['Screening consultado'] = c.screening?.screenedAt ? fmtFecha(c.screening.screenedAt) : '';
+        // El payload completo al final: cada cola manda campos distintos y no
+        // hay que perderlos. `cellText` aplana lo que no es escalar — Excel no
+        // sabe qué hacer con un objeto y lo escribiría como [object Object].
+        for (const k of columnas) fila[k] = cellText(c.datos?.[k]);
+        return fila;
+      });
+
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(filas),
+        activeQueue === 'ofac' ? 'OFAC-PEP' : 'Remesas');
+      const hoy = new Date().toLocaleDateString('es-CL').replace(/\//g, '-');
+      XLSX.writeFile(wb, `cola_${activeQueue}_${hoy}.xlsx`);
+    } finally {
+      setDescargando(false);
     }
   };
 
@@ -2794,6 +2882,21 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                 <input type="checkbox" checked={verCerrados} onChange={e => setVerCerrados(e.target.checked)} className="w-3.5 h-3.5" />
                 Ver cerrados
               </label>
+
+              {/* Descarga a Excel. Solo en OFAC y Remesa: son las dos colas con
+                  columnas propias y screening, y las que se gestionan en lote. */}
+              {(activeQueue === 'ofac' || activeQueue === 'remesa') && ordenados.length > 0 && (
+                <button
+                  onClick={descargarExcel}
+                  disabled={descargando}
+                  title={seleccion.size > 0
+                    ? `Descarga los ${seleccion.size} caso(s) seleccionados`
+                    : `Descarga los ${ordenados.length} caso(s) que se ven, con el payload completo`}
+                  className="flex items-center gap-1.5 text-xs font-semibold text-emerald-700 dark:text-emerald-400 hover:underline disabled:opacity-50 whitespace-nowrap"
+                >
+                  ⬇ Excel ({seleccion.size > 0 ? seleccion.size : ordenados.length})
+                </button>
+              )}
               {/* Qué se leyó. Sin esto, una cola corta y una consulta que se quedó
                   corta se ven exactamente igual. */}
               {infoCola && (
