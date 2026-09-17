@@ -195,5 +195,14 @@ ok('qué se resolvió', !!d.resolver);
 ok('cómo quedó después', !!d.historialDespues);
 ok('el estado efectivo final', !!d.estadoEfectivo);
 
+console.log('\n── NINGUNA llamada manda Claim-Email ──');
+// El gateway lo inyecta desde el token. Mandarlo además lo CONCATENA en el
+// registro: medido en producción, quedó
+// `createdBy: "benjamin.mackenna@global66.com,benjamin.mackenna@global66.com"`.
+// Un campo de auditoría con dos emails pegados no sirve para auditar.
+modo = {}; r = await correr(ENV, 'BLOCKED');
+ok('ninguna a ms-customer lo manda', msc(r).every(l => l.headers['Claim-Email'] === undefined),
+   msc(r).filter(l => l.headers['Claim-Email']).map(l => l.u));
+
 console.log(f ? `\n  ${f} FALLARON` : '\n  Todo OK.');
 process.exit(f ? 1 : 0);

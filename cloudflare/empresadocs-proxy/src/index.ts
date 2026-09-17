@@ -638,7 +638,6 @@ export default {
       const refresh = env.G66_ADMIN_REFRESH_TOKEN;
       if (!refresh) return jsonError('Falta el secret G66_ADMIN_REFRESH_TOKEN en el Worker', 500, cors);
       const cid = String(url.searchParams.get('customerId') || '').trim();
-      const email = String(url.searchParams.get('email') || '').trim();
       if (!cid) return jsonError('Falta customerId', 400, cors);
 
       let idToken = '';
@@ -670,7 +669,10 @@ export default {
         headers: {
           'Accept': 'application/json, text/plain, */*',
           'Authorization': idToken,
-          ...(email ? { 'Claim-Email': email } : {}),
+          // Sin `Claim-Email`, igual que el camino de escritura: el gateway lo
+          // inyecta desde el token y mandarlo lo CONCATENA. Acá es un GET y no
+          // ensuciaría ningún registro, pero se saca para que no quede el
+          // ejemplo a mano de que "se puede mandar".
         },
       }, 30000);
       const txt = await res.text();
