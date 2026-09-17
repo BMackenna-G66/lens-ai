@@ -92,60 +92,76 @@ const modeloAdmin = (env: Env): ModeloAdmin =>
 const accionPara = (status: string): 'resolver' | 'crear_y_resolver' =>
   status === 'NORMAL' ? 'resolver' : 'crear_y_resolver';
 
-// ── Rutas reales de ms-customer (contrato v2, 17-09-2026) ──────────────────
-// NO hay host aparte: `ms-customer` cuelga del path `/customer` del MISMO
-// api.global66.com que Lens ya usa. `MS_CUSTOMER_BASE` queda solo para poder
-// apuntar a CI (`https://ci-api.global66.com`) sin tocar código.
+// ── Rutas reales de ms-customer, carpeta BO ────────────────────────────────
 //
-// Se usa la carpeta `Iuse` y NO `Admin BO`: Iuse no pide autenticación ni
-// `Claim-User-Admin-Rol`, y el actor viaja en el body.
-const MS_CREAR = '/customer/iuse/compliance';
-const MS_RESOLVER = (id: string) => `/customer/iuse/compliance/customers/${encodeURIComponent(id)}/resolve`;
-const MS_ESTADO = (id: string) => `/customer/iuse/compliance/customers/${encodeURIComponent(id)}/status`;
-const MS_SIN_RESOLVER = (id: string) => `/customer/iuse/compliance/customers/${encodeURIComponent(id)}/comments/unresolved`;
+// Se usa **BO** y no `Iuse`. Probado el 17-09-2026 desde internet, que es desde
+// donde pega este Worker:
+//   ruta inventada        → 403 "Missing Authentication Token"  (no mapeada)
+//   /customer/bo/...      → 401 UNAUTHORIZED source BUSINESS_SERVICE  (existe)
+//   /customer/iuse/...    → 403 "Missing Authentication Token"  ← igual que la inventada
+// O sea: `Iuse` no está publicada hacia afuera. Es la puerta entre
+// microservicios, dentro de la VPC.
+//
+// BO es además la puerta correcta por otro motivo: es la que usa el Admin desde
+// el navegador, con la credencial del equipo de Compliance, así que queda
+// registrado QUIÉN hizo el cambio en vez de un bot genérico.
+const MS_BASE_PATH = '/customer/bo/compliance';
+const MS_CREAR = MS_BASE_PATH;
+const MS_RESOLVER = (complianceId: string | number) => `${MS_BASE_PATH}/${encodeURIComponent(String(complianceId))}/resolve`;
+const MS_HISTORIAL = (id: string) => `${MS_BASE_PATH}/customers/${encodeURIComponent(id)}/history`;
 
-// Quién queda registrado como autor en Admin. Es un valor del catálogo de
-// actores, no un email: mandar la casilla del analista caería en SYSTEM_BOT.
-// La trazabilidad por persona ya queda en `colas_trabajo.cierre` y en Salesforce.
-const MS_ACTOR = 'OPERATION_BOT';
+// En BO NO hay `/status` ni `/comments/unresolved`: `history` cubre las dos.
+// Viene ordenado por prioridad —primero los no resueltos, y entre esos el de
+// mayor restricción— así que el PRIMER elemento es el estado efectivo.
 
-// `observation` de ms-customer admite SOLO letras, números y espacios. Es más
-// estricto que `sanitizarTexto` de la app, que deja punto y coma — y con un
-// punto la API responde BAD_REQUEST "Observation cannot have special
-// characters". Se sanea acá, en el borde, para que valga también para lo que
-// escribe el analista a mano.
+// Comentarios TERMINALES del catálogo: no se pueden resolver nunca. Intentarlo
+// devuelve COMPLIANCE_STATUS_CANNOT_BE_RESOLVED.
+//
+// `NORMAL` está acá y no es teórico: el cliente de prueba 4535350 tiene un
+// `NORMAL` sin resolver conviviendo con el bloqueo. Sin esta lista, cada cierre
+// intentaría resolverlo y fallaría. Da igual que quede vigente: es nivel 1 y no
+// restringe nada.
+const MS_TERMINALES = new Set([
+  'NORMAL', 'ACCOUNT_DELETION', 'TOTAL_FRAUD_CLOSURE', 'ROULETTE_USERS', 'MULE_ACCOUNT',
+  'TOTAL_COMPLIANCE_CLOSURE_KYX', 'CONFIRMED_CRIMINAL_PROFILE', 'TOTAL_COMPLIANCE_CLOSURE_KYT',
+  'ACCOUNT_DELETION_DEATH',
+]);
+
+// `observation` admite SOLO letras, números y espacios. Es más estricto que
+// `sanitizarTexto` de la app, que deja punto y coma — y con un punto la API
+// responde BAD_REQUEST "Observation cannot have special characters".
 const soloAlfanumerico = (v: unknown): string =>
   String(v ?? '').normalize('NFC').replace(/[^0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ ]/g, ' ').replace(/\s+/g, ' ').trim();
 
-// Resolver algo que ya no está vigente NO es un error: significa que el estado
-// deseado ya se alcanzó. El flujo reintenta, y si esto contara como falla el
-// canal Admin nunca cerraría y el caso quedaría en GESTIONANDO para siempre.
-const RESOLVER_YA_ESTABA = 'UNRESOLVED_COMPLIANCE_NOT_FOUND';
-const esResolverVacio = (data: unknown): boolean =>
-  JSON.stringify(data ?? '').includes(RESOLVER_YA_ESTABA);
+// Errores que NO son fallas del cierre, y por qué:
+//   DUPLICATE_UNRESOLVED_COMMENT  el bloqueo que íbamos a crear YA existe. En BO
+//                                 esto es error (en Iuse devolvía el existente);
+//                                 para nosotros es "ya estaba", o sea éxito.
+//   COMPLIANCE_STATUS_CANNOT_BE_RESOLVED  terminal o ya resuelto: nada que hacer.
+//   COMPLIANCE_INVALID_RESOLVE_AREA  el bloqueo es de OTRA área (fraude, CX).
+//                                 Compliance no debería levantarlo, así que se
+//                                 deja y se reporta — el chequeo final dirá si
+//                                 el cliente quedó como se pretendía.
+const contiene = (data: unknown, code: string) => JSON.stringify(data ?? '').includes(code);
 
 /**
- * El paso 2 contra ms-customer. Devuelve la MISMA forma que `doStep`
- * (`{ok, status, data}`) para que el resto del handler, la app y el Lambda no
- * noten la diferencia.
+ * El paso 2 contra ms-customer, carpeta BO. Devuelve la MISMA forma que
+ * `doStep` para que el resto del handler, la app y el Lambda no noten nada.
  *
- * CREAR VA ANTES QUE RESOLVER, y no es estilo. No hay transacción entre las
- * llamadas: si se resolviera primero y fallara el create, el cliente quedaría
- * LIBERADO sin que nadie lo haya decidido. En este orden, una falla parcial lo
- * deja en el estado más restrictivo, que es el lado correcto para equivocarse.
+ * Tres diferencias grandes contra `Iuse`, que es lo que hizo falta reescribir:
  *
- * RESOLVER ES POR COMMENT, no por id, y esa es la parte que no se puede
- * adivinar: cada llamada barre los vigentes que tengan ESE comment. Como no
- * sabemos con qué comment bloqueó el bot —en el cliente 4535350 es
- * `OTHER_FULLY_BLOCKED`, el genérico de fallback— hay que PREGUNTAR cuáles hay
- * sin resolver y resolver uno por uno. Mandar un resolve a ciegas no funciona:
- * `comment` es obligatorio.
+ *   · RESOLVER ES POR `complianceId`, uno por llamada. Hay que listar primero.
+ *   · NO existe el campo `status` en el create: el estado sale SOLO del
+ *     `comment`. No hay fallback — un comment fuera de catálogo es error duro.
+ *   · Un duplicado es ERROR, no un no-op silencioso.
+ *
+ * CREAR VA ANTES QUE RESOLVER: no hay transacción entre las llamadas, así que
+ * una falla parcial tiene que dejar al cliente en el estado MÁS restrictivo.
  */
 async function paso2MsCustomer(
   env: Env, idToken: string, id: string, status: string,
   body: { comment?: string; observation?: string; agent?: string },
 ): Promise<{ ok: boolean; status: number; data: unknown }> {
-  // Mismo host que el resto de Admin, salvo que se apunte a CI a propósito.
   const base = String(env.MS_CUSTOMER_BASE || G66_ADMIN_BASE).trim().replace(/\/$/, '');
 
   const llamar = async (method: string, path: string, payload?: unknown) => {
@@ -154,10 +170,11 @@ async function paso2MsCustomer(
       headers: {
         'Accept': 'application/json, text/plain, */*',
         'Content-Type': 'application/json',
-        // `Iuse` NO pide autenticación. Se manda igual porque el token ya está
-        // en mano para los otros cuatro pasos y no cuesta nada: si la ruta
-        // llegara a publicarse con credencial, esto ya la lleva.
         'Authorization': idToken,
+        // Alimenta `created_by` / `resolved_by`. El ÁREA ya no sale de acá: la
+        // resuelve el gateway con `Claim-User-Admin-Rol`, que inyecta él solo
+        // desde el claim `custom:title` del token. Nosotros no lo mandamos.
+        'Claim-Email': String(body.agent || ''),
       },
       body: payload === undefined ? undefined : JSON.stringify(payload),
     }, 30000);
@@ -166,78 +183,80 @@ async function paso2MsCustomer(
     return { ok: res.ok, status: res.status, data };
   };
 
+  // El historial viene ordenado por prioridad: el primero es el estado efectivo.
+  const filas = (d: unknown): Array<Record<string, unknown>> => {
+    const x = Array.isArray(d) ? d
+      : ((d as { content?: unknown[] })?.content ?? (d as { data?: unknown[] })?.data ?? []);
+    return Array.isArray(x) ? x as Array<Record<string, unknown>> : [];
+  };
+  const sinResolver = (fs: Array<Record<string, unknown>>) =>
+    fs.filter(r => r.resolved !== true && r.resuelto !== true && !r.resolvedAt && !r.resolved_at);
+  const efectivo = (fs: Array<Record<string, unknown>>) =>
+    String(sinResolver(fs)[0]?.status ?? 'NORMAL');
+
   const accion = accionPara(status);
   const observation = soloAlfanumerico(body.observation);
   const comentarioPropio = String(body.comment || '').trim();
-  const sub: Record<string, unknown> = { modelo: 'nuevo', accion, statusPedido: status, comentarioPropio };
+  const sub: Record<string, unknown> = { modelo: 'nuevo', puerta: 'BO', accion, statusPedido: status, comentarioPropio };
   let ok = true;
   let httpFinal = 200;
 
-  // ── 1) CREAR primero ─────────────────────────────────────────────────────
-  // Es idempotente por comment: si ya hay uno vigente con el mismo, devuelve el
-  // existente en vez de duplicar. `status` viaja SIEMPRE y no es redundante: es
-  // el fallback cuando el comment no está en el catálogo. Sin él, un comment
-  // desconocido responde COMMENT_NOT_FOUND y NO CREA NADA — o sea, el cliente
-  // se quedaría sin bloquear.
+  // ── 1) Qué hay hoy ───────────────────────────────────────────────────────
+  const rAntes = await llamar('GET', MS_HISTORIAL(id));
+  sub.historialAntes = rAntes;
+  if (!rAntes.ok) return { ok: false, status: rAntes.status, data: sub };
+  const antes = sinResolver(filas(rAntes.data));
+  sub.sinResolverAntes = antes.length;
+
+  // ── 2) CREAR primero ─────────────────────────────────────────────────────
+  let idCreado: unknown = null;
   if (accion === 'crear_y_resolver') {
-    const r = await llamar('POST', MS_CREAR, {
-      customerId: Number(id) || id,
-      comment: comentarioPropio,
-      observation,
-      createdBy: MS_ACTOR,
-      status,
-    });
-    sub.crear = r;
-    httpFinal = r.status;
-    if (!r.ok) {
-      // Sin el bloqueo nuevo creado NO se resuelve nada: cortar acá deja al
-      // cliente como estaba, que es lo seguro.
+    const r = await llamar('POST', MS_CREAR, { customerId: Number(id) || id, comment: comentarioPropio, observation });
+    const yaEstaba = !r.ok && contiene(r.data, 'DUPLICATE_UNRESOLVED_COMMENT');
+    sub.crear = yaEstaba ? { ...r, tratadoComoOk: 'DUPLICATE_UNRESOLVED_COMMENT' } : r;
+    if (!r.ok && !yaEstaba) {
+      // Sin el bloqueo nuevo NO se resuelve nada: el cliente queda como estaba.
       sub.resolver = { omitido: 'no se creó el bloqueo nuevo' };
       return { ok: false, status: r.status, data: sub };
     }
+    idCreado = (r.data as { id?: unknown })?.id ?? null;
+    httpFinal = r.status;
   }
 
-  // ── 2) ¿Qué hay sin resolver? ────────────────────────────────────────────
-  // Hace falta para saber con qué comment resolver. Si esta consulta falla no
-  // se sigue a ciegas: se corta con el bloqueo nuevo ya creado (estado
-  // restrictivo), que otra vez es el lado correcto para equivocarse.
-  const rLista = await llamar('GET', MS_SIN_RESOLVER(id));
-  sub.sinResolverAntes = rLista;
-  if (!rLista.ok) {
-    sub.resolver = { omitido: 'no se pudo listar lo que había sin resolver' };
-    return { ok: false, status: rLista.status, data: sub };
-  }
-
-  // Comments vigentes, sin repetir y sin el que acabamos de crear: ese tiene
-  // que QUEDAR vigente, es la conclusión del analista.
-  const lista = Array.isArray(rLista.data) ? rLista.data
-    : ((rLista.data as { content?: unknown[]; data?: unknown[] })?.content
-       ?? (rLista.data as { data?: unknown[] })?.data ?? []);
-  const pendientes = [...new Set((lista as Array<{ comment?: string }>)
-    .map(x => String(x?.comment || '').trim())
-    .filter(Boolean))].filter(c => c !== comentarioPropio);
-
-  // ── 3) RESOLVER, uno por comment ─────────────────────────────────────────
+  // ── 3) RESOLVER los vigentes, uno por complianceId ───────────────────────
   const resueltos: Record<string, unknown> = {};
-  for (const c of pendientes) {
-    const r = await llamar('PATCH', MS_RESOLVER(id), {
-      comment: c,
-      resolvedComment: observation || 'Resuelto por la cola de casos de compliance',
-      resolvedBy: MS_ACTOR,
-    });
-    // "No había nada que resolver" es éxito: el estado deseado ya estaba.
-    const bien = r.ok || esResolverVacio(r.data);
-    resueltos[c] = bien && !r.ok ? { ...r, tratadoComoOk: RESOLVER_YA_ESTABA } : r;
-    if (!bien) { ok = false; httpFinal = r.status; }
-  }
-  sub.resolver = pendientes.length ? resueltos : { nadaQueResolver: true };
+  for (const fila of antes) {
+    const cid = fila.id ?? fila.complianceId ?? fila.compliance_id;
+    const cmt = String(fila.comment ?? '');
+    if (cid == null) continue;
+    if (String(cid) === String(idCreado)) continue;            // el nuestro queda vigente
+    if (MS_TERMINALES.has(cmt)) { resueltos[`${cid}:${cmt}`] = { omitido: 'terminal' }; continue; }
 
-  // ── 4) VERIFICAR el estado efectivo ──────────────────────────────────────
-  // Es el más restrictivo entre los NO resueltos, así que mirar solo las
-  // respuestas de arriba no alcanza: resolver el propio y que el cliente siga
-  // bloqueado por otro es un escenario real. NO decide el ok/error del paso: es
-  // evidencia para quien audite.
-  sub.estadoDespues = await llamar('GET', MS_ESTADO(id));
+    const r = await llamar('PATCH', MS_RESOLVER(cid as string | number), {
+      resolvedComment: observation || 'Resuelto por la cola de casos de compliance',
+    });
+    const yaNoHabia = !r.ok && contiene(r.data, 'COMPLIANCE_STATUS_CANNOT_BE_RESOLVED');
+    const deOtraArea = !r.ok && contiene(r.data, 'COMPLIANCE_INVALID_RESOLVE_AREA');
+    resueltos[`${cid}:${cmt}`] = r.ok ? r
+      : { ...r, tratadoComoOk: yaNoHabia ? 'YA_RESUELTO_O_TERMINAL' : deOtraArea ? 'ES_DE_OTRA_AREA' : undefined };
+    if (!r.ok && !yaNoHabia && !deOtraArea) { ok = false; httpFinal = r.status; }
+  }
+  sub.resolver = Object.keys(resueltos).length ? resueltos : { nadaQueResolver: true };
+
+  // ── 4) VERIFICAR contra el estado efectivo ───────────────────────────────
+  // Es la única forma de saber si el cliente quedó como el analista quiso: el
+  // estado es el más restrictivo SIN RESOLVER, así que resolver lo nuestro y que
+  // siga bloqueado por otra área es un escenario real. Acá SÍ decide el ok.
+  const rDespues = await llamar('GET', MS_HISTORIAL(id));
+  sub.historialDespues = rDespues;
+  if (rDespues.ok) {
+    const quedo = efectivo(filas(rDespues.data));
+    sub.estadoEfectivo = quedo;
+    if (quedo !== status) {
+      ok = false;
+      sub.discrepancia = `se pidió ${status} y el cliente quedó en ${quedo}`;
+    }
+  }
 
   return { ok, status: httpFinal, data: sub };
 }
@@ -578,6 +597,68 @@ export default {
     //   (solo si aplica al status y lastStep=true). El REFRESH_TOKEN de admin vive
     //   como secret (G66_ADMIN_REFRESH_TOKEN). Acción de ALTO impacto: bloquea/
     //   desbloquea clientes reales — el frontend confirma antes de llamar.
+    // ── Diagnóstico de SOLO LECTURA del paso 2: GET /admin/compliance-historial ─
+    //
+    // Existe para poder probar la migración SIN escribir nada. Hace un solo
+    // `GET` al historial de compliance de un cliente con la credencial que ya
+    // tiene el Worker, y devuelve la respuesta cruda.
+    //
+    // Con esa única llamada se responden tres cosas que hoy bloquean:
+    //   · ¿el idToken de Lens sirve contra los endpoints BO?
+    //   · ¿el rol del usuario resuelve un área válida, o sale 400 / 403?
+    //   · ¿cuál es la forma REAL del JSON de `history`? (los nombres de campo
+    //     se venían infiriendo de los labels del Admin)
+    //
+    // NO crea, NO resuelve, NO modifica nada. Es un GET.
+    if (url.pathname === '/admin/compliance-historial') {
+      if (request.method !== 'GET') return jsonError('Método no permitido', 405, cors);
+      const refresh = env.G66_ADMIN_REFRESH_TOKEN;
+      if (!refresh) return jsonError('Falta el secret G66_ADMIN_REFRESH_TOKEN en el Worker', 500, cors);
+      const cid = String(url.searchParams.get('customerId') || '').trim();
+      const email = String(url.searchParams.get('email') || '').trim();
+      if (!cid) return jsonError('Falta customerId', 400, cors);
+
+      let idToken = '';
+      const tokRes = await fetchTimeout(`${G66_ADMIN_BASE}/admin/refresh-token`, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json, text/plain, */*', 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ refreshToken: refresh }).toString(),
+      }, 20000);
+      const tokText = await tokRes.text();
+      if (!tokRes.ok) {
+        return new Response(JSON.stringify({ paso: 'refresh-token', ok: false, status: tokRes.status, detalle: tokText.slice(0, 400) }),
+          { status: 200, headers: { ...cors, 'Content-Type': 'application/json' } });
+      }
+      idToken = (JSON.parse(tokText) as { idToken?: string }).idToken || '';
+
+      // El claim `custom:title` del token es lo que el gateway convierte en
+      // `Claim-User-Admin-Rol`, y de ahí sale el área. Se expone acá —solo ese
+      // campo, no el token— porque es justo el dato que falta averiguar.
+      let claims: unknown = null;
+      try {
+        const payload = idToken.split('.')[1];
+        const json = atob(payload.replace(/-/g, '+').replace(/_/g, '/'));
+        const c = JSON.parse(json) as Record<string, unknown>;
+        claims = { 'custom:title': c['custom:title'], 'custom:admin_id': c['custom:admin_id'], email: c.email };
+      } catch { claims = { error: 'no se pudo leer el token' }; }
+
+      const res = await fetchTimeout(`${G66_ADMIN_BASE}${MS_HISTORIAL(cid)}`, {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/json, text/plain, */*',
+          'Authorization': idToken,
+          ...(email ? { 'Claim-Email': email } : {}),
+        },
+      }, 30000);
+      const txt = await res.text();
+      let data: unknown; try { data = txt ? JSON.parse(txt) : {}; } catch { data = { raw: txt.slice(0, 2000) }; }
+
+      return new Response(JSON.stringify({
+        ok: res.ok, customerId: cid, ruta: MS_HISTORIAL(cid),
+        httpStatus: res.status, claimsDelToken: claims, respuesta: data,
+      }, null, 2), { status: 200, headers: { ...cors, 'Content-Type': 'application/json' } });
+    }
+
     if (url.pathname === '/admin/customer-status') {
       if (request.method !== 'POST') return jsonError('Método no permitido', 405, cors);
       const refresh = env.G66_ADMIN_REFRESH_TOKEN;
