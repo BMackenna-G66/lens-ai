@@ -37,6 +37,10 @@ export interface TipoCierreAdmin {
   // Qué hacer en el modelo nuevo de ms-customer. El Worker lo usa solo cuando
   // está en modo `nuevo`; en modo `anterior` lo ignora por completo.
   accion: AccionAdmin;
+  // Si el paso 1 (blacklist/OFAC) marca al cliente. Es EXPLÍCITO por tipología y
+  // ya no se deriva del status: al bajar «Fully blocked» a BLOCKED, derivarlo
+  // habría apagado la marca en silencio. El paso 1 no migra y no cambia.
+  ofacFlag?: boolean;
   pep?: boolean;         // etiqueta legacy ("requiere formulario PEP"); NO dispara el PUT
   pepValue?: boolean;    // si está definido, ejecuta el paso PEP con este isPep
   riskLevel?: string;    // si está definido, ejecuta Risk Level (Bajo | Medio | Alto)
@@ -66,9 +70,26 @@ export const TIPOS_CIERRE_ADMIN: TipoCierreAdmin[] = [
   },
   {
     id: 'fully_blocked',
-    label: 'Fully blocked',
-    status: 'FULLY_BLOCKED',
+    // El id NO cambia: `flujoDecision.ts` y `cierreTipos.ts` lo referencian, y
+    // es lo que se guarda en la auditoría. Cambiarlo rompería el histórico.
+    label: 'Bloqueado',
+    // Decisión del 17-09-2026: baja de FULLY_BLOCKED a BLOCKED "de momento",
+    // hasta medir la gravedad real del bloqueo total.
+    //
+    // Además queda ALINEADO con el catálogo nuevo, que era el problema de
+    // fondo: `COMPLIANCE_OFFICER_REQUEST` es id 40 y produce **BLOCKED**, no
+    // FULLY_BLOCKED. Como en el modelo nuevo el estado se DERIVA del comment,
+    // mandar FULLY_BLOCKED con ese comment dejaba al cliente en BLOCKED igual,
+    // sin fallar — o sea, menos bloqueado de lo que el analista decidió.
+    //
+    // Para volver a bloqueo total hay que cambiar las DOS cosas: el status y el
+    // comment (a uno FULLY_BLOCKED del área COMPLIANCE, p. ej. `OFAC_CONFIRMED`
+    // o `BLACK_LIST_G66`). Cambiar solo el status no hace nada.
+    status: 'BLOCKED',
     comment: 'COMPLIANCE_OFFICER_REQUEST',
+    // Se mantiene la marca de blacklist que tenía cuando era FULLY_BLOCKED: el
+    // paso 1 no migra y esta decisión no era sobre él.
+    ofacFlag: true,
     observation: 'Cliente NO puede operar con global66 caso liberado bajo logica de bandeja de casos Fuera de la matriz de riesgo',
     // Decisión de negocio (17-09-2026): queda registro propio de que compliance
     // revisó Y se resuelve el del bot, para que NO queden dos bloqueos vigentes
@@ -109,11 +130,17 @@ export const ADMIN_ASSIGNEE_DEFAULT = 'compliance.masivo@global66.com';
 export const ADMIN_STATUS_OPTIONS = ['NORMAL', 'UNDER_COMPLIANCE_REVIEW', 'UNDER_COMPLIANCE_REVIEW_2', 'BLOCKED', 'FULLY_BLOCKED'] as const;
 export const ADMIN_COMMENT_OPTIONS = ['NO_COMMENTS', 'UCR_CRIMINAL_RISK', 'COMPLIANCE_OFFICER_REQUEST', 'PEP_REQUEST'] as const;
 
-// El flag OFAC / blacklist va en true SOLO cuando el cliente queda Fully Blocked.
-// Regla única para el cierre individual, el masivo y el flujo automático.
+// El flag OFAC / blacklist del paso 1. Regla única para el cierre individual, el
+// masivo y el flujo automático.
 //
-// Sigue dependiendo de `status` y eso está bien: el paso 1 (blacklist) NO migra
-// a ms-customer. `status` desaparece de la URL del paso 2, no de nuestro modelo.
+// Sale del campo `ofacFlag` de la tipología y NO del status. Antes se derivaba
+// (`status === 'FULLY_BLOCKED'`), y eso ataba dos decisiones que no tienen por
+// qué ir juntas: al bajar «Fully blocked» a BLOCKED, la marca de blacklist se
+// habría apagado sola, sin que nadie lo pidiera ni lo viera.
+export const ofacFlagDe = (tipo: Pick<TipoCierreAdmin, 'ofacFlag'> | undefined): boolean =>
+  tipo?.ofacFlag === true;
+
+/** @deprecated Derivaba el flag del status. Usar `ofacFlagDe(tipo)`. */
 export const ofacFlagPara = (status: string): boolean => status === 'FULLY_BLOCKED';
 
 // Risk Level (paso PUT /customer) y provider PEP por defecto (PUT isPep).

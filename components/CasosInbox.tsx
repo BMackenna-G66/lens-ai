@@ -39,7 +39,7 @@ import { correrFlujoAhora, subscribeUltimasCorridas, subscribeLatido, disparador
 import { guardarInvestigacion } from '../services/caseInvestigationService';
 import { enviarResolucion, conclusionAStatus } from '../services/caseResolutionService';
 import { TIPOS_CIERRE, camposDeCierre } from '../services/cierreTipos';
-import { TIPOS_CIERRE_ADMIN, OFAC_PROVIDERS, ADMIN_ASSIGNEE_DEFAULT, ADMIN_STATUS_OPTIONS, ADMIN_COMMENT_OPTIONS, RISK_LEVELS, PEP_PROVIDER_DEFAULT, ofacFlagPara } from '../services/cierreAdminTipos';
+import { TIPOS_CIERRE_ADMIN, OFAC_PROVIDERS, ADMIN_ASSIGNEE_DEFAULT, ADMIN_STATUS_OPTIONS, ADMIN_COMMENT_OPTIONS, RISK_LEVELS, PEP_PROVIDER_DEFAULT, ofacFlagDe } from '../services/cierreAdminTipos';
 import { enviarCierreAdmin, adminCierreDisponible, AdminCierreResult } from '../services/adminCierreService';
 import { registrarAuditoria, leerAuditoria } from '../services/caseAuditService';
 import { logCierre, logHistorial, logConfigFlujo, logScreening, sincronizarAnalistas, filasBackfillCaso, enviarLote, reintentarPendientes, pendientesEnBuffer, logLiberacionRemesa } from '../services/colasLogService';
@@ -831,7 +831,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       try {
         const r = await enviarCierreAdmin({
           customerIds: ids, status: tipo.status, comment: tipo.comment, observation: tipo.observation,
-          agent: ADMIN_ASSIGNEE_DEFAULT, ofacFlag: ofacFlagPara(tipo.status), ofacProvider: 'REGCHECK',
+          agent: ADMIN_ASSIGNEE_DEFAULT, ofacFlag: ofacFlagDe(tipo), ofacProvider: 'REGCHECK',
           countryCode: cc, lastStep: tipo.lastStepDefault,
           // Risk/PEP solo si la tipología los define explícitamente (hoy: ninguna) — el
           // masivo no cambia PEP/riesgo de clientes reales sin revisión por ficha.
@@ -846,7 +846,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
             for (const caseId of casosPorCustomer.get(String(res.customerId)) ?? []) {
               await registrarCierreCanal(caseId, 'admin', { ok: true, tipologia: tipo.id }, actor ?? undefined).catch(() => {});
               const caso = seleccionados.find(x => x.id === caseId);
-              if (caso) logCierre(caso, activeQueue, { canal: 'ADMIN', ok: true, tipologia: tipo.id, statusEnviado: tipo.status, ofacFlag: ofacFlagPara(tipo.status) }, actor ?? undefined);
+              if (caso) logCierre(caso, activeQueue, { canal: 'ADMIN', ok: true, tipologia: tipo.id, statusEnviado: tipo.status, ofacFlag: ofacFlagDe(tipo) }, actor ?? undefined);
             }
           } else err++;
         }
@@ -1216,7 +1216,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       pepEnabled: t?.pepValue !== undefined, pepValue: !!t?.pepValue, riskLevel: t?.riskLevel ?? '',
       lastStep: t?.lastStepDefault ?? true,
       // OFAC/blacklist se deriva del status (true solo en FULLY_BLOCKED); editable.
-      ofacFlag: ofacFlagPara(t?.status ?? ''),
+      ofacFlag: ofacFlagDe(t),
     });
   };
 
@@ -3128,7 +3128,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                   <span className="text-rose-800 dark:text-rose-200">
                     {(() => {
                       const t = TIPOS_CIERRE_ADMIN.find(x => x.id === adminMasivoTipo);
-                      return <>¿Aplicar «{t?.label}» a {seleccion.size} cliente(s) en Admin? status {t?.status} · OFAC={ofacFlagPara(t?.status ?? '') ? 'Sí' : 'No'} · <b>bloquea/desbloquea clientes reales</b>.</>;
+                      return <>¿Aplicar «{t?.label}» a {seleccion.size} cliente(s) en Admin? status {t?.status} · OFAC={ofacFlagDe(t) ? 'Sí' : 'No'} · <b>bloquea/desbloquea clientes reales</b>.</>;
                     })()}
                   </span>
                   <button onClick={cerrarMasivoAdmin} disabled={adminMasivoSending} className="px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold disabled:opacity-50">
