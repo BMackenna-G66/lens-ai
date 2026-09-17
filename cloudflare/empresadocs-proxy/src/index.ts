@@ -781,10 +781,32 @@ export default {
           const sr = await doStep('PUT', `/customer/bo/customer-info/${encodeURIComponent(id)}/customer`, { riskLevel: body.riskLevel });
           steps.risk = sr; if (!sr.ok) ok = false;
         }
-        // PASO 5 — last-step (solo si el status lo requiere y lastStep=true)
-        if (ok && body.lastStep && G66_STATUS_REQUIERE_LAST_STEP.has(status)) {
+        // PASO 5 — last-step. Va al final, como en el flujo viejo.
+        //
+        // Se decide con el estado en el que el cliente QUEDÓ, no con el que se
+        // pidió, y SIN depender de `ok`. Las dos cosas son a propósito:
+        //
+        // · `ok` acumula las fallas de todos los pasos anteriores. En el modelo
+        //   nuevo el paso 2 tiene más formas de fallar —por ejemplo un bloqueo
+        //   de otra área que no se puede resolver—, así que con el gate viejo un
+        //   cliente podía quedar LIBERADO en compliance y sin last-step. O sea,
+        //   liberado pero sin poder operar, y sin que nadie lo note.
+        //
+        // · Gatear por el estado EFECTIVO es más seguro que por el pedido: si el
+        //   cliente no terminó liberado, el estado no está en la lista y el
+        //   last-step no corre. Se corrige solo.
+        //
+        // En el modelo anterior no hay estado verificado, así que se usa el
+        // pedido y el comportamiento queda idéntico al de siempre.
+        const compData = (steps.compliance as { data?: { estadoEfectivo?: string } } | undefined)?.data;
+        const estadoFinal = compData?.estadoEfectivo || status;
+        if (body.lastStep && G66_STATUS_REQUIERE_LAST_STEP.has(estadoFinal)) {
           const s3 = await doStep('GET', `/customer/bo/${encodeURIComponent(id)}/${encodeURIComponent(countryCode)}/last-step`);
           steps.lastStep = s3; if (!s3.ok) ok = false;
+        } else if (body.lastStep) {
+          // Que quede escrito POR QUÉ no corrió: "no aparece" y "no correspondía"
+          // se ven igual en el resultado, y son cosas distintas.
+          steps.lastStep = { omitido: `el cliente quedó en ${estadoFinal}, que no requiere last-step` };
         }
         results.push({ customerId: id, ok, steps });
       }

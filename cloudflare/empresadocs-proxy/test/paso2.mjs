@@ -26,6 +26,9 @@ let modo = {};
 let creado = false;
 let resueltos = [];
 let cmtCreado = 'COMPLIANCE_OFFICER_REQUEST';
+// El estado que ms-customer DERIVA del comment del create. En el real sale del
+// catálogo; acá lo fija el caso de prueba.
+let statusCreado = 'BLOCKED';
 // Lo que queda vigente después de resolver: se quitan los que se resolvieron OK.
 const vigentes = () => sinResolver.filter(r => !resueltos.includes(String(r.id)) || modo.resolverFalla || modo.resolverOtraArea);
 // Lo que el cliente tiene sin resolver. Por defecto, el escenario REAL del
@@ -61,7 +64,7 @@ globalThis.fetch = async (url, opt = {}) => {
     if (u.includes('/history')) {
       if (modo.listaFalla) return j({ error: 'boom' }, 500);
       // Siempre lo que queda vigente; el creado va primero, como el orden real.
-      return j(creado ? [{ id: 99, comment: cmtCreado, status: 'BLOCKED', isTerminal: false, isResolved: false }, ...vigentes()] : vigentes());
+      return j(creado ? [{ id: 99, comment: cmtCreado, status: statusCreado, isTerminal: false, isResolved: false }, ...vigentes()] : vigentes());
     }
     if (u.includes('/resolve')) {
       const cid = u.match(/compliance\/(\d+)\/resolve/)?.[1];
@@ -194,6 +197,30 @@ ok('qué había antes', !!d.historialAntes);
 ok('qué se resolvió', !!d.resolver);
 ok('cómo quedó después', !!d.historialDespues);
 ok('el estado efectivo final', !!d.estadoEfectivo);
+
+console.log('\n── El last-step corre SÍ O SÍ cuando el cliente quedó liberado ──');
+// Es el paso que deja al cliente poder operar. Si se libera en compliance y esto
+// no corre, queda liberado pero trabado, y no se nota.
+const hayLastStep = r => r.llamadas.some(l => l.u.includes('/last-step'));
+
+modo = {}; r = await correr(ENV, 'NORMAL', { lastStep: true });
+ok('Liberar Normal → corre', hayLastStep(r), r.llamadas.map(l => l.u));
+modo = {}; cmtCreado = 'UCR_CRIMINAL_RISK'; statusCreado = 'UNDER_COMPLIANCE_REVIEW';
+r = await correr(ENV, 'UNDER_COMPLIANCE_REVIEW', { lastStep: true, comment: 'UCR_CRIMINAL_RISK' });
+ok('Liberar UCR → corre', hayLastStep(r), r.llamadas.map(l => l.u));
+cmtCreado = 'COMPLIANCE_OFFICER_REQUEST'; statusCreado = 'BLOCKED';
+modo = {}; r = await correr(ENV, 'BLOCKED', { lastStep: true });
+ok('Bloqueado → NO corre (no corresponde)', !hayLastStep(r), r.llamadas.map(l => l.u));
+ok('y queda escrito por qué', JSON.stringify(paso(r)).length > 0 && JSON.stringify(r.body.results[0].steps.lastStep || {}).includes('no requiere'), r.body.results[0].steps.lastStep);
+
+console.log('\n── Y corre aunque otro paso haya fallado, si quedó liberado ──');
+// LA REGRESIÓN que esto viene a evitar: el gate viejo era `ok && ...`, y `ok`
+// acumulaba las fallas de todos los pasos. Un bloqueo de otra área sin resolver
+// dejaba al cliente liberado y sin last-step.
+modo = { resolverOtraArea: true }; r = await correr(ENV, 'NORMAL', { lastStep: true });
+ok('el paso 2 quedó en error', paso(r).ok === false);
+ok('pero si quedó liberado, el last-step corre igual',
+   paso(r).data.estadoEfectivo !== 'NORMAL' || hayLastStep(r), { efectivo: paso(r).data.estadoEfectivo, corrio: hayLastStep(r) });
 
 console.log('\n── NINGUNA llamada manda Claim-Email ──');
 // El gateway lo inyecta desde el token. Mandarlo además lo CONCATENA en el
