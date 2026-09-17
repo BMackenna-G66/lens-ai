@@ -124,7 +124,7 @@ ok('customerId en el BODY', crear.cuerpo.customerId === 4535350, crear.cuerpo);
 ok('NO manda status (en BO no existe)', crear.cuerpo.status === undefined, crear.cuerpo);
 ok('NO manda createdBy (sale del token)', crear.cuerpo.createdBy === undefined, crear.cuerpo);
 ok('observation sin signos de puntuación', /^[0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ ]*$/.test(crear.cuerpo.observation), crear.cuerpo.observation);
-ok('manda Claim-Email', crear.headers['Claim-Email'] === 'ana@global66.com', crear.headers);
+ok('NO manda Claim-Email (el gateway lo inyecta; mandarlo lo duplica)', crear.headers['Claim-Email'] === undefined, crear.headers);
 
 console.log('\n── Resolver es POR ID, y se INTENTA con todo lo vigente ──');
 // No hay lista de terminales nuestra: el área dueña puede resolver los suyos,
@@ -141,9 +141,28 @@ ok('lo anota', JSON.stringify(paso(r).data).includes('NO_RESOLUBLE_O_YA_RESUELTO
 ok('y el cierre no falla por eso', paso(r).ok === true, paso(r).data.discrepancia);
 
 console.log('\n── Duplicado en BO es error, para nosotros es "ya estaba" ──');
-modo = { crearDuplicado: true }; r = await correr(ENV, 'BLOCKED');
-ok('sigue adelante y resuelve', msc(r).some(l => l.met === 'PATCH'), msc(r).map(l => l.met + ' ' + l.u));
-ok('lo deja anotado', JSON.stringify(paso(r).data).includes('DUPLICATE_UNRESOLVED_COMMENT'));
+// Escenario REAL de un segundo cierre sobre el mismo caso: el bloqueo con
+// NUESTRO comment ya está vigente. Sin la guarda por comment, el bucle lo
+// resolvería —no hay `idCreado` porque el create falló— y desharía el bloqueo.
+sinResolver = [
+  { id: 4225468, status: 'BLOCKED', comment: 'COMPLIANCE_OFFICER_REQUEST', isTerminal: false, isResolved: false },
+  { id: 4223019, status: 'NORMAL', comment: 'NORMAL', isTerminal: true, isResolved: false },
+];
+modo = {}; r = await correr(ENV, 'BLOCKED');
+ok('NI SIQUIERA intenta crear (lo ve en el historial)', !msc(r).some(l => l.met === 'POST'), msc(r).map(l => l.met + ' ' + l.u));
+ok('lo deja anotado', JSON.stringify(paso(r).data).includes('ya existe un bloqueo vigente'));
+ok('NO resuelve el bloqueo propio que ya estaba', !msc(r).some(l => l.met === 'PATCH' && l.u.includes('/4225468/')), msc(r).filter(l => l.met === 'PATCH').map(l => l.u));
+ok('el cliente sigue BLOCKED', paso(r).data.estadoEfectivo === 'BLOCKED', paso(r).data.estadoEfectivo);
+ok('y el cierre no falla', paso(r).ok === true, paso(r).data.discrepancia);
+sinResolver = [
+  { id: 4223940, status: 'FULLY_BLOCKED', comment: 'OTHER_FULLY_BLOCKED', isTerminal: false, isResolved: false },
+  { id: 4223019, status: 'NORMAL', comment: 'NORMAL', isTerminal: true, isResolved: false },
+];
+
+console.log('\n── Un 422 del create NO se traga: puede ser un comment inválido ──');
+modo = { crearFalla: true }; r = await correr(ENV, 'BLOCKED');
+ok('el paso FALLA', paso(r).ok === false, paso(r).data);
+ok('y no resuelve nada', !msc(r).some(l => l.met === 'PATCH'));
 
 console.log('\n── Si falla el CREATE de verdad, no se resuelve nada ──');
 modo = { crearFalla: true }; r = await correr(ENV, 'BLOCKED');

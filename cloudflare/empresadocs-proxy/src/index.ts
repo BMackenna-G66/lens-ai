@@ -133,9 +133,6 @@ const soloAlfanumerico = (v: unknown): string =>
   String(v ?? '').normalize('NFC').replace(/[^0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ ]/g, ' ').replace(/\s+/g, ' ').trim();
 
 // Errores que NO son fallas del cierre, y por qué:
-//   DUPLICATE_UNRESOLVED_COMMENT  el bloqueo que íbamos a crear YA existe. En BO
-//                                 esto es error (en Iuse devolvía el existente);
-//                                 para nosotros es "ya estaba", o sea éxito.
 //   COMPLIANCE_STATUS_CANNOT_BE_RESOLVED  no se puede resolver (terminal ajeno o
 //                                 ya resuelto). No es falla del cierre.
 //   COMPLIANCE_INVALID_RESOLVE_AREA  el bloqueo es de OTRA área (fraude, CX).
@@ -171,10 +168,11 @@ async function paso2MsCustomer(
         'Accept': 'application/json, text/plain, */*',
         'Content-Type': 'application/json',
         'Authorization': idToken,
-        // Alimenta `created_by` / `resolved_by`. El ÁREA ya no sale de acá: la
-        // resuelve el gateway con `Claim-User-Admin-Rol`, que inyecta él solo
-        // desde el claim `custom:title` del token. Nosotros no lo mandamos.
-        'Claim-Email': String(body.agent || ''),
+        // NO se manda `Claim-Email`: el gateway ya lo inyecta desde el token.
+        // Mandarlo además lo DUPLICA — medido en la primera corrida real, quedó
+        // `createdBy: "benjamin.mackenna@global66.com,benjamin.mackenna@global66.com"`.
+        // El área tampoco sale de acá: la resuelve el gateway con
+        // `Claim-User-Admin-Rol`, desde el claim `custom:title`.
       },
       body: payload === undefined ? undefined : JSON.stringify(payload),
     }, 30000);
@@ -216,16 +214,30 @@ async function paso2MsCustomer(
   // ── 2) CREAR primero ─────────────────────────────────────────────────────
   let idCreado: unknown = null;
   if (accion === 'crear_y_resolver') {
-    const r = await llamar('POST', MS_CREAR, { customerId: Number(id) || id, comment: comentarioPropio, observation });
-    const yaEstaba = !r.ok && contiene(r.data, 'DUPLICATE_UNRESOLVED_COMMENT');
-    sub.crear = yaEstaba ? { ...r, tratadoComoOk: 'DUPLICATE_UNRESOLVED_COMMENT' } : r;
-    if (!r.ok && !yaEstaba) {
-      // Sin el bloqueo nuevo NO se resuelve nada: el cliente queda como estaba.
-      sub.resolver = { omitido: 'no se creó el bloqueo nuevo' };
-      return { ok: false, status: r.status, data: sub };
+    // ¿Ya existe un bloqueo vigente con NUESTRO comment? Se decide con el
+    // historial que acabamos de pedir, NO con el error del create.
+    //
+    // Medido en producción: ante un duplicado, BO responde 422 con
+    // `{"code":"016402","reason":"CUSTOMER_COMPLIANCE_INVALID"}` y NADA más. El
+    // detalle `DUPLICATE_UNRESOLVED_COMMENT` que documenta la colección no viaja
+    // en la respuesta, y ese mismo `reason` genérico cubre también
+    // COMMENT_NOT_FOUND. Tratar el 422 como "ya estaba" se tragaría un comment
+    // inválido —que es un error de verdad— y dejaría al cliente sin bloquear.
+    const existente = antes.find(r => String(r.comment ?? '') === comentarioPropio);
+    if (existente) {
+      idCreado = existente.id ?? existente.complianceId ?? null;
+      sub.crear = { omitido: 'ya existe un bloqueo vigente con este comment', id: idCreado };
+    } else {
+      const r = await llamar('POST', MS_CREAR, { customerId: Number(id) || id, comment: comentarioPropio, observation });
+      sub.crear = r;
+      if (!r.ok) {
+        // Sin el bloqueo nuevo NO se resuelve nada: el cliente queda como estaba.
+        sub.resolver = { omitido: 'no se creó el bloqueo nuevo' };
+        return { ok: false, status: r.status, data: sub };
+      }
+      idCreado = (r.data as { id?: unknown })?.id ?? null;
+      httpFinal = r.status;
     }
-    idCreado = (r.data as { id?: unknown })?.id ?? null;
-    httpFinal = r.status;
   }
 
   // ── 3) RESOLVER los vigentes, uno por complianceId ───────────────────────
@@ -234,7 +246,13 @@ async function paso2MsCustomer(
     const cid = fila.id ?? fila.complianceId ?? fila.compliance_id;
     const cmt = String(fila.comment ?? '');
     if (cid == null) continue;
-    if (String(cid) === String(idCreado)) continue;            // el nuestro queda vigente
+    // El nuestro queda VIGENTE. Se compara por id y TAMBIÉN por comment, y esa
+    // segunda condición no es redundante: cuando el create devuelve
+    // DUPLICATE_UNRESOLVED_COMMENT no hay id nuevo —`idCreado` queda en null— y
+    // sin esto el bucle resolvería el bloqueo que ya estaba con NUESTRO comment,
+    // deshaciendo exactamente lo que el cierre vino a hacer.
+    if (String(cid) === String(idCreado)) continue;
+    if (comentarioPropio && cmt === comentarioPropio) { resueltos[`${cid}:${cmt}`] = { omitido: 'es el nuestro' }; continue; }
 
     const r = await llamar('PATCH', MS_RESOLVER(cid as string | number), {
       resolvedComment: observation || 'Resuelto por la cola de casos de compliance',
