@@ -114,18 +114,17 @@ const MS_HISTORIAL = (id: string) => `${MS_BASE_PATH}/customers/${encodeURICompo
 // Viene ordenado por prioridad —primero los no resueltos, y entre esos el de
 // mayor restricción— así que el PRIMER elemento es el estado efectivo.
 
-// Comentarios TERMINALES del catálogo: no se pueden resolver nunca. Intentarlo
-// devuelve COMPLIANCE_STATUS_CANNOT_BE_RESOLVED.
+// NO hay lista de terminales hardcodeada, y es a propósito.
 //
-// `NORMAL` está acá y no es teórico: el cliente de prueba 4535350 tiene un
-// `NORMAL` sin resolver conviviendo con el bloqueo. Sin esta lista, cada cierre
-// intentaría resolverlo y fallaría. Da igual que quede vigente: es nivel 1 y no
-// restringe nada.
-const MS_TERMINALES = new Set([
-  'NORMAL', 'ACCOUNT_DELETION', 'TOTAL_FRAUD_CLOSURE', 'ROULETTE_USERS', 'MULE_ACCOUNT',
-  'TOTAL_COMPLIANCE_CLOSURE_KYX', 'CONFIRMED_CRIMINAL_PROFILE', 'TOTAL_COMPLIANCE_CLOSURE_KYT',
-  'ACCOUNT_DELETION_DEATH',
-]);
+// El catálogo marca algunos comments como terminales, pero **el área dueña SÍ
+// puede resolver los suyos** — Compliance necesita resolver los propios para
+// dejar a un cliente en NORMAL. Una lista acá decidiría por la API con una copia
+// del catálogo que además se desactualiza sola.
+//
+// Se intenta resolver todo lo vigente y se deja que el servicio conteste. Si no
+// se puede, responde COMPLIANCE_STATUS_CANNOT_BE_RESOLVED y eso se tolera: no
+// es una falla del cierre, es "eso no se toca". La verificación final dice si el
+// cliente quedó donde tenía que quedar.
 
 // `observation` admite SOLO letras, números y espacios. Es más estricto que
 // `sanitizarTexto` de la app, que deja punto y coma — y con un punto la API
@@ -137,7 +136,8 @@ const soloAlfanumerico = (v: unknown): string =>
 //   DUPLICATE_UNRESOLVED_COMMENT  el bloqueo que íbamos a crear YA existe. En BO
 //                                 esto es error (en Iuse devolvía el existente);
 //                                 para nosotros es "ya estaba", o sea éxito.
-//   COMPLIANCE_STATUS_CANNOT_BE_RESOLVED  terminal o ya resuelto: nada que hacer.
+//   COMPLIANCE_STATUS_CANNOT_BE_RESOLVED  no se puede resolver (terminal ajeno o
+//                                 ya resuelto). No es falla del cierre.
 //   COMPLIANCE_INVALID_RESOLVE_AREA  el bloqueo es de OTRA área (fraude, CX).
 //                                 Compliance no debería levantarlo, así que se
 //                                 deja y se reporta — el chequeo final dirá si
@@ -189,8 +189,13 @@ async function paso2MsCustomer(
       : ((d as { content?: unknown[] })?.content ?? (d as { data?: unknown[] })?.data ?? []);
     return Array.isArray(x) ? x as Array<Record<string, unknown>> : [];
   };
-  const sinResolver = (fs: Array<Record<string, unknown>>) =>
-    fs.filter(r => r.resolved !== true && r.resuelto !== true && !r.resolvedAt && !r.resolved_at);
+  // `isResolved` es el campo REAL, confirmado contra producción el 17-09-2026:
+  //   { id, customerId, status, comment, complianceStatusCommentId, observation,
+  //     createdBy, createdAt, areaId, areaName, isTerminal, isResolved,
+  //     resolvedBy, resolvedComment, resolvedAt, channel }
+  // Antes se adivinaba (`resolved` / `resuelto` / `resolvedAt`) a partir de los
+  // labels del Admin, y ninguno de esos nombres existe.
+  const sinResolver = (fs: Array<Record<string, unknown>>) => fs.filter(r => r.isResolved !== true);
   const efectivo = (fs: Array<Record<string, unknown>>) =>
     String(sinResolver(fs)[0]?.status ?? 'NORMAL');
 
@@ -230,16 +235,16 @@ async function paso2MsCustomer(
     const cmt = String(fila.comment ?? '');
     if (cid == null) continue;
     if (String(cid) === String(idCreado)) continue;            // el nuestro queda vigente
-    if (MS_TERMINALES.has(cmt)) { resueltos[`${cid}:${cmt}`] = { omitido: 'terminal' }; continue; }
 
     const r = await llamar('PATCH', MS_RESOLVER(cid as string | number), {
       resolvedComment: observation || 'Resuelto por la cola de casos de compliance',
     });
-    const yaNoHabia = !r.ok && contiene(r.data, 'COMPLIANCE_STATUS_CANNOT_BE_RESOLVED');
+    // Terminal que esta área no puede tocar, o ya resuelto. No es falla nuestra.
+    const noSeToca = !r.ok && contiene(r.data, 'COMPLIANCE_STATUS_CANNOT_BE_RESOLVED');
     const deOtraArea = !r.ok && contiene(r.data, 'COMPLIANCE_INVALID_RESOLVE_AREA');
     resueltos[`${cid}:${cmt}`] = r.ok ? r
-      : { ...r, tratadoComoOk: yaNoHabia ? 'YA_RESUELTO_O_TERMINAL' : deOtraArea ? 'ES_DE_OTRA_AREA' : undefined };
-    if (!r.ok && !yaNoHabia && !deOtraArea) { ok = false; httpFinal = r.status; }
+      : { ...r, tratadoComoOk: noSeToca ? 'NO_RESOLUBLE_O_YA_RESUELTO' : deOtraArea ? 'ES_DE_OTRA_AREA' : undefined };
+    if (!r.ok && !noSeToca && !deOtraArea) { ok = false; httpFinal = r.status; }
   }
   sub.resolver = Object.keys(resueltos).length ? resueltos : { nadaQueResolver: true };
 

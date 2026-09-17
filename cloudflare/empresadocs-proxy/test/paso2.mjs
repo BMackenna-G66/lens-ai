@@ -31,9 +31,16 @@ const vigentes = () => sinResolver.filter(r => !resueltos.includes(String(r.id))
 // Lo que el cliente tiene sin resolver. Por defecto, el escenario REAL del
 // cliente de prueba 4535350 al 17-09-2026: dos vigentes, y el del bot con el
 // comment genérico de fallback.
+// Copiado del GET real a producción del 17-09-2026, con los nombres de campo
+// exactos que devuelve `history` (no los labels del Admin, que era lo que se
+// venía infiriendo).
 let sinResolver = [
-  { id: 4223940, comment: 'OTHER_FULLY_BLOCKED', status: 'FULLY_BLOCKED', resolved: false },
-  { id: 4223019, comment: 'NORMAL', status: 'NORMAL', resolved: false },
+  { id: 4223940, customerId: 4535350, status: 'FULLY_BLOCKED', comment: 'OTHER_FULLY_BLOCKED',
+    complianceStatusCommentId: 5, observation: 'OFAC_SUSPECTED', createdBy: 'ONBOARDING_BOT',
+    areaId: 6, areaName: 'SYSTEM_BOT', isTerminal: false, isResolved: false },
+  { id: 4223019, customerId: 4535350, status: 'NORMAL', comment: 'NORMAL',
+    complianceStatusCommentId: 1, observation: null, createdBy: 'ONBOARDING_BOT',
+    areaId: 6, areaName: 'SYSTEM_BOT', isTerminal: true, isResolved: false },
 ];
 
 globalThis.fetch = async (url, opt = {}) => {
@@ -54,10 +61,12 @@ globalThis.fetch = async (url, opt = {}) => {
     if (u.includes('/history')) {
       if (modo.listaFalla) return j({ error: 'boom' }, 500);
       // Siempre lo que queda vigente; el creado va primero, como el orden real.
-      return j(creado ? [{ id: 99, comment: cmtCreado, status: 'BLOCKED', resolved: false }, ...vigentes()] : vigentes());
+      return j(creado ? [{ id: 99, comment: cmtCreado, status: 'BLOCKED', isTerminal: false, isResolved: false }, ...vigentes()] : vigentes());
     }
     if (u.includes('/resolve')) {
       const cid = u.match(/compliance\/(\d+)\/resolve/)?.[1];
+      // El NORMAL del bot: en este cliente SÍ es resoluble por el área dueña.
+      if (modo.normalNoResoluble && cid === '4223019') return j({ code: 'COMPLIANCE_STATUS_CANNOT_BE_RESOLVED' }, 409);
       resueltos.push(cid);
       if (modo.resolverTerminal) return j({ code: 'COMPLIANCE_STATUS_CANNOT_BE_RESOLVED' }, 409);
       if (modo.resolverOtraArea) return j({ code: 'COMPLIANCE_INVALID_RESOLVE_AREA' }, 403);
@@ -117,12 +126,19 @@ ok('NO manda createdBy (sale del token)', crear.cuerpo.createdBy === undefined, 
 ok('observation sin signos de puntuación', /^[0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ ]*$/.test(crear.cuerpo.observation), crear.cuerpo.observation);
 ok('manda Claim-Email', crear.headers['Claim-Email'] === 'ana@global66.com', crear.headers);
 
-console.log('\n── Resolver es POR ID, y el NORMAL terminal se saltea ──');
+console.log('\n── Resolver es POR ID, y se INTENTA con todo lo vigente ──');
+// No hay lista de terminales nuestra: el área dueña puede resolver los suyos,
+// así que decide la API. Se intenta con los dos y se tolera el que diga que no.
 const patches = msc(r).filter(l => l.met === 'PATCH');
-ok('resuelve el 4223940 (el del bot)', patches.some(l => l.u.includes('/4223940/')), patches.map(l => l.u));
-ok('NO intenta resolver el NORMAL (terminal)', !patches.some(l => l.u.includes('/4223019/')), patches.map(l => l.u));
+ok('intenta el 4223940 (el bloqueo del bot)', patches.some(l => l.u.includes('/4223940/')), patches.map(l => l.u));
+ok('intenta también el 4223019 (NORMAL)', patches.some(l => l.u.includes('/4223019/')), patches.map(l => l.u));
 ok('NO resuelve el que acaba de crear', !patches.some(l => l.u.includes('/99/')), patches.map(l => l.u));
 ok('manda resolvedComment', patches.every(l => !!l.cuerpo.resolvedComment));
+
+console.log('\n── Si la API dice que uno no se puede resolver, se tolera ──');
+modo = { normalNoResoluble: true }; r = await correr(ENV, 'BLOCKED');
+ok('lo anota', JSON.stringify(paso(r).data).includes('NO_RESOLUBLE_O_YA_RESUELTO'));
+ok('y el cierre no falla por eso', paso(r).ok === true, paso(r).data.discrepancia);
 
 console.log('\n── Duplicado en BO es error, para nosotros es "ya estaba" ──');
 modo = { crearDuplicado: true }; r = await correr(ENV, 'BLOCKED');
