@@ -83,7 +83,16 @@ export const TIPOS_CIERRE_ADMIN: TipoCierreAdmin[] = [
     label: 'Blocked + formulario PEP',
     // Bloqueo preventivo por formulario PEP: es BLOCKED, no FULLY_BLOCKED.
     status: 'BLOCKED',
-    comment: 'COMPLIANCE_OFFICER_REQUEST',
+    // `PEP_REQUEST` y no `COMPLIANCE_OFFICER_REQUEST`: en el modelo viejo las
+    // dos conclusiones compartían comment y se distinguían por `status`. El
+    // catálogo nuevo es una matriz 1:1 status × comment, así que ahora Admin
+    // puede separarlas en su propio registro.
+    //
+    // PENDIENTE: confirmar el nombre exacto contra el volcado de
+    // `GET /customer/bo/compliance/comments/all`. Si no existe, NO falla
+    // ruidosamente: cae al genérico `OTHER_BLOCKED` y se pierde la distinción
+    // en silencio, salvo por la alerta en #compliance-status-comment-alerts.
+    comment: 'PEP_REQUEST',
     observation: 'Cliente puede operar con global66 caso liberado bajo logica de bandeja de casos Dentro de la matriz de riesgo',
     // Baja la restricción: crea el BLOCKED y resuelve el FULLY_BLOCKED del bot.
     accion: 'crear_y_resolver',
@@ -98,7 +107,7 @@ export const ADMIN_ASSIGNEE_DEFAULT = 'compliance.masivo@global66.com';
 // Valores válidos de status/comment de la API de admin (editables en la ficha).
 // Si la API acepta otros, agregarlos acá.
 export const ADMIN_STATUS_OPTIONS = ['NORMAL', 'UNDER_COMPLIANCE_REVIEW', 'UNDER_COMPLIANCE_REVIEW_2', 'BLOCKED', 'FULLY_BLOCKED'] as const;
-export const ADMIN_COMMENT_OPTIONS = ['NO_COMMENTS', 'UCR_CRIMINAL_RISK', 'COMPLIANCE_OFFICER_REQUEST'] as const;
+export const ADMIN_COMMENT_OPTIONS = ['NO_COMMENTS', 'UCR_CRIMINAL_RISK', 'COMPLIANCE_OFFICER_REQUEST', 'PEP_REQUEST'] as const;
 
 // El flag OFAC / blacklist va en true SOLO cuando el cliente queda Fully Blocked.
 // Regla única para el cierre individual, el masivo y el flujo automático.

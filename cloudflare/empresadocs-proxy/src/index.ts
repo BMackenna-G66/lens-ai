@@ -92,16 +92,30 @@ const modeloAdmin = (env: Env): ModeloAdmin =>
 const accionPara = (status: string): 'resolver' | 'crear_y_resolver' =>
   status === 'NORMAL' ? 'resolver' : 'crear_y_resolver';
 
-// Rutas de ms-customer. PENDIENTES DE CONFIRMAR con el equipo dueño: acá van las
-// tres que hacen falta. Mientras `MS_CUSTOMER_BASE` no esté seteado, el modo
-// 'nuevo' se niega a correr con un mensaje claro en vez de inventar una llamada.
+// ── Rutas reales de ms-customer (contrato v2, 17-09-2026) ──────────────────
+// NO hay host aparte: `ms-customer` cuelga del path `/customer` del MISMO
+// api.global66.com que Lens ya usa. `MS_CUSTOMER_BASE` queda solo para poder
+// apuntar a CI (`https://ci-api.global66.com`) sin tocar código.
 //
-// Se usa la carpeta `Iuse` y NO `Admin BO`: con un bloqueo duplicado sin
-// resolver, Iuse devuelve el existente en vez de fallar, y BO responde
-// DUPLICATE_UNRESOLVED_COMMENT. Iuse tampoco pide `Claim-Email` ni resuelve área.
-const MS_RUTA_CREAR = (id: string) => `/iuse/customers/${encodeURIComponent(id)}/compliance`;
-const MS_RUTA_RESOLVER = (id: string) => `/iuse/customers/${encodeURIComponent(id)}/compliance/resolve`;
-const MS_RUTA_ESTADO = (id: string) => `/customers/${encodeURIComponent(id)}/status`;
+// Se usa la carpeta `Iuse` y NO `Admin BO`: Iuse no pide autenticación ni
+// `Claim-User-Admin-Rol`, y el actor viaja en el body.
+const MS_CREAR = '/customer/iuse/compliance';
+const MS_RESOLVER = (id: string) => `/customer/iuse/compliance/customers/${encodeURIComponent(id)}/resolve`;
+const MS_ESTADO = (id: string) => `/customer/iuse/compliance/customers/${encodeURIComponent(id)}/status`;
+const MS_SIN_RESOLVER = (id: string) => `/customer/iuse/compliance/customers/${encodeURIComponent(id)}/comments/unresolved`;
+
+// Quién queda registrado como autor en Admin. Es un valor del catálogo de
+// actores, no un email: mandar la casilla del analista caería en SYSTEM_BOT.
+// La trazabilidad por persona ya queda en `colas_trabajo.cierre` y en Salesforce.
+const MS_ACTOR = 'OPERATION_BOT';
+
+// `observation` de ms-customer admite SOLO letras, números y espacios. Es más
+// estricto que `sanitizarTexto` de la app, que deja punto y coma — y con un
+// punto la API responde BAD_REQUEST "Observation cannot have special
+// characters". Se sanea acá, en el borde, para que valga también para lo que
+// escribe el analista a mano.
+const soloAlfanumerico = (v: unknown): string =>
+  String(v ?? '').normalize('NFC').replace(/[^0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ ]/g, ' ').replace(/\s+/g, ' ').trim();
 
 // Resolver algo que ya no está vigente NO es un error: significa que el estado
 // deseado ya se alcanzó. El flujo reintenta, y si esto contara como falla el
@@ -115,28 +129,36 @@ const esResolverVacio = (data: unknown): boolean =>
  * (`{ok, status, data}`) para que el resto del handler, la app y el Lambda no
  * noten la diferencia.
  *
- * CREAR VA ANTES QUE RESOLVER, y no es estilo. No hay transacción entre las dos
+ * CREAR VA ANTES QUE RESOLVER, y no es estilo. No hay transacción entre las
  * llamadas: si se resolviera primero y fallara el create, el cliente quedaría
  * LIBERADO sin que nadie lo haya decidido. En este orden, una falla parcial lo
  * deja en el estado más restrictivo, que es el lado correcto para equivocarse.
+ *
+ * RESOLVER ES POR COMMENT, no por id, y esa es la parte que no se puede
+ * adivinar: cada llamada barre los vigentes que tengan ESE comment. Como no
+ * sabemos con qué comment bloqueó el bot —en el cliente 4535350 es
+ * `OTHER_FULLY_BLOCKED`, el genérico de fallback— hay que PREGUNTAR cuáles hay
+ * sin resolver y resolver uno por uno. Mandar un resolve a ciegas no funciona:
+ * `comment` es obligatorio.
  */
 async function paso2MsCustomer(
   env: Env, idToken: string, id: string, status: string,
   body: { comment?: string; observation?: string; agent?: string },
 ): Promise<{ ok: boolean; status: number; data: unknown }> {
-  const base = String(env.MS_CUSTOMER_BASE || '').trim().replace(/\/$/, '');
-  if (!base) {
-    return { ok: false, status: 0, data: {
-      error: 'MODELO_ADMIN=nuevo pero falta MS_CUSTOMER_BASE en el Worker. '
-           + 'Se aborta sin llamar a nadie: es preferible que el cierre falle visible '
-           + 'a que pegue en el ambiente equivocado.',
-    } };
-  }
+  // Mismo host que el resto de Admin, salvo que se apunte a CI a propósito.
+  const base = String(env.MS_CUSTOMER_BASE || G66_ADMIN_BASE).trim().replace(/\/$/, '');
 
   const llamar = async (method: string, path: string, payload?: unknown) => {
     const res = await fetchTimeout(`${base}${path}`, {
       method,
-      headers: { 'Accept': 'application/json, text/plain, */*', 'Content-Type': 'application/json', 'Authorization': idToken },
+      headers: {
+        'Accept': 'application/json, text/plain, */*',
+        'Content-Type': 'application/json',
+        // `Iuse` NO pide autenticación. Se manda igual porque el token ya está
+        // en mano para los otros cuatro pasos y no cuesta nada: si la ruta
+        // llegara a publicarse con credencial, esto ya la lleva.
+        'Authorization': idToken,
+      },
       body: payload === undefined ? undefined : JSON.stringify(payload),
     }, 30000);
     const t = await res.text();
@@ -145,17 +167,28 @@ async function paso2MsCustomer(
   };
 
   const accion = accionPara(status);
-  const sub: Record<string, unknown> = { modelo: 'nuevo', accion, statusPedido: status };
+  const observation = soloAlfanumerico(body.observation);
+  const comentarioPropio = String(body.comment || '').trim();
+  const sub: Record<string, unknown> = { modelo: 'nuevo', accion, statusPedido: status, comentarioPropio };
   let ok = true;
+  let httpFinal = 200;
 
-  // 1) CREAR primero.
+  // ── 1) CREAR primero ─────────────────────────────────────────────────────
+  // Es idempotente por comment: si ya hay uno vigente con el mismo, devuelve el
+  // existente en vez de duplicar. `status` viaja SIEMPRE y no es redundante: es
+  // el fallback cuando el comment no está en el catálogo. Sin él, un comment
+  // desconocido responde COMMENT_NOT_FOUND y NO CREA NADA — o sea, el cliente
+  // se quedaría sin bloquear.
   if (accion === 'crear_y_resolver') {
-    const r = await llamar('POST', MS_RUTA_CREAR(id), {
-      comment: body.comment || '',
-      observation: body.observation || '',
-      agent: body.agent || '',
+    const r = await llamar('POST', MS_CREAR, {
+      customerId: Number(id) || id,
+      comment: comentarioPropio,
+      observation,
+      createdBy: MS_ACTOR,
+      status,
     });
     sub.crear = r;
+    httpFinal = r.status;
     if (!r.ok) {
       // Sin el bloqueo nuevo creado NO se resuelve nada: cortar acá deja al
       // cliente como estaba, que es lo seguro.
@@ -164,25 +197,49 @@ async function paso2MsCustomer(
     }
   }
 
-  // 2) RESOLVER los vigentes.
-  const rRes = await llamar('POST', MS_RUTA_RESOLVER(id), {
-    observation: body.observation || '',
-    agent: body.agent || '',
-  });
-  // "No había nada que resolver" es éxito: el estado deseado ya estaba.
-  const resolverOk = rRes.ok || esResolverVacio(rRes.data);
-  sub.resolver = { ...rRes, tratadoComoOk: resolverOk && !rRes.ok ? RESOLVER_YA_ESTABA : undefined };
-  if (!resolverOk) ok = false;
+  // ── 2) ¿Qué hay sin resolver? ────────────────────────────────────────────
+  // Hace falta para saber con qué comment resolver. Si esta consulta falla no
+  // se sigue a ciegas: se corta con el bloqueo nuevo ya creado (estado
+  // restrictivo), que otra vez es el lado correcto para equivocarse.
+  const rLista = await llamar('GET', MS_SIN_RESOLVER(id));
+  sub.sinResolverAntes = rLista;
+  if (!rLista.ok) {
+    sub.resolver = { omitido: 'no se pudo listar lo que había sin resolver' };
+    return { ok: false, status: rLista.status, data: sub };
+  }
 
-  // 3) VERIFICAR el estado efectivo. Es capacidad nueva y resuelve el falso
-  //    positivo de "resolví el mío y el cliente sigue bloqueado por otro": el
-  //    estado efectivo es el más restrictivo entre los no resueltos, así que
-  //    mirar solo la respuesta de las dos llamadas de arriba no alcanza.
-  //    NO decide el ok/error del paso: es evidencia para quien audite.
-  const rEstado = await llamar('GET', MS_RUTA_ESTADO(id));
-  sub.estadoDespues = rEstado;
+  // Comments vigentes, sin repetir y sin el que acabamos de crear: ese tiene
+  // que QUEDAR vigente, es la conclusión del analista.
+  const lista = Array.isArray(rLista.data) ? rLista.data
+    : ((rLista.data as { content?: unknown[]; data?: unknown[] })?.content
+       ?? (rLista.data as { data?: unknown[] })?.data ?? []);
+  const pendientes = [...new Set((lista as Array<{ comment?: string }>)
+    .map(x => String(x?.comment || '').trim())
+    .filter(Boolean))].filter(c => c !== comentarioPropio);
 
-  return { ok, status: rRes.status, data: sub };
+  // ── 3) RESOLVER, uno por comment ─────────────────────────────────────────
+  const resueltos: Record<string, unknown> = {};
+  for (const c of pendientes) {
+    const r = await llamar('PATCH', MS_RESOLVER(id), {
+      comment: c,
+      resolvedComment: observation || 'Resuelto por la cola de casos de compliance',
+      resolvedBy: MS_ACTOR,
+    });
+    // "No había nada que resolver" es éxito: el estado deseado ya estaba.
+    const bien = r.ok || esResolverVacio(r.data);
+    resueltos[c] = bien && !r.ok ? { ...r, tratadoComoOk: RESOLVER_YA_ESTABA } : r;
+    if (!bien) { ok = false; httpFinal = r.status; }
+  }
+  sub.resolver = pendientes.length ? resueltos : { nadaQueResolver: true };
+
+  // ── 4) VERIFICAR el estado efectivo ──────────────────────────────────────
+  // Es el más restrictivo entre los NO resueltos, así que mirar solo las
+  // respuestas de arriba no alcanza: resolver el propio y que el cliente siga
+  // bloqueado por otro es un escenario real. NO decide el ok/error del paso: es
+  // evidencia para quien audite.
+  sub.estadoDespues = await llamar('GET', MS_ESTADO(id));
+
+  return { ok, status: httpFinal, data: sub };
 }
 // BLOCKED = bloqueo preventivo (ej. formulario PEP); no dispara last-step.
 const G66_STATUS_VALIDOS = ['NORMAL', 'UNDER_COMPLIANCE_REVIEW', 'UNDER_COMPLIANCE_REVIEW_2', 'BLOCKED', 'FULLY_BLOCKED'];
