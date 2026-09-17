@@ -39,6 +39,14 @@ interface Env {
   // navegador nunca los ve: pega en /flujo/correr y el Worker los agrega.
   FLUJO_TRIGGER_URL?: string;
   FLUJO_TRIGGER_SECRET?: string;
+  // ── Migración del paso 2 a ms-customer ──────────────────────────────────
+  // `MODELO_ADMIN`: 'anterior' (default) | 'nuevo'. ES EL SWITCH DE VUELTA
+  // ATRÁS: apagarlo devuelve el camino viejo sin tocar código.
+  //   wrangler secret put MODELO_ADMIN      → 'nuevo'
+  // `MS_CUSTOMER_BASE`: URL base del ambiente nuevo. Sin esto, el modo 'nuevo'
+  // se niega a correr en vez de pegarle al ambiente equivocado.
+  MODELO_ADMIN?: string;
+  MS_CUSTOMER_BASE?: string;
 }
 
 const ALLOWED_ORIGINS = [
@@ -55,6 +63,127 @@ const SF_INSTANCE_DEFAULT = 'https://global66.my.salesforce.com';
 const G66_ADMIN_BASE = 'https://api.global66.com';
 // Estados de compliance que disparan el "last-step" (igual que el bot).
 const G66_STATUS_REQUIERE_LAST_STEP = new Set(['NORMAL', 'UNDER_COMPLIANCE_REVIEW', 'UNDER_COMPLIANCE_REVIEW_2']);
+
+// ── PASO 2: el modelo nuevo de ms-customer ──────────────────────────────────
+//
+// Admin dejó de "poner un estado". Ahora se CREA un registro de bloqueo o se
+// RESUELVEN los vigentes, y el estado efectivo del cliente es el más restrictivo
+// entre los que quedan sin resolver.
+//
+// EL RESPALDO ES ESTA VARIABLE, no un revert. `MODELO_ADMIN` arranca en
+// 'anterior' a propósito: se puede desplegar este Worker sin que cambie nada, y
+// se prende cuando se quiera. Si algo sale mal, se apaga y el camino viejo —que
+// sigue entero unas líneas más abajo— vuelve a correr sin tocar código.
+type ModeloAdmin = 'anterior' | 'nuevo';
+const modeloAdmin = (env: Env): ModeloAdmin =>
+  String(env.MODELO_ADMIN || '').trim().toLowerCase() === 'nuevo' ? 'nuevo' : 'anterior';
+
+// Qué hacer según el estado al que se quiere llevar al cliente. Se DERIVA del
+// `status` que ya viaja en el body: así el contrato de entrada del Worker no
+// cambia y ni la app, ni el Lambda del flujo autónomo, ni la UI se enteran.
+//
+// Tiene que coincidir con el campo `accion` de `services/cierreAdminTipos.ts`,
+// que es donde está escrito el porqué de cada una. Si se agrega una tipología
+// allá, revisar acá.
+//
+//   NORMAL → el cliente queda libre: no se crea nada, se resuelve lo vigente.
+//   el resto → baja o mantiene restricción: se crea el propio y se resuelve el
+//              del bot, para no dejar dos bloqueos apilados sobre el cliente.
+const accionPara = (status: string): 'resolver' | 'crear_y_resolver' =>
+  status === 'NORMAL' ? 'resolver' : 'crear_y_resolver';
+
+// Rutas de ms-customer. PENDIENTES DE CONFIRMAR con el equipo dueño: acá van las
+// tres que hacen falta. Mientras `MS_CUSTOMER_BASE` no esté seteado, el modo
+// 'nuevo' se niega a correr con un mensaje claro en vez de inventar una llamada.
+//
+// Se usa la carpeta `Iuse` y NO `Admin BO`: con un bloqueo duplicado sin
+// resolver, Iuse devuelve el existente en vez de fallar, y BO responde
+// DUPLICATE_UNRESOLVED_COMMENT. Iuse tampoco pide `Claim-Email` ni resuelve área.
+const MS_RUTA_CREAR = (id: string) => `/iuse/customers/${encodeURIComponent(id)}/compliance`;
+const MS_RUTA_RESOLVER = (id: string) => `/iuse/customers/${encodeURIComponent(id)}/compliance/resolve`;
+const MS_RUTA_ESTADO = (id: string) => `/customers/${encodeURIComponent(id)}/status`;
+
+// Resolver algo que ya no está vigente NO es un error: significa que el estado
+// deseado ya se alcanzó. El flujo reintenta, y si esto contara como falla el
+// canal Admin nunca cerraría y el caso quedaría en GESTIONANDO para siempre.
+const RESOLVER_YA_ESTABA = 'UNRESOLVED_COMPLIANCE_NOT_FOUND';
+const esResolverVacio = (data: unknown): boolean =>
+  JSON.stringify(data ?? '').includes(RESOLVER_YA_ESTABA);
+
+/**
+ * El paso 2 contra ms-customer. Devuelve la MISMA forma que `doStep`
+ * (`{ok, status, data}`) para que el resto del handler, la app y el Lambda no
+ * noten la diferencia.
+ *
+ * CREAR VA ANTES QUE RESOLVER, y no es estilo. No hay transacción entre las dos
+ * llamadas: si se resolviera primero y fallara el create, el cliente quedaría
+ * LIBERADO sin que nadie lo haya decidido. En este orden, una falla parcial lo
+ * deja en el estado más restrictivo, que es el lado correcto para equivocarse.
+ */
+async function paso2MsCustomer(
+  env: Env, idToken: string, id: string, status: string,
+  body: { comment?: string; observation?: string; agent?: string },
+): Promise<{ ok: boolean; status: number; data: unknown }> {
+  const base = String(env.MS_CUSTOMER_BASE || '').trim().replace(/\/$/, '');
+  if (!base) {
+    return { ok: false, status: 0, data: {
+      error: 'MODELO_ADMIN=nuevo pero falta MS_CUSTOMER_BASE en el Worker. '
+           + 'Se aborta sin llamar a nadie: es preferible que el cierre falle visible '
+           + 'a que pegue en el ambiente equivocado.',
+    } };
+  }
+
+  const llamar = async (method: string, path: string, payload?: unknown) => {
+    const res = await fetchTimeout(`${base}${path}`, {
+      method,
+      headers: { 'Accept': 'application/json, text/plain, */*', 'Content-Type': 'application/json', 'Authorization': idToken },
+      body: payload === undefined ? undefined : JSON.stringify(payload),
+    }, 30000);
+    const t = await res.text();
+    let data: unknown; try { data = t ? JSON.parse(t) : {}; } catch { data = { raw: t }; }
+    return { ok: res.ok, status: res.status, data };
+  };
+
+  const accion = accionPara(status);
+  const sub: Record<string, unknown> = { modelo: 'nuevo', accion, statusPedido: status };
+  let ok = true;
+
+  // 1) CREAR primero.
+  if (accion === 'crear_y_resolver') {
+    const r = await llamar('POST', MS_RUTA_CREAR(id), {
+      comment: body.comment || '',
+      observation: body.observation || '',
+      agent: body.agent || '',
+    });
+    sub.crear = r;
+    if (!r.ok) {
+      // Sin el bloqueo nuevo creado NO se resuelve nada: cortar acá deja al
+      // cliente como estaba, que es lo seguro.
+      sub.resolver = { omitido: 'no se creó el bloqueo nuevo' };
+      return { ok: false, status: r.status, data: sub };
+    }
+  }
+
+  // 2) RESOLVER los vigentes.
+  const rRes = await llamar('POST', MS_RUTA_RESOLVER(id), {
+    observation: body.observation || '',
+    agent: body.agent || '',
+  });
+  // "No había nada que resolver" es éxito: el estado deseado ya estaba.
+  const resolverOk = rRes.ok || esResolverVacio(rRes.data);
+  sub.resolver = { ...rRes, tratadoComoOk: resolverOk && !rRes.ok ? RESOLVER_YA_ESTABA : undefined };
+  if (!resolverOk) ok = false;
+
+  // 3) VERIFICAR el estado efectivo. Es capacidad nueva y resuelve el falso
+  //    positivo de "resolví el mío y el cliente sigue bloqueado por otro": el
+  //    estado efectivo es el más restrictivo entre los no resueltos, así que
+  //    mirar solo la respuesta de las dos llamadas de arriba no alcanza.
+  //    NO decide el ok/error del paso: es evidencia para quien audite.
+  const rEstado = await llamar('GET', MS_RUTA_ESTADO(id));
+  sub.estadoDespues = rEstado;
+
+  return { ok, status: rRes.status, data: sub };
+}
 // BLOCKED = bloqueo preventivo (ej. formulario PEP); no dispara last-step.
 const G66_STATUS_VALIDOS = ['NORMAL', 'UNDER_COMPLIANCE_REVIEW', 'UNDER_COMPLIANCE_REVIEW_2', 'BLOCKED', 'FULLY_BLOCKED'];
 
@@ -450,10 +579,20 @@ export default {
         const s1 = await doStep('POST', `/customer/bo/customer-info/${encodeURIComponent(id)}/blacklist`,
           { blacklistFlag: !!body.ofacFlag, blacklistProvider: body.ofacProvider || 'REGCHECK' });
         steps.blacklist = s1; if (!s1.ok) ok = false;
-        // PASO 2 — compliance/{status}
+        // PASO 2 — estado de compliance.
+        //
+        // ES EL ÚNICO PASO QUE MIGRA a ms-customer. Los otros cuatro —blacklist,
+        // PEP, risk level y last-step— siguen yendo a api.global66.com, por
+        // decisión del 08-09-2026.
+        //
+        // Se elige con `MODELO_ADMIN`, que arranca en 'anterior': desplegar este
+        // Worker NO cambia el comportamiento de nadie. Volver atrás es cambiar
+        // esa variable, no revertir un commit.
         if (ok) {
-          const s2 = await doStep('POST', `/customer/bo/customer-info/${encodeURIComponent(id)}/compliance/${encodeURIComponent(status)}`,
-            { comment: body.comment || '', observation: body.observation || '', agent: body.agent || '' });
+          const s2 = modeloAdmin(env) === 'nuevo'
+            ? await paso2MsCustomer(env, idToken, id, status, body)
+            : await doStep('POST', `/customer/bo/customer-info/${encodeURIComponent(id)}/compliance/${encodeURIComponent(status)}`,
+                { comment: body.comment || '', observation: body.observation || '', agent: body.agent || '' });
           steps.compliance = s2; if (!s2.ok) ok = false;
         }
         // PASO 3 — PEP (PUT isPep): busca el pepId del KYC principal y lo actualiza.
