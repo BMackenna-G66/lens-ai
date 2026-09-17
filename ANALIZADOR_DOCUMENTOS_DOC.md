@@ -7,8 +7,8 @@ Desde septiembre hace además una **segunda extracción**, independiente de esos
 18: la **composición societaria** —representantes, dueños directos y la cadena
 de las jurídicas— leyendo el archivo nativo. Es §5.
 
-Este documento sirve para dos cosas: entender **cómo funciona** (§1–§7) y tener
-todo lo necesario para **integrarlo** en otro sistema (§8–§12).
+Este documento sirve para dos cosas: entender **cómo funciona** (§1–§8) y tener
+todo lo necesario para **integrarlo** en otro sistema (§9–§12).
 
 > **Actualizado el 17-09-2026.** La versión anterior (31-08) describía solo el
 > pipeline de los 18 campos y decía "hoy no hay API". Las dos cosas cambiaron.
