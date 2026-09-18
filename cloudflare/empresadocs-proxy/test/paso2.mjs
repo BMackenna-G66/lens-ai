@@ -182,6 +182,28 @@ modo = { resolverOtraArea: true }; r = await correr(ENV, 'NORMAL');
 ok('lo anota como de otra área', JSON.stringify(paso(r).data).includes('ES_DE_OTRA_AREA'));
 ok('y el paso FALLA, porque el cliente no quedó liberado', paso(r).ok === false, paso(r).data.discrepancia);
 
+console.log('\n── LA REGRESIÓN DE PRODUCCIÓN (18-09): pedir FULLY_BLOCKED y que quede BLOCKED ──');
+// Lo que pasó: la SPA pedía FULLY_BLOCKED, el comment COMPLIANCE_OFFICER_REQUEST
+// produce BLOCKED, y la verificación vieja marcaba discrepancia → ok=false → el
+// canal Admin NO se registraba → el caso quedaba en GESTIONANDO con el cliente
+// correctamente bloqueado. Seis casos reales.
+modo = {}; cmtCreado = 'COMPLIANCE_OFFICER_REQUEST'; statusCreado = 'BLOCKED';
+r = await correr(ENV, 'FULLY_BLOCKED', { comment: 'COMPLIANCE_OFFICER_REQUEST' });
+ok('el bloqueo se crea', msc(r).some(l => l.met === 'POST'));
+ok('el cierre NO falla por eso', paso(r).ok === true, paso(r).data.discrepancia);
+ok('pero queda anotado que el estado no fue el anticipado',
+   !!paso(r).data.estadoDistintoDelPedido, paso(r).data);
+
+console.log('\n── Y sigue fallando cuando NUESTRO bloqueo no quedó vigente ──');
+modo = { crearFalla: true }; r = await correr(ENV, 'BLOCKED');
+ok('falla', paso(r).ok === false);
+
+console.log('\n── Liberar: si el cliente sigue restringido, SÍ falla ──');
+// Acá cerrar el caso sería mentir: se pidió liberar y no se liberó.
+modo = { resolverOtraArea: true }; r = await correr(ENV, 'NORMAL');
+ok('falla', paso(r).ok === false, paso(r).data.discrepancia);
+ok('y dice por qué', String(paso(r).data.discrepancia || '').includes('sigue en'), paso(r).data.discrepancia);
+
 console.log('\n── La verificación final es la que manda ──');
 modo = {}; r = await correr(ENV, 'NORMAL');
 ok('quedó en NORMAL como se pidió', paso(r).data.estadoEfectivo === 'NORMAL', paso(r).data.estadoEfectivo);

@@ -266,19 +266,49 @@ async function paso2MsCustomer(
   }
   sub.resolver = Object.keys(resueltos).length ? resueltos : { nadaQueResolver: true };
 
-  // ── 4) VERIFICAR contra el estado efectivo ───────────────────────────────
-  // Es la única forma de saber si el cliente quedó como el analista quiso: el
-  // estado es el más restrictivo SIN RESOLVER, así que resolver lo nuestro y que
-  // siga bloqueado por otra área es un escenario real. Acá SÍ decide el ok.
+  // ── 4) VERIFICAR que NUESTRA acción haya tomado efecto ───────────────────
+  //
+  // La primera versión comparaba el estado efectivo contra el `status` pedido y
+  // fallaba ante cualquier diferencia. Estaba mal, y rompió en producción:
+  //
+  //   la SPA pedía FULLY_BLOCKED · el comment COMPLIANCE_OFFICER_REQUEST
+  //   produce BLOCKED · la comparación daba discrepancia · ok=false · y el
+  //   canal Admin NO se registraba, así que el caso se quedaba en GESTIONANDO
+  //   con el cliente correctamente bloqueado.
+  //
+  // El error de fondo: en el modelo nuevo el estado lo DERIVA el servicio del
+  // `comment`. El `status` que mandamos no es un pedido, es a lo sumo una
+  // predicción — y compararse contra una predicción propia no verifica nada.
+  //
+  // Lo que sí hay que verificar es si NUESTRA acción tomó efecto, y eso depende
+  // de qué acción era:
+  //
+  //   crear_y_resolver → nuestro bloqueo existe y está vigente. Que el cliente
+  //                      quede MÁS restringido por otra área no es falla
+  //                      nuestra: nuestro bloqueo está puesto igual.
+  //   resolver         → el cliente TIENE que haber quedado liberado. Si sigue
+  //                      restringido, cerrar el caso sería mentir: acá sí falla.
   const rDespues = await llamar('GET', MS_HISTORIAL(id));
   sub.historialDespues = rDespues;
   if (rDespues.ok) {
-    const quedo = efectivo(filas(rDespues.data));
+    const restantes = sinResolver(filas(rDespues.data));
+    const quedo = restantes[0] ? String(restantes[0].status ?? 'NORMAL') : 'NORMAL';
     sub.estadoEfectivo = quedo;
-    if (quedo !== status) {
+
+    if (accion === 'crear_y_resolver') {
+      const nuestroVigente = restantes.some(r => String(r.comment ?? '') === comentarioPropio);
+      if (!nuestroVigente) {
+        ok = false;
+        sub.discrepancia = `el bloqueo con comment ${comentarioPropio} no quedó vigente`;
+      }
+    } else if (quedo !== 'NORMAL') {
       ok = false;
-      sub.discrepancia = `se pidió ${status} y el cliente quedó en ${quedo}`;
+      sub.discrepancia = `se pidió liberar y el cliente sigue en ${quedo}`;
     }
+
+    // Se informa igual cuando el estado no es el que se anticipó: no es falla,
+    // pero quien audite tiene que poder verlo sin reconstruirlo.
+    if (quedo !== status) sub.estadoDistintoDelPedido = `se anticipó ${status} y quedó ${quedo}`;
   }
 
   return { ok, status: httpFinal, data: sub };
