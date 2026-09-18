@@ -7,7 +7,7 @@
 // prendido; el llamador se encarga de eso.
 
 import { TIPOS_CIERRE, camposDeCierre } from './cierreTipos';
-import { TIPOS_CIERRE_ADMIN, ADMIN_ASSIGNEE_DEFAULT, PEP_PROVIDER_DEFAULT, ofacFlagPara } from './cierreAdminTipos';
+import { TIPOS_CIERRE_ADMIN, ADMIN_ASSIGNEE_DEFAULT, PEP_PROVIDER_DEFAULT, ofacFlagDe } from './cierreAdminTipos';
 import { enviarResolucion } from './caseResolutionService';
 import { enviarCierreAdmin, adminCierreDisponible } from './adminCierreService';
 import { sfUpdateDisponible } from './salesforceCaseService';
@@ -94,7 +94,7 @@ export async function procesarCasoAuto(
         try {
           const r = await enviarCierreAdmin({
             customerIds: [customerId], status: tipo.status, comment: tipo.comment, observation: tipo.observation,
-            agent: ADMIN_ASSIGNEE_DEFAULT, ofacFlag: ofacFlagPara(tipo.status), ofacProvider: 'REGCHECK',
+            agent: ADMIN_ASSIGNEE_DEFAULT, ofacFlag: ofacFlagDe(tipo), ofacProvider: 'REGCHECK',
             countryCode: cc, lastStep: tipo.lastStepDefault,
             pepEnabled: tipo.pepValue !== undefined, pepValue: !!tipo.pepValue,
             pepProvider: PEP_PROVIDER_DEFAULT, pepCountryCode: cc, pepPosition: null,
@@ -105,7 +105,7 @@ export async function procesarCasoAuto(
             await registrarCierreCanal(caso.id, 'admin', { ok: true, tipologia: tipoId }, actor).catch(() => {});
             logCierre(caso, 'ofac', {
               canal: 'ADMIN', ok: true, automatico: true, tipologia: tipoId,
-              statusEnviado: tipo.status, ofacFlag: ofacFlagPara(tipo.status), lastStep: tipo.lastStepDefault,
+              statusEnviado: tipo.status, ofacFlag: ofacFlagDe(tipo), lastStep: tipo.lastStepDefault,
             }, ACTOR_SISTEMA);
           } else {
             res.admin = 'error';

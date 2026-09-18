@@ -28,7 +28,7 @@ import { screenCaso, esScreenable } from '../../../services/casosCriminalService
 import { evaluarCasoAuto, statusDeCaso, statusTrasCierre, normalizarFlujoConfig } from '../../../services/flujoDecision';
 import type { FlujoOfacConfig, ConfigNormalizada } from '../../../services/flujoDecision';
 import { TIPOS_CIERRE, camposDeCierre } from '../../../services/cierreTipos';
-import { TIPOS_CIERRE_ADMIN, ADMIN_ASSIGNEE_DEFAULT, PEP_PROVIDER_DEFAULT, ofacFlagPara } from '../../../services/cierreAdminTipos';
+import { TIPOS_CIERRE_ADMIN, ADMIN_ASSIGNEE_DEFAULT, PEP_PROVIDER_DEFAULT, ofacFlagDe } from '../../../services/cierreAdminTipos';
 import { sendCaseUpdate } from '../../../services/salesforceCaseService';
 import { enviarCierreAdmin } from '../../../services/adminCierreService';
 import { evaluarRemesaAuto, extraerRemesa, clasificarCola } from '../../../services/flujoDecision';
@@ -393,7 +393,7 @@ async function procesar(caso: CasoSF, cfg: FlujoOfacConfig): Promise<ResultadoCa
         try {
           const r = await enviarCierreAdmin({
             customerIds: [customerId], status: tipo.status, comment: tipo.comment, observation: tipo.observation,
-            agent: ADMIN_ASSIGNEE_DEFAULT, ofacFlag: ofacFlagPara(tipo.status), ofacProvider: 'REGCHECK',
+            agent: ADMIN_ASSIGNEE_DEFAULT, ofacFlag: ofacFlagDe(tipo), ofacProvider: 'REGCHECK',
             countryCode: cc, lastStep: tipo.lastStepDefault,
             pepEnabled: tipo.pepValue !== undefined, pepValue: !!tipo.pepValue,
             pepProvider: PEP_PROVIDER_DEFAULT, pepCountryCode: cc, pepPosition: null,
