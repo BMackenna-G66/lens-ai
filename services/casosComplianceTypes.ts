@@ -147,7 +147,12 @@ export type TipoEventoAuditoria =
   | 'CIERRE_ADMIN_REMESA'   // liberación de la transacción (cola Remesa)
   | 'CASO_RECONSULTADO'
   | 'STATUS_CAMBIADO'
-  | 'CIERRE_AUTOMATICO';
+  | 'CIERRE_AUTOMATICO'
+  // Freno manual del caso: mientras está puesto, ningún camino lo cierra.
+  // Son dos eventos y no uno con un booleano para que poner y levantar el freno
+  // se puedan contar y filtrar por separado en la auditoría.
+  | 'STANDBY_PUESTO'
+  | 'STANDBY_QUITADO';
 
 export interface EventoAuditoriaCaso {
   eventId: string;

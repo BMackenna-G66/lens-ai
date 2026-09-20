@@ -170,9 +170,9 @@ async function leerWhitelist(): Promise<WhitelistClientes> {
   }
 }
 
-/** ¿La lista tiene algo que hacer en esta cola? Decide si la corrida arranca. */
-const whitelistAplica = (wl: WhitelistClientes | undefined, cola: 'ofac' | 'remesa'): boolean =>
-  !!wl?.enabled && wl.entradas.some(e => e[cola] === true);
+/** ¿La lista tiene algo que hacer? Decide si la corrida de remesas arranca. */
+const whitelistAplica = (wl: WhitelistClientes | undefined): boolean =>
+  !!wl?.enabled && wl.entradas.length > 0;
 
 // ── Freno de frecuencia del barrido "solo whitelist" ────────────────────────
 // El problema que esto evita, medido sobre los números reales de la cola:
@@ -471,28 +471,13 @@ interface ResultadoCaso {
   porWhitelist?: string;
 }
 
-async function procesar(caso: CasoSF, cfg: FlujoOfacConfig, wl?: WhitelistClientes): Promise<ResultadoCaso> {
+async function procesar(caso: CasoSF, cfg: FlujoOfacConfig): Promise<ResultadoCaso> {
   const base = { caseId: caso.id, numeroCaso: caso.numeroCaso };
-
-  // 0. Whitelist, ANTES del screening y a propósito.
-  //
-  // Su razón de ser es no volver a trabajar a un cliente ya resuelto, y
-  // screenearlo para después descartar el resultado sería pagarle al proveedor
-  // exactamente por lo que la lista existe para evitar.
-  //
-  // El otro efecto de que vaya acá: con el flujo apagado —que es como está hoy
-  // la cola— un caso que NO está en la lista se descarta sin consultar a nadie.
-  // Sin esto, prender solo la whitelist screenearía la cola entera para después
-  // no hacer nada con ella.
-  const enWhitelist = buscarEnWhitelist(caso, wl, 'ofac');
-  if (!enWhitelist && !cfg.enabled) {
-    return { ...base, accion: 'retenido', motivo: 'flujo_apagado' };
-  }
 
   // 1. Screening. Si ya hay uno vigente no se vuelve a consultar: una consulta
   //    por caso, y el proveedor no se paga dos veces.
   let screening = caso.screening as Record<string, unknown> | undefined;
-  if (!enWhitelist && !screeningVigente(screening)) {
+  if (!screeningVigente(screening)) {
     if (!esScreenable(caso)) return { ...base, accion: 'sin_screening', motivo: 'país sin screening' };
     try {
       screening = (await screenCaso(caso)) as unknown as Record<string, unknown>;
@@ -505,18 +490,15 @@ async function procesar(caso: CasoSF, cfg: FlujoOfacConfig, wl?: WhitelistClient
   }
 
   // 2. Decisión. La misma función que corre en el navegador.
-  const ev = evaluarCasoAuto(caso, screening as never, cfg, wl);
+  const ev = evaluarCasoAuto(caso, screening as never, cfg);
   if (!ev.automatizable || !ev.tipologia) {
     return { ...base, accion: 'retenido', motivo: ev.motivo };
   }
-  // Por qué se cerró: queda en el `detalle` de cada canal en el caso, para que
-  // un cierre por excepción no se lea igual que uno por screening limpio.
-  const porWhitelist = ev.whitelist ? motivoWhitelistLegible(ev.whitelist) : undefined;
 
   // `accion` se decide DESPUÉS de intentar los canales, no antes: si los dos
   // fallan, esto no es un cierre. Reportarlo como cerrado sería el mismo error
   // que ya arreglamos en el KYB — un fallo nuestro presentado como un resultado.
-  const out: ResultadoCaso = { ...base, accion: 'error', tipologia: ev.tipologia, sf: 'omitido', admin: 'omitido', porWhitelist };
+  const out: ResultadoCaso = { ...base, accion: 'error', tipologia: ev.tipologia, sf: 'omitido', admin: 'omitido' };
 
   // 3. Cierre en Salesforce.
   if (cfg.cerrarSF) {
@@ -538,7 +520,7 @@ async function procesar(caso: CasoSF, cfg: FlujoOfacConfig, wl?: WhitelistClient
             out.sf = r.ok ? 'ok' : 'error';
             if (!r.ok) out.motivo = r.errors?.join('; ') ?? `HTTP ${r.status ?? 0}`;
             await marcarEnvioSF(caso.id, firma, !!r.ok, out.motivo);
-            await guardarCierre(caso.id, 'sf', !!r.ok, ev.tipologia, out.motivo ?? porWhitelist);
+            await guardarCierre(caso.id, 'sf', !!r.ok, ev.tipologia, out.motivo);
           }
         } catch (e) { out.sf = 'error'; out.motivo = (e as Error).message; }
       }
@@ -566,7 +548,7 @@ async function procesar(caso: CasoSF, cfg: FlujoOfacConfig, wl?: WhitelistClient
           } as never);
           out.admin = r.ok ? 'ok' : 'error';
           if (!r.ok) out.motivo = out.motivo ?? r.error ?? 'Admin rechazó el cierre';
-          await guardarCierre(caso.id, 'admin', !!r.ok, ev.tipologia, out.motivo ?? porWhitelist);
+          await guardarCierre(caso.id, 'admin', !!r.ok, ev.tipologia, out.motivo);
         } catch (e) { out.admin = 'error'; out.motivo = out.motivo ?? (e as Error).message; }
       }
     }
@@ -757,7 +739,7 @@ async function procesarRemesa(
   //
   // Igual que en OFAC: con el flujo apagado y el caso fuera de la lista, se
   // descarta sin consultar a ningún proveedor.
-  const enWhitelistR = buscarEnWhitelist(caso, wl, 'remesa');
+  const enWhitelistR = buscarEnWhitelist(caso, wl);
   if (!enWhitelistR && !cfg.enabled) {
     return { ...base, accion: 'retenido', motivo: 'flujo_apagado' };
   }
@@ -982,8 +964,9 @@ async function correr(
   // que se pidió: la cola corre a mano y la lista saca de ahí a los clientes ya
   // resueltos.
   let wl = await leerWhitelist();
-  const corridaOfac = conf?.cfg.ofac.enabled === true || whitelistAplica(wl, 'ofac');
-  const corridaRemesa = conf?.cfg.remesa.enabled === true || whitelistAplica(wl, 'remesa');
+  // La whitelist solo mueve la cola de REMESAS: en OFAC no existe.
+  const corridaOfac = conf?.cfg.ofac.enabled === true;
+  const corridaRemesa = conf?.cfg.remesa.enabled === true || whitelistAplica(wl);
   if (!corridaOfac && !corridaRemesa) {
     // Apagado no es un error: es el cortafuegos funcionando. Pero se late igual,
     // para que la app pueda distinguir "apagado" de "muerto".
@@ -1040,12 +1023,11 @@ async function correr(
     // por el mismo motivo: sacar a alguien de la lista tiene que surtir efecto
     // en la corrida en curso.
     conf = await leerConfig();
-    wl = await leerWhitelist();
-    if (!conf?.cfg.ofac.enabled && !whitelistAplica(wl, 'ofac')) { apagadoEnVuelo = true; break; }
+    if (!conf?.cfg.ofac.enabled) { apagadoEnVuelo = true; break; }
 
     const lote = casos.slice(i, i + LOTE);
     const hechos = await Promise.all(lote.map(c =>
-      procesar(c, cfgDe(conf).ofac, wl).catch(e => ({
+      procesar(c, cfgDe(conf).ofac).catch(e => ({
         caseId: c.id, numeroCaso: c.numeroCaso, accion: 'error' as const, motivo: (e as Error).message,
       }))));
     resultados.push(...hechos);
@@ -1076,7 +1058,7 @@ async function correr(
     // El resto se sigue omitiendo con UN aviso, como antes: marcar cada caso
     // como error dejaría ~114 corridas por noche con decenas de errores cada
     // una y el aviso dejaría de significar algo.
-    const aProcesar = baseCaida ? remesas.filter(c => !!buscarEnWhitelist(c, wl, 'remesa')) : remesas;
+    const aProcesar = baseCaida ? remesas.filter(c => !!buscarEnWhitelist(c, wl)) : remesas;
     if (baseCaida) {
       remesasOmitidas = remesas.length - aProcesar.length;
       log.push(
@@ -1089,7 +1071,7 @@ async function correr(
       if (restante() <= 0) { cortadoPorTiempo = true; break; }
       conf = await leerConfig();
       wl = await leerWhitelist();
-      if (!conf?.cfg.remesa.enabled && !whitelistAplica(wl, 'remesa')) { apagadoEnVuelo = true; break; }
+      if (!conf?.cfg.remesa.enabled && !whitelistAplica(wl)) { apagadoEnVuelo = true; break; }
 
       const lote = aProcesar.slice(i, i + LOTE);
       const hechos = await Promise.all(lote.map(c =>
@@ -1122,13 +1104,13 @@ async function correr(
     retenidos: cuenta('retenido'),
     errores: cuenta('error'),
     sinScreening: cuenta('sin_screening'),
-    // Cuántos de esos cierres salieron de la WHITELIST y no del screening.
-    // Separado a propósito: la lista perdona todo, así que "10 cerrados" no
+    // Cuántas remesas se liberaron por la WHITELIST y no por el screening.
+    // Separado a propósito: la lista perdona todo, así que "10 liberadas" no
     // significa lo mismo si 9 fueron excepciones cargadas a mano.
+    // (La lista no aplica a OFAC: ahí nunca hay cierres por whitelist.)
     whitelist: {
       activa: wl.enabled,
       entradas: wl.entradas.length,
-      cerradosOfac: resultados.filter(r => r.accion === 'cerrado' && r.porWhitelist).length,
       cerradasRemesa: resultadosRemesa.filter(r => r.accion === 'cerrado' && r.porWhitelist).length,
       // Lo que costó leerla. Se mira junto con `lecturas`: si esto crece, es que
       // la lista se está releyendo entera en cada lote y hay que revisar el caché.

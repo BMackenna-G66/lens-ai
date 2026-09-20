@@ -32,6 +32,8 @@ import type { StatusCaso } from '../services/caseStatusService';
 import { subscribeFlujoConfig, guardarFlujoConfig, flujoConfigDisponible, FLUJO_CONFIG_DEFAULT, PAISES_FLUJO } from '../services/flujoAutomaticoService';
 import WhitelistClientesPanel from './WhitelistClientes';
 import { subscribeWhitelist, buscarEnWhitelist, WHITELIST_DEFAULT } from '../services/whitelistClientesService';
+import { enStandby } from '../services/flujoDecision';
+import { ponerStandbyVarios, quitarStandbyVarios, standbyDisponible } from '../services/casoStandby';
 import type { WhitelistClientes } from '../services/whitelistClientesService';
 // La extracción de la TX del asunto es compartida con el flujo desatendido.
 import { extraerRemesa, clasificarCola } from '../services/flujoDecision';
@@ -392,6 +394,52 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     finally { setBorrando(false); }
   };
 
+  // ── STAND BY ───────────────────────────────────────────────────────────────
+  // El freno manual. La regla de qué frena vive en `flujoDecision.enStandby` y la
+  // comparten la app y el Lambda; acá están las acciones y el filtro.
+  const [standbyMotivo, setStandbyMotivo] = useState('');
+  // Motivo propio de la ficha: si compartiera estado con el masivo, escribir en
+  // uno cambiaría el otro y alguien frenaría un caso con el motivo de otro lote.
+  const [standbyMotivoFicha, setStandbyMotivoFicha] = useState('');
+  const [standbyEnCurso, setStandbyEnCurso] = useState(false);
+  const [standbyMsg, setStandbyMsg] = useState<string | null>(null);
+
+  const frenarSeleccionados = async () => {
+    const motivo = standbyMotivo.trim();
+    if (!motivo || seleccion.size === 0) return;
+    setStandbyEnCurso(true); setStandbyMsg(null);
+    const r = await ponerStandbyVarios([...seleccion], motivo, actor ?? undefined);
+    setStandbyEnCurso(false);
+    setStandbyMsg(`${r.ok} frenado(s)${r.err ? `, ${r.err} con error` : ''}`);
+    if (r.err === 0) { setStandbyMotivo(''); limpiarSeleccion(); }
+  };
+
+  const soltarSeleccionados = async () => {
+    if (seleccion.size === 0) return;
+    setStandbyEnCurso(true); setStandbyMsg(null);
+    const r = await quitarStandbyVarios([...seleccion], actor ?? undefined);
+    setStandbyEnCurso(false);
+    setStandbyMsg(`${r.ok} soltado(s)${r.err ? `, ${r.err} con error` : ''}`);
+    if (r.err === 0) limpiarSeleccion();
+  };
+
+  // EL FILTRO. Lo usa **todo** camino de cierre masivo, sin excepción.
+  //
+  // Va acá y no dentro de cada handler porque son cinco (SF de OFAC, Admin de
+  // OFAC, y los tres de remesa) y el modo de fallo de olvidarse en uno es
+  // invisible: ese masivo cerraría los casos frenados y nadie se enteraría hasta
+  // revisar la auditoría. Una función sola, llamada en los cinco, se ve en un
+  // grep.
+  //
+  // Devuelve además cuántos se sacaron, para poder DECIRLO en el resultado: si
+  // el usuario selecciona 10 y se cierran 7, tiene que saber por qué.
+  const sinFrenados = (cs: CasoSF[]): { van: CasoSF[]; frenados: number } => {
+    const van = cs.filter(c => !enStandby(c));
+    return { van, frenados: cs.length - van.length };
+  };
+  /** El sufijo del mensaje de resultado. '' cuando no se frenó nada. */
+  const avisoFrenados = (n: number): string => (n ? `, ${n} en stand by (no se tocaron)` : '');
+
   // Cierre masivo: aplica la tipificación de un tipo de cierre a los seleccionados
   // y los envía a Salesforce (idempotente, reusa enviarResolucion).
   const [cierreTipo, setCierreTipo] = useState('');
@@ -402,7 +450,9 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     const tipo = TIPOS_CIERRE.find(t => t.id === cierreTipo);
     if (!tipo || seleccion.size === 0) return;
     setCerrando(true); setCierreResult(null);
-    const seleccionados = [...seleccion].map(id => casos.find(c => c.id === id)).filter((c): c is CasoSF => !!c);
+    // Los frenados NO se tocan. Ver `sinFrenados`.
+    const { van: seleccionados, frenados } = sinFrenados(
+      [...seleccion].map(id => casos.find(c => c.id === id)).filter((c): c is CasoSF => !!c));
     let ok = 0, err = 0;
     await runPool(seleccionados, async (c) => {
       try {
@@ -417,7 +467,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       } catch { err++; }
     }, 3);
     setCerrando(false); setCierreConfirm(false);
-    setCierreResult(`${ok} enviado(s)${err ? `, ${err} con error` : ''}`);
+    setCierreResult(`${ok} enviado(s)${err ? `, ${err} con error` : ''}${avisoFrenados(frenados)}`);
     if (err === 0) limpiarSeleccion();
   };
 
@@ -471,9 +521,12 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     if (!tipo || seleccion.size === 0) return;
     remesaMasivoLock.current = true;
     setRemesaEnCurso('ambos'); setRemesaMasivoResult(null);
-    const seleccionados = [...seleccion]
+    const todosSel = [...seleccion]
       .map(id => colas.remesa.find(c => c.id === id))
       .filter((c): c is QueuedCaso => !!c);
+    // Los frenados NO se tocan. Ver `sinFrenados`.
+    const frenados = todosSel.filter(c => enStandby(c)).length;
+    const seleccionados = todosSel.filter(c => !enStandby(c));
 
     try {
       // ── 1) Admin: aplica la tipología a las transacciones ──
@@ -543,7 +596,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
         `${sfOk} cerrado(s) en Salesforce${sfErr ? `, ${sfErr} con error` : ''}`,
         sinTx ? `${sinTx} sin N° de transacción` : '',
       ].filter(Boolean);
-      setRemesaMasivoResult(partes.join(' · '));
+      setRemesaMasivoResult(partes.join(' · ') + avisoFrenados(frenados));
       if (rAdmin.ok && sfErr === 0 && !sinTx) limpiarSeleccion();
     } catch (e) {
       setRemesaMasivoResult(`❌ ${e instanceof Error ? e.message : String(e)}`);
@@ -593,6 +646,11 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
           'Estado': op.estado,
           'Prioridad': op.prioridad,
           'Asignado a': op.asignado,
+          // El freno manual va al Excel: un caso que lleva días sin moverse se
+          // explica acá y no hay que abrir la ficha de cada uno para entenderlo.
+          'Stand by': enStandby(c) ? 'Sí' : 'No',
+          'Stand by — motivo': c.standby?.motivo ?? '',
+          'Stand by — puso': c.standby?.por ?? '',
           'Cerrado en Salesforce': c.cierres?.sf?.ok === true ? 'Sí' : 'No',
           'Cerrado en Admin': c.cierres?.admin?.ok === true ? 'Sí' : 'No',
           'Tipología de cierre': c.cierres?.sf?.tipologia ?? c.cierres?.admin?.tipologia ?? '',
@@ -673,9 +731,12 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     if (!tipo || seleccion.size === 0) return;
     remesaMasivoLock.current = true;
     setRemesaEnCurso('admin'); setRemesaMasivoResult(null);
-    const seleccionados = [...seleccion]
+    const todosSel = [...seleccion]
       .map(id => colas.remesa.find(c => c.id === id))
       .filter((c): c is QueuedCaso => !!c);
+    // Los frenados NO se tocan. Ver `sinFrenados`.
+    const frenados = todosSel.filter(c => enStandby(c)).length;
+    const seleccionados = todosSel.filter(c => !enStandby(c));
 
     try {
       const conTx = seleccionados.filter(c => c.remesa);
@@ -726,7 +787,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
         'el caso queda ABIERTO en Salesforce',
         sinTx ? `${sinTx} sin N° de transacción` : '',
       ].filter(Boolean);
-      setRemesaMasivoResult(partes.join(' · '));
+      setRemesaMasivoResult(partes.join(' · ') + avisoFrenados(frenados));
       // NO se limpia la selección: lo normal después de esto es cerrar el caso
       // con el otro botón, sobre los mismos casos.
     } catch (e) {
@@ -752,9 +813,12 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     if (!tipo || seleccion.size === 0) return;
     remesaMasivoLock.current = true;
     setRemesaEnCurso('sf'); setRemesaMasivoResult(null);
-    const seleccionados = [...seleccion]
+    const todosSel = [...seleccion]
       .map(id => colas.remesa.find(c => c.id === id))
       .filter((c): c is QueuedCaso => !!c);
+    // Los frenados NO se tocan. Ver `sinFrenados`.
+    const frenados = todosSel.filter(c => enStandby(c)).length;
+    const seleccionados = todosSel.filter(c => !enStandby(c));
 
     try {
       // Lo ya cerrado en SF no se reenvía. `enviarResolucion` además devuelve
@@ -792,7 +856,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
         sinAdmin ? `⚠️ ${sinAdmin} sin liberar/rechazar en Admin` : '',
         yaCerrados ? `${yaCerrados} ya estaba(n) cerrado(s)` : '',
       ].filter(Boolean);
-      setRemesaMasivoResult(partes.join(' · '));
+      setRemesaMasivoResult(partes.join(' · ') + avisoFrenados(frenados));
       if (sfErr === 0) limpiarSeleccion();
     } catch (e) {
       setRemesaMasivoResult(`❌ ${e instanceof Error ? e.message : String(e)}`);
@@ -814,7 +878,8 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     const tipo = TIPOS_CIERRE_ADMIN.find(t => t.id === adminMasivoTipo);
     if (!tipo || seleccion.size === 0) return;
     setAdminMasivoSending(true); setAdminMasivoResult(null);
-    const seleccionados = [...seleccion].map(id => casos.find(c => c.id === id)).filter((c): c is CasoSF => !!c);
+    const { van: seleccionados, frenados } = sinFrenados(
+      [...seleccion].map(id => casos.find(c => c.id === id)).filter((c): c is CasoSF => !!c));
     // Agrupa customerIds por país (countryCode del last-step) y guarda el mapa
     // customerId → casos, para poder marcar el status de cada caso al volver.
     const porPais = new Map<string, string[]>();
@@ -857,7 +922,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       } catch { err += ids.length; }
     }
     setAdminMasivoSending(false); setAdminMasivoConfirm(false);
-    setAdminMasivoResult(`${ok} cliente(s) OK${err ? `, ${err} con error` : ''}${sinId ? `, ${sinId} sin Customer ID` : ''}`);
+    setAdminMasivoResult(`${ok} cliente(s) OK${err ? `, ${err} con error` : ''}${sinId ? `, ${sinId} sin Customer ID` : ''}${avisoFrenados(frenados)}`);
     if (err === 0 && sinId === 0) limpiarSeleccion();
   };
 
@@ -1234,6 +1299,9 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
 
   const enviarAdmin = async () => {
     if (!sel || !adminForm.status || !adminForm.comment) return;
+    // STAND BY: freno duro, también en el cierre individual. `disabled` en el
+    // botón no alcanza — el estado del caso pudo cambiar con la ficha abierta.
+    if (enStandby(sel)) { setAdminResult({ ok: false, error: 'El caso está en STAND BY: hay que soltarlo antes de cerrarlo.' } as AdminCierreResult); return; }
     const ids = adminForm.customerIds.split(',').map(s => s.trim()).filter(Boolean);
     if (!ids.length) { setAdminResult({ ok: false, results: [], error: 'Falta el customerId.' }); return; }
     setAdminSending(true); setAdminResult(null);
@@ -1582,6 +1650,11 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     if (!tipo || !sel || ids.length === 0) return;
     // Segundo freno, por si el estado del caso cambió mientras la ficha estaba
     // abierta (otro analista, o el flujo automático).
+    if (enStandby(sel)) {
+      setRemesaAdminMsg('⏸️ El caso está en STAND BY: hay que soltarlo antes de liberar la transacción.');
+      setRemesaAdminConfirm(false);
+      return;
+    }
     if (sel.cierres?.admin?.ok === true || remesaAdminHechos.current.has(sel.id)) {
       setRemesaAdminMsg('↷ Este caso ya tiene el cierre en Admin aplicado.');
       setRemesaAdminConfirm(false);
@@ -2137,6 +2210,10 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
 
   const enviarRespuesta = async () => {
     if (!sel) return;
+    if (enStandby(sel)) {
+      setSfResult({ ok: false, errors: ['El caso está en STAND BY: hay que soltarlo antes de cerrarlo.'] } as SFUpdateResult);
+      return;
+    }
     setSending(true);
     setSfResult(null);
     try {
@@ -3009,6 +3086,39 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
             </div>
           )}
 
+          {/* STAND BY masivo: frenar o soltar los seleccionados.
+              Va acá arriba, junto al borrado y la asignación, porque es una
+              acción sobre la selección y no un cierre. Sirve en las tres colas. */}
+          {seleccion.size > 0 && (
+            <div className="flex flex-wrap items-center gap-3 mb-3 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/50 rounded-xl px-4 py-2 text-sm">
+              <span className="font-semibold text-amber-800 dark:text-amber-300">⏸️ Stand by</span>
+              <span className="text-[11px] text-amber-700 dark:text-amber-400">
+                Frena el caso: no lo cierra nadie —ni el flujo, ni la whitelist, ni un masivo— hasta que se suelte.
+              </span>
+              <input
+                value={standbyMotivo}
+                onChange={e => { setStandbyMotivo(e.target.value); setStandbyMsg(null); }}
+                placeholder="Motivo (obligatorio)"
+                className="px-2 py-1 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-xs min-w-[16rem]"
+              />
+              <button
+                onClick={frenarSeleccionados}
+                disabled={standbyEnCurso || !standbyMotivo.trim() || !standbyDisponible()}
+                className="font-bold text-amber-800 dark:text-amber-300 hover:underline disabled:opacity-40"
+              >
+                {standbyEnCurso ? 'Un momento…' : `Frenar ${seleccion.size}`}
+              </button>
+              <button
+                onClick={soltarSeleccionados}
+                disabled={standbyEnCurso || !standbyDisponible()}
+                className="font-bold text-slate-600 dark:text-slate-300 hover:underline disabled:opacity-40"
+              >
+                Soltar {seleccion.size}
+              </button>
+              {standbyMsg && <span className="text-xs font-semibold text-amber-800 dark:text-amber-300">{standbyMsg}</span>}
+            </div>
+          )}
+
           {/* Barra de cierre masivo en Salesforce (solo cola OFAC/PEP) */}
           {/* Asignación masiva: repartir casos entre analistas desde la cola */}
           {seleccion.size > 0 && (
@@ -3195,6 +3305,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                       {/* Orden pedido: caso → same person → beneficiario →
                           identificación → TX → cliente → screening. */}
                       {Th('numeroCaso', 'Nº caso')}
+                      {Th('asignado', 'Asignado')}
                       {Th('sameperson', 'Same person', 'text-center')}
                       {Th('benef', 'Beneficiario')}
                       {Th('benefdni', 'DNI benef.')}
@@ -3238,7 +3349,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
               <tbody>
                 {ordenados.length === 0 && (
                   <tr>
-                    <td colSpan={columnas.length + (activeQueue === 'remesa' ? 17 : activeQueue === 'ofac' ? 13 : 2)} className="py-8 text-center text-slate-400">
+                    <td colSpan={columnas.length + (activeQueue === 'remesa' ? 18 : activeQueue === 'ofac' ? 13 : 2)} className="py-8 text-center text-slate-400">
                       Sin casos en esta cola.
                     </td>
                   </tr>
@@ -3275,13 +3386,25 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                           title="Shift+clic para marcar todo el rango desde la última fila marcada"
                           className="w-4 h-4 cursor-pointer align-middle"
                         />
+                        {/* Marca de STAND BY: va primero porque es el freno que
+                            manda sobre todo lo demás, incluida la whitelist. */}
+                        {enStandby(c) && (
+                          <span
+                            title={`STAND BY — ${c.standby?.motivo ?? ''} (puso ${c.standby?.por ?? '?'})`}
+                            className="ml-1 align-middle text-[9px] font-black px-1 py-0.5 rounded bg-amber-500 text-white"
+                          >
+                            SB
+                          </span>
+                        )}
                         {/* Marca de whitelist. Va en la columna del check porque
                             es la única que existe en las tres colas, y el resto
                             de las columnas cambia según la cola.
+                            Solo en REMESAS: la lista no aplica a OFAC.
                             Se calcula con la MISMA función que el Lambda, así
                             que lo que se ve acá es lo que va a pasar. */}
                         {(() => {
-                          const w = buscarEnWhitelist(c, whitelist, activeQueue === 'remesa' ? 'remesa' : 'ofac');
+                          if (activeQueue !== 'remesa') return null;
+                          const w = buscarEnWhitelist(c, whitelist);
                           if (!w) return null;
                           return (
                             <span
@@ -3320,6 +3443,13 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                                 </span>
                               );
                             })()}
+                          </td>
+                          {/* Asignado. Mismo dato que en la cola OFAC; acá se lee
+                              directo del caso porque en remesas no se calcula
+                              `vistaOp`, que es lo que arma esa columna allá. */}
+                          <td className="px-3 py-2 whitespace-nowrap text-slate-600 dark:text-slate-300 max-w-[150px] truncate"
+                              title={c.asignacion?.analistaNombre ?? ''}>
+                            {c.asignacion?.analistaNombre || '—'}
                           </td>
                           {/* Envío a sí mismo. Se calcula SIEMPRE, aunque el switch
                               esté apagado: el switch decide si se saltea el screening
@@ -3799,6 +3929,64 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                   const selectCls = 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1 text-sm outline-none focus:border-sky-400';
                   return (
                     <div className="mb-5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/60 dark:bg-slate-900/40 p-4">
+                      {/* ── STAND BY ─────────────────────────────────────────
+                          Va arriba de todo en este bloque porque, cuando está
+                          puesto, es lo único que explica por qué el caso no se
+                          mueve: ningún botón de cierre de esta ficha funciona. */}
+                      <div className={`mb-3 rounded-lg border px-3 py-2.5 ${
+                        enStandby(sel)
+                          ? 'border-amber-400 dark:border-amber-600 bg-amber-50 dark:bg-amber-950/40'
+                          : 'border-slate-200 dark:border-slate-700 bg-white/60 dark:bg-slate-900/30'}`}>
+                        {enStandby(sel) ? (
+                          <div className="flex flex-wrap items-center gap-3">
+                            <span className="text-sm font-black text-amber-800 dark:text-amber-300">⏸️ EN STAND BY</span>
+                            <span className="text-xs text-amber-800 dark:text-amber-300">
+                              {sel.standby?.motivo}
+                              <span className="opacity-70">
+                                {' '}· lo frenó {sel.standby?.por}
+                                {sel.standby?.en ? ` el ${new Date(sel.standby.en).toLocaleString('es-CL')}` : ''}
+                              </span>
+                            </span>
+                            <button
+                              onClick={async () => {
+                                setStandbyEnCurso(true);
+                                try { await quitarStandbyVarios([sel.id], actor ?? undefined); }
+                                finally { setStandbyEnCurso(false); }
+                              }}
+                              disabled={standbyEnCurso || !standbyDisponible()}
+                              className="ml-auto px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-xs font-bold"
+                            >
+                              {standbyEnCurso ? 'Un momento…' : 'Soltar el caso'}
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-xs font-bold text-slate-700 dark:text-slate-200">⏸️ Stand by</span>
+                            <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                              Frena el caso hasta revisarlo: no lo cierra nadie, ni a mano ni el flujo automático.
+                            </span>
+                            <input
+                              value={standbyMotivoFicha}
+                              onChange={e => setStandbyMotivoFicha(e.target.value)}
+                              placeholder="Motivo (obligatorio)"
+                              className={`${selectCls} text-xs flex-1 min-w-[14rem]`}
+                            />
+                            <button
+                              onClick={async () => {
+                                const m = standbyMotivoFicha.trim();
+                                if (!m) return;
+                                setStandbyEnCurso(true);
+                                try { await ponerStandbyVarios([sel.id], m, actor ?? undefined); setStandbyMotivoFicha(''); }
+                                finally { setStandbyEnCurso(false); }
+                              }}
+                              disabled={standbyEnCurso || !standbyMotivoFicha.trim() || !standbyDisponible()}
+                              className="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-800 disabled:opacity-40 text-white text-xs font-bold"
+                            >
+                              Frenar este caso
+                            </button>
+                          </div>
+                        )}
+                      </div>
                       <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm">
                         <span className="text-slate-500 dark:text-slate-400">Tipo: <b className="text-slate-800 dark:text-slate-200">{op.tipo}</b></span>
                         <label className="flex items-center gap-1 text-slate-500 dark:text-slate-400">
@@ -3943,31 +4131,21 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                         Lambda, así que no puede decir una cosa y hacer otra. */}
                     {(() => {
                       const sc2 = screenMap[sel.id];
-                      // Con screening pendiente no hay nada que anticipar… salvo
-                      // que el cliente esté en la whitelist: ese caso se cierra
-                      // sin screening, así que callarlo sería esconder justo la
-                      // liberación que más conviene ver.
-                      const evWl = evaluarCasoAuto(sel, undefined, flujoCfg.ofac, whitelist);
-                      if (!evWl.whitelist && (!sc2 || sc2.estado === 'loading')) return null;
-                      const ev = evWl.whitelist ? evWl : evaluarCasoAuto(sel, sc2, flujoCfg.ofac, whitelist);
+                      // El stand by se muestra aunque no haya screening: es el
+                      // motivo por el que el caso no se mueve, y esconderlo
+                      // dejaría a alguien esperando una liberación que no viene.
+                      if (!enStandby(sel) && (!sc2 || sc2.estado === 'loading')) return null;
+                      const ev = evaluarCasoAuto(sel, sc2, flujoCfg.ofac);
                       if (ev.automatizable) {
-                        if (ev.whitelist) {
-                          return (
-                            <p className="text-[11px] text-red-700 dark:text-red-400 font-semibold mt-3 pt-3 border-t border-indigo-200 dark:border-indigo-800/50">
-                              ✅ Se cierra por WHITELIST, sin mirar el screening — {ev.whitelist.entrada.motivo}
-                              {ev.whitelist.entrada.referencia ? ` · ${ev.whitelist.entrada.referencia}` : ''}
-                              {' '}(cargó {ev.whitelist.entrada.agregadoPor}).
-                            </p>
-                          );
-                        }
                         return (
                           <p className="text-[11px] text-emerald-700 dark:text-emerald-400 mt-3 pt-3 border-t border-indigo-200 dark:border-indigo-800/50">
                             ✅ El flujo automático va a cerrar este caso con la tipología <b>{ev.tipologia}</b>.
                           </p>
                         );
                       }
-                      const duro = ev.motivo === 'delito_sensible' || ev.motivo === 'pep';
+                      const duro = ev.motivo === 'delito_sensible' || ev.motivo === 'pep' || ev.motivo === 'standby';
                       const texto: Record<string, string> = {
+                        standby: 'está en STAND BY, frenado a mano',
                         flujo_apagado: 'el flujo automático está apagado',
                         pais_apagado: 'el país está apagado en el mantenedor',
                         ya_cerrado: 'el caso ya está cerrado',

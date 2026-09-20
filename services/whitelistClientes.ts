@@ -1,11 +1,16 @@
 // WHITELIST DE CLIENTES — clientes autorizados a liberarse solos.
 //
 // ── Qué es ─────────────────────────────────────────────────────────────────
-// Una lista de clientes que, cuando aparecen en una cola de trabajo, se liberan
-// automáticamente: se cierra el caso en Salesforce y se ejecuta el cierre en
-// Admin (en OFAC, el desbloqueo del cliente; en Remesas, la liberación de la
-// transacción). Sirve para los clientes ya investigados cuya coincidencia es un
-// homónimo conocido y vuelve a caer en la cola una y otra vez.
+// Una lista de clientes que, cuando aparecen en la cola de REMESAS, se liberan
+// automáticamente: se cierra el caso en Salesforce y se libera la transacción
+// en Admin. Sirve para los clientes que remesan seguido y cuya revisión ya se
+// hizo, para que no vuelvan a caer en la cola una y otra vez.
+//
+// **Solo REMESAS.** No aplica a la cola de OFAC y no tiene por qué: lo que se
+// decide en OFAC es qué hacer con el CLIENTE —bloquearlo o no—, y eso no se
+// delega a una lista. Acá se libera una transacción puntual de un cliente que
+// ya se revisó. Si alguna vez hace falta lo mismo para OFAC, es una lista
+// aparte con su propio switch, no una columna más en esta.
 //
 // ── Lo que hay que tener clarísimo ─────────────────────────────────────────
 // **Esta lista PERDONA TODO, sin excepción.** Es una decisión de negocio
@@ -35,11 +40,6 @@
 //   · `ya_cerrado` — no hay nada que hacer.
 //   · `asignado`   — si un analista tomó el caso, lo termina el analista. Si no,
 //     el cron le cerraría por debajo el caso que está mirando.
-//
-// ── Alcance por cola ───────────────────────────────────────────────────────
-// Cada entrada declara en qué colas aplica (`ofac` / `remesa`), porque no es lo
-// mismo perdonarle a un cliente su homonimia OFAC que liberarle todas sus
-// transferencias. Se pueden prender las dos.
 //
 // ── Regla del archivo ──────────────────────────────────────────────────────
 // Funciones PURAS: sin red, sin Firestore, sin React. Lo importan la app y el
@@ -110,10 +110,6 @@ export interface EntradaWhitelist {
   motivo: string;
   /** Caso, ticket o acta que autorizó la excepción. Opcional pero muy recomendable. */
   referencia: string;
-  /** ¿Aplica en la cola de Coincidencia OFAC? */
-  ofac: boolean;
-  /** ¿Aplica en la cola de Remesas (libera la transacción)? */
-  remesa: boolean;
   /** 'YYYY-MM-DD'. null = no vence. Vencida, la entrada deja de aplicar sola. */
   vigenciaHasta: string | null;
   agregadoPor: string;
@@ -158,8 +154,7 @@ export const AVISO_ENTRADAS = 15000;
 
 // ── Normalización ───────────────────────────────────────────────────────────
 // Mismo criterio que `normalizarFlujoConfig`: **un campo ausente no puede
-// habilitar nada**. `enabled` ausente ⇒ apagado; `ofac`/`remesa` ausentes ⇒
-// apagados en esa entrada.
+// habilitar nada**. `enabled` ausente ⇒ apagado.
 
 export interface WhitelistNormalizada {
   wl: WhitelistClientes;
@@ -205,13 +200,6 @@ export function normalizarWhitelist(raw: Record<string, unknown> | undefined): W
       return;
     }
 
-    const ofac = e.ofac === true;
-    const remesa = e.remesa === true;
-    if (!ofac && !remesa) {
-      descartadas.push({ indice, motivo: 'No aplica a ninguna cola', crudo: c });
-      return;
-    }
-
     const vig = texto(e.vigenciaHasta);
     if (vig && !FECHA_ISO.test(vig)) {
       descartadas.push({ indice, motivo: `Vigencia con formato inválido ("${vig}"): se espera YYYY-MM-DD`, crudo: c });
@@ -231,7 +219,6 @@ export function normalizarWhitelist(raw: Record<string, unknown> | undefined): W
       nombre: texto(e.nombre),
       motivo,
       referencia: texto(e.referencia),
-      ofac, remesa,
       vigenciaHasta: vig || null,
       agregadoPor: texto(e.agregadoPor) || 'desconocido',
       agregadoEn: texto(e.agregadoEn) || '',
@@ -259,8 +246,6 @@ export function normalizarWhitelist(raw: Record<string, unknown> | undefined): W
 }
 
 // ── Búsqueda ────────────────────────────────────────────────────────────────
-export type ColaWhitelist = 'ofac' | 'remesa';
-
 export interface CoincidenciaWhitelist {
   entrada: EntradaWhitelist;
   /** Por cuál de las dos llaves entró. Va al log y a la ficha. */
@@ -306,23 +291,26 @@ export function entradaVigente(e: EntradaWhitelist, hoy: string): boolean {
 export const hoyISO = (): string => new Date().toISOString().slice(0, 10);
 
 /**
- * ¿Este caso es de un cliente de la whitelist, para esta cola?
+ * ¿Este caso es de un cliente de la whitelist?
  *
  * Devuelve `null` cuando no aplica — y eso incluye la lista apagada, que es lo
  * que hace que agregar esto no cambie absolutamente nada hasta que alguien
  * prenda el switch a propósito.
+ *
+ * Solo tiene sentido llamarla con casos de la cola de REMESAS: la lista no
+ * aplica a OFAC. Quien llama es responsable de eso, igual que con el resto de
+ * las reglas que dependen de la cola.
  */
 export function buscarEnWhitelist(
   caso: Pick<CasoSF, 'datos'> | undefined,
   wl: WhitelistClientes | undefined,
-  cola: ColaWhitelist,
   hoy: string = hoyISO(),
 ): CoincidenciaWhitelist | null {
   if (!wl?.enabled || !wl.entradas?.length || !caso) return null;
   const idx = indexar(wl.entradas);
 
   const aplica = (e: EntradaWhitelist | undefined): e is EntradaWhitelist =>
-    !!e && e[cola] === true && entradaVigente(e, hoy);
+    !!e && entradaVigente(e, hoy);
 
   // El documento va primero: es la llave más estable de las dos (el customerId
   // puede repetirse entre ambientes; el documento identifica a la persona).
@@ -359,8 +347,6 @@ export interface BorradorEntrada {
   nombre?: unknown;
   motivo?: unknown;
   referencia?: unknown;
-  ofac?: boolean;
-  remesa?: boolean;
   vigenciaHasta?: unknown;
 }
 
@@ -376,9 +362,6 @@ export function construirEntrada(
   }
   const motivo = texto(b.motivo);
   if (!motivo) return { ok: false, error: 'El motivo es obligatorio.' };
-  const ofac = b.ofac === true;
-  const remesa = b.remesa === true;
-  if (!ofac && !remesa) return { ok: false, error: 'Elegí al menos una cola (OFAC o Remesas).' };
   const vig = texto(b.vigenciaHasta);
   if (vig && !FECHA_ISO.test(vig)) return { ok: false, error: 'La vigencia va en formato YYYY-MM-DD.' };
 
@@ -387,7 +370,6 @@ export function construirEntrada(
     entrada: {
       documento: doc, customerId: cid,
       nombre: texto(b.nombre), motivo, referencia: texto(b.referencia),
-      ofac, remesa,
       vigenciaHasta: vig || null,
       agregadoPor: agregadoPor || 'desconocido',
       agregadoEn: ahora,
@@ -422,8 +404,6 @@ export interface ResultadoImportacion {
 }
 
 export interface OpcionesImportacion {
-  ofac: boolean;
-  remesa: boolean;
   agregadoPor: string;
   /** Se aplica a las filas sin motivo propio. Sin esto, esas filas se descartan. */
   motivoPorDefecto?: string;
@@ -462,8 +442,6 @@ export function filasAEntradas(
       motivo: (celdas[3] ?? '').trim() || opciones.motivoPorDefecto || '',
       referencia: (celdas[4] ?? '').trim() || opciones.referenciaPorDefecto || '',
       vigenciaHasta: (celdas[5] ?? '').trim() || opciones.vigenciaPorDefecto || '',
-      ofac: opciones.ofac,
-      remesa: opciones.remesa,
     };
     const r = construirEntrada(b, opciones.agregadoPor, ahora);
     if (r.ok) entradas.push(r.entrada);
@@ -520,10 +498,10 @@ export function fusionarEntradas(
 export function whitelistACsv(entradas: EntradaWhitelist[]): string {
   const esc = (v: string) => (/[",;\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
   const filas = [
-    ['documento', 'customerId', 'nombre', 'motivo', 'referencia', 'vigenciaHasta', 'ofac', 'remesa', 'agregadoPor', 'agregadoEn'],
+    ['documento', 'customerId', 'nombre', 'motivo', 'referencia', 'vigenciaHasta', 'agregadoPor', 'agregadoEn'],
     ...entradas.map(e => [
       e.documento, e.customerId, e.nombre, e.motivo, e.referencia,
-      e.vigenciaHasta ?? '', e.ofac ? 'si' : 'no', e.remesa ? 'si' : 'no',
+      e.vigenciaHasta ?? '',
       e.agregadoPor, e.agregadoEn,
     ]),
   ];
