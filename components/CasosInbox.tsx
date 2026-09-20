@@ -30,6 +30,9 @@ import type { Notificacion } from '../services/notificacionesService';
 import { statusDeCaso, setStatusCaso, registrarCierreCanal, STATUS_CASO_VALORES } from '../services/caseStatusService';
 import type { StatusCaso } from '../services/caseStatusService';
 import { subscribeFlujoConfig, guardarFlujoConfig, flujoConfigDisponible, FLUJO_CONFIG_DEFAULT, PAISES_FLUJO } from '../services/flujoAutomaticoService';
+import WhitelistClientesPanel from './WhitelistClientes';
+import { subscribeWhitelist, buscarEnWhitelist, WHITELIST_DEFAULT } from '../services/whitelistClientesService';
+import type { WhitelistClientes } from '../services/whitelistClientesService';
 // La extracción de la TX del asunto es compartida con el flujo desatendido.
 import { extraerRemesa, clasificarCola } from '../services/flujoDecision';
 import { CATEGORIAS_SENSIBLES } from '../services/delitosSensibles';
@@ -928,6 +931,15 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   useEffect(() => subscribeFlujoConfig((cfg, ausentes) => {
     setFlujoCfg(cfg); setFlujoDraft(cfg); setFlujoCamposAusentes(ausentes ?? []);
   }), []);
+
+  // ── Whitelist de clientes ───────────────────────────────────────────────────
+  // Mantenedor aparte del flujo automático porque el switch es aparte: la lista
+  // libera aunque el flujo esté apagado. Acá solo se lee, para poder marcar los
+  // casos en la cola y explicar por qué uno se va a liberar solo; el que decide
+  // de verdad es el Lambda, con esta misma lista y esta misma función.
+  const [whitelist, setWhitelist] = useState<WhitelistClientes>(WHITELIST_DEFAULT);
+  const [showWhitelist, setShowWhitelist] = useState(false);
+  useEffect(() => subscribeWhitelist(wl => setWhitelist(wl)), []);
 
   // Usuarios de Lens: sirven para asignar casos y como diccionario de analistas en
   // Redshift (para poder leer los logs por nombre/correo).
@@ -2249,6 +2261,22 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                 : 'OFF'}
             </span>
           </button>
+          {/* Mantenedor de la whitelist. Botón aparte del flujo automático
+              porque el interruptor también lo es: la lista libera con el flujo
+              apagado, y juntarlos haría creer que uno gobierna al otro. */}
+          <button
+            onClick={() => setShowWhitelist(v => !v)}
+            title="Clientes que se liberan solos, sin mirar el screening"
+            className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-bold border transition-colors ${
+              whitelist.enabled
+                ? 'bg-emerald-600 text-white border-emerald-600'
+                : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:border-emerald-300'}`}
+          >
+            <span>{showWhitelist ? '▾' : '▸'}</span> ✅ Whitelist
+            <span className={`px-1.5 py-0.5 rounded-full ${whitelist.enabled ? 'bg-white/25' : 'bg-slate-100 dark:bg-slate-700'}`}>
+              {whitelist.enabled ? `ON: ${whitelist.entradas.length}` : 'OFF'}
+            </span>
+          </button>
           <span className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-emerald-600 dark:text-emerald-400">
             <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" /> en vivo
           </span>
@@ -2309,6 +2337,18 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
             </div>
           </div>
         </div>
+      )}
+
+      {/* Mantenedor de la whitelist de clientes */}
+      {showWhitelist && !loading && !error && (
+        <WhitelistClientesPanel
+          // Se le pasan los casos que la Bandeja tiene cargados para que pueda
+          // decir cuántos liberaría ANTES de guardar. Es el único aviso posible
+          // contra una carga masiva que no coincide con nada.
+          casos={casos}
+          actor={actor}
+          onCerrar={() => setShowWhitelist(false)}
+        />
       )}
 
       {/* Ficha de configuración del flujo automático */}
@@ -3235,6 +3275,24 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                           title="Shift+clic para marcar todo el rango desde la última fila marcada"
                           className="w-4 h-4 cursor-pointer align-middle"
                         />
+                        {/* Marca de whitelist. Va en la columna del check porque
+                            es la única que existe en las tres colas, y el resto
+                            de las columnas cambia según la cola.
+                            Se calcula con la MISMA función que el Lambda, así
+                            que lo que se ve acá es lo que va a pasar. */}
+                        {(() => {
+                          const w = buscarEnWhitelist(c, whitelist, activeQueue === 'remesa' ? 'remesa' : 'ofac');
+                          if (!w) return null;
+                          return (
+                            <span
+                              title={`Whitelist: se libera solo sin mirar el screening · ${w.entrada.motivo}`
+                                + `${w.entrada.referencia ? ` · ${w.entrada.referencia}` : ''} · cargó ${w.entrada.agregadoPor}`}
+                              className="ml-1 align-middle text-[9px] font-black px-1 py-0.5 rounded bg-emerald-600 text-white"
+                            >
+                              WL
+                            </span>
+                          );
+                        })()}
                       </td>
                       {activeQueue === 'otros' && <td className="px-3 py-2 whitespace-nowrap text-slate-500 dark:text-slate-400">{fmtFecha(c.recibidoEn)}</td>}
                       {activeQueue === 'remesa' && (() => {
@@ -3627,8 +3685,20 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                       {/* Por qué este caso no se libera solo. Deja explícito el freno
                           por delito sensible, que es el que más importa auditar. */}
                       {!benefLoading && sc && sel && (() => {
-                        const ev = evaluarRemesaAuto(sel, sc, flujoCfg.remesa);
+                        const ev = evaluarRemesaAuto(sel, sc, flujoCfg.remesa, whitelist);
                         if (ev.automatizable) {
+                          // Una liberación por whitelist no se puede leer igual
+                          // que una por screening limpio: la primera no miró
+                          // ningún hallazgo. Se dice quién la autorizó.
+                          if (ev.whitelist) {
+                            return (
+                              <p className="text-[11px] text-red-700 dark:text-red-400 mt-2 font-semibold">
+                                ✅ Se libera por WHITELIST, sin mirar el screening — {ev.whitelist.entrada.motivo}
+                                {ev.whitelist.entrada.referencia ? ` · ${ev.whitelist.entrada.referencia}` : ''}
+                                {' '}(cargó {ev.whitelist.entrada.agregadoPor}).
+                              </p>
+                            );
+                          }
                           return (
                             <p className="text-[11px] text-emerald-700 dark:text-emerald-400 mt-2">
                               ✅ Habilitado para el flujo automático (tipología {ev.tipologia}).
@@ -3873,9 +3943,23 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                         Lambda, así que no puede decir una cosa y hacer otra. */}
                     {(() => {
                       const sc2 = screenMap[sel.id];
-                      if (!sc2 || sc2.estado === 'loading') return null;
-                      const ev = evaluarCasoAuto(sel, sc2, flujoCfg.ofac);
+                      // Con screening pendiente no hay nada que anticipar… salvo
+                      // que el cliente esté en la whitelist: ese caso se cierra
+                      // sin screening, así que callarlo sería esconder justo la
+                      // liberación que más conviene ver.
+                      const evWl = evaluarCasoAuto(sel, undefined, flujoCfg.ofac, whitelist);
+                      if (!evWl.whitelist && (!sc2 || sc2.estado === 'loading')) return null;
+                      const ev = evWl.whitelist ? evWl : evaluarCasoAuto(sel, sc2, flujoCfg.ofac, whitelist);
                       if (ev.automatizable) {
+                        if (ev.whitelist) {
+                          return (
+                            <p className="text-[11px] text-red-700 dark:text-red-400 font-semibold mt-3 pt-3 border-t border-indigo-200 dark:border-indigo-800/50">
+                              ✅ Se cierra por WHITELIST, sin mirar el screening — {ev.whitelist.entrada.motivo}
+                              {ev.whitelist.entrada.referencia ? ` · ${ev.whitelist.entrada.referencia}` : ''}
+                              {' '}(cargó {ev.whitelist.entrada.agregadoPor}).
+                            </p>
+                          );
+                        }
                         return (
                           <p className="text-[11px] text-emerald-700 dark:text-emerald-400 mt-3 pt-3 border-t border-indigo-200 dark:border-indigo-800/50">
                             ✅ El flujo automático va a cerrar este caso con la tipología <b>{ev.tipologia}</b>.
