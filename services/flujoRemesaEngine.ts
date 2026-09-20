@@ -28,6 +28,7 @@ import { enviarResolucion } from './caseResolutionService';
 import { sfUpdateDisponible, type SFCaseUpdate } from './salesforceCaseService';
 import { enviarCierreRemesaAdmin, remesaAdminDisponible } from './remesaAdminService';
 import { registrarCierreCanal } from './caseStatusService';
+import { registrarAuditoria } from './caseAuditService';
 import { logCierre, logLiberacionRemesa } from './colasLogService';
 import type { Actor } from './caseWorkflowService';
 
@@ -40,6 +41,8 @@ export {
 export type { MotivoNoAutoRemesa, EvaluacionRemesa, ScreeningRemesaParaAuto } from './flujoDecision';
 import { evaluarRemesaAuto } from './flujoDecision';
 import type { ScreeningRemesaParaAuto } from './flujoDecision';
+import { motivoWhitelistLegible } from './whitelistClientes';
+import type { WhitelistClientes } from './whitelistClientes';
 
 // ── Ejecución ────────────────────────────────────────────────────────────────
 // Cierra el caso en Salesforce y libera la transacción en Admin, según config.
@@ -56,6 +59,8 @@ export interface ResultadoRemesaAuto {
   sf: EstadoCanalRemesa;
   admin: EstadoCanalRemesa;
   detalle?: string;
+  /** La liberación salió de la whitelist de clientes, no del screening del beneficiario. */
+  porWhitelist?: string;
 }
 
 const ACTOR_SISTEMA = { uid: 'system', nombre: 'flujo automático' } as unknown as Actor;
@@ -66,8 +71,10 @@ export async function procesarRemesaAuto(
   screening: ScreeningRemesaParaAuto | undefined,
   cfg: FlujoRemesaConfig,
   actor?: Actor,
+  // Opcional y al final: sin whitelist, esto se comporta exactamente como antes.
+  wl?: WhitelistClientes,
 ): Promise<ResultadoRemesaAuto | null> {
-  const evaluacion = evaluarRemesaAuto(caso, screening, cfg);
+  const evaluacion = evaluarRemesaAuto(caso, screening, cfg, wl);
   if (!evaluacion.automatizable || !evaluacion.tipologia) return null;
   const tipo = tipoRemesaPorId(evaluacion.tipologia);
   // `automatico` es un freno, no una preferencia: el flujo desatendido solo
@@ -77,8 +84,14 @@ export async function procesarRemesaAuto(
   // Firestore y se puede editar a mano.
   if (!tipo || !tipo.automatico) return null;
 
+  // Por qué se liberó. Va al `detalle` de cada canal en Firestore, que es lo que
+  // queda visible en la ficha del caso. No se agrega columna a Redshift: eso
+  // exige desplegar la DDL y el Lambda del logger juntos, y es un cambio aparte.
+  const porWhitelist = evaluacion.whitelist ? motivoWhitelistLegible(evaluacion.whitelist) : undefined;
+
   const res: ResultadoRemesaAuto = {
-    caseId: caso.id, numeroCaso: caso.numeroCaso, tipologia: tipo.id, sf: 'omitido', admin: 'omitido',
+    caseId: caso.id, numeroCaso: caso.numeroCaso, tipologia: tipo.id,
+    sf: 'omitido', admin: 'omitido', porWhitelist,
   };
 
   // ── Canal Salesforce ──
@@ -91,7 +104,7 @@ export async function procesarRemesaAuto(
         const r = await enviarResolucion(caso.id, payload, actor);
         if (r.yaEnviada || r.sf?.ok) {
           res.sf = 'ok';
-          await registrarCierreCanal(caso.id, 'sf', { ok: true, tipologia: tipo.id }, actor).catch(() => {});
+          await registrarCierreCanal(caso.id, 'sf', { ok: true, tipologia: tipo.id, detalle: porWhitelist }, actor).catch(() => {});
           logCierre(caso, 'remesa', { canal: 'SF', ok: true, automatico: true, tipologia: tipo.id }, ACTOR_SISTEMA);
         } else {
           res.sf = 'error';
@@ -116,7 +129,7 @@ export async function procesarRemesaAuto(
         });
         if (r.ok) {
           res.admin = 'ok';
-          await registrarCierreCanal(caso.id, 'admin', { ok: true, tipologia: tipo.id }, actor).catch(() => {});
+          await registrarCierreCanal(caso.id, 'admin', { ok: true, tipologia: tipo.id, detalle: porWhitelist }, actor).catch(() => {});
           logCierre(caso, 'remesa', { canal: 'ADMIN', ok: true, automatico: true, tipologia: tipo.id, statusEnviado: tipo.statusDB }, ACTOR_SISTEMA);
         } else {
           res.admin = 'error';
@@ -138,6 +151,30 @@ export async function procesarRemesaAuto(
     requestedBy: actor?.nombre ?? 'flujo automático',
     detalleError: res.detalle ?? null,
   }, undefined, screening as Parameters<typeof logLiberacionRemesa>[3], ACTOR_SISTEMA as unknown as Parameters<typeof logLiberacionRemesa>[4]);
+
+  // Traza de la excepción, SOLO cuando la liberación salió de la whitelist.
+  //
+  // Solo en ese caso a propósito: este motor no escribía auditoría en Firestore
+  // y no hay motivo para empezar a pagar una escritura por cada remesa limpia.
+  // Pero una remesa liberada sin consultar a ningún proveedor, por una excepción
+  // que cargó una persona, tiene que dejar dicho quién la cargó y por qué —
+  // si no, es indistinguible de un screening limpio.
+  if (evaluacion.whitelist) {
+    const w = evaluacion.whitelist;
+    await registrarAuditoria(caso.id, {
+      tipo: 'CIERRE_AUTOMATICO', actorId: actor?.uid ?? 'system', actorTipo: 'SYSTEM',
+      correlationId: caso.id, versionCaso: 1,
+      metadata: {
+        cola: 'remesa', tipologia: tipo.id, transaccion: transaccion || null,
+        sf: res.sf, admin: res.admin, detalle: res.detalle ?? null,
+        whitelist: {
+          por: w.por, valor: w.valor, motivo: w.entrada.motivo,
+          referencia: w.entrada.referencia || null,
+          agregadoPor: w.entrada.agregadoPor, agregadoEn: w.entrada.agregadoEn || null,
+        },
+      },
+    }).catch(() => {});
+  }
 
   return res;
 }

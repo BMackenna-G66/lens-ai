@@ -18,6 +18,13 @@
 
 import { categoriasSensibles } from './delitosSensibles';
 import type { CasoSF } from './casosService';
+// La whitelist vive en su propio módulo, también puro y también importado por
+// los dos lados. Se engancha acá y no en los ejecutores por el mismo motivo que
+// todo lo demás de este archivo: si el Lambda y la app decidieran por separado
+// quién está whitelisteado, divergirían — y en esa dirección la divergencia
+// libera plata.
+import { buscarEnWhitelist } from './whitelistClientes';
+import type { WhitelistClientes, CoincidenciaWhitelist } from './whitelistClientes';
 
 // ── Config del flujo ────────────────────────────────────────────────────────
 export interface FlujoOfacConfig {
@@ -282,6 +289,8 @@ export interface EvaluacionAuto {
   motivo?: MotivoNoAuto;
   tipologia?: string;
   categorias?: string[];
+  /** Presente solo si la liberación viene de la whitelist, no del screening. */
+  whitelist?: CoincidenciaWhitelist;
 }
 
 export interface ScreeningParaAuto {
@@ -297,7 +306,30 @@ export function evaluarCasoAuto(
   caso: CasoSF,
   screening: ScreeningParaAuto | undefined,
   cfg: FlujoOfacConfig,
+  wl?: WhitelistClientes,
 ): EvaluacionAuto {
+  // ── WHITELIST ─────────────────────────────────────────────────────────────
+  // Va PRIMERO y a propósito: es una autorización explícita por cliente, cargada
+  // a mano por alguien que firma con su nombre, y pasa por encima de TODO lo que
+  // decide el screening — listas de sanciones y delitos sensibles incluidos. Esa
+  // es la regla, no un descuido; ver la cabecera de `whitelistClientes.ts`.
+  //
+  // Tiene switch PROPIO (`wl.enabled`), así que no depende de `cfg.enabled` ni de
+  // los países: con el flujo automático apagado —que es como está hoy la cola— la
+  // whitelist igual libera. Si colgara de `cfg.enabled`, prender el flujo para
+  // otra cosa prendería también las excepciones.
+  //
+  // Lo único que la whitelist NO pasa por encima son los dos frenos que no son de
+  // riesgo sino de coordinación: un caso ya cerrado no tiene nada que hacer, y un
+  // caso con dueño lo termina su dueño (si no, el cron le cierra por debajo el
+  // caso que está mirando).
+  const w = buscarEnWhitelist(caso, wl, 'ofac');
+  if (w) {
+    if (statusDeCaso(caso) === 'CERRADO') return { automatizable: false, motivo: 'ya_cerrado' };
+    if (caso.asignacion?.analistaId) return { automatizable: false, motivo: 'asignado' };
+    return { automatizable: true, tipologia: cfg.tipoLiberarNormal, whitelist: w };
+  }
+
   if (!cfg.enabled) return { automatizable: false, motivo: 'flujo_apagado' };
   if (!paisHabilitado(caso.pais, cfg)) return { automatizable: false, motivo: 'pais_apagado' };
   if (statusDeCaso(caso) === 'CERRADO') return { automatizable: false, motivo: 'ya_cerrado' };
@@ -393,6 +425,8 @@ export interface EvaluacionRemesa {
   motivo?: MotivoNoAutoRemesa;
   tipologia?: string;
   categorias?: string[];
+  /** Presente solo si la liberación viene de la whitelist, no del screening. */
+  whitelist?: CoincidenciaWhitelist;
 }
 
 // Forma mínima del screening del beneficiario que necesita la decisión.
@@ -412,7 +446,29 @@ export function evaluarRemesaAuto(
   caso: CasoSF,
   screening: ScreeningRemesaParaAuto | undefined,
   cfg: FlujoRemesaConfig,
+  wl?: WhitelistClientes,
 ): EvaluacionRemesa {
+  // ── WHITELIST ─────────────────────────────────────────────────────────────
+  // Misma regla que en OFAC y con la misma lista, pero mirando la columna
+  // `remesa` de cada entrada: perdonarle a un cliente su homonimia OFAC no es lo
+  // mismo que liberarle todas sus transferencias, así que cada entrada declara
+  // en qué colas aplica.
+  //
+  // Acá pasa por encima de MÁS cosas que en OFAC, porque acá hay más frenos:
+  // destino apagado, sin screening, sin nacionalidad, sin documento, delito
+  // sensible y coincidencia en listas. La whitelist los saltea todos. Es
+  // exactamente lo que se pidió y lo que hay que tener presente al cargar una
+  // entrada con `remesa: true`: **libera plata real, sin consultar a nadie.**
+  //
+  // La whitelist entra ANTES incluso que `statusDeCaso`, igual que en OFAC, y
+  // después vuelve a verificar cerrado/asignado por su cuenta.
+  const w = buscarEnWhitelist(caso, wl, 'remesa');
+  if (w) {
+    if (statusDeCaso(caso) === 'CERRADO') return { automatizable: false, motivo: 'ya_cerrado' };
+    if (caso.asignacion?.analistaId) return { automatizable: false, motivo: 'asignado' };
+    return { automatizable: true, tipologia: cfg.tipoLiberar, whitelist: w };
+  }
+
   if (!cfg.enabled) return { automatizable: false, motivo: 'flujo_apagado' };
   if (statusDeCaso(caso) === 'CERRADO') return { automatizable: false, motivo: 'ya_cerrado' };
 

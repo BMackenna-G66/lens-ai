@@ -46,3 +46,8 @@ aws/flujo-autonomo/.aws-sam/
 *firebase-adminsdk*.json
 
 .lens-trigger-secret
+
+# Bundles generados para correr los tests con node (ver test/*.mjs)
+test/wl.mjs
+test/decision.mjs
+cloudflare/empresadocs-proxy/test/tipos.mjs

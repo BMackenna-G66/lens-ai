@@ -38,11 +38,15 @@ import { enviarCierreRemesaAdmin } from '../../../services/remesaAdminService';
 import { buscarRemesas } from '../../../services/remesasService';
 import { screenBeneficiario } from '../../../services/remesaScreeningService';
 import { dniDelCliente, tipoDniDelCliente } from '../../../services/remesaSamePerson';
+import { buscarEnWhitelist, normalizarWhitelist, motivoWhitelistLegible, WHITELIST_DEFAULT }
+  from '../../../services/whitelistClientes';
+import type { WhitelistClientes } from '../../../services/whitelistClientes';
 import type { CasoSF } from '../../../services/casosService';
 
 // ── Configuración de la corrida ─────────────────────────────────────────────
 const COLECCION = process.env.FIRESTORE_COLLECTION || 'casos_sf';
 const CONFIG_DOC = process.env.CONFIG_DOC || 'config/flujoAutomatico';
+const WHITELIST_DOC_PATH = process.env.WHITELIST_DOC || 'config/whitelistClientes';
 // La versión de esquema del screening. Tiene que coincidir con SCREENING_SCHEMA
 // de casosService: si suben una y no la otra, el Lambda re-consulta todo o no
 // re-consulta nada.
@@ -80,6 +84,135 @@ async function leerConfig(): Promise<ConfigNormalizada | null> {
   const snap = await db().collection(col).doc(id).get();
   if (!snap.exists) return null;      // sin doc = nunca se configuró = apagado
   return normalizarFlujoConfig(snap.data() as Record<string, unknown>);
+}
+
+// ── Whitelist de clientes ───────────────────────────────────────────────────
+// Documento aparte del de config, y switch aparte del flujo: un cliente de la
+// whitelist se libera aunque el flujo automático esté apagado, que es como está
+// hoy la cola. Las reglas viven en `services/whitelistClientes.ts` y las importan
+// los dos lados, igual que la decisión.
+//
+// ── Cómo se lee sin fundir la cuota ───────────────────────────────────────
+// La lista se guarda partida: una CABECERA chica (switch + conteo + fecha) y N
+// partes de hasta 1.000 entradas (ver `whitelistClientesService.ts`).
+//
+// Este proceso corre cada 5 minutos, o sea ~288 veces por día, y relee la config
+// entre cada lote de 4 casos. Leer las partes con esa frecuencia serían decenas
+// de miles de lecturas diarias contra una cuota de 50.000 que comparte TODO Lens.
+//
+// Entonces: la cabecera se relee siempre (1 lectura, es el cortafuegos), y las
+// partes solo cuando la cabecera dice que la lista cambió. `actualizadoEn` sirve
+// de detector: cambia en cada guardado.
+// Las partes son documentos HERMANOS de la cabecera dentro de `config`
+// (`whitelistClientes_000`, `_001`, …), no una subcolección: las reglas de
+// seguridad de Firestore no viven en el repo y una subcolección nueva puede
+// quedar sin permiso para la app. Acá el Admin SDK se las saltea igual, pero las
+// dos puntas tienen que leer del MISMO lugar.
+const parteWhitelist = (id: string, i: number) => `${id}_${String(i).padStart(3, '0')}`;
+const TOPE_PARTES = 20;
+
+interface CabeceraWhitelist {
+  enabled: boolean;
+  actualizadoEn: string;
+  partes: number;
+}
+
+async function leerCabeceraWhitelist(): Promise<CabeceraWhitelist> {
+  const [col, id] = WHITELIST_DOC_PATH.split('/');
+  try {
+    const snap = await db().collection(col).doc(id).get();
+    if (!snap.exists) return { enabled: false, actualizadoEn: '', partes: 0 };
+    const d = snap.data() as Record<string, unknown>;
+    const n = Number(d.partes ?? 0);
+    return {
+      enabled: d.enabled === true,
+      actualizadoEn: String(d.actualizadoEn ?? ''),
+      partes: Number.isFinite(n) && n > 0 ? Math.min(TOPE_PARTES, Math.floor(n)) : 0,
+    };
+  } catch {
+    // Si no se pudo leer, se sigue SIN whitelist. Es la dirección segura: se
+    // trabaja de más (los casos quedan para el analista), nunca de menos.
+    return { enabled: false, actualizadoEn: '', partes: 0 };
+  }
+}
+
+// Caché de la corrida: entradas + la versión con la que se cargaron.
+let wlCache: { version: string; wl: WhitelistClientes } | null = null;
+let wlLecturas = 0;
+
+/**
+ * La lista completa, cargando las partes solo si hace falta.
+ *
+ * Con la lista apagada devuelve la vacía SIN leer ninguna parte: el caso más
+ * común es también el más barato.
+ */
+async function leerWhitelist(): Promise<WhitelistClientes> {
+  const cab = await leerCabeceraWhitelist();
+  wlLecturas++;
+  if (!cab.enabled) return WHITELIST_DEFAULT;
+  if (wlCache && wlCache.version === cab.actualizadoEn) return wlCache.wl;
+
+  if (cab.partes <= 0) return WHITELIST_DEFAULT;
+
+  const [col, id] = WHITELIST_DOC_PATH.split('/');
+  try {
+    // `getAll` trae las N partes en UNA ida y vuelta, en el orden pedido.
+    const refs = Array.from({ length: cab.partes }, (_, i) =>
+      db().collection(col).doc(parteWhitelist(id, i)));
+    const docs = await db().getAll(...refs);
+    wlLecturas += docs.length;
+    const entradas = docs.flatMap(d => ((d.data() as { entradas?: unknown } | undefined)?.entradas ?? []) as unknown[]);
+    const wl = normalizarWhitelist({ enabled: true, entradas }).wl;
+    wlCache = { version: cab.actualizadoEn, wl };
+    return wl;
+  } catch {
+    return WHITELIST_DEFAULT;
+  }
+}
+
+/** ¿La lista tiene algo que hacer en esta cola? Decide si la corrida arranca. */
+const whitelistAplica = (wl: WhitelistClientes | undefined, cola: 'ofac' | 'remesa'): boolean =>
+  !!wl?.enabled && wl.entradas.some(e => e[cola] === true);
+
+// ── Freno de frecuencia del barrido "solo whitelist" ────────────────────────
+// El problema que esto evita, medido sobre los números reales de la cola:
+//
+// Hasta ahora, con los dos flujos apagados esta función terminaba en el primer
+// `if`: leía UN documento (la config) y volvía. Con la whitelist prendida ya no
+// puede, porque para saber a quién liberar tiene que mirar la cola — y leer la
+// cola son ~107 documentos. Con el cron cada 5 minutos eso son 288 corridas por
+// día ≈ **30.000 lecturas diarias** contra una cuota de 50.000 que comparte TODO
+// Lens. Cuando esa cuota se agota no se cae la Bandeja: se cae la app entera,
+// como el 05-09-2026.
+//
+// Entonces: cuando lo ÚNICO activo es la whitelist, la cola se barre cada media
+// hora en vez de cada cinco minutos (~5.000 lecturas/día). No hay nada que
+// perder con esperar: la lista no reacciona a eventos, solo a que alguien la
+// cargue, y media hora de demora en liberar un caso ya decidido no le cambia la
+// vida a nadie.
+//
+// Con el flujo automático prendido este freno NO aplica: ahí la cola se lee
+// igual, es la corrida de siempre y la whitelist viaja de arrimada.
+const WHITELIST_BARRIDO_MS = Number(process.env.WHITELIST_BARRIDO_MS || '1800000');   // 30 min
+const LATIDO_DOC = 'config/flujoAutonomoLatido';
+
+// Se persiste en el latido (no en memoria) porque el Lambda puede arrancar en un
+// contenedor nuevo en cualquier corrida, y una variable de módulo fría valdría
+// cero: el freno no frenaría nada.
+let ultimoBarridoWhitelist = '';
+
+async function leerUltimoBarrido(): Promise<number> {
+  const [col, id] = LATIDO_DOC.split('/');
+  try {
+    const snap = await db().collection(col).doc(id).get();
+    const v = String((snap.data() as Record<string, unknown> | undefined)?.ultimoBarridoWhitelist ?? '');
+    if (v) ultimoBarridoWhitelist = v;
+    const t = Date.parse(v);
+    return Number.isFinite(t) ? t : 0;
+  } catch {
+    // Sin poder leerlo, se barre. Trabajar de más es la dirección segura.
+    return 0;
+  }
 }
 
 // ¿El screening guardado sirve, o hay que volver a consultar al proveedor?
@@ -299,8 +432,12 @@ async function guardarCierre(
 // Nadie más escribe este documento —solo esta función— así que pisarlo completo
 // no borra nada de otro.
 async function latir(estado: Record<string, unknown>): Promise<void> {
-  await db().collection('config').doc('flujoAutonomoLatido')
-    .set(limpio({ ...estado, en: new Date().toISOString() }))
+  const [col, id] = LATIDO_DOC.split('/');
+  await db().collection(col).doc(id)
+    // `ultimoBarridoWhitelist` viaja en TODOS los latidos porque este `set` no
+    // es un merge: escribirlo solo cuando hay barrido lo borraría en el latido
+    // siguiente, y el freno de frecuencia dejaría de frenar.
+    .set(limpio({ ...estado, ultimoBarridoWhitelist: ultimoBarridoWhitelist || null, en: new Date().toISOString() }))
     .catch(() => {});
 }
 
@@ -322,15 +459,36 @@ interface ResultadoCaso {
   tipologia?: string;
   sf?: string;
   admin?: string;
+  /**
+   * Se cerró por la WHITELIST, no por la conclusión del screening. Va en el
+   * resumen de la corrida porque un cierre por excepción y uno por screening
+   * limpio son la misma línea si no se distinguen, y la lista perdona todo.
+   */
+  porWhitelist?: string;
 }
 
-async function procesar(caso: CasoSF, cfg: FlujoOfacConfig): Promise<ResultadoCaso> {
+async function procesar(caso: CasoSF, cfg: FlujoOfacConfig, wl?: WhitelistClientes): Promise<ResultadoCaso> {
   const base = { caseId: caso.id, numeroCaso: caso.numeroCaso };
+
+  // 0. Whitelist, ANTES del screening y a propósito.
+  //
+  // Su razón de ser es no volver a trabajar a un cliente ya resuelto, y
+  // screenearlo para después descartar el resultado sería pagarle al proveedor
+  // exactamente por lo que la lista existe para evitar.
+  //
+  // El otro efecto de que vaya acá: con el flujo apagado —que es como está hoy
+  // la cola— un caso que NO está en la lista se descarta sin consultar a nadie.
+  // Sin esto, prender solo la whitelist screenearía la cola entera para después
+  // no hacer nada con ella.
+  const enWhitelist = buscarEnWhitelist(caso, wl, 'ofac');
+  if (!enWhitelist && !cfg.enabled) {
+    return { ...base, accion: 'retenido', motivo: 'flujo_apagado' };
+  }
 
   // 1. Screening. Si ya hay uno vigente no se vuelve a consultar: una consulta
   //    por caso, y el proveedor no se paga dos veces.
   let screening = caso.screening as Record<string, unknown> | undefined;
-  if (!screeningVigente(screening)) {
+  if (!enWhitelist && !screeningVigente(screening)) {
     if (!esScreenable(caso)) return { ...base, accion: 'sin_screening', motivo: 'país sin screening' };
     try {
       screening = (await screenCaso(caso)) as unknown as Record<string, unknown>;
@@ -343,15 +501,18 @@ async function procesar(caso: CasoSF, cfg: FlujoOfacConfig): Promise<ResultadoCa
   }
 
   // 2. Decisión. La misma función que corre en el navegador.
-  const ev = evaluarCasoAuto(caso, screening as never, cfg);
+  const ev = evaluarCasoAuto(caso, screening as never, cfg, wl);
   if (!ev.automatizable || !ev.tipologia) {
     return { ...base, accion: 'retenido', motivo: ev.motivo };
   }
+  // Por qué se cerró: queda en el `detalle` de cada canal en el caso, para que
+  // un cierre por excepción no se lea igual que uno por screening limpio.
+  const porWhitelist = ev.whitelist ? motivoWhitelistLegible(ev.whitelist) : undefined;
 
   // `accion` se decide DESPUÉS de intentar los canales, no antes: si los dos
   // fallan, esto no es un cierre. Reportarlo como cerrado sería el mismo error
   // que ya arreglamos en el KYB — un fallo nuestro presentado como un resultado.
-  const out: ResultadoCaso = { ...base, accion: 'error', tipologia: ev.tipologia, sf: 'omitido', admin: 'omitido' };
+  const out: ResultadoCaso = { ...base, accion: 'error', tipologia: ev.tipologia, sf: 'omitido', admin: 'omitido', porWhitelist };
 
   // 3. Cierre en Salesforce.
   if (cfg.cerrarSF) {
@@ -373,7 +534,7 @@ async function procesar(caso: CasoSF, cfg: FlujoOfacConfig): Promise<ResultadoCa
             out.sf = r.ok ? 'ok' : 'error';
             if (!r.ok) out.motivo = r.errors?.join('; ') ?? `HTTP ${r.status ?? 0}`;
             await marcarEnvioSF(caso.id, firma, !!r.ok, out.motivo);
-            await guardarCierre(caso.id, 'sf', !!r.ok, ev.tipologia, out.motivo);
+            await guardarCierre(caso.id, 'sf', !!r.ok, ev.tipologia, out.motivo ?? porWhitelist);
           }
         } catch (e) { out.sf = 'error'; out.motivo = (e as Error).message; }
       }
@@ -401,7 +562,7 @@ async function procesar(caso: CasoSF, cfg: FlujoOfacConfig): Promise<ResultadoCa
           } as never);
           out.admin = r.ok ? 'ok' : 'error';
           if (!r.ok) out.motivo = out.motivo ?? r.error ?? 'Admin rechazó el cierre';
-          await guardarCierre(caso.id, 'admin', !!r.ok, ev.tipologia, out.motivo);
+          await guardarCierre(caso.id, 'admin', !!r.ok, ev.tipologia, out.motivo ?? porWhitelist);
         } catch (e) { out.admin = 'error'; out.motivo = out.motivo ?? (e as Error).message; }
       }
     }
@@ -577,10 +738,27 @@ async function procesarRemesa(
   fila: unknown,
   cfg: FlujoRemesaConfig,
   baseCaida: boolean,
+  wl?: WhitelistClientes,
 ): Promise<ResultadoCaso> {
   const base = { caseId: caso.id, numeroCaso: caso.numeroCaso };
 
-  if (!fila) {
+  // 0. Whitelist, antes de TODO — incluso antes de exigir la fila de Redshift.
+  //
+  // La fila hace falta para dos cosas: conocer al beneficiario (para
+  // screenearlo) y nada más; el id de la transacción que se libera sale del
+  // ASUNTO del caso, no de la fila. Un cliente de la whitelist no necesita que
+  // se screenee a nadie, así que tampoco necesita la fila — y eso hace que sus
+  // remesas se liberen también durante la ventana en que el cluster de Redshift
+  // está pausado, que es cuando hoy se acumulan.
+  //
+  // Igual que en OFAC: con el flujo apagado y el caso fuera de la lista, se
+  // descarta sin consultar a ningún proveedor.
+  const enWhitelistR = buscarEnWhitelist(caso, wl, 'remesa');
+  if (!enWhitelistR && !cfg.enabled) {
+    return { ...base, accion: 'retenido', motivo: 'flujo_apagado' };
+  }
+
+  if (!enWhitelistR && !fila) {
     // Ojo con el motivo: si el cluster de Redshift estaba pausado, `buscarRemesas`
     // devuelve vacío sin lanzar error, y decir "no se encontró la transacción"
     // sería afirmar algo sobre el caso cuando el problema es nuestro. Es el mismo
@@ -602,7 +780,7 @@ async function procesarRemesa(
   // en la Bandeja porque el ejecutor del flujo automático es este Lambda — sin
   // esto, el atajo solo aplicaría cuando un analista tuviera la pantalla abierta.
   let screening = caso.screeningBeneficiario as Record<string, unknown> | undefined;
-  if (!screeningVigente(screening)) {
+  if (!enWhitelistR && !screeningVigente(screening)) {
     try {
       screening = (await screenBeneficiario(fila as never, {
         dniCliente: dniDelCliente(caso as never),
@@ -617,10 +795,11 @@ async function procesarRemesa(
     }
   }
 
-  const ev = evaluarRemesaAuto(caso, screening as never, cfg);
+  const ev = evaluarRemesaAuto(caso, screening as never, cfg, wl);
   if (!ev.automatizable || !ev.tipologia) return { ...base, accion: 'retenido', motivo: ev.motivo };
+  const porWhitelist = ev.whitelist ? motivoWhitelistLegible(ev.whitelist) : undefined;
 
-  const out: ResultadoCaso = { ...base, accion: 'error', tipologia: ev.tipologia, sf: 'omitido', admin: 'omitido' };
+  const out: ResultadoCaso = { ...base, accion: 'error', tipologia: ev.tipologia, sf: 'omitido', admin: 'omitido', porWhitelist };
   const tipo = TIPOS_CIERRE_REMESA.find(t => t.id === ev.tipologia);
   if (!tipo) return { ...out, motivo: `tipología de remesa desconocida: ${ev.tipologia}` };
   // Freno: este flujo solo puede LIBERAR. Rechazar es una decisión de una
@@ -646,7 +825,7 @@ async function procesarRemesa(
         } as never);
         out.admin = r.ok ? 'ok' : 'error';
         if (!r.ok) out.motivo = r.error ?? 'Admin rechazó la liberación';
-        await guardarCierre(caso.id, 'admin', !!r.ok, ev.tipologia, out.motivo);
+        await guardarCierre(caso.id, 'admin', !!r.ok, ev.tipologia, out.motivo ?? porWhitelist);
       } catch (e) { out.admin = 'error'; out.motivo = (e as Error).message; }
     }
   }
@@ -685,7 +864,7 @@ async function procesarRemesa(
           out.sf = r.ok ? 'ok' : 'error';
           if (!r.ok) out.motivo = out.motivo ?? (r.errors?.join('; ') ?? `HTTP ${r.status ?? 0}`);
           await marcarEnvioSF(caso.id, firma, !!r.ok, out.motivo);
-          await guardarCierre(caso.id, 'sf', !!r.ok, ev.tipologia, out.motivo);
+          await guardarCierre(caso.id, 'sf', !!r.ok, ev.tipologia, out.motivo ?? porWhitelist);
         }
       } catch (e) { out.sf = 'error'; out.motivo = out.motivo ?? (e as Error).message; }
     }
@@ -785,19 +964,54 @@ async function correr(
   restante: () => number,
   origen: string,
 ): Promise<Record<string, unknown>> {
+  // El contador de lecturas de la whitelist es estado de MÓDULO: sobrevive entre
+  // invocaciones tibias del Lambda. Sin este reset, el resumen iría sumando las
+  // lecturas de todas las corridas que compartieron contenedor y el número
+  // dejaría de significar algo. (El CACHÉ de la lista sí conviene que sobreviva:
+  // se invalida solo cuando cambia `actualizadoEn`.)
+  wlLecturas = 0;
+
   let conf = await leerConfig();
-  if (!conf?.cfg.ofac.enabled) {
+  // La whitelist tiene switch PROPIO: no cuelga de `ofac.enabled` ni de
+  // `remesa.enabled`. Por eso la corrida arranca también cuando el flujo está
+  // apagado pero la lista tiene entradas activas — que es el escenario para el
+  // que se pidió: la cola corre a mano y la lista saca de ahí a los clientes ya
+  // resueltos.
+  let wl = await leerWhitelist();
+  const corridaOfac = conf?.cfg.ofac.enabled === true || whitelistAplica(wl, 'ofac');
+  const corridaRemesa = conf?.cfg.remesa.enabled === true || whitelistAplica(wl, 'remesa');
+  if (!corridaOfac && !corridaRemesa) {
     // Apagado no es un error: es el cortafuegos funcionando. Pero se late igual,
     // para que la app pueda distinguir "apagado" de "muerto".
-    await latir({ corrio: false, motivo: 'flujo OFAC apagado', origen });
-    return { corrio: false, motivo: 'flujo OFAC apagado' };
+    const motivo = 'flujo apagado y whitelist sin entradas activas';
+    await latir({ corrio: false, motivo, origen });
+    return { corrio: false, motivo };
+  }
+
+  // Barrido "solo whitelist": se espacia a media hora. Ver `WHITELIST_BARRIDO_MS`.
+  const soloWhitelist = conf?.cfg.ofac.enabled !== true && conf?.cfg.remesa.enabled !== true;
+  if (soloWhitelist) {
+    const desde = Date.now() - await leerUltimoBarrido();
+    if (desde < WHITELIST_BARRIDO_MS) {
+      const motivo = `solo whitelist: el próximo barrido en ${Math.ceil((WHITELIST_BARRIDO_MS - desde) / 60000)} min`;
+      await latir({ corrio: false, motivo, origen });
+      return { corrio: false, motivo };
+    }
+    ultimoBarridoWhitelist = new Date().toISOString();
   }
   // Qué campos se leyeron por defecto. Un proceso desatendido no puede degradarse
   // en silencio: si el doc de config quedó incompleto, tiene que decirlo.
   //
   // Se filtra a `ofac.*`: esta función no toca remesas, así que reportar campos
   // de remesa sería ruido que enseña a ignorar el aviso.
-  const camposAusentes = conf.camposAusentes.filter(c => c.startsWith('ofac.'));
+  const camposAusentes = (conf?.camposAusentes ?? []).filter(c => c.startsWith('ofac.'));
+
+  // `conf` puede venir null: sin documento de config, `leerConfig` devuelve null.
+  // Antes eso era inalcanzable —la corrida terminaba en el `return` de arriba—,
+  // pero ahora la whitelist puede hacer correr una corrida sin config guardada.
+  // Los defaults son flujo APAGADO y las tipologías por defecto, que es
+  // exactamente lo que la whitelist necesita para liberar.
+  const cfgDe = (c: ConfigNormalizada | null) => (c ?? normalizarFlujoConfig(undefined)).cfg;
 
   const log: string[] = [];
   const { casos: abiertos, lecturas, modo } = await leerCasosAbiertos();
@@ -814,17 +1028,20 @@ async function correr(
   let cortadoPorTiempo = false;
   let apagadoEnVuelo = false;
 
-  for (let i = 0; i < casos.length; i += LOTE) {
+  for (let i = 0; corridaOfac && i < casos.length; i += LOTE) {
     if (restante() <= 0) { cortadoPorTiempo = true; break; }
 
     // El switch se relee ENTRE LOTES: si alguien apaga a mitad de una corrida
-    // de 200 casos, la corrida frena acá y no al final.
+    // de 200 casos, la corrida frena acá y no al final. La whitelist se relee
+    // por el mismo motivo: sacar a alguien de la lista tiene que surtir efecto
+    // en la corrida en curso.
     conf = await leerConfig();
-    if (!conf?.cfg.ofac.enabled) { apagadoEnVuelo = true; break; }
+    wl = await leerWhitelist();
+    if (!conf?.cfg.ofac.enabled && !whitelistAplica(wl, 'ofac')) { apagadoEnVuelo = true; break; }
 
     const lote = casos.slice(i, i + LOTE);
     const hechos = await Promise.all(lote.map(c =>
-      procesar(c, conf!.cfg.ofac).catch(e => ({
+      procesar(c, cfgDe(conf).ofac, wl).catch(e => ({
         caseId: c.id, numeroCaso: c.numeroCaso, accion: 'error' as const, motivo: (e as Error).message,
       }))));
     resultados.push(...hechos);
@@ -833,7 +1050,7 @@ async function correr(
   // ── Cola REMESA ───────────────────────────────────────────────────────────
   // Switch propio: prender OFAC no prende remesas. Se procesa después porque
   // necesita traer las filas de las transacciones, que es una consulta aparte.
-  if (!cortadoPorTiempo && !apagadoEnVuelo && conf?.cfg.remesa.enabled && remesas.length > 0) {
+  if (!cortadoPorTiempo && !apagadoEnVuelo && corridaRemesa && remesas.length > 0) {
     // Las filas se traen TODAS de una: es una sola consulta para N casos.
     let filas: Record<string, unknown> = {};
     let baseCaida = false;
@@ -847,23 +1064,32 @@ async function correr(
     } catch {
       baseCaida = true;
     }
+    // Con la base caída se miran SOLO las remesas de la whitelist: esas no
+    // necesitan la fila (el id de la transacción sale del asunto y no hay a
+    // quién screenear), así que se liberan igual durante la ventana en que el
+    // cluster está pausado — que es justo cuando hoy se acumulan.
+    //
+    // El resto se sigue omitiendo con UN aviso, como antes: marcar cada caso
+    // como error dejaría ~114 corridas por noche con decenas de errores cada
+    // una y el aviso dejaría de significar algo.
+    const aProcesar = baseCaida ? remesas.filter(c => !!buscarEnWhitelist(c, wl, 'remesa')) : remesas;
     if (baseCaida) {
-      // La base pausa todas las noches (18:30–04:00 Chile) y el cron corre 24/7.
-      // Marcar cada caso como error dejaría ~114 corridas por noche con decenas
-      // de errores cada una, y el aviso dejaría de significar algo. Se omite el
-      // paso completo con UN aviso y los casos se retoman cuando la base vuelve.
-      log.push(`la base de transacciones no respondió: ${remesas.length} remesa(s) omitida(s), se retoman en la próxima corrida`);
-      remesasOmitidas = remesas.length;
+      remesasOmitidas = remesas.length - aProcesar.length;
+      log.push(
+        `la base de transacciones no respondió: ${remesasOmitidas} remesa(s) omitida(s), se retoman en la próxima corrida`
+        + (aProcesar.length ? ` · ${aProcesar.length} de la whitelist se procesan igual (no necesitan la fila)` : ''),
+      );
     }
 
-    for (let i = 0; !baseCaida && i < remesas.length; i += LOTE) {
+    for (let i = 0; i < aProcesar.length; i += LOTE) {
       if (restante() <= 0) { cortadoPorTiempo = true; break; }
       conf = await leerConfig();
-      if (!conf?.cfg.remesa.enabled) { apagadoEnVuelo = true; break; }
+      wl = await leerWhitelist();
+      if (!conf?.cfg.remesa.enabled && !whitelistAplica(wl, 'remesa')) { apagadoEnVuelo = true; break; }
 
-      const lote = remesas.slice(i, i + LOTE);
+      const lote = aProcesar.slice(i, i + LOTE);
       const hechos = await Promise.all(lote.map(c =>
-        procesarRemesa(c, filas[extraerRemesa(c.asunto)], conf!.cfg.remesa, baseCaida).catch(e => ({
+        procesarRemesa(c, filas[extraerRemesa(c.asunto)], cfgDe(conf).remesa, baseCaida, wl).catch(e => ({
           caseId: c.id, numeroCaso: c.numeroCaso, accion: 'error' as const, motivo: (e as Error).message,
         }))));
       resultadosRemesa.push(...hechos);
@@ -892,6 +1118,18 @@ async function correr(
     retenidos: cuenta('retenido'),
     errores: cuenta('error'),
     sinScreening: cuenta('sin_screening'),
+    // Cuántos de esos cierres salieron de la WHITELIST y no del screening.
+    // Separado a propósito: la lista perdona todo, así que "10 cerrados" no
+    // significa lo mismo si 9 fueron excepciones cargadas a mano.
+    whitelist: {
+      activa: wl.enabled,
+      entradas: wl.entradas.length,
+      cerradosOfac: resultados.filter(r => r.accion === 'cerrado' && r.porWhitelist).length,
+      cerradasRemesa: resultadosRemesa.filter(r => r.accion === 'cerrado' && r.porWhitelist).length,
+      // Lo que costó leerla. Se mira junto con `lecturas`: si esto crece, es que
+      // la lista se está releyendo entera en cada lote y hay que revisar el caché.
+      lecturas: wlLecturas,
+    },
     // Las dos colas se cuentan separadas: mezclarlas escondería que una anduvo y
     // la otra no.
     remesa: {
