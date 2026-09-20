@@ -17,12 +17,14 @@
 // importe React. Si algo de eso hace falta, va en el llamador.
 
 import { categoriasSensibles } from './delitosSensibles';
-import type { CasoSF } from './casosService';
+import type { CasoSF, StandbyCaso } from './casosService';
 // La whitelist vive en su propio módulo, también puro y también importado por
 // los dos lados. Se engancha acá y no en los ejecutores por el mismo motivo que
 // todo lo demás de este archivo: si el Lambda y la app decidieran por separado
 // quién está whitelisteado, divergirían — y en esa dirección la divergencia
 // libera plata.
+//
+// Solo la usa `evaluarRemesaAuto`: la lista es exclusiva de la cola de remesas.
 import { buscarEnWhitelist } from './whitelistClientes';
 import type { WhitelistClientes, CoincidenciaWhitelist } from './whitelistClientes';
 
@@ -246,6 +248,35 @@ export function statusDeCaso(c: CasoSF): StatusCaso {
 
 export const sigueEnCola = (c: CasoSF): boolean => statusDeCaso(c) !== 'CERRADO';
 
+// ── STAND BY ────────────────────────────────────────────────────────────────
+// Freno manual, por caso. Un analista lo pone cuando el caso necesita una
+// revisión de verdad y no quiere que se resuelva mientras tanto — ni solo, ni
+// por error de otra persona en un masivo.
+//
+// **Frena TODO**: el flujo automático, la whitelist, el cierre individual y los
+// cierres masivos, en las dos colas. Se evalúa antes que cualquier otra regla,
+// incluida la lista de clientes autorizados. Se levanta a mano.
+//
+// ── Por qué es un campo aparte y no un `statusCaso` más ────────────────────
+// `statusCaso` tiene tres valores (ABIERTO | GESTIONANDO | CERRADO) y no es
+// decorativo: la consulta que arma la cola filtra por `where('statusCaso','in',
+// ['ABIERTO','GESTIONANDO'])`. Un cuarto valor "STANDBY" haría **desaparecer el
+// caso de la cola**, que es lo contrario de lo que se pide: el caso tiene que
+// seguir a la vista, justamente para que alguien lo resuelva. Además
+// `statusDeCaso` y `statusTrasCierre` derivan esos tres valores de los canales
+// de cierre, y meterles un cuarto los rompe a los dos.
+//
+// Como campo propio no toca nada de eso: el caso conserva su status, sigue en la
+// cola, y lo único que cambia es que ningún camino lo cierra.
+//
+// La FORMA del dato (`StandbyCaso`) vive en `casosService.ts` junto al resto del
+// caso; acá va la regla, que es lo que tienen que compartir la app y el Lambda.
+export type { StandbyCaso };
+
+/** ¿El caso está frenado a mano? Lo pregunta todo camino que pueda cerrar. */
+export const enStandby = (c: Pick<CasoSF, 'standby'> | undefined): boolean =>
+  c?.standby?.activo === true;
+
 // El status DESPUÉS de cerrar un canal. Distinto de `statusDeCaso`: acá los
 // CANALES mandan sobre el valor guardado.
 //
@@ -276,6 +307,7 @@ export function statusTrasCierre(
 
 // ── La decisión ─────────────────────────────────────────────────────────────
 export type MotivoNoAuto =
+  | 'standby'
   | 'flujo_apagado'
   | 'pais_apagado'
   | 'ya_cerrado'
@@ -289,8 +321,6 @@ export interface EvaluacionAuto {
   motivo?: MotivoNoAuto;
   tipologia?: string;
   categorias?: string[];
-  /** Presente solo si la liberación viene de la whitelist, no del screening. */
-  whitelist?: CoincidenciaWhitelist;
 }
 
 export interface ScreeningParaAuto {
@@ -306,29 +336,9 @@ export function evaluarCasoAuto(
   caso: CasoSF,
   screening: ScreeningParaAuto | undefined,
   cfg: FlujoOfacConfig,
-  wl?: WhitelistClientes,
 ): EvaluacionAuto {
-  // ── WHITELIST ─────────────────────────────────────────────────────────────
-  // Va PRIMERO y a propósito: es una autorización explícita por cliente, cargada
-  // a mano por alguien que firma con su nombre, y pasa por encima de TODO lo que
-  // decide el screening — listas de sanciones y delitos sensibles incluidos. Esa
-  // es la regla, no un descuido; ver la cabecera de `whitelistClientes.ts`.
-  //
-  // Tiene switch PROPIO (`wl.enabled`), así que no depende de `cfg.enabled` ni de
-  // los países: con el flujo automático apagado —que es como está hoy la cola— la
-  // whitelist igual libera. Si colgara de `cfg.enabled`, prender el flujo para
-  // otra cosa prendería también las excepciones.
-  //
-  // Lo único que la whitelist NO pasa por encima son los dos frenos que no son de
-  // riesgo sino de coordinación: un caso ya cerrado no tiene nada que hacer, y un
-  // caso con dueño lo termina su dueño (si no, el cron le cierra por debajo el
-  // caso que está mirando).
-  const w = buscarEnWhitelist(caso, wl, 'ofac');
-  if (w) {
-    if (statusDeCaso(caso) === 'CERRADO') return { automatizable: false, motivo: 'ya_cerrado' };
-    if (caso.asignacion?.analistaId) return { automatizable: false, motivo: 'asignado' };
-    return { automatizable: true, tipologia: cfg.tipoLiberarNormal, whitelist: w };
-  }
+  // STAND BY: lo primero de todo. Ver `enStandby`.
+  if (enStandby(caso)) return { automatizable: false, motivo: 'standby' };
 
   if (!cfg.enabled) return { automatizable: false, motivo: 'flujo_apagado' };
   if (!paisHabilitado(caso.pais, cfg)) return { automatizable: false, motivo: 'pais_apagado' };
@@ -407,6 +417,7 @@ export function extraerRemesa(asunto: string | undefined): string {
 }
 
 export type MotivoNoAutoRemesa =
+  | 'standby'
   | 'flujo_apagado'
   | 'destino_apagado'
   | 'ya_cerrado'
@@ -449,20 +460,22 @@ export function evaluarRemesaAuto(
   wl?: WhitelistClientes,
 ): EvaluacionRemesa {
   // ── WHITELIST ─────────────────────────────────────────────────────────────
-  // Misma regla que en OFAC y con la misma lista, pero mirando la columna
-  // `remesa` de cada entrada: perdonarle a un cliente su homonimia OFAC no es lo
-  // mismo que liberarle todas sus transferencias, así que cada entrada declara
-  // en qué colas aplica.
+  // La lista de clientes autorizados a liberarse solos. Es EXCLUSIVA de esta
+  // cola: en OFAC no existe, porque allá lo que se decide es qué hacer con el
+  // CLIENTE y eso no se delega a una lista.
   //
-  // Acá pasa por encima de MÁS cosas que en OFAC, porque acá hay más frenos:
-  // destino apagado, sin screening, sin nacionalidad, sin documento, delito
-  // sensible y coincidencia en listas. La whitelist los saltea todos. Es
-  // exactamente lo que se pidió y lo que hay que tener presente al cargar una
-  // entrada con `remesa: true`: **libera plata real, sin consultar a nadie.**
+  // Pasa por encima de todos los frenos de abajo: destino apagado, sin
+  // screening, sin nacionalidad, sin documento, delito sensible y coincidencia
+  // en listas de sanciones. Es exactamente lo que se pidió, y lo que hay que
+  // tener presente al cargar una entrada: **libera plata real, sin consultar a
+  // nadie.**
   //
-  // La whitelist entra ANTES incluso que `statusDeCaso`, igual que en OFAC, y
-  // después vuelve a verificar cerrado/asignado por su cuenta.
-  const w = buscarEnWhitelist(caso, wl, 'remesa');
+  // STAND BY: antes que la whitelist y antes que todo. Un caso frenado a mano no
+  // se libera ni siquiera si el cliente está en la lista — es exactamente para
+  // eso que existe el freno. Ver `enStandby`.
+  if (enStandby(caso)) return { automatizable: false, motivo: 'standby' };
+
+  const w = buscarEnWhitelist(caso, wl);
   if (w) {
     if (statusDeCaso(caso) === 'CERRADO') return { automatizable: false, motivo: 'ya_cerrado' };
     if (caso.asignacion?.analistaId) return { automatizable: false, motivo: 'asignado' };
@@ -565,6 +578,7 @@ export const retenidoPorDelitoRemesa = (s: ScreeningRemesaParaAuto | undefined):
   categoriasSensibles(s?.coincidencias);
 
 export const motivoRemesaLegible = (m: MotivoNoAutoRemesa | undefined): string => ({
+  standby: 'En STAND BY: frenado a mano hasta que alguien lo resuelva',
   flujo_apagado: 'Flujo automático apagado',
   destino_apagado: 'El destino del beneficiario está apagado en el mantenedor',
   ya_cerrado: 'El caso ya está cerrado',

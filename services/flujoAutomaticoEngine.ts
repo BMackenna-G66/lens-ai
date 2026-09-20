@@ -28,8 +28,6 @@ export interface ResultadoAuto {
   sf: EstadoCanal;
   admin: EstadoCanal;
   detalle?: string;
-  /** El cierre salió de la whitelist de clientes, no de la conclusión del screening. */
-  porWhitelist?: string;
 }
 
 const paisCC = (p: string): string => (/colombia|^co$/i.test(p) ? 'CO' : 'CL');
@@ -44,36 +42,20 @@ export {
 export type { MotivoNoAuto, EvaluacionAuto, ScreeningParaAuto } from './flujoDecision';
 import { evaluarCasoAuto } from './flujoDecision';
 import type { ScreeningParaAuto } from './flujoDecision';
-import { motivoWhitelistLegible } from './whitelistClientes';
-import type { WhitelistClientes } from './whitelistClientes';
-
 export async function procesarCasoAuto(
   caso: CasoSF,
   screening: ScreeningParaAuto | undefined,
   cfg: FlujoOfacConfig,
   actor?: Actor,
-  // Opcional y al final: los llamadores que no la pasan se comportan igual que
-  // antes de que la whitelist existiera.
-  wl?: WhitelistClientes,
 ): Promise<ResultadoAuto | null> {
-  const evaluacion = evaluarCasoAuto(caso, screening, cfg, wl);
+  const evaluacion = evaluarCasoAuto(caso, screening, cfg);
   if (!evaluacion.automatizable || !evaluacion.tipologia) return null;
   const tipoId = evaluacion.tipologia;
   const decision = screening?.decision;
 
-  // Por qué se cerró: la conclusión del screening, o una excepción cargada a
-  // mano. Viaja al `detalle` de cada canal en Firestore y a la auditoría del
-  // caso, que es donde queda buscable.
-  //
-  // NO se agrega una columna nueva a Redshift: el logger arma el SQL desde su
-  // whitelist `TABLAS` y descarta en silencio lo que no conoce, así que una
-  // columna nueva exige desplegar la DDL y el Lambda juntos. Eso es un cambio
-  // aparte, no un efecto colateral de este.
-  const porWhitelist = evaluacion.whitelist ? motivoWhitelistLegible(evaluacion.whitelist) : undefined;
-
   const res: ResultadoAuto = {
     caseId: caso.id, numeroCaso: caso.numeroCaso, tipologia: tipoId,
-    sf: 'omitido', admin: 'omitido', porWhitelist,
+    sf: 'omitido', admin: 'omitido',
   };
 
   // ── Canal Salesforce ────────────────────────────────────────────────────────
@@ -89,7 +71,7 @@ export async function procesarCasoAuto(
           const r = await enviarResolucion(caso.id, payload, actor);
           if (r.yaEnviada || r.sf?.ok) {
             res.sf = 'ok';
-            await registrarCierreCanal(caso.id, 'sf', { ok: true, tipologia: tipoId, detalle: porWhitelist }, actor).catch(() => {});
+            await registrarCierreCanal(caso.id, 'sf', { ok: true, tipologia: tipoId }, actor).catch(() => {});
             logCierre(caso, 'ofac', { canal: 'SF', ok: true, automatico: true, tipologia: tipoId }, ACTOR_SISTEMA);
           } else {
             res.sf = 'error';
@@ -122,7 +104,7 @@ export async function procesarCasoAuto(
           });
           if (r.ok) {
             res.admin = 'ok';
-            await registrarCierreCanal(caso.id, 'admin', { ok: true, tipologia: tipoId, detalle: porWhitelist }, actor).catch(() => {});
+            await registrarCierreCanal(caso.id, 'admin', { ok: true, tipologia: tipoId }, actor).catch(() => {});
             logCierre(caso, 'ofac', {
               canal: 'ADMIN', ok: true, automatico: true, tipologia: tipoId,
               statusEnviado: tipo.status, ofacFlag: ofacFlagDe(tipo), lastStep: tipo.lastStepDefault,
@@ -142,19 +124,6 @@ export async function procesarCasoAuto(
     metadata: {
       tipologia: tipoId, decision: decision ?? null, sf: res.sf, admin: res.admin,
       detalle: res.detalle ?? null,
-      // La traza de la excepción: quién la autorizó, por qué y con qué llave.
-      // Sin esto, un cierre por whitelist es indistinguible de uno por screening
-      // limpio, que es justo lo que no puede pasar con una lista que perdona todo.
-      whitelist: evaluacion.whitelist
-        ? {
-            por: evaluacion.whitelist.por,
-            valor: evaluacion.whitelist.valor,
-            motivo: evaluacion.whitelist.entrada.motivo,
-            referencia: evaluacion.whitelist.entrada.referencia || null,
-            agregadoPor: evaluacion.whitelist.entrada.agregadoPor,
-            agregadoEn: evaluacion.whitelist.entrada.agregadoEn || null,
-          }
-        : null,
     },
   }).catch(() => {});
 

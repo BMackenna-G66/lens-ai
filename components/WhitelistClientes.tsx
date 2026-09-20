@@ -4,24 +4,26 @@
 // que es lo que esta pantalla tiene que dejar imposible de ignorar:
 //
 //   **Un cliente de esta lista se libera solo, sin mirar el screening.** Se
-//   cierra su caso en Salesforce y se ejecuta el cierre en Admin — en remesas,
-//   eso es plata que sale. Perdona coincidencias en listas de sanciones y
-//   perdona delitos sensibles. Por decisión de negocio explícita.
+//   cierra su caso en Salesforce y se libera la transacción en Admin: es plata
+//   que sale. Perdona coincidencias en listas de sanciones y perdona delitos
+//   sensibles. Por decisión de negocio explícita.
+//
+// Es SOLO de la cola de remesas. En OFAC no aplica.
 //
 // De ahí las tres cosas que esta pantalla hace y que no son decorativas:
 //
 //   1. El switch general está aparte del flujo automático y arranca apagado.
-//   2. Antes de guardar, dice **cuántos casos de la cola actual** se liberarían.
-//      Es el único aviso posible contra el modo de fallo silencioso de una carga
-//      masiva: el match es exacto tras normalizar, así que una base de RUTs sin
-//      dígito verificador coincide con CERO casos y nadie se entera. Si el
+//   2. Antes de guardar, dice **cuántas remesas de la cola actual** se
+//      liberarían. Es el único aviso posible contra el modo de fallo silencioso
+//      de una carga masiva: el match es exacto tras normalizar, así que una base
+//      de RUTs sin dígito verificador coincide con CERO y nadie se entera. Si el
 //      número sorprende para cualquiera de los dos lados, algo está mal.
 //   3. Toda entrada guarda quién, cuándo y por qué. Sin motivo no se carga.
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   subscribeWhitelist, guardarWhitelist, whitelistDisponible,
-  parsearPegado, parsearArchivo, fusionarEntradas, whitelistACsv, construirEntrada,
+  parsearPegado, parsearArchivo, descargarPlantilla, fusionarEntradas, whitelistACsv, construirEntrada,
   buscarEnWhitelist, normalizarWhitelist, entradaVigente, hoyISO,
   WHITELIST_DEFAULT, TOPE_ENTRADAS, AVISO_ENTRADAS, POR_PARTE,
 } from '../services/whitelistClientesService';
@@ -54,8 +56,6 @@ export const WhitelistClientesPanel: React.FC<Props> = ({ casos, actor, onCerrar
 
   // ── Carga masiva ──────────────────────────────────────────────────────────
   const [pegado, setPegado] = useState('');
-  const [impOfac, setImpOfac] = useState(true);
-  const [impRemesa, setImpRemesa] = useState(false);
   const [impMotivo, setImpMotivo] = useState('');
   const [impReferencia, setImpReferencia] = useState('');
   const [impVigencia, setImpVigencia] = useState('');
@@ -64,12 +64,19 @@ export const WhitelistClientesPanel: React.FC<Props> = ({ casos, actor, onCerrar
   const fileRef = useRef<HTMLInputElement>(null);
 
   const opcionesImp = () => ({
-    ofac: impOfac, remesa: impRemesa,
     agregadoPor: actor?.email || actor?.nombre || 'desconocido',
     motivoPorDefecto: impMotivo.trim(),
     referenciaPorDefecto: impReferencia.trim(),
     vigenciaPorDefecto: impVigencia.trim(),
   });
+
+  const [bajandoPlantilla, setBajandoPlantilla] = useState(false);
+  const bajarPlantilla = async () => {
+    setBajandoPlantilla(true); setMsg(null);
+    try { await descargarPlantilla(); }
+    catch (e) { setMsg(`❌ No se pudo generar la plantilla: ${(e as Error).message}`); }
+    finally { setBajandoPlantilla(false); }
+  };
 
   const leerArchivo = async (f: File) => {
     setLeyendo(true); setMsg(null);
@@ -91,13 +98,10 @@ export const WhitelistClientesPanel: React.FC<Props> = ({ casos, actor, onCerrar
   }, [borrador.entradas, previa]);
 
   const impacto = useMemo(() => {
-    const ofac = casos.filter(c => clasificarCola(c.asunto) === 'ofac');
     const remesa = casos.filter(c => clasificarCola(c.asunto) === 'remesa');
     return {
-      ofac: ofac.filter(c => !!buscarEnWhitelist(c, listaSimulada, 'ofac')).length,
-      ofacTotal: ofac.length,
-      remesa: remesa.filter(c => !!buscarEnWhitelist(c, listaSimulada, 'remesa')).length,
-      remesaTotal: remesa.length,
+      coinciden: remesa.filter(c => !!buscarEnWhitelist(c, listaSimulada)).length,
+      total: remesa.length,
     };
   }, [casos, listaSimulada]);
 
@@ -111,13 +115,13 @@ export const WhitelistClientesPanel: React.FC<Props> = ({ casos, actor, onCerrar
   };
 
   // ── Alta de a uno ─────────────────────────────────────────────────────────
-  const [uno, setUno] = useState({ documento: '', customerId: '', nombre: '', motivo: '', referencia: '', vigenciaHasta: '', ofac: true, remesa: false });
+  const [uno, setUno] = useState({ documento: '', customerId: '', nombre: '', motivo: '', referencia: '', vigenciaHasta: '' });
   const agregarUno = () => {
     const r = construirEntrada(uno, actor?.email || actor?.nombre || 'desconocido');
     if (!r.ok) { setMsg(`❌ ${r.error}`); return; }
     const f = fusionarEntradas(borrador.entradas, [r.entrada]);
     setBorrador(b => ({ ...b, entradas: f.entradas }));
-    setUno({ documento: '', customerId: '', nombre: '', motivo: '', referencia: '', vigenciaHasta: '', ofac: true, remesa: false });
+    setUno({ documento: '', customerId: '', nombre: '', motivo: '', referencia: '', vigenciaHasta: '' });
     setMsg(f.reemplazadas ? '✔️ Cliente actualizado. Falta guardar.' : '✔️ Cliente agregado. Falta guardar.');
   };
 
@@ -148,8 +152,7 @@ export const WhitelistClientesPanel: React.FC<Props> = ({ casos, actor, onCerrar
   const hoy = hoyISO();
   const stats = useMemo(() => ({
     total: borrador.entradas.length,
-    ofac: borrador.entradas.filter(e => e.ofac).length,
-    remesa: borrador.entradas.filter(e => e.remesa).length,
+    vigentes: borrador.entradas.filter(e => entradaVigente(e, hoy)).length,
     vencidas: borrador.entradas.filter(e => !entradaVigente(e, hoy)).length,
   }), [borrador.entradas, hoy]);
 
@@ -178,8 +181,8 @@ export const WhitelistClientesPanel: React.FC<Props> = ({ casos, actor, onCerrar
         <div>
           <h3 className="text-sm font-black text-emerald-800 dark:text-emerald-300">✅ Whitelist de clientes</h3>
           <p className="text-[11px] text-emerald-700 dark:text-emerald-400 mt-0.5">
-            Clientes que se liberan <b>solos</b> cuando caen en una cola: se cierra el caso en Salesforce
-            y se ejecuta el cierre en Admin.
+            Clientes que se liberan <b>solos</b> cuando su remesa cae en la cola: se cierra el caso en
+            Salesforce y se libera la transacción en Admin. <b>Solo aplica a Remesas</b>, no a OFAC.
           </p>
         </div>
         <button onClick={onCerrar} className="text-xs text-slate-500 dark:text-slate-400 hover:text-slate-700">Cerrar</button>
@@ -188,18 +191,6 @@ export const WhitelistClientesPanel: React.FC<Props> = ({ casos, actor, onCerrar
       {!whitelistDisponible() && (
         <p className="text-xs text-red-600 dark:text-red-400 mb-3">Firestore no está configurado: la lista no se puede guardar en esta instancia.</p>
       )}
-
-      {/* La advertencia. Va arriba y en rojo porque describe exactamente lo que
-          la lista hace, no una precaución genérica. */}
-      <div className="mb-3 rounded-lg border border-red-300 dark:border-red-800/60 bg-red-50 dark:bg-red-950/30 px-3 py-2.5">
-        <p className="text-xs font-bold text-red-800 dark:text-red-300">🛑 Esta lista no hace excepciones</p>
-        <p className="text-[11px] text-red-700 dark:text-red-400 mt-1">
-          Un cliente de la whitelist se libera <b>aunque el screening traiga coincidencia en listas de
-          sanciones</b> (OFAC, ONU, UE, GAFI) y <b>aunque traiga un delito sensible</b>. En la cola de
-          remesas eso es <b>plata que sale</b> sin consultar a ningún proveedor. Lo único que la lista
-          no pasa por encima es un caso ya cerrado y uno que tenga analista asignado.
-        </p>
-      </div>
 
       {/* Switch general. Aparte del flujo automático a propósito: la lista
           funciona con el flujo apagado, que es como está hoy la cola. */}
@@ -228,8 +219,7 @@ export const WhitelistClientesPanel: React.FC<Props> = ({ casos, actor, onCerrar
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 mb-3">
         {([
           ['En la lista', stats.total, ''],
-          ['Aplican a OFAC', stats.ofac, ''],
-          ['Aplican a Remesas', stats.remesa, ''],
+          ['Vigentes', stats.vigentes, ''],
           ['Vencidas (no aplican)', stats.vencidas, stats.vencidas ? 'text-amber-600 dark:text-amber-400' : ''],
         ] as const).map(([l, v, cls]) => (
           <div key={l} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-900/40 px-3 py-2">
@@ -242,7 +232,7 @@ export const WhitelistClientesPanel: React.FC<Props> = ({ casos, actor, onCerrar
       <div className="mb-3 rounded-lg border border-sky-200 dark:border-sky-800/50 bg-sky-50/70 dark:bg-sky-950/20 px-3 py-2.5">
         <p className="text-xs font-bold text-sky-800 dark:text-sky-300">🎯 Qué liberaría sobre la cola de hoy</p>
         <p className="text-sm font-black text-sky-900 dark:text-sky-200 mt-1">
-          {impacto.ofac} de {impacto.ofacTotal} casos OFAC · {impacto.remesa} de {impacto.remesaTotal} remesas
+          {impacto.coinciden} de {impacto.total} remesas en cola
         </p>
         <p className="text-[11px] text-sky-700 dark:text-sky-400 mt-1">
           Contado con la misma función que corre en producción, sobre los casos que la Bandeja tiene
@@ -254,10 +244,23 @@ export const WhitelistClientesPanel: React.FC<Props> = ({ casos, actor, onCerrar
 
       {/* ── Carga masiva ──────────────────────────────────────────────────── */}
       <div className="mb-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-900/40 p-3">
-        <p className="text-xs font-bold text-slate-800 dark:text-slate-200 mb-1">📥 Cargar una base de clientes</p>
+        <div className="flex flex-wrap items-start justify-between gap-2 mb-1">
+          <p className="text-xs font-bold text-slate-800 dark:text-slate-200">📥 Cargar una base de clientes</p>
+          {/* La plantilla no es una comodidad: las columnas se leen POR ORDEN, así
+              que un archivo armado de memoria con las columnas cambiadas importa
+              mal y no falla. Partir de este archivo es la forma de no equivocarse. */}
+          <button
+            onClick={bajarPlantilla}
+            disabled={bajandoPlantilla}
+            className="px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white text-[11px] font-bold whitespace-nowrap"
+          >
+            {bajandoPlantilla ? 'Generando…' : '⬇️ Descargar plantilla Excel'}
+          </button>
+        </div>
         <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-2">
-          Excel (.xlsx) o CSV, o pegando desde una planilla. Las columnas se leen <b>por orden</b>, no
-          por nombre: <code className="text-[10px]">documento · customerId · nombre · motivo · referencia · vigencia (YYYY-MM-DD)</code>.
+          Bajá la plantilla, llenala y subila acá. También se puede pegar desde una planilla o subir un
+          CSV. Las columnas se leen <b>por orden</b>, no por nombre:{' '}
+          <code className="text-[10px]">documento · customerId · nombre · motivo · referencia · vigencia (YYYY-MM-DD)</code>.
           Con una de las dos llaves alcanza. Un cliente que ya esté en la lista se <b>actualiza</b>, no se duplica.
         </p>
 
@@ -273,18 +276,6 @@ export const WhitelistClientesPanel: React.FC<Props> = ({ casos, actor, onCerrar
           <label className="text-[11px] text-slate-600 dark:text-slate-300">
             Vigencia por defecto (opcional)
             <input value={impVigencia} onChange={e => setImpVigencia(e.target.value)} placeholder="YYYY-MM-DD" className={inp} />
-          </label>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-4 mb-2">
-          <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">Aplicar a:</span>
-          <label className="flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-300">
-            <input type="checkbox" checked={impOfac} onChange={e => setImpOfac(e.target.checked)} className="w-3.5 h-3.5" />
-            Cola OFAC
-          </label>
-          <label className="flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-300">
-            <input type="checkbox" checked={impRemesa} onChange={e => setImpRemesa(e.target.checked)} className="w-3.5 h-3.5" />
-            Cola Remesas <span className="text-red-600 dark:text-red-400 font-bold">(libera plata)</span>
           </label>
         </div>
 
@@ -305,14 +296,11 @@ export const WhitelistClientesPanel: React.FC<Props> = ({ casos, actor, onCerrar
         <div className="flex flex-wrap items-center gap-2 mt-2">
           <button
             onClick={() => setPrevia(parsearPegado(pegado, opcionesImp()))}
-            disabled={!pegado.trim() || (!impOfac && !impRemesa)}
+            disabled={!pegado.trim()}
             className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-900 disabled:opacity-40 text-white text-xs font-bold"
           >
             Revisar lo pegado
           </button>
-          {(!impOfac && !impRemesa) && (
-            <span className="text-[11px] text-amber-700 dark:text-amber-400">Elegí al menos una cola.</span>
-          )}
         </div>
 
         {previa && (
@@ -371,12 +359,6 @@ export const WhitelistClientesPanel: React.FC<Props> = ({ casos, actor, onCerrar
         </div>
         <div className="flex flex-wrap items-center gap-4 mt-2">
           <input value={uno.referencia} onChange={e => setUno(u => ({ ...u, referencia: e.target.value }))} placeholder="Referencia (caso, ticket, acta)" className={`${inp} max-w-xs`} />
-          <label className="flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-300">
-            <input type="checkbox" checked={uno.ofac} onChange={e => setUno(u => ({ ...u, ofac: e.target.checked }))} className="w-3.5 h-3.5" /> OFAC
-          </label>
-          <label className="flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-300">
-            <input type="checkbox" checked={uno.remesa} onChange={e => setUno(u => ({ ...u, remesa: e.target.checked }))} className="w-3.5 h-3.5" /> Remesas
-          </label>
           <button onClick={agregarUno} className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-900 text-white text-xs font-bold">Agregar</button>
         </div>
       </div>
@@ -409,7 +391,7 @@ export const WhitelistClientesPanel: React.FC<Props> = ({ casos, actor, onCerrar
           <table className="w-full text-[11px]">
             <thead className="sticky top-0 bg-slate-100 dark:bg-slate-800">
               <tr className="text-left text-slate-600 dark:text-slate-300">
-                {['Documento', 'Customer ID', 'Nombre', 'Colas', 'Motivo', 'Vence', 'Cargó', ''].map(h => (
+                {['Documento', 'Customer ID', 'Nombre', 'Motivo', 'Vence', 'Cargó', ''].map(h => (
                   <th key={h} className="px-2 py-1.5 font-semibold">{h}</th>
                 ))}
               </tr>
@@ -422,10 +404,6 @@ export const WhitelistClientesPanel: React.FC<Props> = ({ casos, actor, onCerrar
                     <td className="px-2 py-1 font-mono text-slate-700 dark:text-slate-200">{e.documento || '—'}</td>
                     <td className="px-2 py-1 font-mono text-slate-700 dark:text-slate-200">{e.customerId || '—'}</td>
                     <td className="px-2 py-1 text-slate-600 dark:text-slate-300 truncate max-w-[12rem]">{e.nombre || '—'}</td>
-                    <td className="px-2 py-1">
-                      {e.ofac && <span className="mr-1 px-1.5 py-0.5 rounded bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-200 font-semibold">OFAC</span>}
-                      {e.remesa && <span className="px-1.5 py-0.5 rounded bg-red-100 dark:bg-red-900/50 text-red-800 dark:text-red-300 font-semibold">REMESA</span>}
-                    </td>
                     <td className="px-2 py-1 text-slate-600 dark:text-slate-300 truncate max-w-[16rem]" title={e.motivo}>
                       {e.motivo}{e.referencia && <span className="text-slate-400"> · {e.referencia}</span>}
                     </td>
@@ -438,7 +416,7 @@ export const WhitelistClientesPanel: React.FC<Props> = ({ casos, actor, onCerrar
                 );
               })}
               {visibles.filas.length === 0 && (
-                <tr><td colSpan={8} className="px-2 py-6 text-center text-slate-400">
+                <tr><td colSpan={7} className="px-2 py-6 text-center text-slate-400">
                   {stats.total === 0 ? 'La lista está vacía.' : 'Nada coincide con el filtro.'}
                 </td></tr>
               )}

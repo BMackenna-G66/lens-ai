@@ -59,7 +59,7 @@ export {
   parsearPegado, fusionarEntradas, whitelistACsv,
 } from './whitelistClientes';
 export type {
-  WhitelistClientes, EntradaWhitelist, CoincidenciaWhitelist, ColaWhitelist,
+  WhitelistClientes, EntradaWhitelist, CoincidenciaWhitelist,
   BorradorEntrada, WhitelistNormalizada, OpcionesImportacion, ResultadoImportacion,
 } from './whitelistClientes';
 
@@ -230,6 +230,63 @@ export async function cambiarSwitchWhitelist(enabled: boolean, actor?: Actor): P
     actualizadoPor: actor?.nombre ?? 'system',
   }, { merge: true });
   await batch.commit();
+}
+
+/**
+ * Baja un .xlsx con el formato exacto que espera la importación.
+ *
+ * Existe porque las columnas se leen **por orden y no por nombre**: un archivo
+ * armado de memoria con las columnas cambiadas de lugar importa mal y no falla
+ * —carga el nombre en el campo del motivo, por ejemplo—, así que la forma de no
+ * equivocarse es partir de este archivo y llenarlo.
+ *
+ * Trae dos filas de ejemplo (una por documento, otra por customer ID) y una hoja
+ * aparte con las reglas. Las de ejemplo hay que borrarlas: si quedan, se cargan.
+ */
+export async function descargarPlantilla(): Promise<void> {
+  const XLSX = await import('xlsx');
+  const libro = XLSX.utils.book_new();
+
+  const datos = [
+    ['documento', 'customerId', 'nombre', 'motivo', 'referencia', 'vigenciaHasta'],
+    ['12.345.678-9', '', 'BORRAR ESTA FILA - ejemplo por documento', 'Cliente recurrente ya revisado', 'AR-00000', ''],
+    ['', '9990001', 'BORRAR ESTA FILA - ejemplo por customer ID', 'Cliente recurrente ya revisado', 'AR-00000', '2027-12-31'],
+  ];
+  const hoja = XLSX.utils.aoa_to_sheet(datos);
+  hoja['!cols'] = [{ wch: 16 }, { wch: 12 }, { wch: 42 }, { wch: 38 }, { wch: 14 }, { wch: 14 }];
+  XLSX.utils.book_append_sheet(libro, hoja, 'Clientes');
+
+  const ayuda = [
+    ['Whitelist de clientes — cola de REMESAS'],
+    [''],
+    ['Qué hace: un cliente de esta lista se libera solo cuando su remesa cae en la cola.'],
+    ['Se cierra el caso en Salesforce y se libera la transacción en Admin. Es plata que sale.'],
+    ['No aplica a la cola de OFAC.'],
+    [''],
+    ['LAS COLUMNAS SE LEEN POR ORDEN, NO POR NOMBRE. No las muevas de lugar.'],
+    [''],
+    ['Columna', 'Obligatoria', 'Qué va'],
+    ['documento', 'una de las dos', 'RUT o documento del cliente. CON dígito verificador.'],
+    ['customerId', 'una de las dos', 'Id interno del usuario en Admin. Solo números.'],
+    ['nombre', 'no', 'Para poder leer la lista. No participa del cruce.'],
+    ['motivo', 'SÍ', 'Por qué este cliente no necesita revisión. Sin esto la fila no entra.'],
+    ['referencia', 'no', 'Acta, ticket o caso que autorizó la excepción.'],
+    ['vigenciaHasta', 'no', 'YYYY-MM-DD. Vacío = no vence.'],
+    [''],
+    ['OJO CON EL DÍGITO VERIFICADOR'],
+    ['El cruce es exacto: se sacan puntos y guiones y se compara.'],
+    ['Un RUT cargado como 12345678 NO coincide con el caso, que trae 12.345.678-9.'],
+    ['Antes de guardar, el mantenedor dice cuántos casos de la cola coincidirían.'],
+    ['Si carga muchos clientes y ese número da 0, la base está mal armada.'],
+    [''],
+    ['Se puede cargar solo una de las dos llaves. Con el documento alcanza.'],
+    ['Un cliente que ya está en la lista se actualiza, no se duplica.'],
+  ];
+  const hojaAyuda = XLSX.utils.aoa_to_sheet(ayuda);
+  hojaAyuda['!cols'] = [{ wch: 30 }, { wch: 16 }, { wch: 70 }];
+  XLSX.utils.book_append_sheet(libro, hojaAyuda, 'Instrucciones');
+
+  XLSX.writeFile(libro, 'plantilla-whitelist-clientes.xlsx');
 }
 
 /**

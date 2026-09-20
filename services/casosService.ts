@@ -71,6 +71,19 @@ export interface CierreCanal {
   detalle?: string | null;
 }
 
+// Freno manual del caso. La REGLA de qué frena vive en `flujoDecision.ts`
+// (`enStandby`), que es el módulo que comparten la app y el Lambda; acá está
+// solo la forma del dato, porque es un campo del caso.
+export interface StandbyCaso {
+  activo: boolean;
+  /** Por qué se frenó. Va a la ficha y a la auditoría. */
+  motivo: string;
+  /** Quién lo frenó. */
+  por: string;
+  /** ISO. */
+  en: string;
+}
+
 export interface CasoSF {
   id: string;
   numeroCaso: string;
@@ -91,6 +104,10 @@ export interface CasoSF {
   respuestaSalesforce?: unknown;
   statusCaso?: string;             // ABIERTO | GESTIONANDO | CERRADO
   cierres?: { sf?: CierreCanal; admin?: CierreCanal };
+  // Freno manual del caso. Mientras esté activo, NINGÚN camino lo cierra: ni el
+  // flujo automático, ni la whitelist, ni el cierre individual, ni los masivos.
+  // Ver `StandbyCaso` en `flujoDecision.ts`, que es donde vive la regla.
+  standby?: StandbyCaso;
   // ── Cola Remesa: se cachean los dos resultados caros del caso ───────────────
   // Sin esto, cada vez que alguien abre la Bandeja se vuelve a consultar Redshift
   // y a los proveedores de listas, que es lento y se cobra por consulta.
@@ -133,6 +150,10 @@ function docToCaso(id: string, data: Record<string, unknown>): CasoSF {
     respuestaSalesforce: data.respuestaSalesforce,
     statusCaso: data.statusCaso as string | undefined,
     cierres: (data.cierres && typeof data.cierres === 'object') ? data.cierres as CasoSF['cierres'] : undefined,
+    // Passthrough del freno manual. Si no viaja acá, la UI no puede frenar nada
+    // y el caso se cerraría igual: es el mismo error que ya pasó con los bloques
+    // operacionales.
+    standby: (data.standby && typeof data.standby === 'object') ? data.standby as StandbyCaso : undefined,
     remesaRow: (data.remesaRow && typeof data.remesaRow === 'object') ? data.remesaRow as Record<string, unknown> : undefined,
     screeningBeneficiario: (data.screeningBeneficiario && typeof data.screeningBeneficiario === 'object')
       ? data.screeningBeneficiario as Record<string, unknown> : undefined,

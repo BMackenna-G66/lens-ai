@@ -26,7 +26,7 @@ import {
   documentoParaWhitelist,
 } from './wl.mjs';
 import {
-  evaluarCasoAuto, evaluarRemesaAuto, FLUJO_CONFIG_DEFAULT,
+  evaluarCasoAuto, evaluarRemesaAuto, FLUJO_CONFIG_DEFAULT, enStandby,
 } from './decision.mjs';
 
 let fallas = 0;
@@ -39,13 +39,14 @@ const titulo = t => console.log('\n── ' + t + ' ' + '─'.repeat(Math.max(0,
 // ── Ayudas ──────────────────────────────────────────────────────────────────
 const entrada = (p = {}) => ({
   documento: '123456789', customerId: '9990001', nombre: 'Cliente Prueba',
-  motivo: 'Homonimia verificada', referencia: 'CASE-1', ofac: true, remesa: true,
+  motivo: 'Homonimia verificada', referencia: 'CASE-1',
   vigenciaHasta: null, agregadoPor: 'test', agregadoEn: '2026-09-20T00:00:00.000Z',
   ...p,
 });
 const lista = (entradas, enabled = true) => normalizarWhitelist({ enabled, entradas }).wl;
+// Los casos de prueba son de REMESA: la whitelist es exclusiva de esa cola.
 const caso = (datos = {}, resto = {}) => ({
-  id: 'c1', numeroCaso: '02646256', asunto: 'Coincidencia OFAC',
+  id: 'c1', numeroCaso: '02646256', asunto: 'DETIENE TX 998877',
   nombreCuenta: 'X', pais: 'Chile', recibidoEn: '', origen: 'sf',
   datos: { 'Número de DNI': '12.345.678-9', 'Id interno del usuario': '9990001', ...datos },
   ...resto,
@@ -86,10 +87,10 @@ titulo('Normalización: qué entra y qué se descarta');
   // mantenedor cuenta cuántos casos de la cola coincidirían antes de guardar.
   const sinDV = lista([entrada({ documento: '12345678', customerId: '' })]);
   ok('un RUT sin dígito verificador NO coincide con el caso que sí lo trae',
-    buscarEnWhitelist(caso({ 'Id interno del usuario': '' }), sinDV, 'ofac') === null);
+    buscarEnWhitelist(caso({ 'Id interno del usuario': '' }), sinDV) === null);
   const conDV = lista([entrada({ documento: '12345678-9', customerId: '' })]);
   ok('…y con el DV sí coincide, escrito como sea',
-    buscarEnWhitelist(caso({ 'Id interno del usuario': '' }), conDV, 'ofac')?.valor === '123456789');
+    buscarEnWhitelist(caso({ 'Id interno del usuario': '' }), conDV)?.valor === '123456789');
 }
 
 {
@@ -112,11 +113,6 @@ titulo('Normalización: qué entra y qué se descarta');
 }
 
 {
-  const n = normalizarWhitelist({ enabled: true, entradas: [entrada({ ofac: false, remesa: false })] });
-  ok('sin ninguna cola se descarta', n.wl.entradas.length === 0, n.descartadas);
-}
-
-{
   const n = normalizarWhitelist({ enabled: true, entradas: [entrada({ vigenciaHasta: '31/12/2026' })] });
   ok('una vigencia con formato raro descarta la ENTRADA (no se ignora la fecha)',
     n.wl.entradas.length === 0, n.descartadas);
@@ -136,9 +132,8 @@ titulo('Normalización: qué entra y qué se descarta');
 }
 
 {
-  // Las columnas de cola ausentes también apagan, no prenden.
-  const n = normalizarWhitelist({ enabled: true, entradas: [{ documento: '12345678', motivo: 'x', ofac: true }] });
-  ok('remesa ausente ⇒ la entrada NO aplica a remesas', n.wl.entradas[0]?.remesa === false, n.wl.entradas[0]);
+  const n = normalizarWhitelist({ enabled: true, entradas: [{ documento: '12345678-9', motivo: 'x' }] });
+  ok('con una llave y un motivo alcanza', n.wl.entradas.length === 1, n.descartadas);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -146,13 +141,13 @@ titulo('Búsqueda');
 
 {
   const wl = lista([entrada()]);
-  ok('apagada nunca coincide', buscarEnWhitelist(caso(), lista([entrada()], false), 'ofac') === null);
+  ok('apagada nunca coincide', buscarEnWhitelist(caso(), lista([entrada()], false)) === null);
   ok('coincide por documento con otra puntuación',
-    buscarEnWhitelist(caso({ 'Id interno del usuario': '' }), wl, 'ofac')?.por === 'documento');
+    buscarEnWhitelist(caso({ 'Id interno del usuario': '' }), wl)?.por === 'documento');
   ok('coincide por customerId cuando el documento no está',
-    buscarEnWhitelist(caso({ 'Número de DNI': '' }), wl, 'ofac')?.por === 'customerId');
+    buscarEnWhitelist(caso({ 'Número de DNI': '' }), wl)?.por === 'customerId');
   ok('el documento gana cuando están los dos',
-    buscarEnWhitelist(caso(), wl, 'ofac')?.por === 'documento');
+    buscarEnWhitelist(caso(), wl)?.por === 'documento');
 }
 
 {
@@ -160,24 +155,16 @@ titulo('Búsqueda');
   // regla de las llaves vacías: la entrada se valida al cargar, el caso acá.
   const wl = lista([entrada()]);
   ok('un caso sin documento ni customerId no coincide',
-    buscarEnWhitelist(caso({ 'Número de DNI': '', 'Id interno del usuario': '' }), wl, 'ofac') === null);
+    buscarEnWhitelist(caso({ 'Número de DNI': '', 'Id interno del usuario': '' }), wl) === null);
   ok('un caso con basura en los campos no coincide',
-    buscarEnWhitelist(caso({ 'Número de DNI': 'N/A', 'Id interno del usuario': '0' }), wl, 'ofac') === null);
-}
-
-{
-  const soloOfac = lista([entrada({ remesa: false })]);
-  ok('una entrada solo-OFAC coincide en OFAC', !!buscarEnWhitelist(caso(), soloOfac, 'ofac'));
-  ok('…y NO en remesas', buscarEnWhitelist(caso(), soloOfac, 'remesa') === null);
-  const soloRemesa = lista([entrada({ ofac: false })]);
-  ok('una entrada solo-remesa NO coincide en OFAC', buscarEnWhitelist(caso(), soloRemesa, 'ofac') === null);
+    buscarEnWhitelist(caso({ 'Número de DNI': 'N/A', 'Id interno del usuario': '0' }), wl) === null);
 }
 
 {
   const wl = lista([entrada({ vigenciaHasta: '2026-09-19' })]);
-  ok('vencida ayer: no aplica', buscarEnWhitelist(caso(), wl, 'ofac', '2026-09-20') === null);
+  ok('vencida ayer: no aplica', buscarEnWhitelist(caso(), wl, '2026-09-20') === null);
   ok('el día del vencimiento todavía aplica',
-    !!buscarEnWhitelist(caso(), wl, 'ofac', '2026-09-19'));
+    !!buscarEnWhitelist(caso(), wl, '2026-09-19'));
   ok('sin vigencia, siempre', entradaVigente(entrada(), '2099-01-01') === true);
 }
 
@@ -187,7 +174,7 @@ titulo('Búsqueda');
   const a = lista([entrada({ documento: '123456789' })]);
   const b = lista([entrada({ documento: '876543210', customerId: '9999999' })]);
   ok('el caché del índice no se pega entre listas distintas',
-    !!buscarEnWhitelist(caso(), a, 'ofac') && buscarEnWhitelist(caso(), b, 'ofac') === null);
+    !!buscarEnWhitelist(caso(), a) && buscarEnWhitelist(caso(), b) === null);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -197,97 +184,111 @@ titulo('Enganche con la decisión: SIN whitelist nada cambia');
   // La regresión que más importa. Hoy la cola corre con los flujos apagados: si
   // agregar la whitelist hiciera que algo se libere solo, sería plata movida sin
   // que nadie lo pidiera.
-  const cfg = FLUJO_CONFIG_DEFAULT.ofac;        // enabled: false
-  const limpio = { decision: 'Liberar', pep: false, coincidencias: [] };
+  const cfg = FLUJO_CONFIG_DEFAULT.remesa;      // enabled: false, destinos apagados
+  const limpio = { estado: 'ok', flujo: 'CL', decision: 'Liberar', coincidencias: [], listas: [] };
   ok('sin whitelist y flujo apagado: no se automatiza',
-    evaluarCasoAuto(caso(), limpio, cfg).automatizable === false);
+    evaluarRemesaAuto(caso(), limpio, cfg).automatizable === false);
   ok('…y el motivo sigue siendo flujo_apagado',
-    evaluarCasoAuto(caso(), limpio, cfg).motivo === 'flujo_apagado');
+    evaluarRemesaAuto(caso(), limpio, cfg).motivo === 'flujo_apagado');
   ok('con whitelist VACÍA tampoco cambia',
-    evaluarCasoAuto(caso(), limpio, cfg, lista([])).motivo === 'flujo_apagado');
+    evaluarRemesaAuto(caso(), limpio, cfg, lista([])).motivo === 'flujo_apagado');
   ok('con whitelist APAGADA tampoco cambia',
-    evaluarCasoAuto(caso(), limpio, cfg, lista([entrada()], false)).motivo === 'flujo_apagado');
-}
-
-{
-  // Un cliente que NO está en la lista, con la lista prendida: nada cambia.
-  const cfg = FLUJO_CONFIG_DEFAULT.ofac;
-  const wl = lista([entrada({ documento: '876543210', customerId: '9999999' })]);
+    evaluarRemesaAuto(caso(), limpio, cfg, lista([entrada()], false)).motivo === 'flujo_apagado');
+  const ajena = lista([entrada({ documento: '876543210', customerId: '9999999' })]);
   ok('un cliente ajeno a la lista no se libera',
-    evaluarCasoAuto(caso(), { decision: 'Liberar' }, cfg, wl).motivo === 'flujo_apagado');
+    evaluarRemesaAuto(caso(), limpio, cfg, ajena).motivo === 'flujo_apagado');
 }
 
 {
-  // Y con el flujo PRENDIDO, la decisión de siempre se conserva.
+  // LA COLA DE OFAC NO TIENE WHITELIST. `evaluarCasoAuto` ni siquiera la recibe;
+  // esto fija que la decisión de OFAC sigue siendo la de siempre.
   const cfg = { ...FLUJO_CONFIG_DEFAULT.ofac, enabled: true, paises: { CL: true, CO: true } };
+  const ofac = caso({}, { asunto: 'Coincidencia OFAC' });
   const sensible = { decision: 'Liberar', coincidencias: [{ tipo: 'penal', detalle: 'lavado de activos' }] };
-  const ev = evaluarCasoAuto(caso(), sensible, cfg, lista([]));
-  ok('el delito sensible sigue reteniendo cuando el cliente NO está en la lista',
-    ev.automatizable === false && ev.motivo === 'delito_sensible', ev);
-  const pep = evaluarCasoAuto(caso(), { decision: 'Liberar', pep: true }, cfg, lista([]));
-  ok('PEP sigue reteniendo en OFAC', pep.motivo === 'pep', pep);
+  ok('en OFAC el delito sensible sigue reteniendo',
+    evaluarCasoAuto(ofac, sensible, cfg).motivo === 'delito_sensible');
+  ok('en OFAC el PEP sigue reteniendo',
+    evaluarCasoAuto(ofac, { decision: 'Liberar', pep: true }, cfg).motivo === 'pep');
+  ok('en OFAC un caso limpio se libera como siempre',
+    evaluarCasoAuto(ofac, { decision: 'Liberar', coincidencias: [] }, cfg).automatizable === true);
+  ok('evaluarCasoAuto toma 3 argumentos (la whitelist no llega a OFAC)',
+    evaluarCasoAuto.length === 3, { largo: evaluarCasoAuto.length });
 }
 
 // ════════════════════════════════════════════════════════════════════════════
 titulo('Enganche con la decisión: CON whitelist perdona todo');
 
 {
-  const cfg = FLUJO_CONFIG_DEFAULT.ofac;          // flujo APAGADO a propósito
+  const cfg = FLUJO_CONFIG_DEFAULT.remesa;        // flujo APAGADO a propósito
   const wl = lista([entrada()]);
-  const sensible = {
-    decision: 'Revisión manual', pep: true,
-    coincidencias: [{ tipo: 'penal', detalle: 'trafico de drogas' }],
-  };
-  const ev = evaluarCasoAuto(caso(), sensible, cfg, wl);
-  ok('libera con el flujo APAGADO (switch propio)', ev.automatizable === true, ev);
-  ok('libera pese a delito sensible + PEP + conclusión de revisión',
-    ev.tipologia === cfg.tipoLiberarNormal, ev);
-  ok('deja dicho que fue por whitelist', ev.whitelist?.por === 'documento', ev.whitelist);
-  ok('…con el motivo de la entrada', ev.whitelist?.entrada?.motivo === 'Homonimia verificada', ev.whitelist);
-}
-
-{
-  // Los dos frenos que la whitelist NO pasa por encima.
-  const cfg = FLUJO_CONFIG_DEFAULT.ofac;
-  const wl = lista([entrada()]);
-  const asignado = caso({}, { asignacion: { analistaId: 'u1' } });
-  ok('un caso con analista asignado no se cierra solo',
-    evaluarCasoAuto(asignado, {}, cfg, wl).motivo === 'asignado');
-  const cerrado = caso({}, { statusCaso: 'CERRADO' });
-  ok('un caso ya cerrado no se reabre',
-    evaluarCasoAuto(cerrado, {}, cfg, wl).motivo === 'ya_cerrado');
-}
-
-{
-  // Remesas: acá hay más frenos y la lista los saltea todos.
-  const cfg = FLUJO_CONFIG_DEFAULT.remesa;       // apagado, destinos apagados
-  const wl = lista([entrada()]);
-  const r = caso({}, { asunto: 'DETIENE TX 998877' });
+  const r = caso();
 
   const sinWl = evaluarRemesaAuto(r, undefined, cfg, lista([]));
   ok('sin whitelist, la remesa no se libera', sinWl.automatizable === false, sinWl);
 
   const conWl = evaluarRemesaAuto(r, undefined, cfg, wl);
-  ok('con whitelist libera sin screening y con el destino apagado',
+  ok('libera con el flujo APAGADO y el destino apagado (switch propio)',
     conWl.automatizable === true && conWl.tipologia === cfg.tipoLiberar, conWl);
+  ok('deja dicho que fue por whitelist', conWl.whitelist?.por === 'documento', conWl.whitelist);
+  ok('…con el motivo de la entrada',
+    conWl.whitelist?.entrada?.motivo === 'Homonimia verificada', conWl.whitelist);
 
-  const conListas = evaluarRemesaAuto(r, {
-    estado: 'ok', flujo: 'INTL', listas: [{ lista: 'OFAC SDN' }],
-    coincidencias: [{ tipo: 'penal', detalle: 'lavado de activos' }],
+  const todoMal = evaluarRemesaAuto(r, {
+    estado: 'ok', flujo: 'INTL', pep: true,
+    listas: [{ lista: 'OFAC SDN' }],
+    coincidencias: [{ tipo: 'penal', detalle: 'trafico de drogas' }],
   }, cfg, wl);
-  ok('libera incluso con coincidencia en listas de sanciones', conListas.automatizable === true, conListas);
+  ok('libera pese a listas de sanciones + delito sensible + PEP',
+    todoMal.automatizable === true, todoMal);
+}
 
-  // …pero una entrada solo-OFAC no libera remesas.
-  const soloOfac = lista([entrada({ remesa: false })]);
-  ok('una entrada solo-OFAC no libera la remesa',
-    evaluarRemesaAuto(r, undefined, cfg, soloOfac).automatizable === false);
+{
+  // Los dos frenos que la whitelist NO pasa por encima.
+  const cfg = FLUJO_CONFIG_DEFAULT.remesa;
+  const wl = lista([entrada()]);
+  ok('un caso con analista asignado no se cierra solo',
+    evaluarRemesaAuto(caso({}, { asignacion: { analistaId: 'u1' } }), undefined, cfg, wl).motivo === 'asignado');
+  ok('un caso ya cerrado no se reabre',
+    evaluarRemesaAuto(caso({}, { statusCaso: 'CERRADO' }), undefined, cfg, wl).motivo === 'ya_cerrado');
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+titulo('STAND BY: frena todo, incluso la whitelist');
+
+{
+  const frenado = { standby: { activo: true, motivo: 'revisión pendiente', por: 'ana', en: '2026-09-20T00:00:00.000Z' } };
+  ok('enStandby detecta el freno', enStandby(caso({}, frenado)) === true);
+  ok('…y un caso sin el campo no está frenado', enStandby(caso()) === false);
+  ok('…ni uno con activo:false',
+    enStandby(caso({}, { standby: { activo: false, motivo: '', por: '', en: '' } })) === false);
+
+  // OFAC: con el flujo prendido y un caso que se liberaría solo.
+  const cfgO = { ...FLUJO_CONFIG_DEFAULT.ofac, enabled: true, paises: { CL: true, CO: true } };
+  const limpioO = { decision: 'Liberar', coincidencias: [] };
+  const ofacFrenado = caso({}, { ...frenado, asunto: 'Coincidencia OFAC' });
+  ok('en OFAC frena un caso que si no se cerraría',
+    evaluarCasoAuto(ofacFrenado, limpioO, cfgO).motivo === 'standby',
+    evaluarCasoAuto(ofacFrenado, limpioO, cfgO));
+
+  // Remesa: con el flujo prendido Y el destino habilitado.
+  const cfgR = { ...FLUJO_CONFIG_DEFAULT.remesa, enabled: true, paises: { CL: true, CO: true, INTL: true } };
+  const limpioR = { estado: 'ok', flujo: 'CL', coincidencias: [], listas: [] };
+  ok('en remesas frena una que si no se liberaría',
+    evaluarRemesaAuto(caso({}, frenado), limpioR, cfgR).motivo === 'standby');
+
+  // LO QUE MÁS IMPORTA: el stand by gana sobre la whitelist.
+  const wl = lista([entrada()]);
+  ok('el stand by GANA sobre la whitelist',
+    evaluarRemesaAuto(caso({}, frenado), undefined, FLUJO_CONFIG_DEFAULT.remesa, wl).motivo === 'standby');
+  ok('…y sin el freno, esa misma lista sí libera',
+    evaluarRemesaAuto(caso(), undefined, FLUJO_CONFIG_DEFAULT.remesa, wl).automatizable === true);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
 titulo('Carga masiva');
 
 {
-  const op = { ofac: true, remesa: false, agregadoPor: 'test' };
+  const op = { agregadoPor: 'test' };
   const r = parsearPegado(
     'documento\tcustomerId\tnombre\tmotivo\n'
     + '12.345.678-9\t9990001\tJuan Perez\tHomonimia\n'
@@ -296,27 +297,27 @@ titulo('Carga masiva');
   ok('saltea el encabezado', r.encabezadoSalteado === true, r);
   ok('lee las dos filas', r.entradas.length === 2, r);
   ok('normaliza el documento', r.entradas[0].documento === '123456789', r.entradas[0]);
-  ok('respeta la cola elegida', r.entradas[0].ofac === true && r.entradas[0].remesa === false);
+  ok('conserva el motivo de cada fila', r.entradas[0].motivo === 'Homonimia', r.entradas[0]);
 }
 
 {
   // El encabezado solo se saltea si NINGUNA celda parece una llave: una primera
   // fila que YA es un cliente no se puede perder.
   const r = parsearPegado('12345678\t9990001\tRut Motivo Nombre\tHomonimia\n',
-    { ofac: true, remesa: true, agregadoPor: 't' });
+    { agregadoPor: 't' });
   ok('una primera fila que es un cliente no se confunde con encabezado',
     r.encabezadoSalteado === false && r.entradas.length === 1, r);
 }
 
 {
   const r = parsearPegado('12345678;;Juan;;;\nbasura;;;;;\n',
-    { ofac: true, remesa: true, agregadoPor: 't', motivoPorDefecto: 'Base masiva AR-1' });
+    { agregadoPor: 't', motivoPorDefecto: 'Base masiva AR-1' });
   ok('el motivo por defecto salva las filas sin motivo', r.entradas.length === 1, r);
   ok('…y la fila inválida se reporta, no se traga', r.errores.length === 1, r.errores);
 }
 
 {
-  const r = parsearPegado('12345678\t\t\t\n', { ofac: true, remesa: true, agregadoPor: 't' });
+  const r = parsearPegado('12345678\t\t\t\n', { agregadoPor: 't' });
   ok('sin motivo ni default, la fila NO entra', r.entradas.length === 0 && r.errores.length === 1, r);
 }
 
@@ -361,9 +362,9 @@ titulo('Carga masiva');
 }
 
 {
-  const r = construirEntrada({ documento: '12.345.678-9', motivo: 'x', ofac: true }, 'yo');
+  const r = construirEntrada({ documento: '12.345.678-9', motivo: 'x' }, 'yo');
   ok('construirEntrada acepta una llave sola', r.ok === true && r.entrada.customerId === '', r);
-  const mal = construirEntrada({ documento: '123', customerId: '1', motivo: 'x', ofac: true }, 'yo');
+  const mal = construirEntrada({ documento: '123', customerId: '1', motivo: 'x' }, 'yo');
   ok('…y rechaza llaves basura con un mensaje', mal.ok === false && /documento/.test(mal.error), mal);
 }
 
