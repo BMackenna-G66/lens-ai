@@ -219,7 +219,7 @@ export const WhitelistClientesPanel: React.FC<Props> = ({ casos, actor, onCerrar
             acá alguien va a pensar que la lista no funciona. */}
         <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
           Con el flujo automático apagado, el proceso desatendido revisa la cola <b>cada 30 minutos</b> en
-          vez de cada 5: leer la cola cuesta lecturas de Firestore y la cuota la comparte todo Lens. O sea
+          vez de cada 15: leer la cola cuesta lecturas de Firestore y la cuota la comparte todo Lens. O sea
           que un caso puede tardar hasta media hora en salir solo. Con el flujo prendido no hay demora.
         </p>
       </div>

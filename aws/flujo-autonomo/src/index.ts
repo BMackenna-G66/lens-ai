@@ -180,16 +180,20 @@ const whitelistAplica = (wl: WhitelistClientes | undefined, cola: 'ofac' | 'reme
 // Hasta ahora, con los dos flujos apagados esta función terminaba en el primer
 // `if`: leía UN documento (la config) y volvía. Con la whitelist prendida ya no
 // puede, porque para saber a quién liberar tiene que mirar la cola — y leer la
-// cola son ~107 documentos. Con el cron cada 5 minutos eso son 288 corridas por
-// día ≈ **30.000 lecturas diarias** contra una cuota de 50.000 que comparte TODO
-// Lens. Cuando esa cuota se agota no se cae la Bandeja: se cae la app entera,
-// como el 05-09-2026.
+// cola son ~107 documentos. El cron corre cada 15 minutos —verificado contra la
+// regla de EventBridge el 20-09-2026: `cron(0/15 * * * ? *)`—, o sea 96 corridas
+// por día ≈ **10.000 lecturas diarias** contra una cuota de 50.000 que comparte
+// TODO Lens. Cuando esa cuota se agota no se cae la Bandeja: se cae la app
+// entera, como el 05-09-2026.
 //
 // Entonces: cuando lo ÚNICO activo es la whitelist, la cola se barre cada media
-// hora en vez de cada cinco minutos (~5.000 lecturas/día). No hay nada que
+// hora en vez de cada quince minutos (~5.000 lecturas/día). No hay nada que
 // perder con esperar: la lista no reacciona a eventos, solo a que alguien la
 // cargue, y media hora de demora en liberar un caso ya decidido no le cambia la
 // vida a nadie.
+//
+// El freno es por TIEMPO transcurrido, no por cantidad de corridas: si mañana se
+// acelera el cron, esto sigue valiendo sin tocar nada.
 //
 // Con el flujo automático prendido este freno NO aplica: ahí la cola se lee
 // igual, es la corrida de siempre y la whitelist viaja de arrimada.
