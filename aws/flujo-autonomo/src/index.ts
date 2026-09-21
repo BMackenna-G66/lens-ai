@@ -174,48 +174,87 @@ async function leerWhitelist(): Promise<WhitelistClientes> {
 const whitelistAplica = (wl: WhitelistClientes | undefined): boolean =>
   !!wl?.enabled && wl.entradas.length > 0;
 
-// ── Freno de frecuencia del barrido "solo whitelist" ────────────────────────
-// El problema que esto evita, medido sobre los números reales de la cola:
+// ── SONDEO: la corrida de un minuto que casi no cuesta ──────────────────────
 //
-// Hasta ahora, con los dos flujos apagados esta función terminaba en el primer
-// `if`: leía UN documento (la config) y volvía. Con la whitelist prendida ya no
-// puede, porque para saber a quién liberar tiene que mirar la cola — y leer la
-// cola son ~107 documentos. El cron corre cada 15 minutos —verificado contra la
-// regla de EventBridge el 20-09-2026: `cron(0/15 * * * ? *)`—, o sea 96 corridas
-// por día ≈ **10.000 lecturas diarias** contra una cuota de 50.000 que comparte
-// TODO Lens. Cuando esa cuota se agota no se cae la Bandeja: se cae la app
-// entera, como el 05-09-2026.
+// El pedido es que un cliente de la whitelist se libere en **un minuto como
+// máximo**. La forma obvia —poner el cron cada minuto— no entra:
 //
-// Entonces: cuando lo ÚNICO activo es la whitelist, la cola se barre cada media
-// hora en vez de cada quince minutos (~5.000 lecturas/día). No hay nada que
-// perder con esperar: la lista no reacciona a eventos, solo a que alguien la
-// cargue, y media hora de demora en liberar un caso ya decidido no le cambia la
-// vida a nadie.
+//   1.440 corridas/día × ~115 lecturas = **165.000 lecturas/día**
 //
-// El freno es por TIEMPO transcurrido, no por cantidad de corridas: si mañana se
-// acelera el cron, esto sigue valiendo sin tocar nada.
+// contra una cuota de 50.000 que comparte TODO Lens. Se agotaría en unas siete
+// horas, todos los días, y cuando se agota no cae la Bandeja: cae la app entera,
+// como el 05-09-2026 y como el 20-09-2026.
 //
-// Con el flujo automático prendido este freno NO aplica: ahí la cola se lee
-// igual, es la corrida de siempre y la whitelist viaja de arrimada.
-const WHITELIST_BARRIDO_MS = Number(process.env.WHITELIST_BARRIDO_MS || '1800000');   // 30 min
+// Lo caro no es correr seguido: es **leer la cola entera** en cada corrida. Así
+// que el cron sí pasa a un minuto, pero antes de leer nada la corrida pregunta
+// por DOS lecturas si hay algo que hacer:
+//
+//   1. ¿Llegó un caso nuevo?  → **cuántos documentos tiene la colección**. Un
+//      caso nuevo es un documento nuevo, así que el conteo sube. Firestore cobra
+//      el `count()` a una lectura por cada 1.000 coincidencias: con ~1.500 casos
+//      son 2 lecturas, no 1.500.
+//   2. ¿Cambió la whitelist?  → el `actualizadoEn` de su cabecera, que ya se lee
+//      igual. Cubre el caso de agregar un cliente cuyo caso YA estaba en la cola:
+//      sin esto, ese caso esperaría al barrido completo.
+//
+// ── Por qué el CONTEO y no la fecha del último caso ────────────────────────
+// La señal obvia era el `recibidoEn` más alto. No sirve: el import desde la app
+// («Traer a la Bandeja») escribe `recibidoEn` con la fecha de creación en
+// SALESFORCE, no con la de ahora, y a propósito —así la cola queda ordenada por
+// antigüedad real—. Un caso creado ayer e importado hoy entra con fecha vieja,
+// el máximo no se mueve y el sondeo no lo vería: quedaría esperando el barrido.
+// El conteo no tiene ese problema, porque lo que mira es que haya un documento
+// más. Cubre las DOS vías de ingreso: el receptor y el import de la app.
+//
+// Lo que el conteo no ve es una reingesta de un caso que ya existía (mismo
+// documento, no suma). No importa: ese caso ya estaba en la cola y ya se evaluó.
+//
+// Si ninguna de las dos cambió, la corrida termina ahí: **2 lecturas**. Si alguna
+// cambió, se hace la corrida completa de siempre.
+//
+// Contado de verdad, una invocación en vacío son CINCO lecturas: el candado (1),
+// la config (1), la cabecera de la whitelist (1) y el conteo (2).
+//
+//   en vacío:  1.440 × 5                        ≈ 7.200 lecturas/día
+//   barrido completo cada 30 min (red de atrás)  ≈ 5.500
+//   + una corrida completa por cada llegada
+//                                               ─────────
+//                                               ≈ 13.000, contra ~11.000 hoy
+//
+// El barrido pasa de 15 a 30 minutos justamente para pagar el sondeo: así la
+// respuesta baja de 15 minutos a 1 sin subir el consumo. Y se mantiene porque
+// las dos señales detectan LLEGADAS y CAMBIOS DE LISTA, no todo: un screening
+// que se destraba, un caso que alguien desasigna o suelta del stand by, o
+// Redshift que vuelve después de la pausa, no mueven ninguna de las dos.
+//
+// El candado hace que esto sea seguro a un minuto aunque una corrida tarde 316 s
+// (lo medido con Colombia prendida): las invocaciones que caen encima rebotan y
+// cuestan UNA lectura cada una.
+const SONDEO_COMPLETO_MS = Number(process.env.SONDEO_COMPLETO_MS || '1800000');   // 30 min
 const LATIDO_DOC = 'config/flujoAutonomoLatido';
 
-// Se persiste en el latido (no en memoria) porque el Lambda puede arrancar en un
-// contenedor nuevo en cualquier corrida, y una variable de módulo fría valdría
-// cero: el freno no frenaría nada.
-let ultimoBarridoWhitelist = '';
+// Estado del sondeo. Vive en memoria del contenedor a propósito: con el cron a
+// un minuto el Lambda se mantiene tibio, y un arranque en frío simplemente hace
+// una corrida completa — que es la dirección segura (trabajar de más, no de
+// menos). Persistirlo costaría una lectura más por minuto para ahorrar una
+// corrida completa muy de vez en cuando.
+let ultimoConteoVisto = -1;
+let ultimaVersionWl = '';
+let ultimoBarridoCompleto = 0;
 
-async function leerUltimoBarrido(): Promise<number> {
-  const [col, id] = LATIDO_DOC.split('/');
+/**
+ * Cuántos documentos tiene la colección. Dos lecturas con ~1.500 casos.
+ *
+ * Devuelve -1 si no se pudo contar, y ese valor NUNCA coincide con el anterior:
+ * no saber tiene que producir una corrida completa, porque no saber no puede
+ * significar "no hay nada que hacer".
+ */
+async function conteoCasos(): Promise<number> {
   try {
-    const snap = await db().collection(col).doc(id).get();
-    const v = String((snap.data() as Record<string, unknown> | undefined)?.ultimoBarridoWhitelist ?? '');
-    if (v) ultimoBarridoWhitelist = v;
-    const t = Date.parse(v);
-    return Number.isFinite(t) ? t : 0;
+    const r = await db().collection(COLECCION).count().get();
+    return r.data().count;
   } catch {
-    // Sin poder leerlo, se barre. Trabajar de más es la dirección segura.
-    return 0;
+    return -1;
   }
 }
 
@@ -438,10 +477,7 @@ async function guardarCierre(
 async function latir(estado: Record<string, unknown>): Promise<void> {
   const [col, id] = LATIDO_DOC.split('/');
   await db().collection(col).doc(id)
-    // `ultimoBarridoWhitelist` viaja en TODOS los latidos porque este `set` no
-    // es un merge: escribirlo solo cuando hay barrido lo borraría en el latido
-    // siguiente, y el freno de frecuencia dejaría de frenar.
-    .set(limpio({ ...estado, ultimoBarridoWhitelist: ultimoBarridoWhitelist || null, en: new Date().toISOString() }))
+    .set(limpio({ ...estado, en: new Date().toISOString() }))
     .catch(() => {});
 }
 
@@ -956,6 +992,10 @@ async function correr(
   // dejaría de significar algo. (El CACHÉ de la lista sí conviene que sobreviva:
   // se invalida solo cuando cambia `actualizadoEn`.)
   wlLecturas = 0;
+  // Lo que cuesta llegar hasta acá y que `leerCasosAbiertos` no cuenta: el
+  // candado, la config, la cabecera de la whitelist y el sondeo. Se suma para
+  // que el resumen diga la verdad sobre lo que costó la corrida.
+  const lecturasSondeo = 5;
 
   let conf = await leerConfig();
   // La whitelist tiene switch PROPIO: no cuelga de `ofac.enabled` ni de
@@ -975,17 +1015,29 @@ async function correr(
     return { corrio: false, motivo };
   }
 
-  // Barrido "solo whitelist": se espacia a media hora. Ver `WHITELIST_BARRIDO_MS`.
-  const soloWhitelist = conf?.cfg.ofac.enabled !== true && conf?.cfg.remesa.enabled !== true;
-  if (soloWhitelist) {
-    const desde = Date.now() - await leerUltimoBarrido();
-    if (desde < WHITELIST_BARRIDO_MS) {
-      const motivo = `solo whitelist: el próximo barrido en ${Math.ceil((WHITELIST_BARRIDO_MS - desde) / 60000)} min`;
-      await latir({ corrio: false, motivo, origen });
-      return { corrio: false, motivo };
-    }
-    ultimoBarridoWhitelist = new Date().toISOString();
+  // ── SONDEO ────────────────────────────────────────────────────────────────
+  // Dos lecturas para decidir si hace falta leer la cola. Ver `SONDEO_COMPLETO_MS`.
+  //
+  // El disparo manual («Correr ahora») se saltea el sondeo: si alguien apretó el
+  // botón es porque quiere una corrida, no una respuesta de que no hacía falta.
+  const conteo = await conteoCasos();
+  const versionWl = wl.actualizadoEn ?? '';
+  const hayNovedad = conteo < 0 || conteo !== ultimoConteoVisto || versionWl !== ultimaVersionWl;
+  const tocaBarrido = Date.now() - ultimoBarridoCompleto >= SONDEO_COMPLETO_MS;
+
+  if (origen !== 'manual' && !hayNovedad && !tocaBarrido) {
+    // Nada llegó, la lista no cambió y el barrido no toca: se termina acá.
+    const motivo = 'sondeo: sin novedades';
+    await latir({ corrio: false, motivo, origen, casosEnColeccion: conteo });
+    return { corrio: false, motivo, casosEnColeccion: conteo };
   }
+
+  // Se anotan DESPUÉS de decidir y ANTES de trabajar: si la corrida falla a la
+  // mitad, la siguiente no vuelve a intentar lo mismo en bucle. Lo que quedó sin
+  // procesar lo levanta el barrido periódico.
+  ultimoConteoVisto = conteo;
+  ultimaVersionWl = versionWl;
+  ultimoBarridoCompleto = Date.now();
   // Qué campos se leyeron por defecto. Un proceso desatendido no puede degradarse
   // en silencio: si el doc de config quedó incompleto, tiene que decirlo.
   //
@@ -1094,7 +1146,7 @@ async function correr(
     duracionMs: 0,
     // Cuántos documentos leyó la corrida y con qué estrategia. Se registra porque
     // la cuota de lectura del proyecto se agotó por no estar mirando este número.
-    lecturas,
+    lecturas: lecturas + lecturasSondeo,
     modoLectura: modo,
     // Avisos de la corrida que no son de un caso puntual.
     avisos: log,

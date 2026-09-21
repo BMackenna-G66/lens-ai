@@ -125,32 +125,35 @@ Resources:
             # "ScheduleExpression is not valid" (probado: rollback dos veces).
             # Y además conviene que un cambio de horario se vea en un diff.
             #
-            # Cada 30 min entre 11:00 y 22:29 UTC = 07:00 a 18:29 hora Chile.
-            # El corte NO es arbitrario: el cluster de Redshift pausa 18:30 Chile y
-            # la cola de REMESAS necesita consultarlo para traer la fila de la
-            # transacción. Corriendo después, las remesas quedan todas en error.
-            # Cada 15 minutos, 24/7.
+            # CADA MINUTO, 24/7. Pedido explícito: un cliente de la whitelist
+            # tiene que liberarse en un minuto como máximo.
             #
-            # Estuvo en 5 y no daba: con Colombia prendida las corridas tardan 285 s
-            # de mediana (máx 316) contra un intervalo de 300, así que se pisaban.
-            # Medido en una hora: 11 corridas reales y 3 invocaciones rebotadas por
-            # el candado. La cadencia real no eran 5 minutos.
+            # Esto ya estuvo en 5 minutos y NO daba: con Colombia prendida las
+            # corridas tardan 285 s de mediana (máx 316) y se pisaban. Se subió a
+            # 15 por eso y por la cuota de lectura de Firestore.
             #
-            # 15 deja margen de sobra sobre los 285 s y saca presión de la cuota de
-            # lectura de Firestore: pasa de 288 corridas por día a 96.
+            # A un minuto funciona por dos cosas que antes no estaban:
+            #
+            #   · EL CANDADO. Las invocaciones que caen sobre una corrida en vuelo
+            #     rebotan y cuestan UNA lectura. Que una corrida dure 316 s ya no
+            #     importa: no se pisan, se saltean.
+            #   · EL SONDEO (`SONDEO_COMPLETO_MS` en index.ts). Antes de leer la
+            #     cola, la corrida pregunta por 2 lecturas si llegó algo o si
+            #     cambió la whitelist. Si no, termina ahí. Sin eso, 1.440 corridas
+            #     por día leyendo la cola entera serían ~165.000 lecturas contra
+            #     una cuota de 50.000 que comparte TODO Lens.
+            #
+            # Con el sondeo el consumo queda en ~11.000/día, igual que con 15 min.
             #
             # Los casos llegan a cualquier hora —el receptor es un Lambda y
-            # Salesforce le escribe directo— así que sigue siendo 24/7.
+            # Salesforce le escribe directo— así que es 24/7.
             #
             # OFAC no depende de Redshift y funciona a toda hora. La cola de
             # REMESAS sí lo necesita para traer la fila de la transacción, y el
             # cluster pausa 18:30–04:00 hora Chile: en esa ventana el paso de
             # remesas se OMITE con un aviso, no marca cada caso como error. Se
             # retoman solos cuando el cluster vuelve.
-            #
-            # Las corridas medidas tardan de 13 a 59 s, así que a 5 min queda más
-            # de 4 de margen, y el candado impide que se pisen si una se estira.
-            Schedule: 'cron(0/15 * * * ? *)'
+            Schedule: 'cron(* * * * ? *)'
             Name: lens-flujo-autonomo
             Description: Procesa las colas de OFAC y remesas sin intervención.
             # `State` y no `Enabled`. Con `Enabled: false` el parámetro decía
@@ -168,7 +171,7 @@ Outputs:
   LogGroup:
     Value: !Sub '/aws/lambda/${FlujoAutonomoFunction}'
   Horario:
-    Value: 'cron(0/15 * * * ? *) — cada 15 min, 24/7'
+    Value: 'cron(* * * * ? *) — cada minuto, 24/7 (con sondeo barato)'
   UrlDisparador:
     Description: Pegar en el secret FLUJO_TRIGGER_URL del Worker.
     Value: !GetAtt FlujoAutonomoFunctionUrl.FunctionUrl
