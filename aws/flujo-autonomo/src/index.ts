@@ -1027,7 +1027,22 @@ async function correr(
 
   if (origen !== 'manual' && !hayNovedad && !tocaBarrido) {
     // Nada llegó, la lista no cambió y el barrido no toca: se termina acá.
+    //
+    // Se LOGUEA. Sin esta línea, un tick salteado y un tick que no corrió se ven
+    // exactamente igual en CloudWatch —las dos cosas son una invocación sin
+    // `RESUMEN_CORRIDA`— y la única forma de saber si el sondeo está haciendo su
+    // trabajo es contar invocaciones contra corridas a mano. Con el cron a un
+    // minuto eso son 1.440 invocaciones por día de las que la mayoría no deja
+    // rastro: el que venga a entender por qué la cuota subió o bajó no tiene con
+    // qué. El costo es una línea de log por minuto.
     const motivo = 'sondeo: sin novedades';
+    console.log('SONDEO ' + JSON.stringify({
+      corrio: false, origen, casosEnColeccion: conteo,
+      // Cuánto falta para el barrido completo, que es lo que explica por qué
+      // este tick no hizo nada y el de dentro de un rato sí va a hacerlo.
+      proximoBarridoEnMin: Math.max(0, Math.ceil((SONDEO_COMPLETO_MS - (Date.now() - ultimoBarridoCompleto)) / 60000)),
+      lecturas: lecturasSondeo,
+    }));
     await latir({ corrio: false, motivo, origen, casosEnColeccion: conteo });
     return { corrio: false, motivo, casosEnColeccion: conteo };
   }
