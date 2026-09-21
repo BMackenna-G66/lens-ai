@@ -206,12 +206,15 @@ export const WhitelistClientesPanel: React.FC<Props> = ({ casos, actor, onCerrar
           Interruptor propio: <b>no</b> depende del flujo automático. Con el flujo apagado, la whitelist
           igual libera a los clientes de la lista.
         </p>
-        {/* La demora es una decisión de costo, no un defecto, y si no se dice
-            acá alguien va a pensar que la lista no funciona. */}
+        {/* Que la liberación NO sea instantánea hay que decirlo acá, o alguien
+            va a mirar un caso marcado y pensar que la lista no funciona. Es lo
+            que pasó la primera vez. */}
         <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
-          Con el flujo automático apagado, el proceso desatendido revisa la cola <b>cada 30 minutos</b> en
-          vez de cada 15: leer la cola cuesta lecturas de Firestore y la cuota la comparte todo Lens. O sea
-          que un caso puede tardar hasta media hora en salir solo. Con el flujo prendido no hay demora.
+          La liberación no es instantánea: la ejecuta un proceso que corre en el servidor, no esta
+          pantalla. Un caso que llega se libera en <b>hasta 1 minuto</b>, y lo mismo si agregás un
+          cliente cuyo caso ya estaba en la cola. Lo que ves marcado acá o en la cola es lo que{' '}
+          <b>va a pasar</b> en la próxima corrida, no algo que ya pasó. Si lo necesitás ahora, el
+          mantenedor del flujo automático tiene el botón «Correr ahora».
         </p>
       </div>
 
