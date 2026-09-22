@@ -125,8 +125,14 @@ Resources:
             # "ScheduleExpression is not valid" (probado: rollback dos veces).
             # Y además conviene que un cambio de horario se vea en un diff.
             #
-            # CADA MINUTO, 24/7. Pedido explícito: un cliente de la whitelist
-            # tiene que liberarse en un minuto como máximo.
+            # CADA 5 MINUTOS, 24/7. Decisión del 22-09-2026.
+            #
+            # Estuvo un rato en 1 minuto, y con Firestore sin cuota eso fue malo:
+            # cada invocación se colgaba 4,6 min reintentando contra un servicio
+            # que la rechazaba, así que había ~5 Lambdas en paralelo quemando
+            # ~USD 6,6 por día sin hacer nada. A 5 min ese daño se divide por
+            # cinco, y el cortafuegos de `index.ts` (tope de tiempo + pausa) es
+            # lo que de verdad corta el cuelgue.
             #
             # Esto ya estuvo en 5 minutos y NO daba: con Colombia prendida las
             # corridas tardan 285 s de mediana (máx 316) y se pisaban. Se subió a
@@ -139,11 +145,11 @@ Resources:
             #     importa: no se pisan, se saltean.
             #   · EL SONDEO (`SONDEO_COMPLETO_MS` en index.ts). Antes de leer la
             #     cola, la corrida pregunta por 2 lecturas si llegó algo o si
-            #     cambió la whitelist. Si no, termina ahí. Sin eso, 1.440 corridas
-            #     por día leyendo la cola entera serían ~165.000 lecturas contra
-            #     una cuota de 50.000 que comparte TODO Lens.
+            #     cambió la whitelist. Si no, termina ahí. Sin eso, una corrida
+            #     cada 5 minutos leyendo la cola entera serían ~33.000 lecturas
+            #     diarias contra una cuota de 50.000 que comparte TODO Lens.
             #
-            # Con el sondeo el consumo queda en ~11.000/día, igual que con 15 min.
+            # Con el sondeo el consumo queda muy por debajo de eso.
             #
             # Los casos llegan a cualquier hora —el receptor es un Lambda y
             # Salesforce le escribe directo— así que es 24/7.
@@ -153,7 +159,7 @@ Resources:
             # cluster pausa 18:30–04:00 hora Chile: en esa ventana el paso de
             # remesas se OMITE con un aviso, no marca cada caso como error. Se
             # retoman solos cuando el cluster vuelve.
-            Schedule: 'cron(* * * * ? *)'
+            Schedule: 'cron(0/5 * * * ? *)'
             Name: lens-flujo-autonomo
             Description: Procesa las colas de OFAC y remesas sin intervención.
             # `State` y no `Enabled`. Con `Enabled: false` el parámetro decía
@@ -171,7 +177,7 @@ Outputs:
   LogGroup:
     Value: !Sub '/aws/lambda/${FlujoAutonomoFunction}'
   Horario:
-    Value: 'cron(* * * * ? *) — cada minuto, 24/7 (con sondeo barato)'
+    Value: 'cron(0/5 * * * ? *) — cada 5 min, 24/7 (con sondeo barato y cortafuegos de cuota)'
   UrlDisparador:
     Description: Pegar en el secret FLUJO_TRIGGER_URL del Worker.
     Value: !GetAtt FlujoAutonomoFunctionUrl.FunctionUrl

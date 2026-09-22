@@ -1004,7 +1004,17 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   // de verdad es el Lambda, con esta misma lista y esta misma función.
   const [whitelist, setWhitelist] = useState<WhitelistClientes>(WHITELIST_DEFAULT);
   const [showWhitelist, setShowWhitelist] = useState(false);
-  useEffect(() => subscribeWhitelist(wl => setWhitelist(wl)), []);
+  // `whitelistLista` es lo que hace confiable el filtro de screening de abajo.
+  // La suscripción es asíncrona, así que durante el primer render la lista está
+  // VACÍA: sin esta bandera, el lote de screening podía salir antes de que
+  // llegara y le creaba ficha en el proveedor a cada cliente whitelisteado.
+  // Justo lo que la lista existe para evitar.
+  const [whitelistLista, setWhitelistLista] = useState(false);
+  useEffect(() => subscribeWhitelist(wl => { setWhitelist(wl); setWhitelistLista(true); }), []);
+  // Cadena estable para las dependencias de los efectos: el objeto cambia de
+  // identidad en cada snapshot y usarlo como dependencia los re-dispararía de
+  // más.
+  const whitelistVersion = `${whitelist.enabled}|${whitelist.actualizadoEn ?? ''}|${whitelist.entradas.length}`;
 
   // Usuarios de Lens: sirven para asignar casos y como diccionario de analistas en
   // Redshift (para poder leer los logs por nombre/correo).
@@ -1384,9 +1394,20 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     setBenefScreen(null);
     const row = remesaData?.estado === 'ok' ? remesaData.row : undefined;
     if (activeQueue !== 'remesa' || !row || !sel) return;
+    // Sin la lista cargada no se consulta nada: ver `whitelistLista`.
+    if (!whitelistLista) return;
     // Si el caso ya tiene screening guardado, se muestra ese (no se re-consulta).
     const guardado = (sel.screeningBeneficiario as unknown as RemesaScreening | undefined) ?? benefMap[sel.id];
     if (guardado) { setBenefScreen(guardado); return; }
+    // WHITELIST: no se consulta al proveedor. Es la razón de ser de la lista —
+    // no volver a pagar ni a crear una ficha de un cliente ya resuelto—, y abrir
+    // su caso no puede ser lo que dispare justamente eso.
+    //
+    // El Lambda ya lo respetaba; esto faltaba del lado de la app, así que un
+    // cliente de la lista igual terminaba con ficha creada en el proveedor con
+    // solo mirar la cola. Para consultarlo igual está el botón de reconsultar,
+    // que es una decisión explícita de una persona.
+    if (buscarEnWhitelist(sel, whitelist)) { setBenefLoading(false); return; }
     let cancelado = false;
     setBenefLoading(true);
     screenBeneficiario(row, opcionesSamePerson(sel))
@@ -1399,7 +1420,8 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       .catch(e => { if (!cancelado) setBenefScreen({ estado: 'error', flujo: flujoDeBeneficiario(row), fuente: '—', decision: '—', delitosUnicos: 0, coincidencias: [], listas: [], mensaje: (e as Error).message }); })
       .finally(() => { if (!cancelado) setBenefLoading(false); });
     return () => { cancelado = true; };
-  }, [remesaData, activeQueue]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [remesaData, activeQueue, whitelistLista, whitelistVersion]);
 
   // Screening EN LOTE de los beneficiarios de la cola. Arranca cuando ya llegaron
   // los datos de la TX desde Redshift, porque el flujo depende del país del
@@ -1502,9 +1524,19 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   const benefTriggerKey = `${remesaIdsKey}|${Object.keys(remesaMap).length}`;
   useEffect(() => {
     if (activeQueue !== 'remesa' || benefRunning.current) return;
+    // Sin la lista cargada no sale el lote: ver `whitelistLista`.
+    if (!whitelistLista) return;
     const pendientes = colas.remesa.filter(c =>
       c.remesa && remesaMap[c.remesa] && !benefTomados.current.has(c.id)
-      && !(c.id in benefMap) && !screeningVigente(c.screeningBeneficiario));
+      && !(c.id in benefMap) && !screeningVigente(c.screeningBeneficiario)
+      // WHITELIST: fuera del lote. Consultar al proveedor por un cliente de la
+      // lista es exactamente lo que la lista existe para evitar: se paga la
+      // consulta y se le crea una ficha a alguien ya resuelto.
+      //
+      // Acá pesa más que en la ficha individual porque este efecto corre SOLO
+      // con abrir la cola, sobre todas las remesas de una: sin este filtro,
+      // mirar la cola le creaba ficha a cada cliente whitelisteado que hubiera.
+      && !buscarEnWhitelist(c, whitelist));
     if (pendientes.length === 0) return;
     benefRunning.current = true;
     pendientes.forEach(c => benefTomados.current.add(c.id));
@@ -1528,7 +1560,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       setBenefMapLoading(false);   // el re-render deja que el efecto tome el resto
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeQueue, benefTriggerKey, benefMap]);
+  }, [activeQueue, benefTriggerKey, benefMap, whitelistLista, whitelistVersion]);
 
   // ── El flujo automático de REMESAS tampoco corre acá ────────────────────────
   // Se movió al mismo Lambda, por los mismos dos motivos que el de OFAC (ver el
@@ -3475,7 +3507,13 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                             {b ? (b.flujo === 'CL' ? '🇨🇱 Chile' : b.flujo === 'CO' ? '🇨🇴 Colombia' : b.flujo === 'SIN_DATO' ? '⚠️ Sin dato' : '🌍 Intl') : (r ? '…' : '—')}
                           </td>
                           <td className={`px-3 py-2 whitespace-nowrap font-semibold ${decisionColor(b?.decision)}`} title={b?.razon}>
-                            {!b ? (r ? (benefMapLoading ? 'consultando…' : '…') : '—')
+                            {/* Un caso de la whitelist NO se consulta con el
+                                proveedor, así que su conclusión está vacía a
+                                propósito. Decirlo acá evita la lectura obvia y
+                                equivocada: «esto no está funcionando». */}
+                            {!b && buscarEnWhitelist(c, whitelist)
+                              ? <span className="text-emerald-700 dark:text-emerald-400">Whitelist · no se consulta</span>
+                              : !b ? (r ? (benefMapLoading ? 'consultando…' : '…') : '—')
                               : b.estado === 'error' ? <span className="text-red-600 dark:text-red-400" title={b.mensaje || 'Error del proveedor'}>⚠️ Error del proveedor</span>
                               : b.estado === 'na' ? (b.decision || 'Sin revisión')
                               : (b.decision || '—')}
@@ -3814,8 +3852,12 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                       {/* Internacional: qué listas coinciden y de qué tipo (sin catálogo aún) */}
                       {/* Por qué este caso no se libera solo. Deja explícito el freno
                           por delito sensible, que es el que más importa auditar. */}
-                      {!benefLoading && sc && sel && (() => {
-                        const ev = evaluarRemesaAuto(sel, sc, flujoCfg.remesa, whitelist);
+                      {/* Antes esto exigía `sc`: un caso de la whitelist no tiene
+                          screening —no se consulta a propósito— así que la ficha
+                          no mostraba NADA sobre por qué el caso se iba a liberar.
+                          Es justo el caso en que más conviene decirlo. */}
+                      {!benefLoading && sel && (sc || buscarEnWhitelist(sel, whitelist)) && (() => {
+                        const ev = evaluarRemesaAuto(sel, sc ?? undefined, flujoCfg.remesa, whitelist);
                         if (ev.automatizable) {
                           // Una liberación por whitelist no se puede leer igual
                           // que una por screening limpio: la primera no miró

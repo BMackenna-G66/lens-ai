@@ -711,6 +711,50 @@ async function cambiarCron(a: 'ENABLED' | 'DISABLED'): Promise<Record<string, un
   return { cron: real.estado, horario: real.horario, pedido: a };
 }
 
+// ── CORTAFUEGOS DE CUOTA ────────────────────────────────────────────────────
+// Lo que esto arregla, medido el 22-09-2026:
+//
+// Cuando Firestore empieza a rechazar por cuota agotada, el SDK NO falla rápido:
+// reintenta con backoff. Cada invocación quedaba colgada **4 minutos y medio** y
+// terminaba en el `catch` de `tomarCandado`, que se traga el error y devuelve
+// "no se pudo tomar el candado" **sin dejar un log**. Efecto:
+//
+//   · 60 invocaciones por hora de 276 s cada una = ~5 Lambdas en paralelo todo
+//     el tiempo, martillando un Firestore que las rechaza.
+//   · ~400.000 GB-s por día ≈ USD 6,6 diarios de Lambda quemados sin hacer nada.
+//   · Y todo INVISIBLE: ni un error en CloudWatch, ni una corrida, ni un sondeo.
+//     La única pista era la duración de las invocaciones.
+//
+// Dos frenos, porque hacen falta los dos:
+//
+//   1. TOPE DE TIEMPO. La toma del candado —lo primero que toca Firestore— se
+//      corre contra un reloj. Si no resuelve en `TOPE_CANDADO_MS`, se corta ahí:
+//      10 segundos en vez de 276.
+//   2. PAUSA. Si el fallo parece de cuota, se anota y las invocaciones
+//      siguientes vuelven SIN tocar Firestore durante `PAUSA_CUOTA_MS`. Sin
+//      esto, cada tick vuelve a chocar contra la misma pared.
+//
+// Las dos cosas se LOGUEAN. Que el modo degradado fuera silencioso es la mitad
+// del problema: un sistema sin cuota y uno ocioso se veían exactamente igual.
+const TOPE_CANDADO_MS = Number(process.env.TOPE_CANDADO_MS || '10000');
+const PAUSA_CUOTA_MS = Number(process.env.PAUSA_CUOTA_MS || '900000');   // 15 min
+
+let pausadoHasta = 0;
+
+/** Corre la promesa contra un reloj. La original sigue viva, pero ya no se espera. */
+function conTope<T>(p: Promise<T>, ms: number, que: string): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((_, rechazar) => setTimeout(() => rechazar(new Error(`tope de ${ms} ms: ${que}`)), ms)),
+  ]);
+}
+
+/** ¿Este error huele a cuota agotada o a Firestore que no responde? */
+const esCuota = (e: unknown): boolean => {
+  const m = String((e as Error)?.message ?? e);
+  return /RESOURCE_EXHAUSTED|Quota exceeded|tope de \d+ ms|DEADLINE_EXCEEDED|UNAVAILABLE/i.test(m);
+};
+
 // ── Candado de corrida ──────────────────────────────────────────────────────
 // Una corrida a la vez. Con el cron a 30 min era imposible que se pisaran; a 5 min
 // deja de serlo si entran muchos casos de golpe. Y el botón «Correr ahora» puede
@@ -725,7 +769,7 @@ async function tomarCandado(quien: string): Promise<{ ok: boolean; motivo?: stri
   const [col, id] = LOCK_DOC.split('/');
   const ref = db().collection(col).doc(id);
   try {
-    return await db().runTransaction(async tx => {
+    return await conTope(db().runTransaction(async tx => {
       const snap = await tx.get(ref);
       const d = snap.exists ? (snap.data() as { hasta?: string; quien?: string }) : null;
       if (d?.hasta && new Date(d.hasta).getTime() > Date.now()) {
@@ -734,11 +778,25 @@ async function tomarCandado(quien: string): Promise<{ ok: boolean; motivo?: stri
       tx.set(ref, { quien, desde: new Date().toISOString(),
                     hasta: new Date(Date.now() + LOCK_TTL_MS).toISOString() });
       return { ok: true };
-    });
+    }), TOPE_CANDADO_MS, 'tomar el candado');
   } catch (e) {
     // Si el candado no se puede tomar por un error, NO se corre. Preferir no
     // hacer nada antes que arriesgar dos ejecutores.
-    return { ok: false, motivo: `no se pudo tomar el candado: ${(e as Error).message}` };
+    //
+    // Pero se DICE. Este `catch` tapaba el modo degradado por cuota: devolvía
+    // un motivo que nadie leía y la invocación se iba en silencio después de
+    // haber colgado minutos.
+    const motivo = `no se pudo tomar el candado: ${(e as Error).message}`;
+    if (esCuota(e)) {
+      pausadoHasta = Date.now() + PAUSA_CUOTA_MS;
+      console.log('CUOTA ' + JSON.stringify({
+        motivo, pausadoHastaMin: Math.round(PAUSA_CUOTA_MS / 60000),
+        nota: 'Firestore no responde o rechaza por cuota: se pausa para no reintentar en bucle',
+      }));
+    } else {
+      console.log('CANDADO ' + JSON.stringify({ motivo }));
+    }
+    return { ok: false, motivo };
   }
 }
 
@@ -948,6 +1006,16 @@ export async function handler(evento?: unknown): Promise<Record<string, unknown>
   const auth = autorizado(evento);
   if (!auth.ok) {
     return { statusCode: 401, body: JSON.stringify({ corrio: false, motivo: 'no autorizado' }) };
+  }
+
+  // Pausa por cuota. Va ANTES de tocar Firestore: el objetivo es no volver a
+  // chocar contra la misma pared en cada tick. El disparo manual se la saltea —
+  // si una persona apretó el botón, que lo intente y vea el error.
+  if (auth.origen !== 'manual' && Date.now() < pausadoHasta) {
+    const faltanMin = Math.ceil((pausadoHasta - Date.now()) / 60000);
+    const motivo = `en pausa por cuota de Firestore: se reintenta en ${faltanMin} min`;
+    console.log('CUOTA ' + JSON.stringify({ corrio: false, motivo, faltanMin }));
+    return { corrio: false, motivo };
   }
 
   // Consultar o cambiar el cron. Va DESPUÉS de la autorización y ANTES del
