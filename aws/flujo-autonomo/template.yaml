@@ -68,6 +68,19 @@ Globals:
     Runtime: nodejs24.x
     Timeout: 900          # 15 min, el techo de Lambda
     MemorySize: 1024
+    # UNA corrida a la vez, impuesto por AWS y no por nuestro candado.
+    #
+    # El candado en Firestore deja de servir justo cuando más se lo necesita: si
+    # Firestore no responde, no se puede ni leer el candado, así que cada
+    # invocación arranca un contenedor NUEVO —con el estado de módulo en cero, o
+    # sea sin la pausa por cuota— y vuelve a chocar. Medido el 22-09: 11
+    # invocaciones solapadas, cada una colgada ~280 s, y la pausa sin aplicar
+    # nunca porque ninguna compartía memoria con la anterior.
+    #
+    # Con la concurrencia en 1, AWS descarta las invocaciones que se solapan
+    # antes de que arranquen: no hay pila, y el contenedor tibio conserva la
+    # pausa. Es el freno que no depende de que Firestore esté vivo.
+    ReservedConcurrentExecutions: 1
     Architectures: [arm64]
 
 Resources:

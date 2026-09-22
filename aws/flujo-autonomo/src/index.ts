@@ -993,7 +993,19 @@ function autorizado(evento: unknown): { ok: boolean; origen: string } {
   return { ok: true, origen: 'manual' };
 }
 
-export async function handler(evento?: unknown): Promise<Record<string, unknown>> {
+// El `context` de Lambda hace falta por UNA cosa: `callbackWaitsForEmptyEventLoop`.
+interface ContextoLambda { callbackWaitsForEmptyEventLoop?: boolean }
+
+export async function handler(evento?: unknown, contexto?: ContextoLambda): Promise<Record<string, unknown>> {
+  // Sin esto, el tope de tiempo del cortafuegos NO acorta la invocación.
+  //
+  // `conTope` usa `Promise.race`: cuando gana el reloj, esta función devuelve —
+  // pero la promesa de Firestore sigue viva reintentando, y por defecto Lambda
+  // espera a que el event loop se vacíe antes de cerrar la invocación. Medido en
+  // producción el 22-09: el log del cortafuegos aparecía a los 10 s y la
+  // invocación igual duraba 280.000 ms. El tope cortaba la lógica, no el gasto.
+  if (contexto) contexto.callbackWaitsForEmptyEventLoop = false;
+
   const arranque = Date.now();
   const restante = () => PRESUPUESTO_MS - (Date.now() - arranque);
 
