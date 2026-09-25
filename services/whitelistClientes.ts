@@ -60,10 +60,19 @@ import { canonDocumento, documentoUtilizable, MIN_LARGO_DNI } from './remesaSame
 export const CAMPO_DOCUMENTO = 'Número de DNI';
 export const CAMPO_CUSTOMER_ID = 'Id interno del usuario';
 
-// Largo mínimo del customerId ya normalizado. Los ids de Admin son de 7 dígitos
-// (4535350, 4536637); cuatro es un piso holgado que descarta "0", "1", "99" sin
-// dejar afuera ids viejos más cortos.
-export const MIN_LARGO_CUSTOMER_ID = 4;
+// Largo mínimo del customerId ya normalizado.
+//
+// Estuvo en 4 con el razonamiento de que "los ids de Admin son de 7 dígitos
+// (4535350), cuatro es un piso holgado". Era falso: en la base real de clientes
+// hay ids de DOS dígitos —11, 20— de los clientes más viejos. Ese piso
+// rechazaba clientes legítimos, y los rechazaba con un mensaje que culpaba al
+// archivo. Medido el 25-09-2026 sobre una carga de 7.829 filas: 6 rechazadas,
+// las 6 por esto.
+//
+// Uno alcanza: la basura que hay que sacar —"", "0", "-", "N/A"— ya se cae
+// sola. `canonCustomerId` deja solo dígitos, así que "N/A" y "-" quedan en
+// vacío (largo 0) y "0" lo caza la regla de todos-ceros de abajo.
+export const MIN_LARGO_CUSTOMER_ID = 1;
 
 /** Normaliza un customerId para comparar: solo dígitos. */
 export const canonCustomerId = (v: unknown): string => String(v ?? '').replace(/\D/g, '');

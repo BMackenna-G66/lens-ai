@@ -69,13 +69,28 @@ titulo('Normalización: qué entra y qué se descarta');
 }
 
 {
-  const basura = ['', '0', '-', 'N/A', '000000000', '99', '   '];
+  const basura = ['', '0', '-', 'N/A', '000000000', '   '];
   const n = normalizarWhitelist({
     enabled: true,
     entradas: basura.map(v => entrada({ documento: v, customerId: v })),
   });
   ok('los huecos disfrazados se descartan todos', n.wl.entradas.length === 0,
     { entraron: n.wl.entradas });
+}
+
+{
+  // Un customerId CORTO es válido. Va fijado acá porque la primera versión puso
+  // el piso en 4 dígitos "por si acaso" y rechazó 6 clientes reales de una carga
+  // de 7.829: los ids viejos tienen dos dígitos. Un piso inventado sin mirar los
+  // datos rechaza cosas buenas y le echa la culpa al archivo.
+  const cortos = lista([
+    entrada({ documento: '', customerId: '11' }),
+    entrada({ documento: '', customerId: '20', motivo: 'otro' }),
+    entrada({ documento: '', customerId: '948', motivo: 'otro mas' }),
+  ]);
+  ok('un customerId de dos dígitos entra', cortos.entradas.length === 3, cortos.entradas.length);
+  ok('…y coincide con el caso',
+    buscarEnWhitelist(caso({ 'Número de DNI': '', 'Id interno del usuario': '11' }), cortos)?.valor === '11');
 }
 
 {
@@ -364,8 +379,12 @@ titulo('Carga masiva');
 {
   const r = construirEntrada({ documento: '12.345.678-9', motivo: 'x' }, 'yo');
   ok('construirEntrada acepta una llave sola', r.ok === true && r.entrada.customerId === '', r);
-  const mal = construirEntrada({ documento: '123', customerId: '1', motivo: 'x' }, 'yo');
+  // Basura de verdad: documento corto y customerId que no es un número.
+  // (OJO: un customerId de UN dígito sí es válido — hay clientes con id 11 y 20.)
+  const mal = construirEntrada({ documento: '123', customerId: 'N/A', motivo: 'x' }, 'yo');
   ok('…y rechaza llaves basura con un mensaje', mal.ok === false && /documento/.test(mal.error), mal);
+  const ceros = construirEntrada({ documento: '', customerId: '000', motivo: 'x' }, 'yo');
+  ok('…y un customerId de puros ceros tampoco sirve', ceros.ok === false, ceros);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
