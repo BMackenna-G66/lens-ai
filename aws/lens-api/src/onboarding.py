@@ -62,6 +62,7 @@ AVISO_PAIS = _CATALOGO_AVISOS["COUNTRY_NOT_IN_CATALOG"].nombre
 AVISO_FECHA = _CATALOGO_AVISOS["DATE_FORMAT_UNPARSEABLE"].nombre
 AVISO_TRUNCADO = _CATALOGO_AVISOS["VALUE_TRUNCATED"].nombre
 AVISO_NOMBRE_ADIVINADO = _CATALOGO_AVISOS["NAME_SPLIT_INFERRED"].nombre
+AVISO_TAX_ID_DISCREPA = _CATALOGO_AVISOS["TAX_ID_COUNTRY_MISMATCH"].nombre
 
 
 class Avisos:
@@ -547,15 +548,50 @@ _EQUIVALENCIAS: dict[str, tuple[str | None, str | None]] = {
 }
 
 
-def tipo_identificacion(valor: Any, *, endpoint: str) -> str | None:
+# El tipo por defecto según el país y si es persona o empresa. Es la derivación
+# que piden §6.8 y §6.10 («derivado del formato y del país») para cuando el
+# documento no declara el tipo.
+#
+# Va por PAÍS y no por formato porque los formatos no se distinguen: una cédula
+# colombiana y un DNI peruano son los dos una tira de dígitos. El país es la
+# única señal que separa uno de otro, y encima viene declarado.
+TIPO_POR_PAIS: dict[str, tuple[str, str]] = {
+    #  país           NATURAL   LEGAL
+    "chile":        ("RUT",    "RUT"),
+    "colombia":     ("CC",     "NIT"),
+    "peru":         ("DNI",    "RUC"),
+    "argentina":    ("DNI",    "CUIT"),
+    "mexico":       ("CURP",   "RFC"),
+    "brasil":       ("CPF",    "CNPJ"),
+    "brazil":       ("CPF",    "CNPJ"),
+    "ecuador":      ("CC",     "RUC"),
+    "uruguay":      ("CC",     "RUT"),
+}
+
+
+def tipo_identificacion(
+    valor: Any, *, endpoint: str, pais: Any = "", tipo_persona_: str | None = None,
+) -> str | None:
     """El tipo de documento con el vocabulario de `endpoint` (`"EP-4"`/`"EP-6"`).
 
-    `None` cuando no se puede mapear — incluido el caso de un tipo que existe
-    pero no en ese endpoint. Es preferible a emitir un valor que el consumidor
-    no tiene en su lista: ahí no falla, guarda mal.
+    Primero **traduce** lo que el documento declaró —el prompt ya pide
+    `identificationType`, así que normalmente viene— y si no vino, lo **deriva**
+    del país y del tipo de persona, que es lo que describen §6.8 y §6.10.
+
+    `None` cuando no alcanza para saberlo, incluido el caso de un tipo que
+    existe pero **no en ese endpoint**: emitir un valor que el consumidor no
+    tiene en su lista no falla, guarda mal.
     """
     clave = _sin_tildes(str(valor or "")).replace(" ", "").replace("_", "").replace(".", "")
     par = _EQUIVALENCIAS.get(clave)
+
+    if par is None and not clave:
+        # No vino declarado: se deriva. Solo con el país; sin él no se adivina.
+        porpais = TIPO_POR_PAIS.get(_sin_tildes(str(pais or "")))
+        if porpais:
+            derivado = porpais[1] if tipo_persona_ == "LEGAL" else porpais[0]
+            par = _EQUIVALENCIAS.get(_sin_tildes(derivado).replace(" ", ""))
+
     if par is None:
         return None
     return par[0] if endpoint == "EP-4" else par[1]
@@ -604,7 +640,8 @@ def persona(p: dict, avisos: Avisos | None = None) -> dict | None:
         "shareholderName": str(p.get("shareholderName") or "").strip() or None,
         "shareholderId": id_accionista(p.get("shareholderId")),
         "countryOfOrigin": pais_anexo_a(pais_crudo, avisos),
-        "identificationType": tipo_identificacion(p.get("identificationType"), endpoint="EP-6"),
+        "identificationType": tipo_identificacion(
+            p.get("identificationType"), endpoint="EP-6", pais=pais_crudo, tipo_persona_=tipo),
         "lastName": last_name,
         "name": name,
         "ownershipPercentage": p.get("ownershipPercentage"),
@@ -639,7 +676,8 @@ def representante(p: dict, avisos: Avisos | None = None) -> dict | None:
         "name": name,
         "lastName": last_name,
         "personType": tipo,
-        "identificationType": tipo_identificacion(p.get("identificationType"), endpoint="EP-4"),
+        "identificationType": tipo_identificacion(
+            p.get("identificationType"), endpoint="EP-4", pais=pais_crudo, tipo_persona_=tipo),
         "identificationNumber": id_tal_cual(p.get("shareholderId") or p.get("identificationNumber")),
         "role": recortar(p.get("position") or p.get("role"), TOPE_CARGO, "role", avisos),
     }
@@ -668,25 +706,60 @@ TAX_ID_POR_PAIS: dict[str, str] = {
 # La primera versión de esta regex hacía los puntos y el guion opcionales y
 # clasificaba todos los NIT como RUT — en silencio, que es el modo de fallo que
 # esta fase entera existe para evitar.
-_RE_RUT = re.compile(r"^\d{1,2}(\.\d{3}){2}-[\dkK]$|^\d{7,8}-[\dkK]$|^\d{7,8}[kK]$", re.I)
+# Solo las formas que NO puede tener un identificador de otro país de la región:
+# con puntos, o con la K del verificador. Un `12345678-9` pelado queda afuera a
+# propósito — es idéntico a un NIT colombiano de ocho dígitos con verificador.
+_RE_RUT_INEQUIVOCO = re.compile(r"^\d{1,2}(\.\d{3}){2}-[\dkK]$|^\d{7,8}-[kK]$|^\d{7,8}[kK]$", re.I)
 
 
-def tipo_tax_id(tax_id: Any, pais: Any = "") -> str | None:
-    """El `taxIdType` de la empresa, derivado del formato y del país (§6.9).
+def tipo_tax_id(tax_id: Any, pais: Any = "", avisos: Avisos | None = None) -> str | None:
+    """El `taxIdType` de la empresa, derivado del país y del formato (§6.9).
 
-    El FORMATO manda sobre el país cuando es inequívoco: un RUT **con su
-    puntuación** se reconoce solo, aunque el país venga mal detectado. Sin el
-    guion ni la K no alcanza —`900123456` es tan un NIT colombiano como un RUT
-    sin puntos— y ahí decide el país, que es la única señal que queda: los
-    identificadores de Colombia, Perú y Argentina son todos dígitos.
+    ── El país MANDA sobre el formato, y no al revés ─────────────────────────
+    La primera versión invertía esa prioridad y se equivocaba dos veces:
+
+        tipo_tax_id("80012345-6", "colombia") → "RUT"   ✗ es un NIT
+        tipo_tax_id("12345678-9", "colombia") → "RUT"   ✗ es un NIT
+
+    Un NIT colombiano de ocho dígitos con verificador tiene **exactamente** la
+    forma de un RUT chileno sin puntos. No hay nada en el string que los separe.
+
+    El punto de fondo: el país viene **declarado** en el cuerpo de EP-1, no
+    inferido. Es información dura. Hacer que una heurística de formato le gane a
+    un dato declarado es descartar lo que se sabe a favor de lo que se adivina.
+    El formato solo decide cuando el país NO se sabe.
+
+    ── Cuando el formato contradice al país declarado ───────────────────────
+    Gana el país igual, pero se avisa. Un `76.123.456-K` declarado como
+    colombiano no es un NIT ni un RUT: es una señal de que algo vino mal más
+    arriba, y elegir en silencio cualquiera de los dos la tapa.
 
     `None` si no alcanza para saberlo. Igual que con las personas: un valor
     inventado no falla, se guarda mal.
     """
     t = str(tax_id or "").strip()
-    if t and _RE_RUT.match(t):
-        return "RUT"
-    return TAX_ID_POR_PAIS.get(_sin_tildes(str(pais or "")))
+    # Sin identificador no hay tipo de identificador. §6.9 usa la ausencia de
+    # `taxId` para dejar el contraste en NOT_COMPARABLE; un `taxIdType` poblado
+    # ahí es ruido justo en el camino que decide eso.
+    if not t:
+        return None
+
+    del_pais = TAX_ID_POR_PAIS.get(_sin_tildes(str(pais or "")))
+    # Inequívoco = trae la K del verificador o los puntos. Un `12345678-9` pelado
+    # NO es inequívoco y por eso no entra acá.
+    inequivoco_rut = bool(_RE_RUT_INEQUIVOCO.match(t))
+
+    if del_pais:
+        if inequivoco_rut and del_pais != "RUT" and avisos is not None:
+            avisos.agregar(
+                AVISO_TAX_ID_DISCREPA,
+                f"el identificador «{t}» tiene forma de RUT chileno pero el país declarado "
+                f"corresponde a {del_pais}; se usa el del país.",
+                valor=t, pais=str(pais or ""),
+            )
+        return del_pais
+
+    return "RUT" if inequivoco_rut else None
 
 
 def empresa(datos: dict, avisos: Avisos | None = None) -> dict:
@@ -695,7 +768,7 @@ def empresa(datos: dict, avisos: Avisos | None = None) -> dict:
     return {
         "legalName": str(datos.get("legalName") or "").strip() or None,
         "taxId": id_tal_cual(tax_id),
-        "taxIdType": tipo_tax_id(tax_id, datos.get("country") or datos.get("pais")),
+        "taxIdType": tipo_tax_id(tax_id, datos.get("country") or datos.get("pais"), avisos),
         "constitutionDate": fecha_iso(datos.get("constitutionDate"), avisos),
         "legalForm": recortar(datos.get("legalForm"), TOPE_FORMA_LEGAL, "legalForm", avisos),
         "activity": recortar(datos.get("activity"), TOPE_ACTIVIDAD, "activity", avisos),

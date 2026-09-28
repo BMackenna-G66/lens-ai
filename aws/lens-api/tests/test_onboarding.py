@@ -310,7 +310,8 @@ def test_un_accionista_juridico_entero():
         "shareholderName": "MATRIZ HOLDING SpA",
         "shareholderId": "769998887",
         "countryOfOrigin": "México",
-        "identificationType": None,      # el ejemplo no lo trae
+        # No venía declarado: se deriva del país + tipo de persona (México + LEGAL).
+        "identificationType": "RFC",
         "lastName": None,
         "name": "MATRIZ HOLDING SpA",
         "ownershipPercentage": 60,

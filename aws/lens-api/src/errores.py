@@ -160,6 +160,9 @@ AVISO: dict[str, Reason] = {
                "La fecha existe pero no se pudo interpretar con certeza; se envía vacía."),
         Reason("VALUE_TRUNCATED", None, None,
                "El valor estaba completo y se recortó al máximo que admite el contrato."),
+        Reason("TAX_ID_COUNTRY_MISMATCH", None, None,
+               "El identificador tributario tiene forma de otro país que el declarado; "
+               "se usó el del país declarado y queda dicho por si el país vino mal."),
         Reason("NAME_SPLIT_INFERRED", None, None,
                "El nombre vino sin partir y se separó por cantidad de palabras: es una "
                "conjetura, y el orden de apellidos no se puede deducir sin el documento."),
