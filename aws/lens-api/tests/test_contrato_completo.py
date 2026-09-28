@@ -319,11 +319,39 @@ def test_el_original_permite_deshacer_una_particion_equivocada():
 # taxIdType · el cuarto campo faltante, que lo encontró este archivo
 # ════════════════════════════════════════════════════════════════════════════
 
-def test_el_rut_se_reconoce_por_su_forma_sin_saber_el_pais():
-    """Un documento chileno puede venir con el país mal detectado; el RUT se
-    reconoce solo. Es la única de la región con esa forma."""
+def test_el_formato_decide_SOLO_cuando_no_se_sabe_el_pais():
+    """Sin país declarado, una forma inequívoca de RUT alcanza."""
     assert ob.tipo_tax_id("76.123.456-K") == "RUT"
-    assert ob.tipo_tax_id("76123456-7", "colombia") == "RUT"
+    assert ob.tipo_tax_id("76123456-K") == "RUT"
+
+
+def test_el_pais_declarado_le_gana_al_formato():
+    """La corrección de la segunda auditoría, y es la que más importa.
+
+    Un NIT colombiano de ocho dígitos con verificador tiene EXACTAMENTE la forma
+    de un RUT chileno sin puntos: nada en el string los separa. Y el país viene
+    DECLARADO en el cuerpo de EP-1, no inferido — es información dura. Hacer que
+    una heurística de formato le gane a un dato declarado es descartar lo que se
+    sabe a favor de lo que se adivina.
+    """
+    assert ob.tipo_tax_id("80012345-6", "colombia") == "NIT"
+    assert ob.tipo_tax_id("12345678-9", "colombia") == "NIT"
+
+
+def test_cuando_el_formato_contradice_al_pais_gana_el_pais_pero_se_avisa():
+    """Un RUT con K declarado como colombiano no es ni NIT ni RUT: es una señal
+    de que algo vino mal más arriba. Elegir en silencio la tapa."""
+    av = ob.Avisos()
+    assert ob.tipo_tax_id("76.123.456-K", "colombia", av) == "NIT"
+    assert any(a["reason"] == ob.AVISO_TAX_ID_DISCREPA for a in av.items)
+
+
+def test_sin_identificador_no_hay_tipo_de_identificador():
+    """§6.9 usa la ausencia de `taxId` para dejar el contraste en NOT_COMPARABLE;
+    un `taxIdType` poblado ahí es ruido justo en el camino que decide eso."""
+    r = ob.empresa({"legalName": "ACME SpA", "country": "chile"}, ob.Avisos())
+    assert r["taxId"] is None
+    assert r["taxIdType"] is None
 
 
 @pytest.mark.parametrize("pais,esperado", [
@@ -338,7 +366,38 @@ def test_para_el_resto_el_pais_es_la_unica_senal(pais, esperado):
 
 def test_sin_forma_ni_pais_no_se_inventa():
     assert ob.tipo_tax_id("900123456") is None
+    assert ob.tipo_tax_id("12345678-9") is None    # ambiguo: NIT de 8 o RUT sin puntos
     assert ob.tipo_tax_id("", "wakanda") is None
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# identificationType · se DERIVA cuando el documento no lo declara
+# ════════════════════════════════════════════════════════════════════════════
+
+@pytest.mark.parametrize("pais,tipo,esperado", [
+    ("chile", "NATURAL", "RUT"), ("chile", "LEGAL", "RUT"),
+    ("colombia", "NATURAL", "CC"), ("colombia", "LEGAL", "NIT"),
+    ("peru", "NATURAL", "DNI"), ("peru", "LEGAL", "RUC"),
+])
+def test_se_deriva_del_pais_y_del_tipo_de_persona(pais, tipo, esperado):
+    """§6.8 y §6.10 lo describen como «derivado del formato y del país». Va por
+    país y no por formato porque los formatos no se distinguen: una cédula
+    colombiana y un DNI peruano son los dos una tira de dígitos."""
+    r = ob.persona({"personType": tipo, "shareholderName": "X",
+                    "countryOfOrigin": pais}, ob.Avisos())
+    assert r["identificationType"] == esperado
+
+
+def test_lo_declarado_le_gana_a_la_derivacion():
+    r = ob.persona({"personType": "NATURAL", "shareholderName": "X",
+                    "countryOfOrigin": "colombia", "identificationType": "PASAPORTE"},
+                   ob.Avisos())
+    assert r["identificationType"] == "Pasaporte"
+
+
+def test_sin_pais_no_se_deriva():
+    r = ob.persona({"personType": "NATURAL", "shareholderName": "X"}, ob.Avisos())
+    assert r["identificationType"] is None
 
 
 # ════════════════════════════════════════════════════════════════════════════
