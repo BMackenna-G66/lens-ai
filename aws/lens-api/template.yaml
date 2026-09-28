@@ -48,6 +48,30 @@ Parameters:
       podría desplegar NADA del resto. En `false` el almacén corre en memoria: la
       idempotencia no sobrevive entre invocaciones y `/salud` lo dice en
       `almacen_idempotencia`. Poner en `true` apenas exista el permiso.
+  CrearTablaCorridas:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >
+      Si se crea la tabla DynamoDB de la persistencia operacional por empresa
+      (Fase 1 del plan LENS ⇄ Onboarding B2B): la que responde «¿cuál fue la
+      última corrida de esta empresa?», que es lo que preguntan EP-2 y EP-3.
+      Arranca en `false` por el MISMO motivo que `CrearTablaIdempotencia`:
+      `compliance-admin` no tiene `dynamodb:CreateTable`, y sin esto no se podría
+      desplegar nada del resto. En `false` corre en memoria y `/salud` lo dice en
+      `corridas_persistentes`. Es otra tabla, no la misma: una indexa por
+      `analysisId` y la otra por ambiente + `companyId`.
+  AmbientesCorridas:
+    Type: String
+    Default: ''
+    Description: >
+      Ambientes admitidos, separados por coma. VACÍO ACEPTA CUALQUIERA, y es el
+      default porque los tres nombres todavía no están confirmados con
+      Onboarding: adivinarlos bloquearía tráfico legítimo el primer día.
+      Dejarlo abierto tiene su costo — un `prod` contra un `production` crea dos
+      particiones distintas sin avisar, y la consulta de estado devuelve
+      NOT_STARTED sobre una corrida que sí ocurrió. Setearlo cierra esa trampa
+      sin tocar código.
   BucketDocumentos:
     Type: String
     Default: g66-company
@@ -58,6 +82,7 @@ Parameters:
 
 Conditions:
   ConTabla: !Equals [!Ref CrearTablaIdempotencia, 'true']
+  ConTablaCorridas: !Equals [!Ref CrearTablaCorridas, 'true']
 
 Globals:
   Function:
@@ -86,6 +111,10 @@ Resources:
           # Vacío cuando no hay tabla: `almacen.py` cae a memoria y lo
           # reporta en /salud en vez de fingir que hay idempotencia.
           ALMACEN_TABLA: !If [ConTabla, !Ref TablaAnalisis, '']
+          # Idem: vacío deja `corridas.py` en memoria, con la misma semántica
+          # pero sin sobrevivir a la invocación. Lo reporta /salud.
+          CORRIDAS_TABLA: !If [ConTablaCorridas, !Ref TablaCorridas, '']
+          CORRIDAS_AMBIENTES: !Ref AmbientesCorridas
           API_SECRET: !Ref ApiSecretValue
           GEMINI_API_KEY: !Ref GeminiApiKey
           MOTOR_OCR: !Ref MotorOcr
@@ -130,6 +159,16 @@ Resources:
                 Action: [dynamodb:GetItem, dynamodb:PutItem]
                 Resource: !GetAtt TablaAnalisis.Arn
           - !Ref AWS::NoValue
+        # Persistencia operacional por empresa. Lleva `Query` además de
+        # Get/Put: el historial y la última corrida se leen por partición, que
+        # es justamente lo que la tabla de idempotencia no puede hacer.
+        - !If
+          - ConTablaCorridas
+          - Statement:
+              - Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:Query]
+                Resource: !GetAtt TablaCorridas.Arn
+          - !Ref AWS::NoValue
       FunctionUrlConfig:
         AuthType: NONE
         Cors:
@@ -158,6 +197,44 @@ Resources:
       KeySchema:
         - AttributeName: analysis_id
           KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  # ── Persistencia operacional por empresa (Fase 1) ─────────────────────────
+  # Es OTRA tabla, no la de arriba. `TablaAnalisis` indexa por `analysisId` y
+  # sirve para no re-analizar; esta indexa por ambiente + `companyId` y sirve
+  # para responder «¿cuál fue la última corrida de esta empresa?». Con una sola
+  # clave no se pueden contestar las dos preguntas.
+  #
+  # El ambiente va DENTRO de la clave de partición (`ambiente#companyId`) y no
+  # como atributo: LENS tiene un solo ambiente y recibe tráfico de desarrollo,
+  # CI y producción. El mismo `companyId` es una empresa distinta en cada uno, y
+  # sin el ambiente en la clave una prueba de desarrollo pisa la lectura de una
+  # empresa real, en silencio.
+  #
+  # La clave de orden es `startedAt#analysisId` y no el id solo: el contrato dice
+  # que el `analysisId` lo genera ms-company, así que no se puede dar por hecho
+  # que sea ordenable en el tiempo.
+  #
+  # TTL más largo que el de idempotencia (90 días contra 30) porque lo que se
+  # guarda acá es el historial por empresa, que es justamente lo que se consulta
+  # tiempo después.
+  TablaCorridas:
+    Type: AWS::DynamoDB::Table
+    Condition: ConTablaCorridas
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
       TimeToLiveSpecification:
         AttributeName: ttl
         Enabled: true

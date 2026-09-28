@@ -53,6 +53,7 @@ from urllib.parse import urlparse
 import extraccion
 import contrato
 import almacen
+import corridas
 import ingesta_s3
 import gemini
 from extraccion import Presupuesto, extraer_texto
@@ -628,6 +629,11 @@ def lambda_handler(evento: dict, contexto=None) -> dict:
             # Si esto es false, la idempotencia de /v1/analyses NO persiste
             # entre invocaciones. Se expone para no tener que adivinarlo.
             "almacen_idempotencia": almacen.disponible(),
+            # Idem para la persistencia por empresa (Fase 1). En false, el
+            # historial y el estado NO sobreviven a la invocación: EP-2
+            # respondería NOT_STARTED sobre corridas que sí ocurrieron.
+            "corridas_persistentes": corridas.disponible(),
+            "corridas_ambientes": list(corridas.AMBIENTES),
         })
 
     # ── Contrato BusinessShareholders (Fase 5) ─────────────────────────────
