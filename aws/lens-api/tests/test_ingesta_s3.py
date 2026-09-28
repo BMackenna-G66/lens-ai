@@ -11,6 +11,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+import pytest  # noqa: E402
 import ingesta_s3 as ing  # noqa: E402
 
 P = ing.PREFIJO_NOMBRE
@@ -113,10 +114,30 @@ def test_ignora_las_carpetas_de_s3():
 # ── Tope de 50 ──────────────────────────────────────────────────────────────
 
 def test_recorta_a_cincuenta_y_avisa():
-    """Un recorte silencioso haría creer que se analizó la carpeta entera."""
-    ac, av = ing.filtrar([ing.ObjetoS3(clave=f"c/{P}{i}.pdf", tamano=10) for i in range(80)])
+    """Un recorte silencioso haría creer que se analizó la carpeta entera.
+
+    El recorte vive en `aplicar_tope` y no en `filtrar` porque el tope es del
+    LOTE y el filtro es por archivo: con dos orígenes, aplicarlo dentro de
+    `filtrar` daría hasta el doble del tope.
+    """
+    ac, av = ing.aplicar_tope([ing.ObjetoS3(clave=f"c/{P}{i}.pdf", tamano=10) for i in range(80)])
     assert len(ac) == ing.MAX_ARCHIVOS
     assert any("tope es 50" in a for a in av)
+
+
+def test_el_tope_es_del_lote_y_no_por_origen():
+    """Lo que motivó separar el tope del filtro: barrido + nombrados juntos no
+    pueden dar 100."""
+    s3 = S3Falso(
+        [(f"c/{P}{i}.pdf", 10) for i in range(40)]
+        + [(f"otra/doc{i}.pdf", 10) for i in range(40)]
+    )
+    r = ing.ingerir(
+        s3, folder_path="c/",
+        documentos=[ing.DocumentoPedido(clave=f"otra/doc{i}.pdf") for i in range(40)],
+    )
+    assert len(r.archivos) == ing.MAX_ARCHIVOS
+    assert any("tope es 50" in a for a in r.avisos)
 
 
 # ── Lo rechazado no corta ───────────────────────────────────────────────────
@@ -167,3 +188,100 @@ def test_el_orden_no_depende_del_paralelismo():
     r2 = ing.ingerir(S3Falso(objs), folder_path="c/")
     assert [a.clave for a in r1.archivos] == [a.clave for a in r2.archivos]
     assert [a.clave for a in r1.archivos] == sorted(a.clave for a in r1.archivos)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Documentos nombrados por el llamador (contrato de Onboarding B2B)
+# ════════════════════════════════════════════════════════════════════════════
+
+@pytest.mark.parametrize("uri,esperado", [
+    ("s3://g66-company/empresas/123/escritura.pdf", ("g66-company", "empresas/123/escritura.pdf")),
+    ("s3://bucket/x.pdf", ("bucket", "x.pdf")),
+    ("  s3://bucket/x.pdf  ", ("bucket", "x.pdf")),
+    ("S3://bucket/x.pdf", ("bucket", "x.pdf")),
+])
+def test_parsea_el_s3_uri(uri, esperado):
+    assert ing.parsear_s3_uri(uri) == esperado
+
+
+@pytest.mark.parametrize("uri", [
+    "", None, "bucket/clave.pdf", "https://x.s3.amazonaws.com/y.pdf",
+    "s3://solobucket", "s3://", "s3:///clave.pdf",
+])
+def test_un_uri_malo_no_se_arregla(uri):
+    """Un bucket adivinado lee del lugar equivocado, y con tres ambientes eso
+    significa leer producción desde una prueba."""
+    assert ing.parsear_s3_uri(uri) is None
+
+
+def test_el_documento_nombrado_no_pasa_el_filtro_de_nombre():
+    """EL arreglo. Onboarding nombra sus propios archivos: con el filtro puesto,
+    `escritura_constitucion.pdf` se descartaba entero — y no con un error, con
+    un aviso. La corrida terminaba «bien» sin haber leído nada."""
+    s3 = S3Falso([("onboarding/ACME/escritura_constitucion.pdf", 1000)])
+    r = ing.ingerir(s3, documentos=[
+        ing.DocumentoPedido(s3_uri="s3://g66-company/onboarding/ACME/escritura_constitucion.pdf",
+                            tipo="COMPANY_DEEDS"),
+    ])
+    assert len(r.archivos) == 1
+    assert r.avisos == []
+
+
+def test_el_barrido_de_carpeta_SIGUE_exigiendo_el_prefijo():
+    """El camino vivo no se mueve: quien barre una carpeta necesita el filtro
+    porque el nombre es su única señal."""
+    s3 = S3Falso([("c/escritura_constitucion.pdf", 1000)])
+    r = ing.ingerir(s3, folder_path="c/")
+    assert r.archivos == []
+    assert any("no empieza con" in a for a in r.avisos)
+
+
+def test_el_tipo_declarado_vuelve_con_el_archivo():
+    """`documentType` es opaco para LENS, pero se devuelve para que quien
+    integra pueda correlacionar un aviso con el documento que mandó."""
+    s3 = S3Falso([("x/doc.pdf", 500)])
+    r = ing.ingerir(s3, documentos=[
+        ing.DocumentoPedido(s3_uri="s3://otro-bucket/x/doc.pdf", tipo="COMPANY_DEEDS"),
+    ])
+    assert r.archivos[0].tipo == "COMPANY_DEEDS"
+    assert r.archivos[0].bucket == "otro-bucket"
+
+
+def test_cada_documento_puede_venir_de_un_bucket_distinto():
+    """Onboarding tiene tres ambientes y el bucket difiere en cada uno."""
+    s3 = S3Falso([("a/1.pdf", 10), ("b/2.pdf", 10)])
+    r = ing.ingerir(s3, documentos=[
+        ing.DocumentoPedido(s3_uri="s3://bucket-dev/a/1.pdf"),
+        ing.DocumentoPedido(s3_uri="s3://bucket-prod/b/2.pdf"),
+    ])
+    assert sorted(d.bucket for d in r.archivos) == ["bucket-dev", "bucket-prod"]
+
+
+def test_los_limites_siguen_valiendo_para_lo_nombrado():
+    """Que no se filtre por NOMBRE no significa que no se filtre: la extensión
+    y el tamaño siguen aplicando, y son los que Onboarding tiene que conocer."""
+    s3 = S3Falso([("x/grande.pdf", 20 * 1024 * 1024), ("x/raro.tiff", 100)])
+    r = ing.ingerir(s3, documentos=[
+        ing.DocumentoPedido(s3_uri="s3://b/x/grande.pdf"),
+        ing.DocumentoPedido(s3_uri="s3://b/x/raro.tiff"),
+    ])
+    assert r.archivos == []
+    assert any("máximo es 10 MB" in a for a in r.avisos)
+    assert any("extensión no soportada" in a for a in r.avisos)
+
+
+def test_un_uri_invalido_avisa_y_no_corta_el_resto():
+    s3 = S3Falso([("x/bueno.pdf", 100)])
+    r = ing.ingerir(s3, documentos=[
+        ing.DocumentoPedido(s3_uri="no-es-un-uri"),
+        ing.DocumentoPedido(s3_uri="s3://b/x/bueno.pdf"),
+    ])
+    assert len(r.archivos) == 1
+    assert any("no es un s3Uri utilizable" in a for a in r.avisos)
+
+
+def test_la_clave_suelta_usa_el_bucket_por_defecto():
+    """La forma vieja sigue andando: sin `s3Uri`, el bucket es el de siempre."""
+    s3 = S3Falso([("x/doc.pdf", 100)])
+    r = ing.ingerir(s3, documentos=[ing.DocumentoPedido(clave="x/doc.pdf")], bucket="mi-bucket")
+    assert r.archivos[0].bucket == "mi-bucket"

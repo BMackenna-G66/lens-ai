@@ -70,6 +70,15 @@ class ObjetoS3:
     """Un objeto del bucket, antes de decidir si se descarga."""
     clave: str
     tamano: int = 0
+    #: De qué bucket sale. Vacío = el de `BUCKET`, que es como funcionaba antes
+    #: de que existieran los `s3Uri` por documento. Onboarding tiene TRES
+    #: ambientes y el bucket casi seguro difiere en cada uno, así que un único
+    #: bucket global no alcanza: viaja por objeto.
+    bucket: str = ""
+    #: El `documentType` que declaró el llamador. Opaco para LENS: no se
+    #: interpreta, se guarda y se devuelve en los avisos para que quien integra
+    #: pueda correlacionar el aviso con el documento que mandó.
+    tipo: str = ""
 
     @property
     def nombre(self) -> str:
@@ -81,6 +90,8 @@ class Descargado:
     clave: str
     nombre: str
     contenido: bytes
+    bucket: str = ""
+    tipo: str = ""
 
 
 @dataclass
@@ -101,19 +112,101 @@ class ResultadoIngesta:
         }
 
 
+# ── Documentos nombrados por el llamador ────────────────────────────────────
+
+@dataclass
+class DocumentoPedido:
+    """Un documento que el llamador nombró: `s3Uri` + `fileName` + `documentType`.
+
+    Es la forma que pide el contrato de Onboarding B2B. La alternativa —barrer
+    la carpeta de la empresa— lee versiones reemplazadas que siguen en S3 y
+    exige además permiso para LISTAR el bucket, no solo para leer objetos.
+    """
+    s3_uri: str = ""
+    #: Alternativa a `s3_uri`: solo la clave, con el bucket por defecto.
+    clave: str = ""
+    nombre_archivo: str = ""
+    tipo: str = ""
+
+
+def parsear_s3_uri(uri: str) -> tuple[str, str] | None:
+    """`s3://bucket/una/clave.pdf` → `("bucket", "una/clave.pdf")`.
+
+    `None` si no es un URI de S3 utilizable. No se intenta arreglar lo que
+    viene mal: un bucket adivinado lee del lugar equivocado, y eso en tres
+    ambientes significa leer los documentos de producción desde una prueba.
+    """
+    t = str(uri or "").strip()
+    if not t.lower().startswith("s3://"):
+        return None
+    resto = t[5:]
+    bucket, _, clave = resto.partition("/")
+    if not bucket or not clave:
+        return None
+    return bucket, clave
+
+
+def resolver_documentos(
+    cliente: Any, documentos: list[DocumentoPedido], bucket_defecto: str = "",
+) -> tuple[list[ObjetoS3], list[str]]:
+    """Confirma con `head_object` cada documento nombrado y le pega su tamaño.
+
+    Cada uno puede traer su propio bucket en el `s3Uri`. El de por defecto solo
+    se usa para los que vienen con `clave` suelta.
+    """
+    objetos: list[ObjetoS3] = []
+    avisos: list[str] = []
+    for d in documentos:
+        if d.s3_uri:
+            partes = parsear_s3_uri(d.s3_uri)
+            if partes is None:
+                avisos.append(f"{d.s3_uri or '(vacío)'}: no es un s3Uri utilizable (se espera s3://bucket/clave)")
+                continue
+            bucket, clave = partes
+        elif d.clave:
+            bucket, clave = (bucket_defecto or BUCKET), d.clave
+        else:
+            avisos.append("un documento vino sin s3Uri ni clave")
+            continue
+        try:
+            h = cliente.head_object(Bucket=bucket, Key=clave)
+            objetos.append(ObjetoS3(
+                clave=clave, tamano=int(h.get("ContentLength", 0)),
+                bucket=bucket, tipo=d.tipo,
+            ))
+        except Exception as e:  # noqa: BLE001
+            avisos.append(f"{clave}: no se pudo leer ({type(e).__name__})")
+    return objetos, avisos
+
+
 def extension(nombre: str) -> str:
     return ("." + nombre.rsplit(".", 1)[-1].lower()) if "." in nombre else ""
 
 
-def motivo_descarte(obj: ObjetoS3) -> str | None:
+def motivo_descarte(obj: ObjetoS3, *, exigir_prefijo: bool = True) -> str | None:
     """El motivo por el que NO se usa este archivo, o None si sirve.
 
     El orden es el del bot y se respeta: primero el nombre, después la
     extensión, después el tamaño. Importa porque el aviso que ve el consumidor
     tiene que decir la primera razón, no una cualquiera.
+
+    ── `exigir_prefijo` ────────────────────────────────────────────────────
+    El filtro por nombre existe porque el camino original **barre una carpeta**
+    de la empresa que tiene de todo, y solo sirven los documentos societarios.
+    Ahí el nombre es la única señal disponible.
+
+    Cuando el llamador **nombra los documentos uno por uno** —y encima declara
+    su `documentType`— esa señal sobra, y aplicarla igual rompe: Onboarding
+    nombra sus propios archivos, así que `escritura_constitucion.pdf` se
+    descartaría entero. Y no con un error: con un aviso. La corrida terminaría
+    «bien» sin haber leído nada.
+
+    Por eso es un parámetro y no un cambio de comportamiento: quien barre una
+    carpeta lo sigue exigiendo (default `True`, el camino vivo no se mueve) y
+    quien nombra los archivos no.
     """
     nombre = obj.nombre
-    if not nombre.startswith(PREFIJO_NOMBRE):
+    if exigir_prefijo and not nombre.startswith(PREFIJO_NOMBRE):
         return f"{nombre}: el nombre no empieza con «{PREFIJO_NOMBRE}»"
     if extension(nombre) not in EXTENSIONES:
         return f"{nombre}: extensión no soportada ({extension(nombre) or 'sin extensión'})"
@@ -122,26 +215,39 @@ def motivo_descarte(obj: ObjetoS3) -> str | None:
     return None
 
 
-def filtrar(objetos: Iterable[ObjetoS3]) -> tuple[list[ObjetoS3], list[str]]:
+def filtrar(objetos: Iterable[ObjetoS3], *, exigir_prefijo: bool = True) -> tuple[list[ObjetoS3], list[str]]:
     """Separa lo que sirve de lo que no. Devuelve (aceptados, avisos)."""
     aceptados: list[ObjetoS3] = []
     avisos: list[str] = []
     for o in objetos:
-        motivo = motivo_descarte(o)
+        motivo = motivo_descarte(o, exigir_prefijo=exigir_prefijo)
         if motivo:
             avisos.append(motivo)
         else:
             aceptados.append(o)
 
-    if len(aceptados) > MAX_ARCHIVOS:
-        # Se recorta pero SE AVISA. Un tope silencioso haría que el consumidor
-        # crea que analizó una carpeta entera cuando analizó la mitad.
-        avisos.append(
-            f"la carpeta tiene {len(aceptados)} archivos válidos y el tope es {MAX_ARCHIVOS}: "
-            f"se usan los primeros {MAX_ARCHIVOS}"
-        )
-        aceptados = aceptados[:MAX_ARCHIVOS]
     return aceptados, avisos
+
+
+def aplicar_tope(aceptados: list[ObjetoS3]) -> tuple[list[ObjetoS3], list[str]]:
+    """Recorta al tope del lote, avisando.
+
+    Va aparte de `filtrar` porque el tope es del LOTE y el filtro es por
+    archivo. Cuando hay dos orígenes —una carpeta barrida y documentos
+    nombrados— cada uno se filtra con su regla pero el tope se aplica UNA vez
+    sobre el total; si se aplicara dentro de `filtrar`, dos orígenes darían
+    hasta el doble del tope.
+
+    Un tope silencioso haría que el consumidor crea que analizó una carpeta
+    entera cuando analizó la mitad.
+    """
+    if len(aceptados) <= MAX_ARCHIVOS:
+        return aceptados, []
+    aviso = (
+        f"hay {len(aceptados)} archivos válidos y el tope es {MAX_ARCHIVOS}: "
+        f"se usan los primeros {MAX_ARCHIVOS}"
+    )
+    return aceptados[:MAX_ARCHIVOS], [aviso]
 
 
 def listar_prefijo(cliente: Any, bucket: str, prefijo: str) -> list[ObjetoS3]:
@@ -197,7 +303,9 @@ def descargar(cliente: Any, bucket: str, objetos: list[ObjetoS3]) -> tuple[list[
 
     def uno(o: ObjetoS3) -> tuple[ObjetoS3, bytes | None, str | None]:
         try:
-            r = cliente.get_object(Bucket=bucket, Key=o.clave)
+            # El bucket del objeto manda sobre el del lote: con `s3Uri` por
+            # documento, cada uno puede venir de un bucket distinto.
+            r = cliente.get_object(Bucket=(o.bucket or bucket), Key=o.clave)
             return o, r["Body"].read(), None
         except Exception as e:  # noqa: BLE001
             return o, None, f"{o.nombre}: no se pudo descargar ({type(e).__name__})"
@@ -208,7 +316,9 @@ def descargar(cliente: Any, bucket: str, objetos: list[ObjetoS3]) -> tuple[list[
             if err:
                 avisos.append(err)
             else:
-                descargados.append(Descargado(clave=o.clave, nombre=o.nombre, contenido=contenido or b""))
+                descargados.append(Descargado(
+                    clave=o.clave, nombre=o.nombre, contenido=contenido or b"",
+                    bucket=o.bucket or bucket, tipo=o.tipo))
 
     # El orden del paralelo no es determinista y el consumidor compara
     # resultados entre corridas: se reordena por clave.
@@ -221,15 +331,28 @@ def ingerir(
     folder_path: str = "",
     archivos: list[str] | None = None,
     bucket: str = "",
+    documentos: list[DocumentoPedido] | None = None,
 ) -> ResultadoIngesta:
     """Resuelve, filtra y descarga. Nunca lanza por un archivo malo.
 
-    `folder_path` es un prefijo; `archivos` una lista explícita de claves. Si
-    vienen los dos, se usan los dos.
+    Tres formas de decir qué leer, y se pueden combinar:
+
+      · `folder_path`  un prefijo del bucket. Barre la carpeta.
+      · `archivos`     lista explícita de claves, con el bucket por defecto.
+      · `documentos`   lista de `DocumentoPedido` con `s3Uri` propio y
+                       `documentType`. Es la forma del contrato de Onboarding.
+
+    **El filtro por nombre de archivo solo se aplica al barrido de carpeta.**
+    Los documentos nombrados de a uno no lo pasan: si el llamador dijo cuál es
+    el archivo, no hay nada que adivinar por el nombre. Ver `motivo_descarte`.
     """
     bucket = bucket or BUCKET
     res = ResultadoIngesta()
 
+    # Se filtran por separado porque la regla NO es la misma: lo que se barre
+    # pasa el filtro de nombre, lo que se nombra no. Juntarlos antes de filtrar
+    # obligaría a un filtro solo, y sería el equivocado para una de las dos.
+    nombrados: list[ObjetoS3] = []
     objetos: list[ObjetoS3] = []
     if folder_path:
         try:
@@ -241,10 +364,19 @@ def ingerir(
         objs, avs = resolver_lista(cliente, bucket, archivos)
         objetos += objs
         res.avisos += avs
+    if documentos:
+        objs, avs = resolver_documentos(cliente, documentos, bucket)
+        nombrados += objs
+        res.avisos += avs
 
-    res.vistos = len(objetos)
+    res.vistos = len(objetos) + len(nombrados)
     aceptados, avisos_filtro = filtrar(objetos)
     res.avisos += avisos_filtro
+    ac_nom, av_nom = filtrar(nombrados, exigir_prefijo=False)
+    res.avisos += av_nom
+    # El tope es del LOTE: se aplica una sola vez sobre los dos orígenes juntos.
+    aceptados, avisos_tope = aplicar_tope(aceptados + ac_nom)
+    res.avisos += avisos_tope
     res.descartados = res.vistos - len(aceptados)
 
     bajados, avisos_descarga = descargar(cliente, bucket, aceptados)
