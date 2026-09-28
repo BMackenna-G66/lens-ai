@@ -141,10 +141,14 @@ def test_el_de_la_empresa_y_el_representante_van_tal_cual():
 
 
 def test_las_dos_reglas_conviven_en_la_misma_persona():
-    """Mismo dato, reglas distintas según quién sea. Es la trampa de esta fase."""
+    """Mismo dato, reglas distintas según quién sea. Es la trampa de esta fase.
+
+    Y no es solo el VALOR: también la clave. En EP-6 es `shareholderId` y va
+    solo con dígitos; en EP-4 es `identificationNumber` y va tal como figura.
+    """
     p = {"personType": "NATURAL", "shareholderName": "ANA SOTO", "shareholderId": "12.345.678-5"}
     assert ob.persona(p, _av())["shareholderId"] == "123456785"
-    assert ob.representante(p, _av())["shareholderId"] == "12.345.678-5"
+    assert ob.representante(p, _av())["identificationNumber"] == "12.345.678-5"
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -302,11 +306,15 @@ def test_un_accionista_juridico_entero():
     }, _av())
     assert r == {
         "personType": "LEGAL",
-        "name": "MATRIZ HOLDING SpA",
-        "lastName": None,
+        # El texto original se conserva: la partición no es reversible.
+        "shareholderName": "MATRIZ HOLDING SpA",
         "shareholderId": "769998887",
         "countryOfOrigin": "México",
+        "identificationType": None,      # el ejemplo no lo trae
+        "lastName": None,
+        "name": "MATRIZ HOLDING SpA",
         "ownershipPercentage": 60,
+        "indirectShareholders": [],      # la clave va siempre, aunque vacía
         "isPEP": False,
     }
 

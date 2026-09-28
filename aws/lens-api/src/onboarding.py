@@ -61,6 +61,7 @@ AVISO_TIPO_PERSONA = _CATALOGO_AVISOS["PERSON_TYPE_UNDETERMINED"].nombre
 AVISO_PAIS = _CATALOGO_AVISOS["COUNTRY_NOT_IN_CATALOG"].nombre
 AVISO_FECHA = _CATALOGO_AVISOS["DATE_FORMAT_UNPARSEABLE"].nombre
 AVISO_TRUNCADO = _CATALOGO_AVISOS["VALUE_TRUNCATED"].nombre
+AVISO_NOMBRE_ADIVINADO = _CATALOGO_AVISOS["NAME_SPLIT_INFERRED"].nombre
 
 
 class Avisos:
@@ -111,21 +112,43 @@ def tipo_persona(valor: Any) -> str | None:
 # B · name / lastName
 # ══════════════════════════════════════════════════════════════════════════
 
-def partir_nombre(completo: str, *, name: str = "", last_name: str = "") -> tuple[str | None, str | None]:
+# Países cuyos registros escriben APELLIDOS PRIMERO. Es la señal que permite
+# que el respaldo no invierta el caso más común de este contrato.
+PAISES_ORDEN_REGISTRAL = {"colombia", "co"}
+
+
+def partir_nombre(
+    completo: str, *, name: str = "", last_name: str = "",
+    pais: str = "", avisos: "Avisos | None" = None,
+) -> tuple[str | None, str | None]:
     """Separa nombre y apellidos siguiendo la precedencia del contrato.
 
     Textual: *«Separados de origen: Onboarding no puede inferir el orden de los
     apellidos. Precedencia: columnas explícitas → coma → cantidad de palabras.»*
 
-    1. **Columnas explícitas.** Si el documento ya los trae separados, mandan.
-    2. **Coma.** `PÉREZ GONZÁLEZ, JUAN ANDRÉS` → apellidos antes, nombres después.
-       Es la convención de los registros y no admite ambigüedad.
-    3. **Cantidad de palabras.** Convención chilena: los DOS últimos son los
-       apellidos (paterno y materno). Con tres palabras, uno de nombre y dos de
-       apellido. Con dos, uno y uno.
+    1. **Columnas explícitas.** Es el camino NORMAL, no la excepción: el prompt
+       de LENS ya pide `name` y `lastName` partidos, y los parte con el
+       documento a la vista. Cuando vienen, mandan.
+    2. **Coma.** `PÉREZ GONZÁLEZ, JUAN ANDRÉS` → apellidos antes. No admite
+       ambigüedad.
+    3. **Cantidad de palabras.** El respaldo, y el único tramo que adivina.
 
-    Devuelve `(None, None)` si no hay nada con qué trabajar: un nombre vacío no
-    se inventa.
+    ── El respaldo invertía los nombres colombianos ──────────────────────────
+    La regla literal de §7.4 —cuatro palabras, las dos primeras son el nombre—
+    asume orden chileno. Aplicada a un registro colombiano da vuelta la persona:
+
+        PEREZ GOMEZ ANGELA VIVIANA
+          con la regla de §7.4 →  name: «PEREZ GOMEZ»   lastName: «ANGELA VIVIANA»
+          correcto            →  name: «ANGELA VIVIANA» lastName: «PEREZ GOMEZ»
+
+    Y no es un caso raro: Colombia es donde vive el documento de composición
+    accionaria. El propio prompt de LENS ya trae ESE ejemplo resuelto al derecho
+    (`constants.ts`), con la explicación de que «VIVIANA» es un segundo NOMBRE y
+    que «un error acá se repite en todo el registro colombiano».
+
+    Así que el respaldo mira el país. Sigue siendo una conjetura —dos apellidos
+    y dos nombres son indistinguibles sin contexto— y por eso **deja aviso
+    siempre que adivina**. Lo que no hace es invertir en silencio.
     """
     n, a = name.strip(), last_name.strip()
     if n or a:
@@ -145,13 +168,31 @@ def partir_nombre(completo: str, *, name: str = "", last_name: str = "") -> tupl
         return partes[0], None
     if len(partes) == 2:
         return partes[0], partes[1]
+
+    registral = _sin_tildes(pais) in PAISES_ORDEN_REGISTRAL
     if len(partes) == 3:
-        return partes[0], " ".join(partes[1:])
-    # Cuatro o más: los dos últimos son los apellidos.
-    return " ".join(partes[:-2]), " ".join(partes[-2:])
+        # Tres palabras: dos apellidos y un nombre, del lado que corresponda.
+        nombre, apellido = ((partes[-1], " ".join(partes[:-1])) if registral
+                            else (partes[0], " ".join(partes[1:])))
+    else:
+        # Cuatro o más: dos apellidos, del lado que corresponda.
+        nombre, apellido = ((" ".join(partes[2:]), " ".join(partes[:2])) if registral
+                            else (" ".join(partes[:-2]), " ".join(partes[-2:])))
+
+    if avisos is not None:
+        avisos.agregar(
+            AVISO_NOMBRE_ADIVINADO,
+            f"«{txt}» vino sin partir: se separó por cantidad de palabras asumiendo orden "
+            + ("registral (apellidos primero)" if registral else "de nombres primero")
+            + f"; el texto original va en el campo de nombre completo.",
+            valor=txt, pais=pais or "",
+        )
+    return nombre, apellido
 
 
-def nombre_y_apellido(p: dict, tipo: str | None) -> tuple[str | None, str | None]:
+def nombre_y_apellido(
+    p: dict, tipo: str | None, pais: str = "", avisos: "Avisos | None" = None,
+) -> tuple[str | None, str | None]:
     """`(name, lastName)` según el tipo de persona.
 
     En personas jurídicas, `name` es la **razón social** y `lastName` va en
@@ -162,9 +203,10 @@ def nombre_y_apellido(p: dict, tipo: str | None) -> tuple[str | None, str | None
         razon = str(p.get("shareholderName") or p.get("name") or "").strip()
         return (razon or None), None
     return partir_nombre(
-        str(p.get("shareholderName") or ""),
+        str(p.get("shareholderName") or p.get("fullName") or ""),
         name=str(p.get("name") or ""),
         last_name=str(p.get("lastName") or ""),
+        pais=pais, avisos=avisos,
     )
 
 
@@ -184,7 +226,10 @@ def es_pep(valor: Any, tipo: str | None) -> bool | None:
     Una persona jurídica no puede ser PEP: la condición es de personas físicas.
     `null` ahí no es "no sé", es una pregunta mal hecha.
     """
-    if tipo == "LEGAL":
+    # Se normaliza el tipo en vez de comparar contra "LEGAL" a secas: llamada
+    # suelta con el valor crudo («JURIDICA») devolvía None donde el contrato
+    # pide False. `tipo_persona` es idempotente y tiene test; esto lo alinea.
+    if tipo_persona(tipo) == "LEGAL":
         return False
     if isinstance(valor, bool):
         return valor
@@ -450,56 +495,207 @@ def recortar(valor: Any, tope: int, campo: str, avisos: Avisos | None = None) ->
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# identificationType — dos vocabularios, uno por endpoint
+# ══════════════════════════════════════════════════════════════════════════
+# §7.5 define vocabularios DISTINTOS para EP-4 y EP-6, y no es un descuido de
+# ellos: EP-4 usa el catálogo de documentos de personas de Onboarding y EP-6 el
+# que su procesador de accionistas ya recibe. El pasaporte lo deja a la vista —
+# `PASS` en uno, `Pasaporte` en el otro—. Un vocabulario único los rompe a los dos.
+#
+# El valor lo EXTRAE el modelo: el prompt ya pide `identificationType` («CC, NIT,
+# RUT, CE, PASAPORTE, DNI… lo que corresponda»). Acá solo se normaliza al
+# vocabulario del endpoint. Lo que no se puede mapear sale `null`, que es un
+# valor válido del contrato; inventar uno no lo es.
+
+VOCAB_EP4: frozenset[str] = frozenset(
+    {"RUT", "CC", "DNI", "CE", "PASS", "PPT", "CV", "CP", "DRIVERS"})
+VOCAB_EP6: frozenset[str] = frozenset(
+    {"RUT", "RUC", "DNI", "CC", "CE", "NIT", "RFC", "CURP", "INE", "CUIT",
+     "CUIL", "CPF", "CNPJ", "Pasaporte", "Tax ID", "EIN", "VAT Number"})
+
+# Cómo se escribe cada tipo en cada endpoint. La clave es la forma normalizada
+# de lo que puede venir del modelo; el valor, cómo se emite en cada lado.
+# `None` = ese endpoint no tiene ese tipo en su vocabulario.
+_EQUIVALENCIAS: dict[str, tuple[str | None, str | None]] = {
+    #  normalizado        EP-4          EP-6
+    "rut":              ("RUT",        "RUT"),
+    "cc":               ("CC",         "CC"),
+    "cedula":           ("CC",         "CC"),
+    "cedulaciudadania": ("CC",         "CC"),
+    "dni":              ("DNI",        "DNI"),
+    "ce":               ("CE",         "CE"),
+    "cedulaextranjeria":("CE",         "CE"),
+    "ppt":              ("PPT",        None),
+    "nit":              (None,         "NIT"),
+    "ruc":              (None,         "RUC"),
+    "rfc":              (None,         "RFC"),
+    "curp":             (None,         "CURP"),
+    "ine":              (None,         "INE"),
+    "cuit":             (None,         "CUIT"),
+    "cuil":             (None,         "CUIL"),
+    "cpf":              (None,         "CPF"),
+    "cnpj":             (None,         "CNPJ"),
+    "ein":              (None,         "EIN"),
+    "taxid":            (None,         "Tax ID"),
+    "vatnumber":        (None,         "VAT Number"),
+    "cv":               ("CV",         None),
+    "cp":               ("CP",         None),
+    "drivers":          ("DRIVERS",    None),
+    "pasaporte":        ("PASS",       "Pasaporte"),
+    "pass":             ("PASS",       "Pasaporte"),
+    "passport":         ("PASS",       "Pasaporte"),
+}
+
+
+def tipo_identificacion(valor: Any, *, endpoint: str) -> str | None:
+    """El tipo de documento con el vocabulario de `endpoint` (`"EP-4"`/`"EP-6"`).
+
+    `None` cuando no se puede mapear — incluido el caso de un tipo que existe
+    pero no en ese endpoint. Es preferible a emitir un valor que el consumidor
+    no tiene en su lista: ahí no falla, guarda mal.
+    """
+    clave = _sin_tildes(str(valor or "")).replace(" ", "").replace("_", "").replace(".", "")
+    par = _EQUIVALENCIAS.get(clave)
+    if par is None:
+        return None
+    return par[0] if endpoint == "EP-4" else par[1]
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # La persona completa, con los siete ajustes aplicados
 # ══════════════════════════════════════════════════════════════════════════
 
-def persona(p: dict, avisos: Avisos | None = None, *, es_accionista: bool = True) -> dict | None:
-    """Una persona en el formato de Onboarding, o `None` si hay que omitirla.
+def _tipo_o_aviso(p: dict, avisos: Avisos | None) -> str | None:
+    """El tipo de persona, o `None` dejando el aviso que pide el contrato.
 
-    Devuelve `None` cuando no se pudo determinar el tipo de persona. Es lo que
-    pide el contrato — *«Si LENS no puede determinarlo, omite la entidad y lo
-    informa como aviso»*— y es más seguro que mandarla: del otro lado, todo lo
-    que no sea `NATURAL` se guarda como persona jurídica, así que una persona
-    natural sin tipo entraría al registro como empresa.
+    *«Si LENS no puede determinarlo, omite la entidad y lo informa como aviso»*
+    (§7.1). Omitir es más seguro que mandarla: del otro lado, todo lo que no sea
+    `NATURAL` se guarda como jurídica, así que una persona natural sin tipo
+    entraría al registro como empresa.
     """
     tipo = tipo_persona(p.get("personType"))
+    if tipo is None and avisos is not None:
+        avisos.agregar(
+            AVISO_TIPO_PERSONA,
+            "No se pudo determinar si es persona natural o jurídica; se omite la entidad.",
+            valor=str(p.get("personType") or ""),
+            nombre=str(p.get("shareholderName") or ""),
+        )
+    return tipo
+
+
+def persona(p: dict, avisos: Avisos | None = None) -> dict | None:
+    """Un accionista con los DIEZ campos de EP-6 (§6.10), o `None` si se omite.
+
+    `shareholderName` conserva el texto original y no es decorativo: la
+    partición en `name` / `lastName` **no es reversible**. Con el orden registral
+    colombiano, concatenarlos de vuelta da «ANGELA VIVIANA PEREZ GOMEZ», que no
+    es lo que decía la escritura. Quien después cruce contra el registro necesita
+    el nombre como está escrito.
+    """
+    tipo = _tipo_o_aviso(p, avisos)
     if tipo is None:
-        if avisos is not None:
-            avisos.agregar(
-                AVISO_TIPO_PERSONA,
-                "No se pudo determinar si es persona natural o jurídica; se omite la entidad.",
-                valor=str(p.get("personType") or ""),
-                nombre=str(p.get("shareholderName") or ""),
-            )
         return None
 
-    name, last_name = nombre_y_apellido(p, tipo)
+    pais_crudo = str(p.get("countryOfOrigin") or "")
+    name, last_name = nombre_y_apellido(p, tipo, pais_crudo, avisos)
     return {
         "personType": tipo,
-        "name": name,
+        "shareholderName": str(p.get("shareholderName") or "").strip() or None,
+        "shareholderId": id_accionista(p.get("shareholderId")),
+        "countryOfOrigin": pais_anexo_a(pais_crudo, avisos),
+        "identificationType": tipo_identificacion(p.get("identificationType"), endpoint="EP-6"),
         "lastName": last_name,
-        "shareholderId": id_accionista(p.get("shareholderId")) if es_accionista
-                         else id_tal_cual(p.get("shareholderId")),
-        "countryOfOrigin": pais_anexo_a(p.get("countryOfOrigin"), avisos),
+        "name": name,
         "ownershipPercentage": p.get("ownershipPercentage"),
+        # La clave va SIEMPRE, aunque quede vacía: el consumidor no tiene que
+        # defenderse de campos ausentes. Y `[]` significa «el documento no las
+        # revela», que no es lo mismo que «no se sabe». No se inventan personas.
+        "indirectShareholders": [
+            h for h in (persona(x, avisos) for x in (p.get("indirectShareholders") or []))
+            if h is not None
+        ],
         "isPEP": es_pep(p.get("isPEP"), tipo),
     }
 
 
 def representante(p: dict, avisos: Avisos | None = None) -> dict | None:
-    """Un representante legal. Su identificador va **tal cual**, no solo dígitos."""
-    r = persona(p, avisos, es_accionista=False)
-    if r is None:
+    """Un representante legal con los SIETE campos de EP-4 (§6.8).
+
+    NO es `persona()` con un campo más: EP-4 tiene otras claves y otras reglas.
+    El identificador se llama `identificationNumber` y va **tal como figura** —
+    no solo dígitos, que es la regla del accionista—, y el vocabulario de
+    `identificationType` es el otro. Reusar la forma de EP-6 acá emitiría las
+    claves equivocadas con los valores equivocados.
+    """
+    tipo = _tipo_o_aviso(p, avisos)
+    if tipo is None:
         return None
-    r["role"] = recortar(p.get("position") or p.get("role"), TOPE_CARGO, "role", avisos)
-    return r
+
+    pais_crudo = str(p.get("countryOfOrigin") or "")
+    name, last_name = nombre_y_apellido(p, tipo, pais_crudo, avisos)
+    return {
+        "fullName": str(p.get("shareholderName") or p.get("fullName") or "").strip() or None,
+        "name": name,
+        "lastName": last_name,
+        "personType": tipo,
+        "identificationType": tipo_identificacion(p.get("identificationType"), endpoint="EP-4"),
+        "identificationNumber": id_tal_cual(p.get("shareholderId") or p.get("identificationNumber")),
+        "role": recortar(p.get("position") or p.get("role"), TOPE_CARGO, "role", avisos),
+    }
+
+
+# El identificador tributario de la EMPRESA (§6.9). Es un tercer vocabulario,
+# más suelto que los de las personas: «identificador tributario según el país,
+# por ejemplo RUT, NIT o RUC».
+TAX_ID_POR_PAIS: dict[str, str] = {
+    "chile": "RUT",
+    "colombia": "NIT",
+    "peru": "RUC",
+    "argentina": "CUIT",
+    "mexico": "RFC",
+    "brasil": "CNPJ",
+    "brazil": "CNPJ",
+    "uruguay": "RUT",
+    "ecuador": "RUC",
+}
+
+# Un RUT chileno se reconoce por su forma SOLO SI TRAE SU PUNTUACIÓN: el guion
+# del verificador, o una K.
+#
+# Sin eso no se distingue. `900123456` son nueve dígitos y es un NIT colombiano
+# perfectamente válido, pero también encaja en «7 u 8 dígitos más verificador».
+# La primera versión de esta regex hacía los puntos y el guion opcionales y
+# clasificaba todos los NIT como RUT — en silencio, que es el modo de fallo que
+# esta fase entera existe para evitar.
+_RE_RUT = re.compile(r"^\d{1,2}(\.\d{3}){2}-[\dkK]$|^\d{7,8}-[\dkK]$|^\d{7,8}[kK]$", re.I)
+
+
+def tipo_tax_id(tax_id: Any, pais: Any = "") -> str | None:
+    """El `taxIdType` de la empresa, derivado del formato y del país (§6.9).
+
+    El FORMATO manda sobre el país cuando es inequívoco: un RUT **con su
+    puntuación** se reconoce solo, aunque el país venga mal detectado. Sin el
+    guion ni la K no alcanza —`900123456` es tan un NIT colombiano como un RUT
+    sin puntos— y ahí decide el país, que es la única señal que queda: los
+    identificadores de Colombia, Perú y Argentina son todos dígitos.
+
+    `None` si no alcanza para saberlo. Igual que con las personas: un valor
+    inventado no falla, se guarda mal.
+    """
+    t = str(tax_id or "").strip()
+    if t and _RE_RUT.match(t):
+        return "RUT"
+    return TAX_ID_POR_PAIS.get(_sin_tildes(str(pais or "")))
 
 
 def empresa(datos: dict, avisos: Avisos | None = None) -> dict:
-    """El bloque `company`: los campos directos más los tres con formato propio."""
+    """El bloque `company` de EP-5 (§6.9)."""
+    tax_id = datos.get("taxId")
     return {
         "legalName": str(datos.get("legalName") or "").strip() or None,
-        "taxId": id_tal_cual(datos.get("taxId")),
+        "taxId": id_tal_cual(tax_id),
+        "taxIdType": tipo_tax_id(tax_id, datos.get("country") or datos.get("pais")),
         "constitutionDate": fecha_iso(datos.get("constitutionDate"), avisos),
         "legalForm": recortar(datos.get("legalForm"), TOPE_FORMA_LEGAL, "legalForm", avisos),
         "activity": recortar(datos.get("activity"), TOPE_ACTIVIDAD, "activity", avisos),
