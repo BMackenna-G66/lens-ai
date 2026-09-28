@@ -50,12 +50,17 @@ from typing import Any
 from paises_anexo_a import NOMBRES as PAISES_ANEXO_A
 
 # ── Avisos que produce esta capa ────────────────────────────────────────────
-# Son los `reason` del catálogo propio de LENS (Fase 5 del plan). Se nombran acá
-# porque es donde se generan; la lista completa se publica en esa fase.
-AVISO_TIPO_PERSONA = "PERSON_TYPE_UNDETERMINED"
-AVISO_PAIS = "COUNTRY_NOT_IN_CATALOG"
-AVISO_FECHA = "DATE_FORMAT_UNPARSEABLE"
-AVISO_TRUNCADO = "VALUE_TRUNCATED"
+# Los nombres NO se escriben acá: salen del catálogo de `errores.py`, que es la
+# fuente única de los `reason` de los tres canales. Si un aviso se nombrara con
+# un literal suelto, el catálogo publicado y lo que de verdad emite el servicio
+# podrían separarse sin que nadie lo note — y el catálogo existe justamente para
+# que un integrador pueda programar contra él.
+from errores import AVISO as _CATALOGO_AVISOS
+
+AVISO_TIPO_PERSONA = _CATALOGO_AVISOS["PERSON_TYPE_UNDETERMINED"].nombre
+AVISO_PAIS = _CATALOGO_AVISOS["COUNTRY_NOT_IN_CATALOG"].nombre
+AVISO_FECHA = _CATALOGO_AVISOS["DATE_FORMAT_UNPARSEABLE"].nombre
+AVISO_TRUNCADO = _CATALOGO_AVISOS["VALUE_TRUNCATED"].nombre
 
 
 class Avisos:
