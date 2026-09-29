@@ -77,18 +77,26 @@ MAX_DOCUMENTOS_LOTE = int(os.environ.get("MAX_DOCUMENTOS_LOTE", "2"))
 
 #: Los `documentType` que cuentan como documento PRINCIPAL, separados por coma.
 #:
-#: **Vacío = todos son principales**, y es el default a propósito. La regla del
-#: plan dice que si falla la escritura la corrida termina en `FAILED`, y si falla
-#: un complementario termina en `INCOMPLETE` con aviso. Para aplicarla hay que
-#: saber cuál es cuál — y el vocabulario de `documentType` todavía no está
-#: confirmado con Onboarding.
+#: El vocabulario SÍ está especificado —§5.2 lo fija en tres— y el principal es
+#: la escritura:
 #:
-#: Ante la duda se elige el lado conservador: tratar un documento desconocido
-#: como complementario dejaría que la corrida termine «bien» sin haber leído la
-#: escritura. Terminar en `FAILED` de más es visible; terminar en `COMPLETED` de
-#: menos, no.
+#:     company_deeds_document         escritura, siempre        ← PRINCIPAL
+#:     company_shareholders_document  composición, Colombia     complementario
+#:     company_id_document            identidad fiscal, Chile   complementario
+#:
+#: Este default arrancó vacío —«todos principales»— por elegir el lado
+#: conservador sin tener la especificación a mano. Con el dato, el lado
+#: conservador es el otro, y la diferencia le cuesta al usuario: §8 dice que
+#: `FAILED` consume uno de sus 3 intentos de lectura y `INCOMPLETE` no. Con todo
+#: marcado como principal, la rama `INCOMPLETE` de §5.2 no se dispara nunca y un
+#: complementario que falla le quema un intento que no debería.
+#:
+#: Vacío sigue significando «todos principales», porque es lo correcto si alguna
+#: vez llega un lote sin `documentType` declarado.
 TIPOS_PRINCIPALES: tuple[str, ...] = tuple(
-    t.strip().upper() for t in os.environ.get("TIPOS_PRINCIPALES", "").split(",") if t.strip()
+    t.strip().upper()
+    for t in os.environ.get("TIPOS_PRINCIPALES", "company_deeds_document").split(",")
+    if t.strip()
 )
 
 
@@ -154,7 +162,8 @@ def es_principal(documento: dict) -> bool:
 # ── EP-1 ────────────────────────────────────────────────────────────────────
 
 def manejar(evento: dict, ruta: str, metodo: str, *, analizar: Callable,
-            extraer_socios: Callable | None = None) -> dict | None:
+            extraer_socios: Callable | None = None,
+            extraer_administracion: Callable | None = None) -> dict | None:
     """La respuesta si la ruta es de esta familia, `None` si no lo es.
 
     Devolver `None` —y no un `404`— es lo que deja que el handler siga probando
@@ -237,8 +246,9 @@ def manejar(evento: dict, ruta: str, metodo: str, *, analizar: Callable,
     # El modo del disparo NO viaja en la respuesta: el contrato de EP-1 son cinco
     # campos y uno de más se vuelve contrato de hecho en cuanto alguien lo use.
     # Es información de operación y vive donde corresponde, en `/salud`.
-    disparador.disparar(
-        carga, lambda c: procesar(c, analizar=analizar, extraer_socios=extraer_socios))
+    disparador.disparar(carga, lambda c: procesar(
+        c, analizar=analizar, extraer_socios=extraer_socios,
+        extraer_administracion=extraer_administracion))
 
     return _resp(202, {
         "companyId": company_id,
@@ -359,7 +369,8 @@ def estado_de(company_id: str, u: dict | None) -> dict:
 
 # ── El trabajo de fondo ─────────────────────────────────────────────────────
 
-def procesar(carga: dict, *, analizar: Callable, extraer_socios: Callable | None = None) -> dict:
+def procesar(carga: dict, *, analizar: Callable, extraer_socios: Callable | None = None,
+             extraer_administracion: Callable | None = None) -> dict:
     """Resuelve los documentos, analiza y cierra la corrida.
 
     Nunca levanta: lo que sale mal termina la corrida en `FAILED` con su motivo.
@@ -473,7 +484,21 @@ def procesar(carga: dict, *, analizar: Callable, extraer_socios: Callable | None
             avisos_personas = [f"No se pudo extraer la composición societaria ({e})."]
     avisos += [errores.aviso("EXPECTED_DATA_MISSING", a) for a in avisos_personas]
 
-    ficha = _ficha(resultado, descargados, pedidos, personas)
+    # El régimen de administración, en su propia pasada (§11). Va después de la
+    # societaria y con el mismo reloj: si no queda presupuesto, `None` y aviso.
+    # Nunca se adivina — es el dato que decide cuántas aprobaciones necesita una
+    # empresa para operar.
+    administracion = None
+    if extraer_administracion is not None:
+        try:
+            administracion = extraer_administracion(descargados, t0)
+        except Exception as e:  # noqa: BLE001
+            log.warning("no se pudo leer el régimen de administración de %s: %s", analysis_id, e)
+            avisos.append(errores.aviso(
+                "EXPECTED_DATA_MISSING",
+                f"No se pudo determinar el régimen de administración ({e})."))
+
+    ficha = _ficha(resultado, descargados, pedidos, personas, administracion)
 
     # Llegó hasta acá con la escritura leída. Si se perdió un complementario, el
     # resultado sirve pero está incompleto, y se dice cuál faltó.
@@ -492,7 +517,7 @@ def procesar(carga: dict, *, analizar: Callable, extraer_socios: Callable | None
 
 
 def _ficha(resultado: dict, descargados: list, pedidos: list[dict],
-           personas: dict | None = None) -> dict:
+           personas: dict | None = None, administracion: dict | None = None) -> dict:
     """Lo que se guarda de una corrida y después sirve EP-3.
 
     **No entra el texto de los documentos.** Son escrituras enteras y una fila
@@ -534,6 +559,9 @@ def _ficha(resultado: dict, descargados: list, pedidos: list[dict],
         "legalRepresentatives": p.get("legalRepresentatives") or [],
         "directOwnership": p.get("directOwnership") or [],
         "indirectShareholders": p.get("indirectShareholders") or [],
+        # §11. Solo el booleano viaja en EP-5; el detalle queda guardado para
+        # cuando Compliance defina la marca por persona.
+        "administration": administracion or {},
     }
 
 
@@ -629,6 +657,7 @@ def resultado_de(company_id: str, u: dict) -> dict:
         "legalForm": _forma_legal(campos),
         "activity": _dato(campos.get("Objeto Social")),
         "address": _dato(campos.get("Domicilio Legal")),
+        "jointAdministration": (ficha.get("administration") or {}).get("jointAdministration"),
     }, avisos)
 
     representantes = [

@@ -76,6 +76,9 @@ CAMPOS_EMPRESA = (
     "legalForm",
     "address",
     "activity",
+    # §11, no §6.9: la especificación lo propone para EP-5 en la Fase 2 y
+    # Benjamín aprobó construirlo. `boolean | null`.
+    "jointAdministration",
 )
 
 #: §7.5 — vocabularios, que NO son el mismo por endpoint.

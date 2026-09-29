@@ -268,8 +268,10 @@ def correr(documentos, s3, analizar=analizar_falso, ambiente="prod", company_id=
     return corridas.buscar(ambiente, company_id, "a1")
 
 
-PRINCIPAL = {"s3Uri": "s3://b/b2b/escritura.pdf", "documentType": "CONSTITUTION"}
-ANEXO = {"s3Uri": "s3://b/b2b/anexo.pdf", "documentType": "ANNEX"}
+#: Los `documentType` son los de §5.2, no inventados: la escritura es el
+#: principal y el de identidad fiscal es complementario.
+PRINCIPAL = {"s3Uri": "s3://b/b2b/escritura.pdf", "documentType": "company_deeds_document"}
+ANEXO = {"s3Uri": "s3://b/b2b/anexo.pdf", "documentType": "company_id_document"}
 
 
 def test_una_corrida_que_sale_bien_queda_completed(s3_falso):
@@ -277,7 +279,7 @@ def test_una_corrida_que_sale_bien_queda_completed(s3_falso):
 
 
 def test_si_no_se_puede_bajar_el_principal_la_corrida_falla(s3_falso, monkeypatch):
-    monkeypatch.setattr(co, "TIPOS_PRINCIPALES", ("CONSTITUTION",))
+    monkeypatch.setattr(co, "TIPOS_PRINCIPALES", ("COMPANY_DEEDS_DOCUMENT",))
     s3_falso.falla_get.add("b2b/escritura.pdf")
     reg = correr([PRINCIPAL, ANEXO], s3_falso)
     assert reg["status"] == corridas.FAILED
@@ -289,7 +291,7 @@ def test_el_principal_que_falla_AL_BAJAR_no_se_cuela_como_aviso(s3_falso, monkey
     documento se puede caer al resolverlo, al filtrarlo o al descargarlo, y
     mirar solo lo primero hacía que la escritura cayera al bajar, el anexo
     bajara bien, y la corrida terminara analizando el anexo sola."""
-    monkeypatch.setattr(co, "TIPOS_PRINCIPALES", ("CONSTITUTION",))
+    monkeypatch.setattr(co, "TIPOS_PRINCIPALES", ("COMPANY_DEEDS_DOCUMENT",))
     s3_falso.falla_get.add("b2b/escritura.pdf")
     reg = correr([PRINCIPAL, ANEXO], s3_falso)
     assert reg["status"] != corridas.COMPLETED
@@ -297,7 +299,7 @@ def test_el_principal_que_falla_AL_BAJAR_no_se_cuela_como_aviso(s3_falso, monkey
 
 
 def test_si_falla_un_complementario_la_corrida_queda_incompleta(s3_falso, monkeypatch):
-    monkeypatch.setattr(co, "TIPOS_PRINCIPALES", ("CONSTITUTION",))
+    monkeypatch.setattr(co, "TIPOS_PRINCIPALES", ("COMPANY_DEEDS_DOCUMENT",))
     s3_falso.falla_get.add("b2b/anexo.pdf")
     reg = correr([PRINCIPAL, ANEXO], s3_falso)
     assert reg["status"] == corridas.INCOMPLETE
@@ -307,19 +309,39 @@ def test_si_falla_un_complementario_la_corrida_queda_incompleta(s3_falso, monkey
 def test_el_aviso_del_complementario_dice_cual_fue(s3_falso, monkeypatch):
     """El contrato define `objectKey` en cada aviso. Sin él, quien integra tiene
     que adivinar a qué documento se refiere."""
-    monkeypatch.setattr(co, "TIPOS_PRINCIPALES", ("CONSTITUTION",))
+    monkeypatch.setattr(co, "TIPOS_PRINCIPALES", ("COMPANY_DEEDS_DOCUMENT",))
     s3_falso.falla_get.add("b2b/anexo.pdf")
     reg = correr([PRINCIPAL, ANEXO], s3_falso)
     faltante = [a for a in reg["warnings"] if a["reason"] == "EXPECTED_DATA_MISSING"][0]
     assert "anexo" in faltante["objectKey"]
 
 
-def test_sin_vocabulario_configurado_todos_son_principales(s3_falso):
-    """El default conservador: tratar un documento desconocido como
-    complementario dejaría que la corrida termine «bien» sin haber leído la
-    escritura. Terminar en FAILED de más es visible; en COMPLETED de menos, no.
+def test_la_escritura_es_el_documento_principal(s3_falso):
+    """§5.2 fija tres `documentType` y el principal es la escritura.
+
+    Este default arrancó vacío —«todos principales»— por elegir el lado
+    conservador sin la especificación a mano. Con el dato, el lado conservador
+    es el otro: §8 dice que FAILED consume uno de los 3 intentos del usuario e
+    INCOMPLETE no, así que marcar todo como principal le quema un intento cada
+    vez que falla un complementario.
     """
-    assert co.TIPOS_PRINCIPALES == ()
+    assert co.TIPOS_PRINCIPALES == ("COMPANY_DEEDS_DOCUMENT",)
+    s3_falso.falla_get.add("b2b/escritura.pdf")
+    assert correr([PRINCIPAL, ANEXO], s3_falso)["status"] == corridas.FAILED
+
+
+def test_un_complementario_que_falla_no_quema_un_intento(s3_falso):
+    """La rama INCOMPLETE de §5.2, que con el default vacío no se disparaba
+    nunca. Un cliente chileno sin credenciales del SII cuyo `company_id_document`
+    falle tiene que terminar en INCOMPLETE, no en FAILED."""
+    s3_falso.falla_get.add("b2b/anexo.pdf")
+    assert correr([PRINCIPAL, ANEXO], s3_falso)["status"] == corridas.INCOMPLETE
+
+
+def test_sin_documentType_declarado_todos_siguen_siendo_principales(s3_falso, monkeypatch):
+    """Vacío sigue significando «todos principales»: es lo correcto si alguna vez
+    llega un lote sin `documentType`."""
+    monkeypatch.setattr(co, "TIPOS_PRINCIPALES", ())
     s3_falso.falla_get.add("b2b/anexo.pdf")
     assert correr([PRINCIPAL, ANEXO], s3_falso)["status"] == corridas.FAILED
 
@@ -481,7 +503,7 @@ def test_salud_dice_si_el_202_es_de_verdad_inmediato():
     })
     cuerpo = json.loads(r["body"])
     assert cuerpo["disparo_asincrono"] is False
-    assert cuerpo["tipos_principales"] == [], "vacío significa que todos son principales"
+    assert cuerpo["tipos_principales"] == ["COMPANY_DEEDS_DOCUMENT"]
     assert cuerpo["max_documentos_lote"] == 2
 
 
@@ -559,7 +581,7 @@ def test_el_error_va_en_null_pero_la_clave_viaja(s3_falso):
     NO estuviera.
     """
     monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr(co, "TIPOS_PRINCIPALES", ("CONSTITUTION",))
+    monkeypatch.setattr(co, "TIPOS_PRINCIPALES", ("COMPANY_DEEDS_DOCUMENT",))
     s3_falso.falla_get.add("b2b/anexo.pdf")
     correr([PRINCIPAL, ANEXO], s3_falso)
     monkeypatch.undo()
@@ -584,7 +606,7 @@ def test_failed_trae_reason_y_message(s3_falso):
 
 def test_los_avisos_traen_las_tres_claves_del_contrato(s3_falso):
     monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr(co, "TIPOS_PRINCIPALES", ("CONSTITUTION",))
+    monkeypatch.setattr(co, "TIPOS_PRINCIPALES", ("COMPANY_DEEDS_DOCUMENT",))
     s3_falso.falla_get.add("b2b/anexo.pdf")
     correr([PRINCIPAL, ANEXO], s3_falso)
     monkeypatch.undo()
@@ -827,7 +849,7 @@ def test_el_detalle_por_documento_suma_las_cuatro_claves(s3_falso):
     _, cuerpo = pedir_resultado()
     d = cuerpo["documents"][0]
     assert d["objectKey"] == "b2b/escritura.pdf"
-    assert d["documentType"] == "CONSTITUTION"
+    assert d["documentType"] == "company_deeds_document"
     assert d["pagesTotal"] == 12
     assert d["pagesRead"] == 12
 
@@ -1034,3 +1056,101 @@ def test_un_company_id_no_numerico_se_refleja_como_vino():
     repo para confirmar si el tipo siguió igual. Rechazar de más cortaría
     tráfico legítimo; reflejarlo no rompe a nadie."""
     assert co.identificador("ACME-1") == "ACME-1"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# `jointAdministration` — §11
+# ════════════════════════════════════════════════════════════════════════════
+
+def admin_falso(valor=True, **extra):
+    def _f(descargados, t0):
+        return {"jointAdministration": valor, "minimumSignatures": None,
+                "administrators": [], **extra}
+    return _f
+
+
+def correr_con_admin(s3, admin, company_id="ACME-1"):
+    corridas.registrar_inicio("prod", company_id, "a1", documentos=[PRINCIPAL])
+    co.procesar({
+        "ambiente": "prod", "companyId": company_id, "analysisId": "a1",
+        "country": "chile", "documents": [PRINCIPAL],
+    }, analizar=analizar_completo, extraer_socios=socios_completos,
+       extraer_administracion=admin)
+
+
+@pytest.mark.parametrize("valor", [True, False])
+def test_la_administracion_conjunta_llega_a_ep5(s3_falso, valor):
+    """§11: el campo va en EP-5, que comparte bloque con EP-3."""
+    correr_con_admin(s3_falso, admin_falso(valor))
+    assert pedir_seccion("company")[1]["company"]["jointAdministration"] is valor
+    assert pedir_resultado()[1]["company"]["jointAdministration"] is valor
+
+
+def test_si_el_documento_no_lo_dice_va_en_null(s3_falso):
+    """§11 lo define `boolean | null`: «`null` si el documento no permite
+    determinarlo»."""
+    correr_con_admin(s3_falso, admin_falso(None))
+    assert pedir_seccion("company")[1]["company"]["jointAdministration"] is None
+
+
+@pytest.mark.parametrize("basura", ["true", "sí", 1, "CONJUNTA", {}])
+def test_solo_un_booleano_de_verdad_pasa(s3_falso, basura):
+    """De este valor depende cuántas aprobaciones necesita una empresa para
+    operar. Un `"true"` de texto o un 1 son «no lo dijo», no un sí."""
+    correr_con_admin(s3_falso, admin_falso(basura))
+    assert pedir_seccion("company")[1]["company"]["jointAdministration"] is None
+
+
+def test_sin_la_pasada_el_campo_sigue_viajando(s3_falso):
+    """La clave va siempre, como el resto del bloque: el consumidor no se
+    defiende de campos ausentes."""
+    correr_completo(s3_falso)
+    c = pedir_seccion("company")[1]["company"]
+    assert "jointAdministration" in c and c["jointAdministration"] is None
+
+
+def test_si_la_pasada_revienta_la_corrida_igual_termina(s3_falso):
+    """El resto del análisis ya está listo. Perderlo por esto sería peor que
+    devolverlo sin el campo."""
+    def revienta(descargados, t0):
+        raise RuntimeError("Gemini se cayó")
+
+    correr_con_admin(s3_falso, revienta)
+    reg = corridas.buscar("prod", "ACME-1", "a1")
+    assert reg["status"] == corridas.COMPLETED
+    assert any("régimen de administración" in a["message"] for a in reg["warnings"])
+    assert pedir_seccion("company")[1]["company"]["jointAdministration"] is None
+
+
+def test_el_detalle_se_guarda_aunque_no_viaje(s3_falso):
+    """Solo el booleano va en EP-5. Lo demás sale de la misma lectura y queda
+    guardado para cuando Compliance defina la marca por persona, que §11 deja
+    como pregunta abierta."""
+    correr_con_admin(s3_falso, admin_falso(
+        True, minimumSignatures=2,
+        administrators=[{"name": "CLAUDIA MARTINEZ", "mode": "CONJUNTA", "amountLimit": None}]))
+    guardado = corridas.buscar("prod", "ACME-1", "a1")["result"]["administration"]
+    assert guardado["minimumSignatures"] == 2
+    assert guardado["administrators"][0]["mode"] == "CONJUNTA"
+    assert "minimumSignatures" not in pedir_seccion("company")[1]["company"]
+
+
+def test_la_pasada_no_toca_el_prompt_que_comparte_la_spa():
+    """El prompt de administración es PROPIO de la API y está escrito a mano.
+    `PROMPT_SHAREHOLDERS` sale de la SPA vía `generar_prompts.py`, y ampliarlo
+    para que devuelva esto además rompería el verificador de sincronía."""
+    import gemini
+    import prompts_generado
+
+    assert not hasattr(prompts_generado, "PROMPT_ADMINISTRACION")
+    assert "jointAdministration" not in prompts_generado.PROMPT_SHAREHOLDERS
+    assert "jointAdministration" in gemini.PROMPT_ADMINISTRACION
+
+
+def test_el_campo_no_entro_a_los_18():
+    """Agregarlo ahí tocaría `constants.ts`, que comparte la SPA, y metería la
+    cola KYB de Compliance en el alcance."""
+    import prompts_generado
+
+    assert len(prompts_generado.CAMPOS_PREDEFINIDOS) == 18
+    assert not any("dministra" in c for c in prompts_generado.CAMPOS_PREDEFINIDOS)

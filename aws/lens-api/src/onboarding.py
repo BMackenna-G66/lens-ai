@@ -774,6 +774,14 @@ def empresa(datos: dict, avisos: Avisos | None = None) -> dict:
         "legalForm": recortar(datos.get("legalForm"), TOPE_FORMA_LEGAL, "legalForm", avisos),
         "address": domicilio(datos.get("address"), avisos),
         "activity": recortar(datos.get("activity"), TOPE_ACTIVIDAD, "activity", avisos),
+        # §11. `boolean | null`: `null` cuando el documento no permite
+        # determinarlo. Solo pasa un booleano de verdad — un `"true"` de texto o
+        # un 1 son «no lo dijo». Este valor decide cuántas aprobaciones necesita
+        # una empresa para operar, así que adivinarlo es peor que no tenerlo.
+        "jointAdministration": (
+            datos.get("jointAdministration")
+            if isinstance(datos.get("jointAdministration"), bool) else None
+        ),
     }
 
 

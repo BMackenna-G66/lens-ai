@@ -513,3 +513,104 @@ def extraer_shareholders(docs, quedan_llamadas=None) -> tuple[dict, dict]:
         "tokens_salida": salida,
     }
     return resultado, senales
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Administración conjunta — §11 de la especificación
+# ══════════════════════════════════════════════════════════════════════════
+# PASADA APARTE, y el «aparte» es lo importante. Tres cosas que NO se hacen, con
+# su motivo:
+#
+#   · No se agrega a los 18 campos fijos. Eso tocaría `constants.ts`, que
+#     comparte la SPA, y metería la cola KYB de Compliance en el alcance.
+#
+#   · No se amplía `PROMPT_SHAREHOLDERS` para que devuelva esto además. Ese
+#     prompt SALE de la SPA —lo genera `scripts/generar_prompts.py` y el
+#     verificador falla si se edita a mano—, así que el prompt de acá es
+#     propio de la API y vive en este archivo, escrito a mano.
+#
+#   · No se deriva interpretando el texto del campo *Facultades* ya extraído.
+#     Sería gratis y sería el mismo problema con otro nombre: interpretar texto
+#     libre es exactamente lo que hoy hace la revisión humana porque no es
+#     confiable. El riesgo que declara la especificación es que alguien se
+#     identifique como una persona que no puede obligar a la sociedad por sí
+#     sola; resolverlo con una heurística de texto no lo resuelve.
+#
+# La Fase 2 solo necesita el booleano, en EP-5. Lo demás se extrae igual porque
+# sale de la misma lectura y queda disponible para cuando Compliance defina la
+# marca por persona, que §11 deja como pregunta abierta.
+
+PROMPT_ADMINISTRACION = """Sos un abogado societario leyendo la escritura adjunta.
+
+Leé SOLO las cláusulas de administración, representación y facultades.
+
+Respondé si la sociedad exige que DOS O MÁS personas actúen EN CONJUNTO para
+obligarla en los actos de administración ordinaria.
+
+Reglas:
+- `jointAdministration` es true si el documento dice que los administradores
+  actúan conjuntamente, de consuno, en forma mancomunada, o que se requieren dos
+  o más firmas.
+- Es false si un solo administrador puede obligar a la sociedad por sí solo,
+  aunque haya varios administradores designados: varios apoderados que actúan
+  INDISTINTAMENTE no es administración conjunta.
+- Es null si el documento no lo dice, si es ambiguo, o si solo se puede saber
+  interpretando. NO lo deduzcas de que haya más de un representante.
+- Un límite de monto por sobre el cual se exigen dos firmas SÍ es administración
+  conjunta: poné true y anotá el límite en `amountLimit` de esa persona.
+
+Devolvé también, si el documento lo declara explícitamente:
+- `minimumSignatures`: cuántas firmas se exigen. null si no lo dice.
+- `administrators`: una entrada por persona con facultades, con su `name` tal
+  como figura, su `mode` y su `amountLimit` si lo declara.
+
+No inventes. Ante la duda, null."""
+
+ESQUEMA_ADMINISTRACION = {
+    "type": "OBJECT",
+    "properties": {
+        "jointAdministration": {"type": "BOOLEAN", "nullable": True},
+        "minimumSignatures": {"type": "INTEGER", "nullable": True},
+        "administrators": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "name": {"type": "STRING"},
+                    "mode": {"type": "STRING",
+                             "enum": ["CONJUNTA", "INDISTINTA", "CON_LIMITE"]},
+                    "amountLimit": {"type": "STRING", "nullable": True},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    "required": ["jointAdministration"],
+}
+
+
+def extraer_administracion(docs) -> tuple[dict, dict]:
+    """`(resultado, uso)` con el régimen de administración del documento nativo.
+
+    Una sola llamada. El esquema es PLANO por el mismo motivo medido que el de
+    shareholders: anidarlo hace que el modelo se desboque hasta truncar el JSON.
+
+    `jointAdministration` vuelve `None` cuando el modelo no lo declara, y eso es
+    una respuesta, no un fallo: §11 define el campo como `boolean | null` y dice
+    «`null` si el documento no permite determinarlo».
+    """
+    pares = [(d.nombre, d.contenido) if hasattr(d, "nombre") else d for d in docs]
+    texto, uso = _llamar_con_archivos(
+        pares, PROMPT_ADMINISTRACION, _config_multimodal(ESQUEMA_ADMINISTRACION)
+    )
+    datos = _objeto_de(texto, "administración")
+
+    conjunta = datos.get("jointAdministration")
+    return {
+        # Solo un booleano de verdad pasa. Un `"true"` de texto o un 1 se tratan
+        # como «no lo dijo»: es un dato que después decide cuántas aprobaciones
+        # necesita una empresa para operar, y adivinarlo es peor que no tenerlo.
+        "jointAdministration": conjunta if isinstance(conjunta, bool) else None,
+        "minimumSignatures": datos.get("minimumSignatures"),
+        "administrators": [a for a in (datos.get("administrators") or []) if isinstance(a, dict)],
+    }, uso

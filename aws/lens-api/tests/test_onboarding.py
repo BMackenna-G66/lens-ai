@@ -389,3 +389,15 @@ def test_no_hay_dos_versiones_del_bloque_company():
     """Dos funciones para el mismo bloque se desincronizan en el primer cambio,
     y el endpoint que quede atrás entrega datos viejos sin que nadie lo note."""
     assert not hasattr(ob, "empresa_ep3")
+
+
+@pytest.mark.parametrize("valor,esperado", [
+    (True, True), (False, False), (None, None),
+    ("true", None), ("CONJUNTA", None), (1, None), (0, None),
+])
+def test_la_administracion_conjunta_solo_acepta_booleanos(valor, esperado):
+    """§11 lo define `boolean | null`. Un `"true"` de texto o un 1 son «no lo
+    dijo»: de este valor depende cuántas aprobaciones necesita una empresa para
+    operar, y adivinarlo es peor que no tenerlo."""
+    c = ob.empresa({"legalName": "X", "jointAdministration": valor}, ob.Avisos())
+    assert c["jointAdministration"] is esperado

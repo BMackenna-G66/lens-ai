@@ -86,14 +86,16 @@ Parameters:
       de procesar. `/salud` lo dice en `disparo_asincrono`.
   TiposPrincipales:
     Type: String
-    Default: ''
+    Default: company_deeds_document
     Description: >
       Los `documentType` que cuentan como documento PRINCIPAL, separados por
-      coma. VACÍO = TODOS son principales, y es el default a propósito: el
-      vocabulario todavía no está confirmado con Onboarding, y tratar un
-      documento desconocido como complementario dejaría que una corrida termine
-      COMPLETED sin haber leído la escritura. Terminar en FAILED de más es
-      visible; en COMPLETED de menos, no.
+      coma. §5.2 fija tres y el principal es la escritura
+      (`company_deeds_document`); `company_shareholders_document` y
+      `company_id_document` son complementarios. Importa: §8 dice que FAILED
+      consume uno de los 3 intentos de lectura del usuario e INCOMPLETE no, así
+      que marcar todo como principal le quema un intento cada vez que falla un
+      complementario. VACÍO sigue significando TODOS principales, que es lo
+      correcto si alguna vez llega un lote sin `documentType` declarado.
   MaxDocumentosLote:
     Type: Number
     Default: 2
