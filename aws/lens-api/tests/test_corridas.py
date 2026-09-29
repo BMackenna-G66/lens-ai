@@ -232,7 +232,7 @@ def test_el_registro_trae_lo_que_ep1_tiene_que_devolver():
 
 
 def test_los_documentos_y_avisos_sobreviven_al_cierre():
-    docs = [{"objectKey": "a/b.pdf", "documentType": "CONSTITUTION"}]
+    docs = [{"objectKey": "a/b.pdf", "documentType": "company_deeds_document"}]
     co.registrar_inicio("prod", "ACME-1", "a1", documentos=docs, ahora=T0)
     reg = co.cerrar(
         "prod", "ACME-1", "a1", co.INCOMPLETE,
@@ -346,7 +346,7 @@ def test_los_campos_compuestos_vuelven_como_objetos(dynamo):
     """Viajan serializados porque DynamoDB no acepta floats y los porcentajes lo
     son. Si no se deserializan, EP-3 devolvería un string donde promete una lista.
     """
-    docs = [{"objectKey": "a/b.pdf", "documentType": "CONSTITUTION"}]
+    docs = [{"objectKey": "a/b.pdf", "documentType": "company_deeds_document"}]
     co.registrar_inicio("prod", "ACME-1", "a1", documentos=docs, ahora=T0)
     co.cerrar("prod", "ACME-1", "a1", co.INCOMPLETE,
               avisos=[{"reason": "PARTIALLY_ILLEGIBLE", "objectKey": "a/b.pdf"}],

@@ -624,6 +624,24 @@ def _socios_para_companies(descargados, t0: float) -> tuple[dict, list[str]]:
     return _extraer_socios(descargados, t0)
 
 
+def _administracion_para_companies(descargados, t0: float) -> dict | None:
+    """El régimen de administración (§11), acotado por el mismo presupuesto.
+
+    Cuesta una llamada al modelo y corre al final de la corrida, así que puede
+    no alcanzar el tiempo. Cuando no alcanza devuelve `None` —que el contrato
+    representa como `jointAdministration: null`— en vez de una conjetura: de este
+    dato depende cuántas aprobaciones necesita una empresa para operar.
+    """
+    if (time.monotonic() - t0) >= (PRESUPUESTO_S - MARGEN_SOCIOS_S):
+        log.warning("no quedó tiempo para leer el régimen de administración")
+        return None
+    docs = elegir_documentos(descargados)
+    if not docs:
+        return None
+    resultado, _uso = gemini.extraer_administracion(docs)
+    return resultado
+
+
 def lambda_handler(evento: dict, contexto=None) -> dict:
     # ── El trabajo de fondo se mira ANTES que la ruta ──────────────────────
     # Un disparo asíncrono no viene de la Function URL: no trae `requestContext`,
@@ -631,8 +649,9 @@ def lambda_handler(evento: dict, contexto=None) -> dict:
     # `/salud`— y el análisis no se haría nunca. En silencio.
     carga = disparador.es_trabajo_de_fondo(evento)
     if carga is not None:
-        return companies.procesar(carga, analizar=analizar,
-                                  extraer_socios=_socios_para_companies)
+        return companies.procesar(
+            carga, analizar=analizar, extraer_socios=_socios_para_companies,
+            extraer_administracion=_administracion_para_companies)
 
     ctx = (evento.get("requestContext") or {}).get("http") or {}
     metodo = (ctx.get("method") or evento.get("httpMethod") or "GET").upper()
@@ -684,8 +703,10 @@ def lambda_handler(evento: dict, contexto=None) -> dict:
             codigo, cuerpo = errores.error_http(
                 "UNAUTHORIZED", "Falta o no coincide el header x-api-secret.")
             return _resp(codigo, cuerpo)
-        r = companies.manejar(evento, ruta, metodo, analizar=analizar,
-                              extraer_socios=_socios_para_companies)
+        r = companies.manejar(
+            evento, ruta, metodo, analizar=analizar,
+            extraer_socios=_socios_para_companies,
+            extraer_administracion=_administracion_para_companies)
         if r is not None:
             return r
 

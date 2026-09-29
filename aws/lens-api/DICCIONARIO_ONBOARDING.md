@@ -75,6 +75,7 @@ una regla; la regla está en la columna de origen.
 | `legalForm` | string \| null | Sí | Derivado del sufijo de la razón social, máximo 30 caracteres | `"Sociedad por Acciones"` |
 | `address` | object | Sí | Derivado de *Domicilio Legal* (ver abajo) | |
 | `activity` | string \| null | Sí | Derivado de *Objeto Social*, máximo 30 caracteres | `"Inversiones"` |
+| `jointAdministration` | boolean \| null | Sí | Pasada propia sobre las cláusulas de administración (§11) | `true` |
 
 > **Es un solo bloque, no dos.** La especificación lo dice literal en EP-3:
 > «`company`: mismo contenido que EP-5». Dos implementaciones del mismo bloque se
@@ -84,7 +85,7 @@ una regla; la regla está en la columna de origen.
 > `taxIdType` va en `null` cuando `taxId` va en `null`. Un tipo de documento para
 > un documento que no existe es ruido en el camino que decide `NOT_COMPARABLE`.
 
-### 2.2 El sub-bloque `address`
+#### Las cuatro partes del domicilio
 
 | Campo | Tipo | Oblig. | Origen | Ejemplo |
 |---|---|---|---|---|
@@ -99,7 +100,23 @@ más general**, así que se reparte desde el final, que es la posición confiabl
 Lo que no se puede repartir **queda en `null`**: una comuna adivinada a partir de
 una región es peor que una comuna vacía, porque nadie la va a revisar.
 
-### 2.3 `legalRepresentatives[]` — EP-3 y EP-4
+#### Sobre `jointAdministration`
+
+Dice si la sociedad exige que **dos o más personas actúen en conjunto** para
+obligarla. Va en `null` cuando el documento no lo declara o es ambiguo, y eso es
+una respuesta, no un fallo — de este valor depende cuántas aprobaciones necesita
+una empresa para operar, así que solo pasa un booleano explícito.
+
+No se deriva interpretando el texto del campo *Facultades*: sale de una lectura
+propia del documento. Interpretar texto libre es justamente lo que hoy hace la
+revisión humana porque no es confiable, y el riesgo que se quiere cubrir —que
+alguien se identifique como una persona que no puede obligar a la sociedad por sí
+sola— no se resuelve con una heurística.
+
+Varios apoderados que actúan **indistintamente** no son administración conjunta.
+Un límite de monto por sobre el cual se exigen dos firmas, **sí**.
+
+### 2.2 `legalRepresentatives[]` — EP-3 y EP-4
 
 | Campo | Tipo | Oblig. | Origen | Ejemplo |
 |---|---|---|---|---|
@@ -111,7 +128,7 @@ una región es peor que una comuna vacía, porque nadie la va a revisar.
 | `identificationNumber` | string \| null | Sí | **Tal como figura**, no solo dígitos | `"1.020.304-5"` |
 | `role` | string \| null | Sí | *Representante Legal* (cargo), hasta 60 caracteres | `"Gerente General"` |
 
-### 2.4 `shareholders[]` — EP-3 y EP-6
+### 2.3 `shareholders[]` — EP-3 y EP-6
 
 | Campo | Tipo | Oblig. | Origen | Ejemplo |
 |---|---|---|---|---|
