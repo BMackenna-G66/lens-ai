@@ -72,6 +72,35 @@ Parameters:
       particiones distintas sin avisar, y la consulta de estado devuelve
       NOT_STARTED sobre una corrida que sí ocurrió. Setearlo cierra esa trampa
       sin tocar código.
+  DisparoAsincrono:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >
+      Si EP-1 responde el 202 ANTES de procesar, invocándose a sí misma en
+      segundo plano. Arranca en `false` porque eso necesita
+      `lambda:InvokeFunction` sobre la propia función — un permiso, y lo medido
+      el 12-09-2026 es que cualquier despliegue que toque permisos con
+      `compliance-admin` falla Y deja el stack trabado. En `false` el trabajo
+      corre en línea: el 202 sale igual y con el mismo contenido, pero después
+      de procesar. `/salud` lo dice en `disparo_asincrono`.
+  TiposPrincipales:
+    Type: String
+    Default: ''
+    Description: >
+      Los `documentType` que cuentan como documento PRINCIPAL, separados por
+      coma. VACÍO = TODOS son principales, y es el default a propósito: el
+      vocabulario todavía no está confirmado con Onboarding, y tratar un
+      documento desconocido como complementario dejaría que una corrida termine
+      COMPLETED sin haber leído la escritura. Terminar en FAILED de más es
+      visible; en COMPLETED de menos, no.
+  MaxDocumentosLote:
+    Type: Number
+    Default: 2
+    Description: >
+      Tope de documentos por petición de EP-1. La especificación v1.2 lo bajó a
+      2. Es el tope de ESE contrato: `MaxDocumentos` (12) sigue siendo el de
+      `/v1/analisis` y no se toca.
   BucketDocumentos:
     Type: String
     Default: g66-company
@@ -83,6 +112,7 @@ Parameters:
 Conditions:
   ConTabla: !Equals [!Ref CrearTablaIdempotencia, 'true']
   ConTablaCorridas: !Equals [!Ref CrearTablaCorridas, 'true']
+  ConDisparoAsincrono: !Equals [!Ref DisparoAsincrono, 'true']
 
 Globals:
   Function:
@@ -115,6 +145,9 @@ Resources:
           # pero sin sobrevivir a la invocación. Lo reporta /salud.
           CORRIDAS_TABLA: !If [ConTablaCorridas, !Ref TablaCorridas, '']
           CORRIDAS_AMBIENTES: !Ref AmbientesCorridas
+          DISPARO_ASINCRONO: !Ref DisparoAsincrono
+          TIPOS_PRINCIPALES: !Ref TiposPrincipales
+          MAX_DOCUMENTOS_LOTE: !Ref MaxDocumentosLote
           API_SECRET: !Ref ApiSecretValue
           GEMINI_API_KEY: !Ref GeminiApiKey
           MOTOR_OCR: !Ref MotorOcr
@@ -168,6 +201,17 @@ Resources:
               - Effect: Allow
                 Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:Query]
                 Resource: !GetAtt TablaCorridas.Arn
+          - !Ref AWS::NoValue
+        # Invocarse a sí misma para responder el 202 antes de procesar (Fase 2).
+        # Sin esto el trabajo corre en línea: el contrato no cambia, la petición
+        # tarda. No se declara cuando está apagado porque ES un cambio de
+        # permisos, y es justo lo que deja el stack trabado.
+        - !If
+          - ConDisparoAsincrono
+          - Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:lens-analisis'
           - !Ref AWS::NoValue
       FunctionUrlConfig:
         AuthType: NONE
