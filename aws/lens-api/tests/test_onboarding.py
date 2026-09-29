@@ -374,18 +374,18 @@ def test_sin_domicilio_queda_dicho_en_los_avisos():
     assert avisos.items[0]["reason"] == ob.AVISO_DATO_FALTANTE
 
 
-def test_ep5_no_se_contamina_con_el_address_de_ep3():
-    """EP-3 y EP-5 son dos endpoints con dos bloques distintos, y §6.9 fija los
-    SEIS campos de EP-5. Si `empresa()` empezara a devolver `address`, EP-5
-    entregaría un campo que su contrato no define — el mismo motivo por el que
-    `representante()` no es `persona()` con un campo más."""
+def test_el_bloque_company_lleva_el_domicilio():
+    """CORRECCIÓN de la Fase 4. Ahí se separó `empresa_ep3()` de `empresa()`
+    creyendo que `address` era solo de EP-3. La especificación dice lo contrario,
+    literal, en EP-3: «`company`: mismo contenido que EP-5». Es un bloque solo.
+    """
     base = {"legalName": "X SpA", "taxId": "77.111.222-1", "address": "Providencia 1"}
-    assert "address" not in ob.empresa(base, ob.Avisos())
-    assert "address" in ob.empresa_ep3(base, ob.Avisos())
+    c = ob.empresa(base, ob.Avisos())
+    assert "address" in c
+    assert c["address"]["street"] == "Providencia 1"
 
 
-def test_ep3_entrega_los_seis_de_ep5_mas_el_domicilio():
-    base = {"legalName": "X SpA", "taxId": "77.111.222-1"}
-    cinco = ob.empresa(base, ob.Avisos())
-    siete = ob.empresa_ep3(base, ob.Avisos())
-    assert set(siete) == set(cinco) | {"address"}
+def test_no_hay_dos_versiones_del_bloque_company():
+    """Dos funciones para el mismo bloque se desincronizan en el primer cambio,
+    y el endpoint que quede atrás entrega datos viejos sin que nadie lo note."""
+    assert not hasattr(ob, "empresa_ep3")

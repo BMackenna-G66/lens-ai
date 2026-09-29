@@ -244,7 +244,7 @@ campos ausentes.
 Donde dice *derivado*, el valor no sale tal cual de un campo extraído sino de
 una regla; la regla está en la columna de origen.
 
-### 2.1 Bloque `company` — EP-5
+### 2.1 Bloque `company` — EP-3 y EP-5
 
 | Campo | Tipo | Oblig. | Origen | Ejemplo |
 |---|---|---|---|---|
@@ -252,17 +252,19 @@ una regla; la regla está en la columna de origen.
 | `taxId` | string \\| null | Sí | *RUT de la sociedad*, tal como figura | `"77.111.222-1"` |
 | `taxIdType` | string \\| null | Sí | Derivado del país declarado; el formato solo decide si el país no se sabe | `"RUT"` |
 | `constitutionDate` | string \\| null | Sí | *Fecha de Constitución*, convertida a `YYYY-MM-DD` | `"2019-03-12"` |
-| `legalForm` | string \\| null | Sí | Derivado, máximo 30 caracteres | `"Sociedad por Acciones"` |
+| `legalForm` | string \\| null | Sí | Derivado del sufijo de la razón social, máximo 30 caracteres | `"Sociedad por Acciones"` |
+| `address` | object | Sí | Derivado de *Domicilio Legal* (ver abajo) | |
 | `activity` | string \\| null | Sí | Derivado de *Objeto Social*, máximo 30 caracteres | `"Inversiones"` |
+
+> **Es un solo bloque, no dos.** La especificación lo dice literal en EP-3:
+> «`company`: mismo contenido que EP-5». Dos implementaciones del mismo bloque se
+> desincronizan en el primer cambio, y el consumidor vería una empresa distinta
+> según por dónde preguntara.
 
 > `taxIdType` va en `null` cuando `taxId` va en `null`. Un tipo de documento para
 > un documento que no existe es ruido en el camino que decide `NOT_COMPARABLE`.
 
-### 2.2 Bloque `company` — EP-3
-
-**No es el mismo bloque que el de EP-5.** Son los seis campos de arriba **más
-`address`**, que EP-5 no define. Los dos endpoints tienen contratos distintos y
-mezclarlos haría que EP-5 entregue un campo que su especificación no declara.
+### 2.2 El sub-bloque `address`
 
 | Campo | Tipo | Oblig. | Origen | Ejemplo |
 |---|---|---|---|---|

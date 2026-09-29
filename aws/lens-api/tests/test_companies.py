@@ -873,3 +873,157 @@ def test_sin_environment_es_400_tambien_en_ep3():
 
 def test_metodo_no_permitido_en_ep3():
     assert pedir_resultado(metodo="POST")[0] == 400
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# EP-4, EP-5 y EP-6 · Las vistas filtradas (Fase 7)
+# ════════════════════════════════════════════════════════════════════════════
+
+def pedir_seccion(nombre, company_id="ACME-1", ambiente="prod", metodo="GET", query=None):
+    ruta = f"/v1/companies/{company_id}/analysis/{nombre}"
+    ev = {
+        "rawPath": ruta,
+        "requestContext": {"http": {"method": metodo}},
+        "headers": {"x-api-secret": SECRETO},
+        "queryStringParameters": {"environment": ambiente} if query is None else query,
+    }
+    r = co.manejar(ev, ruta, metodo, analizar=analizar_falso)
+    return r["statusCode"], json.loads(r["body"])
+
+
+def socios_completos(descargados, t0):
+    return {
+        "legalRepresentatives": [{
+            "personType": "NATURAL", "shareholderName": "MARTINEZ SOTO CLAUDIA ANDREA",
+            "shareholderId": "10.203.040-5", "countryOfOrigin": "Chile",
+            "position": "Gerente General",
+        }],
+        "directOwnership": [{
+            "personType": "NATURAL", "shareholderName": "MARTINEZ SOTO CLAUDIA ANDREA",
+            "shareholderId": "10.203.040-5", "countryOfOrigin": "Chile",
+            "ownershipPercentage": 40.0,
+        }],
+        "indirectShareholders": [{
+            "personType": "LEGAL", "shareholderName": "INVERSIONES AURORA LIMITADA",
+            "shareholderId": "77.999.888-7", "countryOfOrigin": "Chile",
+            "ownershipPercentage": 60.0, "indirectShareholders": [],
+        }],
+    }, []
+
+
+def correr_con_socios(company_id="ACME-1"):
+    corridas.registrar_inicio("prod", company_id, "a1", documentos=[PRINCIPAL])
+    co.procesar({
+        "ambiente": "prod", "companyId": company_id, "analysisId": "a1",
+        "country": "chile", "documents": [PRINCIPAL],
+    }, analizar=analizar_completo, extraer_socios=socios_completos)
+
+
+# ── Las tres son ventanas del MISMO resultado ───────────────────────────────
+
+@pytest.mark.parametrize("nombre,clave", [
+    ("legal-representatives", "legalRepresentatives"),
+    ("company", "company"),
+    ("shareholders", "businessShareholders"),
+])
+def test_cada_seccion_entrega_su_bloque_y_nada_mas(s3_falso, nombre, clave):
+    correr_con_socios()
+    codigo, cuerpo = pedir_seccion(nombre)
+    assert codigo == 200
+    assert set(cuerpo) == {"companyId", "analysisId", clave, "schemaVersion"}
+
+
+def test_ep5_devuelve_exactamente_el_company_de_ep3(s3_falso):
+    """La especificación dice literal, en EP-3: «`company`: mismo contenido que
+    EP-5». Si cada endpoint armara su bloque, podrían empezar a diferir sin que
+    nadie lo note, y el consumidor vería una empresa distinta según por dónde
+    preguntara."""
+    correr_con_socios()
+    assert pedir_seccion("company")[1]["company"] == pedir_resultado()[1]["company"]
+
+
+def test_ep4_devuelve_exactamente_los_representantes_de_ep3(s3_falso):
+    correr_con_socios()
+    de_ep4 = pedir_seccion("legal-representatives")[1]["legalRepresentatives"]
+    assert de_ep4 == pedir_resultado()[1]["legalRepresentatives"]
+
+
+@pytest.mark.parametrize("nombre", ["legal-representatives", "company", "shareholders"])
+def test_las_tres_dan_el_mismo_404_que_ep3(s3_falso, nombre):
+    """Son el mismo resultado por distintas ventanas: una sección no puede
+    responder 200 mientras otra responde 404 sobre la misma empresa."""
+    assert pedir_seccion(nombre, company_id="NUNCA")[0] == 404
+    corridas.registrar_inicio("prod", "EN-CURSO", "x")
+    assert pedir_seccion(nombre, company_id="EN-CURSO")[0] == 404
+
+
+@pytest.mark.parametrize("nombre", ["legal-representatives", "company", "shareholders"])
+def test_las_tres_piden_environment(nombre):
+    assert pedir_seccion(nombre, query={})[0] == 400
+
+
+@pytest.mark.parametrize("nombre", ["legal-representatives", "company", "shareholders"])
+def test_las_tres_rechazan_metodos_que_no_son_get(nombre):
+    assert pedir_seccion(nombre, metodo="POST")[0] == 400
+
+
+# ── EP-6 · la estructura que Onboarding ya usa ──────────────────────────────
+
+def test_ep6_devuelve_el_objeto_raiz_de_cuatro_campos(s3_falso):
+    """Respetar la estructura del procesador que se retira es el punto del
+    endpoint: permite apagarlo sin que Onboarding toque su persistencia."""
+    correr_con_socios()
+    b = pedir_seccion("shareholders")[1]["businessShareholders"]
+    assert set(b) == {"businessName", "businessId", "directOwnership", "indirectShareholders"}
+    assert b["businessName"] == "COMERCIAL TRIFOLIO SpA"
+    assert b["businessId"] == "77.111.222-1"
+
+
+def test_ep6_usa_la_forma_de_accionista_y_no_la_de_representante(s3_falso):
+    """Las dos hacen «una persona» y no son lo mismo: acá el identificador va
+    SOLO CON DÍGITOS y el vocabulario de `identificationType` es el otro. Reusar
+    la forma de EP-4 emitiría las claves equivocadas con los valores
+    equivocados."""
+    correr_con_socios()
+    d = pedir_seccion("shareholders")[1]["businessShareholders"]["directOwnership"][0]
+    assert "shareholderId" in d and "identificationNumber" not in d
+    assert d["shareholderId"] == "102030405", "solo dígitos"
+    assert d["ownershipPercentage"] == 40.0
+
+
+def test_ep6_conserva_la_cadena_de_indirectos(s3_falso):
+    correr_con_socios()
+    b = pedir_seccion("shareholders")[1]["businessShareholders"]
+    ind = b["indirectShareholders"][0]
+    assert ind["personType"] == "LEGAL"
+    assert ind["lastName"] is None, "una jurídica no tiene apellido"
+    assert ind["name"] == "INVERSIONES AURORA LIMITADA", "la razón social va en `name`"
+    assert "indirectShareholders" in ind, "la cadena se puede anidar"
+
+
+# ── Correcciones de lo ya mergeado ──────────────────────────────────────────
+
+def test_el_schema_version_es_el_del_esquema_no_el_del_documento():
+    """La especificación lo fija en `1.0.0` en los seis endpoints. Decir `1.2`
+    —la versión del documento— le haría creer al consumidor que el formato
+    cambió cuando no cambió."""
+    assert co.SCHEMA_VERSION == "1.0.0"
+
+
+def test_ep3_trae_el_country_de_la_corrida(s3_falso):
+    """Le dice al consumidor bajo qué reglas se leyó el documento."""
+    correr_con_socios()
+    assert pedir_resultado()[1]["country"] == "chile"
+
+
+def test_el_company_id_numerico_viaja_como_numero():
+    """La especificación lo declara `number` y sus ejemplos lo muestran así."""
+    assert co.identificador("48213") == 48213
+    assert co.identificador(48213) == 48213
+
+
+def test_un_company_id_no_numerico_se_refleja_como_vino():
+    """No se rechaza: la v1.2 cambió la clave de persistencia y no está en el
+    repo para confirmar si el tipo siguió igual. Rechazar de más cortaría
+    tráfico legítimo; reflejarlo no rompe a nadie."""
+    assert co.identificador("ACME-1") == "ACME-1"
