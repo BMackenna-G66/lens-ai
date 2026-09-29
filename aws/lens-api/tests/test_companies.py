@@ -640,13 +640,11 @@ def test_si_no_se_puede_leer_no_se_hace_pasar_por_not_started(monkeypatch):
     assert cuerpo["error"]["reason"] == "SERVICE_UNAVAILABLE"
 
 
-def test_status_no_se_confunde_con_ep3():
-    """`/analysis` (EP-3, Fase 4) todavía no existe: no lo puede atender el
-    handler de `/analysis/status`."""
-    ruta = "/v1/companies/ACME-1/analysis"
-    assert co.manejar({
-        "rawPath": ruta, "requestContext": {"http": {"method": "GET"}}, "headers": {},
-    }, ruta, "GET", analizar=analizar_falso) is None
+def test_status_y_ep3_son_dos_endpoints_distintos():
+    """Comparten prefijo y no comparten reglas: sobre una empresa sin corridas,
+    `/analysis/status` responde 200 NOT_STARTED y `/analysis` responde 404."""
+    assert consultar(company_id="NUNCA")[0] == 200
+    assert pedir_resultado(company_id="NUNCA")[0] == 404
 
 
 def test_el_estado_no_toca_el_almacen_analitico():
@@ -697,3 +695,181 @@ def test_el_ciclo_completo_ep1_luego_ep2(s3_falso, monkeypatch):
     cuerpo = json.loads(get["body"])
     assert cuerpo["analysisId"] == analysis_id, "la consulta devuelve LA corrida que se disparó"
     assert cuerpo["status"] != corridas.NOT_STARTED
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# EP-3 · El resultado (Fase 4)
+# ════════════════════════════════════════════════════════════════════════════
+
+def pedir_resultado(company_id="ACME-1", ambiente="prod", metodo="GET", query=None):
+    ruta = f"/v1/companies/{company_id}/analysis"
+    ev = {
+        "rawPath": ruta,
+        "requestContext": {"http": {"method": metodo}},
+        "headers": {"x-api-secret": SECRETO},
+        "queryStringParameters": {"environment": ambiente} if query is None else query,
+    }
+    r = co.manejar(ev, ruta, metodo, analizar=analizar_falso)
+    return r["statusCode"], json.loads(r["body"])
+
+
+def analizar_completo(documentos, incluir_texto, pais=""):
+    return {
+        "campos": [
+            {"field": "Razón Social", "value": "COMERCIAL TRIFOLIO SpA"},
+            {"field": "RUT de la sociedad", "value": "77.111.222-1"},
+            {"field": "Fecha de Constitución", "value": "12 de marzo de 2019"},
+            {"field": "Objeto Social", "value": "Inversiones y rentas de toda clase de bienes"},
+            {"field": "Domicilio Legal", "value": "Av. Providencia 1234, Of 302, Santiago, Región Metropolitana"},
+        ],
+        "documentos": [{"nombre": "escritura.pdf", "ok": True, "metodo": "capa_texto",
+                        "paginas_totales": 12, "paginas_leidas": 12, "paginas_por_ocr": 0}],
+        "pais_detectado": "chile",
+        "avisos": [],
+    }
+
+
+def socios_falsos(descargados, t0):
+    return {
+        "legalRepresentatives": [{
+            "personType": "NATURAL",
+            "shareholderName": "MARTINEZ SOTO CLAUDIA ANDREA",
+            "shareholderId": "10.203.040-5",
+            "countryOfOrigin": "Chile",
+            "position": "Gerente General",
+        }],
+        "directOwnership": [],
+        "indirectShareholders": [],
+    }, []
+
+
+def correr_completo(s3, company_id="ACME-1"):
+    corridas.registrar_inicio("prod", company_id, "a1", documentos=[PRINCIPAL])
+    co.procesar({
+        "ambiente": "prod", "companyId": company_id, "analysisId": "a1",
+        "country": "chile", "documents": [PRINCIPAL],
+    }, analizar=analizar_completo, extraer_socios=socios_falsos)
+
+
+# ── La regla del 404 ────────────────────────────────────────────────────────
+
+def test_sin_corridas_es_404():
+    """EP-2 pregunta «¿en qué anda?» y «todavía nada» es respuesta. EP-3 pide el
+    resultado, y cuando no hay resultado no hay nada que devolver."""
+    codigo, cuerpo = pedir_resultado(company_id="NUNCA")
+    assert codigo == 404
+    assert cuerpo["error"]["reason"] == "NOT_FOUND"
+
+
+def test_una_corrida_en_curso_es_404():
+    corridas.registrar_inicio("prod", "ACME-1", "a1")
+    assert pedir_resultado()[0] == 404
+
+
+def test_una_corrida_fallida_es_404(s3_falso):
+    def revienta(*_, **__):
+        raise RuntimeError("Gemini se cayó")
+
+    correr([PRINCIPAL], s3_falso, analizar=revienta)
+    assert pedir_resultado()[0] == 404
+
+
+def test_el_404_mira_solo_la_ultima_aunque_haya_una_buena_atras(s3_falso):
+    """Del plan: «404 si la corrida más reciente no está en COMPLETED ni
+    INCOMPLETE, AUNQUE EXISTA UNA ANTERIOR UTILIZABLE». Devolver la vieja sería
+    contestar con datos de un análisis ya reemplazado, sin que quien pregunta
+    pueda notarlo."""
+    correr_completo(s3_falso)
+    assert pedir_resultado()[0] == 200
+
+    corridas.registrar_inicio("prod", "ACME-1", "a2")   # una nueva, en curso
+    assert pedir_resultado()[0] == 404, "la vieja ya no cuenta"
+
+
+@pytest.mark.parametrize("estado", [corridas.COMPLETED, corridas.INCOMPLETE])
+def test_completed_e_incomplete_si_devuelven_resultado(s3_falso, estado, monkeypatch):
+    correr_completo(s3_falso)
+    reg = corridas.buscar("prod", "ACME-1", "a1")
+    corridas.cerrar("prod", "ACME-1", "a1", estado, resultado=reg["result"])
+    assert pedir_resultado()[0] == 200
+
+
+# ── La forma de la respuesta ────────────────────────────────────────────────
+
+def test_el_resultado_trae_los_bloques_del_contrato(s3_falso):
+    correr_completo(s3_falso)
+    _, cuerpo = pedir_resultado()
+    for clave in ("company", "legalRepresentatives", "fields", "documents", "warnings"):
+        assert clave in cuerpo, f"EP-3 define {clave}"
+
+
+def test_los_18_campos_siguen_saliendo_como_estaban(s3_falso):
+    """Los 18 campos no se modifican: están fuera de alcance por acuerdo y de
+    ellos depende la cola KYB de Compliance."""
+    correr_completo(s3_falso)
+    _, cuerpo = pedir_resultado()
+    campos = {c["field"] for c in cuerpo["fields"]}
+    assert "Razón Social" in campos and "RUT de la sociedad" in campos
+
+
+def test_el_detalle_por_documento_suma_las_cuatro_claves(s3_falso):
+    """Lo que el plan pide agregar: objectKey, documentType, pagesTotal,
+    pagesRead. Sin `objectKey` quien integra no puede relacionar un documento de
+    la respuesta con el que mandó."""
+    correr_completo(s3_falso)
+    _, cuerpo = pedir_resultado()
+    d = cuerpo["documents"][0]
+    assert d["objectKey"] == "b2b/escritura.pdf"
+    assert d["documentType"] == "CONSTITUTION"
+    assert d["pagesTotal"] == 12
+    assert d["pagesRead"] == 12
+
+
+def test_el_bloque_company_deriva_lo_que_tiene_que_derivar(s3_falso):
+    correr_completo(s3_falso)
+    _, cuerpo = pedir_resultado()
+    c = cuerpo["company"]
+    assert c["legalName"] == "COMERCIAL TRIFOLIO SpA"
+    assert c["taxId"] == "77.111.222-1"
+    assert c["taxIdType"] == "RUT", "derivado del país"
+    assert c["constitutionDate"] == "2019-03-12", "convertido a YYYY-MM-DD"
+    assert c["legalForm"] == "Sociedad por Acciones", "derivado del sufijo"
+    assert len(c["activity"]) <= 30, "el contrato lo topea en 30"
+
+
+def test_el_domicilio_se_parte_en_sus_cuatro_partes(s3_falso):
+    correr_completo(s3_falso)
+    _, cuerpo = pedir_resultado()
+    a = cuerpo["company"]["address"]
+    assert a["street"] == "Av. Providencia 1234"
+    assert a["apt"] == "Of 302"
+    assert a["city"] == "Santiago"
+    assert a["state"] == "Región Metropolitana"
+
+
+def test_los_representantes_salen_con_la_forma_de_ep4(s3_falso):
+    correr_completo(s3_falso)
+    _, cuerpo = pedir_resultado()
+    r = cuerpo["legalRepresentatives"][0]
+    assert set(r) == {"fullName", "name", "lastName", "personType",
+                      "identificationType", "identificationNumber", "role"}
+    assert r["fullName"] == "MARTINEZ SOTO CLAUDIA ANDREA", "el texto original, sin reordenar"
+    assert r["identificationNumber"] == "10.203.040-5", "tal como figura, no solo dígitos"
+
+
+def test_los_representantes_se_guardan_crudos_y_se_serializan_al_responder(s3_falso):
+    """Guardarlos ya serializados congelaría el formato del día en que se corrió
+    el análisis, y un arreglo del contrato no alcanzaría a las corridas viejas.
+    """
+    correr_completo(s3_falso)
+    guardado = corridas.buscar("prod", "ACME-1", "a1")["result"]["legalRepresentatives"][0]
+    assert "shareholderName" in guardado, "crudo, con las claves de la extracción"
+    assert "fullName" not in guardado, "la forma de EP-4 la pone la respuesta"
+
+
+def test_sin_environment_es_400_tambien_en_ep3():
+    assert pedir_resultado(query={})[0] == 400
+
+
+def test_metodo_no_permitido_en_ep3():
+    assert pedir_resultado(metodo="POST")[0] == 400

@@ -327,3 +327,65 @@ def test_el_contrato_viejo_no_se_toca():
     p = contrato._persona({"personType": "JURIDICA", "shareholderId": "76.123.456-K"})
     assert p["personType"] == "JURIDICA", "el contrato del bot NO se traduce"
     assert p["shareholderId"] == "76.123.456-K", "el contrato del bot NO saca el guion"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# El domicilio y el bloque `company` de EP-3 — Fase 4
+# ════════════════════════════════════════════════════════════════════════════
+
+@pytest.mark.parametrize("crudo,esperado", [
+    # El caso normal chileno: calle, comuna, región.
+    ("10 norte 882, Viña del Mar, Valparaíso",
+     {"street": "10 norte 882", "apt": None, "city": "Viña del Mar", "state": "Valparaíso"}),
+    # Con oficina en el medio.
+    ("Av. Providencia 1234, Of 302, Santiago",
+     {"street": "Av. Providencia 1234", "apt": "Of 302", "city": "Santiago", "state": None}),
+    # Colombiano, con una parte de más: las del medio son todas ciudad.
+    ("Calle 93 # 11-30, Oficina 501, Chapinero, Bogotá, Cundinamarca",
+     {"street": "Calle 93 # 11-30", "apt": "Oficina 501",
+      "city": "Chapinero, Bogotá", "state": "Cundinamarca"}),
+    # Una sola parte: va entera a `street`.
+    ("Providencia",
+     {"street": "Providencia", "apt": None, "city": None, "state": None}),
+])
+def test_el_domicilio_se_reparte_desde_la_posicion_confiable(crudo, esperado):
+    assert ob.domicilio(crudo) == esperado
+
+
+def test_un_domicilio_de_una_parte_no_se_inventa_ciudad():
+    """Partirlo por espacios produciría una ciudad que nunca se escribió. Una
+    comuna adivinada es peor que una vacía: nadie la va a revisar."""
+    d = ob.domicilio("Providencia")
+    assert d["city"] is None and d["state"] is None
+
+
+@pytest.mark.parametrize("vacio", ["", "   ", "No especificado", "sin documento"])
+def test_sin_domicilio_las_cuatro_claves_van_en_null(vacio):
+    """Las claves viajan igual: el consumidor no se defiende de campos ausentes."""
+    d = ob.domicilio(vacio)
+    assert set(d) == {"street", "apt", "city", "state"}
+    assert all(v is None for v in d.values())
+
+
+def test_sin_domicilio_queda_dicho_en_los_avisos():
+    avisos = ob.Avisos()
+    ob.domicilio("", avisos)
+    assert len(avisos) == 1
+    assert avisos.items[0]["reason"] == ob.AVISO_DATO_FALTANTE
+
+
+def test_ep5_no_se_contamina_con_el_address_de_ep3():
+    """EP-3 y EP-5 son dos endpoints con dos bloques distintos, y §6.9 fija los
+    SEIS campos de EP-5. Si `empresa()` empezara a devolver `address`, EP-5
+    entregaría un campo que su contrato no define — el mismo motivo por el que
+    `representante()` no es `persona()` con un campo más."""
+    base = {"legalName": "X SpA", "taxId": "77.111.222-1", "address": "Providencia 1"}
+    assert "address" not in ob.empresa(base, ob.Avisos())
+    assert "address" in ob.empresa_ep3(base, ob.Avisos())
+
+
+def test_ep3_entrega_los_seis_de_ep5_mas_el_domicilio():
+    base = {"legalName": "X SpA", "taxId": "77.111.222-1"}
+    cinco = ob.empresa(base, ob.Avisos())
+    siete = ob.empresa_ep3(base, ob.Avisos())
+    assert set(siete) == set(cinco) | {"address"}

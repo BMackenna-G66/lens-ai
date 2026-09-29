@@ -63,6 +63,7 @@ AVISO_FECHA = _CATALOGO_AVISOS["DATE_FORMAT_UNPARSEABLE"].nombre
 AVISO_TRUNCADO = _CATALOGO_AVISOS["VALUE_TRUNCATED"].nombre
 AVISO_NOMBRE_ADIVINADO = _CATALOGO_AVISOS["NAME_SPLIT_INFERRED"].nombre
 AVISO_TAX_ID_DISCREPA = _CATALOGO_AVISOS["TAX_ID_COUNTRY_MISMATCH"].nombre
+AVISO_DATO_FALTANTE = _CATALOGO_AVISOS["EXPECTED_DATA_MISSING"].nombre
 
 
 class Avisos:
@@ -773,3 +774,85 @@ def empresa(datos: dict, avisos: Avisos | None = None) -> dict:
         "legalForm": recortar(datos.get("legalForm"), TOPE_FORMA_LEGAL, "legalForm", avisos),
         "activity": recortar(datos.get("activity"), TOPE_ACTIVIDAD, "activity", avisos),
     }
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# El bloque `company` de EP-3 — Fase 4
+# ══════════════════════════════════════════════════════════════════════════
+# NO es `empresa()` con una clave más, aunque lo parezca: EP-3 y EP-5 son dos
+# endpoints con dos bloques distintos, y §6.9 fija los SEIS campos de EP-5. Si
+# `empresa()` empezara a devolver `address`, EP-5 entregaría un campo que su
+# contrato no define — el mismo motivo por el que `representante()` no es
+# `persona()` con un campo más.
+
+#: Palabras que marcan la parte «departamento / oficina» de una dirección.
+#: Se buscan como palabra entera al principio del fragmento: `of` suelto
+#: aparece en cualquier lado, pero `of 302` solo en esta posición.
+_MARCAS_APTO = (
+    "depto", "dpto", "departamento", "of", "ofic", "oficina", "piso",
+    "local", "casa", "block", "bloque", "torre", "apto", "apartamento",
+)
+
+_RE_APTO = re.compile(
+    r"^(?:" + "|".join(_MARCAS_APTO) + r")\b\.?\s*\S", re.IGNORECASE)
+
+
+def _es_apto(fragmento: str) -> bool:
+    return bool(_RE_APTO.match(fragmento.strip()))
+
+
+def domicilio(texto: Any, avisos: Avisos | None = None) -> dict:
+    """Parte *Domicilio Legal* en `street` / `apt` / `city` / `state`.
+
+    ── Por qué por comas y no con algo más listo ───────────────────────────
+    Una dirección chilena o colombiana viene escrita a mano en la escritura y no
+    hay un formato. Lo único estable es que las partes van separadas por comas y
+    **de lo más específico a lo más general**: calle, luego comuna o ciudad,
+    luego región o departamento. Eso se cumple casi siempre; lo que no se cumple
+    es el largo, porque falta la calle, o la región, o las dos.
+
+    Así que se reparte desde el final, que es la posición confiable:
+
+        "10 norte 882, Viña del Mar, Valparaíso"  → street, city, state
+        "Av. Providencia 1234, Of 302, Santiago"  → street, apt, city
+        "Providencia"                             → street
+
+    Lo que no se puede repartir **no se inventa**: queda en `null`. Una comuna
+    adivinada a partir de una región es peor que una comuna vacía, porque nadie
+    la va a revisar.
+
+    Un domicilio de una sola parte va entero a `street`: es lo que dice el
+    documento, y partirlo por espacios produciría una ciudad que nunca se
+    escribió.
+    """
+    crudo = str(texto or "").strip()
+    if not crudo or crudo.lower() in ("no especificado", "sin documento"):
+        if avisos is not None:
+            avisos.agregar(AVISO_DATO_FALTANTE, "El documento no declara un domicilio legal.")
+        return {"street": None, "apt": None, "city": None, "state": None}
+
+    partes = [p.strip() for p in crudo.split(",") if p.strip()]
+
+    apt = None
+    # El apartamento puede venir en cualquier posición intermedia; se saca de la
+    # lista antes de repartir el resto por posición.
+    for i, p in enumerate(partes):
+        if i > 0 and _es_apto(p):
+            apt = partes.pop(i)
+            break
+
+    street = partes[0] if partes else None
+    city = partes[1] if len(partes) >= 2 else None
+    state = partes[2] if len(partes) >= 3 else None
+    # Con más de tres partes, las del medio son todas ciudad/comuna: se juntan en
+    # vez de descartarlas. La última sigue siendo la región.
+    if len(partes) > 3:
+        city = ", ".join(partes[1:-1])
+        state = partes[-1]
+
+    return {"street": street, "apt": apt, "city": city, "state": state}
+
+
+def empresa_ep3(datos: dict, avisos: Avisos | None = None) -> dict:
+    """El bloque `company` de EP-3 (§6 del plan): los seis de EP-5 más `address`."""
+    return {**empresa(datos, avisos), "address": domicilio(datos.get("address"), avisos)}
