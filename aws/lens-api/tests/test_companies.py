@@ -483,3 +483,217 @@ def test_salud_dice_si_el_202_es_de_verdad_inmediato():
     assert cuerpo["disparo_asincrono"] is False
     assert cuerpo["tipos_principales"] == [], "vacío significa que todos son principales"
     assert cuerpo["max_documentos_lote"] == 2
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# EP-2 · Estado (Fase 3)
+# ════════════════════════════════════════════════════════════════════════════
+
+def consultar(company_id="ACME-1", ambiente="prod", metodo="GET", query=None):
+    ruta = f"/v1/companies/{company_id}/analysis/status"
+    ev = {
+        "rawPath": ruta,
+        "requestContext": {"http": {"method": metodo}},
+        "headers": {"x-api-secret": SECRETO},
+        "queryStringParameters": {"environment": ambiente} if query is None else query,
+    }
+    r = co.manejar(ev, ruta, metodo, analizar=analizar_falso)
+    return r["statusCode"], json.loads(r["body"])
+
+
+# ── EL criterio de terminado ────────────────────────────────────────────────
+
+def test_una_empresa_sin_corridas_responde_200_not_started():
+    """El criterio de terminado del plan. Un `404` haría «todavía no hay
+    análisis» indistinguible de «esa ruta no existe» o «te equivocaste de
+    companyId», y el consumidor consulta en un bucle mientras espera."""
+    codigo, cuerpo = consultar(company_id="NUNCA-ANALIZADA")
+    assert codigo == 200
+    assert cuerpo["status"] == corridas.NOT_STARTED
+    assert cuerpo["analysisId"] is None
+
+
+def test_nunca_devuelve_404(s3_falso):
+    """Ni sin corridas, ni con una fallida, ni con una terminada."""
+    assert consultar(company_id="NUNCA")[0] == 200
+    correr([PRINCIPAL], s3_falso)
+    assert consultar()[0] == 200
+
+
+def test_el_estado_se_lee_sin_reprocesar(s3_falso):
+    """«Latencia por debajo de 1 s: se lee de la persistencia, sin reprocesar».
+    Si tocara el análisis, la consulta costaría lo mismo que la corrida."""
+    correr([PRINCIPAL], s3_falso)
+
+    def no_debe_llamarse(*_, **__):
+        raise AssertionError("EP-2 no puede analizar nada")
+
+    ruta = "/v1/companies/ACME-1/analysis/status"
+    r = co.manejar({
+        "rawPath": ruta, "requestContext": {"http": {"method": "GET"}},
+        "headers": {}, "queryStringParameters": {"environment": "prod"},
+    }, ruta, "GET", analizar=no_debe_llamarse)
+    assert r["statusCode"] == 200
+
+
+# ── La forma de la respuesta ────────────────────────────────────────────────
+
+def test_el_cuerpo_trae_siempre_las_mismas_claves(s3_falso):
+    """El consumidor no tiene que defenderse de campos ausentes."""
+    correr([PRINCIPAL], s3_falso)
+    _, con = consultar()
+    _, sin = consultar(company_id="NUNCA")
+    esperadas = {"companyId", "analysisId", "status", "startedAt", "finishedAt",
+                 "warnings", "schemaVersion"}
+    assert esperadas <= set(con) and esperadas <= set(sin)
+
+
+def test_el_error_va_solo_en_failed(s3_falso):
+    """En INCOMPLETE el análisis SIRVE, y lo degradado se dice en `warnings`.
+    Mandar un `error` ahí haría que Onboarding descarte un resultado utilizable
+    — el error caro que describe `errores.py`."""
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(co, "TIPOS_PRINCIPALES", ("CONSTITUTION",))
+    s3_falso.falla_get.add("b2b/anexo.pdf")
+    correr([PRINCIPAL, ANEXO], s3_falso)
+    monkeypatch.undo()
+
+    _, cuerpo = consultar()
+    assert cuerpo["status"] == corridas.INCOMPLETE
+    assert "error" not in cuerpo, "INCOMPLETE no lleva error"
+    assert cuerpo["warnings"], "lo degradado se dice en warnings"
+
+
+def test_failed_trae_reason_y_message(s3_falso):
+    def revienta(*_, **__):
+        raise RuntimeError("Gemini se cayó")
+
+    correr([PRINCIPAL], s3_falso, analizar=revienta)
+    _, cuerpo = consultar()
+    assert cuerpo["status"] == corridas.FAILED
+    assert cuerpo["error"]["reason"] == "LENS_EXTRACTION_FAILED"
+    assert cuerpo["error"]["message"]
+
+
+def test_los_avisos_traen_las_tres_claves_del_contrato(s3_falso):
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(co, "TIPOS_PRINCIPALES", ("CONSTITUTION",))
+    s3_falso.falla_get.add("b2b/anexo.pdf")
+    correr([PRINCIPAL, ANEXO], s3_falso)
+    monkeypatch.undo()
+
+    _, cuerpo = consultar()
+    for a in cuerpo["warnings"]:
+        assert {"reason", "objectKey", "message"} <= set(a)
+
+
+def test_una_corrida_muerta_se_reporta_failed_y_no_in_progress():
+    """Decir que sigue procesando algo que murió deja al consumidor esperando un
+    resultado que no va a llegar nunca."""
+    import time
+    corridas.registrar_inicio("prod", "ACME-1", "a1",
+                              ahora=time.time() - corridas.TOPE_EN_CURSO_S - 10)
+    _, cuerpo = consultar()
+    assert cuerpo["status"] == corridas.FAILED
+    assert "dejó de reportar" in cuerpo["error"]["message"]
+
+
+def test_una_corrida_muerta_no_inventa_un_reason_nuevo():
+    """Cada `reason` nuevo es un pedido a Arquitectura que bloquea. Se reusa el
+    motivo de respaldo del canal y se distingue por el mensaje."""
+    import time
+    corridas.registrar_inicio("prod", "ACME-1", "a1",
+                              ahora=time.time() - corridas.TOPE_EN_CURSO_S - 10)
+    _, cuerpo = consultar()
+    assert cuerpo["error"]["reason"] in co.errores.FALLO
+
+
+# ── Entrada ─────────────────────────────────────────────────────────────────
+
+def test_sin_environment_es_400():
+    """Es parte de la clave. Adivinarlo leería el estado de otro ambiente sobre
+    la misma empresa, que es peor que no responder."""
+    codigo, cuerpo = consultar(query={})
+    assert codigo == 400
+    assert "environment" in cuerpo["error"]["message"]
+
+
+def test_el_estado_es_por_ambiente(s3_falso):
+    correr([PRINCIPAL], s3_falso, ambiente="dev")
+    assert consultar(ambiente="dev")[1]["status"] == corridas.COMPLETED
+    assert consultar(ambiente="prod")[1]["status"] == corridas.NOT_STARTED
+
+
+def test_metodo_no_permitido_en_status():
+    assert consultar(metodo="POST")[0] == 400
+
+
+def test_si_no_se_puede_leer_no_se_hace_pasar_por_not_started(monkeypatch):
+    """Un NOT_STARTED acá haría que el consumidor vuelva a mandar el análisis de
+    una empresa que ya se analizó, y a pagarlo de nuevo."""
+    def rota(*_, **__):
+        raise RuntimeError("AccessDenied")
+
+    monkeypatch.setattr(corridas, "ultima", rota)
+    codigo, cuerpo = consultar()
+    assert codigo == 503
+    assert cuerpo["error"]["reason"] == "SERVICE_UNAVAILABLE"
+
+
+def test_status_no_se_confunde_con_ep3():
+    """`/analysis` (EP-3, Fase 4) todavía no existe: no lo puede atender el
+    handler de `/analysis/status`."""
+    ruta = "/v1/companies/ACME-1/analysis"
+    assert co.manejar({
+        "rawPath": ruta, "requestContext": {"http": {"method": "GET"}}, "headers": {},
+    }, ruta, "GET", analizar=analizar_falso) is None
+
+
+def test_el_estado_no_toca_el_almacen_analitico():
+    """«A cualquier hora del día»: el cluster analítico se pausa de 18:30 a
+    04:00 y Onboarding pide 24/7. Si EP-2 lo consultara, de noche no
+    respondería."""
+    import inspect
+
+    fuente = inspect.getsource(co) + inspect.getsource(corridas)
+    for prohibido in ("redshift", "Redshift", "lens.analisis", "execute_statement"):
+        assert prohibido not in fuente, f"EP-2 no puede depender de {prohibido}"
+
+
+def test_el_estado_responde_por_el_handler_real(monkeypatch, s3_falso):
+    """Lo anterior prueba el módulo; esto prueba que la ruta llega hasta él."""
+    import app
+
+    monkeypatch.setattr(app, "API_SECRET", SECRETO)
+    correr([PRINCIPAL], s3_falso)
+    r = app.lambda_handler({
+        "rawPath": "/v1/companies/ACME-1/analysis/status",
+        "requestContext": {"http": {"method": "GET"}},
+        "headers": {"x-api-secret": SECRETO},
+        "queryStringParameters": {"environment": "prod"},
+    })
+    assert r["statusCode"] == 200
+    assert json.loads(r["body"])["status"] == corridas.COMPLETED
+
+
+def test_el_ciclo_completo_ep1_luego_ep2(s3_falso, monkeypatch):
+    """Lo que de verdad va a hacer Onboarding: mandar el análisis y consultar."""
+    import app
+
+    monkeypatch.setattr(app, "API_SECRET", SECRETO)
+    post = app.lambda_handler(evento("ACME-9", {
+        "environment": "prod", "country": "chile",
+        "documents": [{"s3Uri": "s3://b/b2b/escritura.pdf", "documentType": "CONSTITUTION"}],
+    }))
+    assert post["statusCode"] == 202
+    analysis_id = json.loads(post["body"])["analysisId"]
+
+    get = app.lambda_handler({
+        "rawPath": "/v1/companies/ACME-9/analysis/status",
+        "requestContext": {"http": {"method": "GET"}},
+        "headers": {"x-api-secret": SECRETO},
+        "queryStringParameters": {"environment": "prod"},
+    })
+    cuerpo = json.loads(get["body"])
+    assert cuerpo["analysisId"] == analysis_id, "la consulta devuelve LA corrida que se disparó"
+    assert cuerpo["status"] != corridas.NOT_STARTED

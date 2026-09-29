@@ -50,6 +50,9 @@ log = logging.getLogger()
 #: cualquier cosa menos una barra: es opaco y lo genera ms-company.
 RUTA_ANALYSES = re.compile(r"^/v1/companies/([^/]+)/analyses$")
 
+#: `GET /v1/companies/{companyId}/analysis/status` — EP-2, Fase 3.
+RUTA_STATUS = re.compile(r"^/v1/companies/([^/]+)/analysis/status$")
+
 #: La versión del contrato que se responde. Viaja en el `202` para que el
 #: consumidor sepa contra qué está hablando sin preguntar.
 SCHEMA_VERSION = os.environ.get("SCHEMA_VERSION", "1.2")
@@ -142,6 +145,10 @@ def manejar(evento: dict, ruta: str, metodo: str, *, analizar: Callable) -> dict
     Devolver `None` —y no un `404`— es lo que deja que el handler siga probando
     las rutas viejas. Un `404` acá se comería `/v1/analisis`.
     """
+    m = RUTA_STATUS.match(ruta)
+    if m:
+        return _status(evento, m.group(1), metodo)
+
     m = RUTA_ANALYSES.match(ruta)
     if not m:
         return None
@@ -217,6 +224,109 @@ def manejar(evento: dict, ruta: str, metodo: str, *, analizar: Callable) -> dict
         # devolver un estado terminal de una. Se dice para que no parezca un bug.
         "dispatch": modo,
     })
+
+
+# ── EP-2 · Estado ───────────────────────────────────────────────────────────
+
+def _ambiente_de_query(evento: dict) -> str:
+    q = evento.get("queryStringParameters") or {}
+    return corridas.normalizar_ambiente(q.get("environment") or q.get("ambiente"))
+
+
+def _status(evento: dict, company_id: str, metodo: str) -> dict:
+    """`GET /v1/companies/{companyId}/analysis/status?environment=…`
+
+    ── La regla que define este endpoint ───────────────────────────────────
+    **Responde `200` siempre**, incluido `NOT_STARTED`. Nunca un `404`.
+
+    No es una preferencia: «no hay análisis todavía» es una respuesta válida a
+    esta pregunta, y decirla con un `404` la vuelve indistinguible de «esa ruta
+    no existe» o «se equivocaron de `companyId`». El consumidor consulta en un
+    bucle mientras espera, y un `404` lo haría dudar de su propia integración en
+    cada vuelta.
+
+    Lee de la persistencia operacional y **no reprocesa nada**: por eso responde
+    con el cluster analítico pausado, que es el criterio de terminado del plan.
+    """
+    if metodo != "GET":
+        return _error("BAD_REQUEST", f"{metodo} no está permitido en esta ruta.")
+
+    ambiente = _ambiente_de_query(evento)
+    if not ambiente:
+        # El ambiente es parte de la clave. Adivinarlo leería el estado de otro
+        # ambiente sobre la misma empresa, que es peor que no responder.
+        return _error("BAD_REQUEST", "Falta el parámetro `environment`.")
+    if not corridas.ambiente_admitido(ambiente):
+        return _error(
+            "BAD_REQUEST",
+            f"`environment` no reconocido: {ambiente}. Admitidos: {', '.join(corridas.AMBIENTES)}.",
+        )
+
+    try:
+        u = corridas.ultima(ambiente, company_id)
+    except Exception as e:  # noqa: BLE001
+        # Un `NOT_STARTED` acá haría que el consumidor vuelva a mandar el
+        # análisis de una empresa que ya se analizó, y a pagarlo de nuevo.
+        log.warning("no se pudo leer el estado de %s/%s: %s", ambiente, company_id, e)
+        return _error("SERVICE_UNAVAILABLE", "No se pudo leer el estado de la empresa.")
+
+    return _resp(200, estado_de(company_id, u))
+
+
+def estado_de(company_id: str, u: dict | None) -> dict:
+    """El cuerpo de EP-2 a partir del registro de la corrida.
+
+    Función aparte y pura para que la forma de la respuesta se pueda testear sin
+    montar un evento HTTP — y para que la Fase 4 la reuse sin copiarla.
+    """
+    if u is None:
+        return {
+            "companyId": company_id,
+            "analysisId": None,
+            "status": corridas.NOT_STARTED,
+            "startedAt": None,
+            "finishedAt": None,
+            "warnings": [],
+            "schemaVersion": SCHEMA_VERSION,
+        }
+
+    estado = str(u.get("status") or corridas.NOT_STARTED)
+    error = u.get("error")
+
+    if corridas.caducada(u):
+        # La corrida murió sin reportar: el proceso que la abrió ya no existe.
+        # Decir que sigue procesando dejaría al consumidor esperando un
+        # resultado que no va a llegar nunca.
+        #
+        # Se reusa `LENS_EXTRACTION_FAILED`, que es el motivo de respaldo del
+        # canal, en vez de pedirle a Arquitectura un código nuevo para esto: el
+        # plan dice explícitamente que cada `reason` nuevo es un pedido que
+        # bloquea, y el mensaje ya distingue el caso.
+        estado = corridas.FAILED
+        error = errores.fallo(
+            "LENS_EXTRACTION_FAILED",
+            "La corrida dejó de reportar y se da por terminada.",
+        )
+
+    cuerpo = {
+        "companyId": u.get("companyId") or company_id,
+        "analysisId": u.get("analysisId"),
+        "status": estado,
+        "startedAt": u.get("startedAt"),
+        "finishedAt": u.get("finishedAt"),
+        "warnings": u.get("warnings") or [],
+        "schemaVersion": u.get("schemaVersion") or SCHEMA_VERSION,
+    }
+
+    # `error` SOLO en FAILED. En `INCOMPLETE` el análisis sirve, y lo que salió
+    # degradado se dice en `warnings`. Mandar un `error` ahí haría que Onboarding
+    # descarte un resultado utilizable — es el error caro que `errores.py`
+    # describe: confundir un aviso con un fallo.
+    if estado == corridas.FAILED:
+        cuerpo["error"] = error or errores.fallo(
+            "LENS_EXTRACTION_FAILED", "La corrida terminó sin un resultado utilizable.")
+
+    return cuerpo
 
 
 # ── El trabajo de fondo ─────────────────────────────────────────────────────
