@@ -58,9 +58,18 @@ RUTA_STATUS = re.compile(r"^/v1/companies/([^/]+)/analysis/status$")
 #: `GET /v1/companies/{companyId}/analysis` — EP-3, Fase 4.
 RUTA_ANALYSIS = re.compile(r"^/v1/companies/([^/]+)/analysis$")
 
-#: La versión del contrato que se responde. Viaja en el `202` para que el
-#: consumidor sepa contra qué está hablando sin preguntar.
-SCHEMA_VERSION = os.environ.get("SCHEMA_VERSION", "1.2")
+#: EP-4, EP-5 y EP-6 — Fase 7. Son vistas filtradas del MISMO resultado, así que
+#: se resuelven con una ruta sola y un nombre de sección. La especificación lo
+#: contempla explícitamente: «LENS puede implementar EP-4, EP-5 y EP-6 como
+#: filtros de un único endpoint de resultados […]. Lo que Onboarding necesita es
+#: el contrato de respuesta, no la forma de la ruta».
+RUTA_SECCION = re.compile(r"^/v1/companies/([^/]+)/analysis/(legal-representatives|company|shareholders)$")
+
+#: La versión del ESQUEMA de respuesta, que no es la del documento de
+#: especificación. La v1.1 la fija en `1.0.0` en los seis endpoints; decir `1.2`
+#: —que es la versión del documento— le haría creer al consumidor que el formato
+#: cambió cuando no cambió.
+SCHEMA_VERSION = os.environ.get("SCHEMA_VERSION", "1.0.0")
 
 #: Tope de documentos por petición. La v1.2 bajó el lote a 2; es su propio tope
 #: y no el de `/v1/analisis` (12), que sigue como estaba.
@@ -154,6 +163,10 @@ def manejar(evento: dict, ruta: str, metodo: str, *, analizar: Callable,
     m = RUTA_STATUS.match(ruta)
     if m:
         return _status(evento, m.group(1), metodo)
+
+    m = RUTA_SECCION.match(ruta)
+    if m:
+        return _seccion(evento, m.group(1), m.group(2), metodo)
 
     m = RUTA_ANALYSIS.match(ruta)
     if m:
@@ -538,14 +551,28 @@ def _analysis(evento: dict, company_id: str, metodo: str) -> dict:
     utilizable. Devolver la vieja sería contestar con datos de un análisis que
     ya se reemplazó, sin que quien pregunta pueda notarlo.
     """
+    u, fallo_ = _corrida_utilizable(evento, company_id, metodo)
+    if fallo_ is not None:
+        return fallo_
+    return _resp(200, resultado_de(company_id, u))
+
+
+def _corrida_utilizable(evento: dict, company_id: str, metodo: str) -> tuple[dict, dict | None]:
+    """`(corrida, None)` si hay una utilizable; `({}, respuesta_de_error)` si no.
+
+    Lo comparten EP-3 y las tres vistas de la Fase 7: son el mismo resultado
+    mirado por distintas ventanas, así que tienen que dar el mismo `404` sobre
+    la misma corrida. Duplicar esta lógica haría que una sección respondiera
+    `200` mientras otra responde `404` sobre la misma empresa.
+    """
     if metodo != "GET":
-        return _error("BAD_REQUEST", f"{metodo} no está permitido en esta ruta.")
+        return {}, _error("BAD_REQUEST", f"{metodo} no está permitido en esta ruta.")
 
     ambiente = _ambiente_de_query(evento)
     if not ambiente:
-        return _error("BAD_REQUEST", "Falta el parámetro `environment`.")
+        return {}, _error("BAD_REQUEST", "Falta el parámetro `environment`.")
     if not corridas.ambiente_admitido(ambiente):
-        return _error(
+        return {}, _error(
             "BAD_REQUEST",
             f"`environment` no reconocido: {ambiente}. Admitidos: {', '.join(corridas.AMBIENTES)}.",
         )
@@ -554,16 +581,34 @@ def _analysis(evento: dict, company_id: str, metodo: str) -> dict:
         u = corridas.ultima(ambiente, company_id)
     except Exception as e:  # noqa: BLE001
         log.warning("no se pudo leer el análisis de %s/%s: %s", ambiente, company_id, e)
-        return _error("SERVICE_UNAVAILABLE", "No se pudo leer el análisis de la empresa.")
+        return {}, _error("SERVICE_UNAVAILABLE", "No se pudo leer el análisis de la empresa.")
 
     if u is None or corridas.caducada(u) or u.get("status") not in UTILIZABLES:
-        return _error(
+        return {}, _error(
             "NOT_FOUND",
             "No hay un análisis utilizable para esa empresa y ambiente.",
             status=(corridas.estado(ambiente, company_id) if u else corridas.NOT_STARTED),
         )
 
-    return _resp(200, resultado_de(company_id, u))
+    return u, None
+
+
+def identificador(company_id: Any) -> Any:
+    """El `companyId` como lo espera Onboarding.
+
+    La especificación lo declara **number** y sus ejemplos lo muestran así
+    (`48213`). Se devuelve como número cuando lo es, y tal cual cuando no: el
+    caso normal calza exacto con el contrato, y un identificador que no sea
+    numérico se refleja como vino en vez de romper la respuesta.
+
+    No se RECHAZA lo no numérico —la v1.1 pide un `400` para eso— porque la v1.2
+    cambió la clave de persistencia a «ambiente + companyId» y no está en este
+    repo para confirmar si el tipo siguió igual. Rechazar de más cortaría
+    tráfico legítimo; reflejarlo no rompe a nadie. Queda anotado para cerrarlo
+    cuando llegue la v1.2.
+    """
+    texto = str(company_id or "").strip()
+    return int(texto) if texto.isdigit() else company_id
 
 
 def resultado_de(company_id: str, u: dict) -> dict:
@@ -572,7 +617,7 @@ def resultado_de(company_id: str, u: dict) -> dict:
     campos = {c.get("field"): c.get("value") for c in (ficha.get("fields") or [])}
     avisos = onboarding.Avisos()
 
-    empresa = onboarding.empresa_ep3({
+    empresa = onboarding.empresa({
         "legalName": _dato(campos.get("Razón Social")),
         "taxId": _dato(campos.get("RUT de la sociedad")),
         "country": ficha.get("detectedCountry") or u.get("country") or "",
@@ -590,9 +635,12 @@ def resultado_de(company_id: str, u: dict) -> dict:
     ]
 
     return {
-        "companyId": u.get("companyId") or company_id,
+        "companyId": identificador(u.get("companyId") or company_id),
         "analysisId": u.get("analysisId"),
         "status": u.get("status"),
+        # La jurisdicción con la que se corrió. La pide el contrato de EP-3 y es
+        # lo que le dice al consumidor bajo qué reglas se leyó el documento.
+        "country": u.get("country") or ficha.get("detectedCountry") or "",
         "startedAt": u.get("startedAt"),
         "finishedAt": u.get("finishedAt"),
         "schemaVersion": u.get("schemaVersion") or SCHEMA_VERSION,
@@ -603,6 +651,74 @@ def resultado_de(company_id: str, u: dict) -> dict:
         # Los de la corrida más los que salieron de serializar. Van juntos
         # porque para quien integra son lo mismo: algo que no salió redondo.
         "warnings": (u.get("warnings") or []) + avisos.items,
+    }
+
+
+# ── EP-4, EP-5 y EP-6 · Las vistas filtradas — Fase 7 ───────────────────────
+# Las tres responden lo MISMO que su bloque en EP-3, sin recalcular nada: salen
+# de `resultado_de`, que es la única implementación del contrato. Si cada una
+# armara su bloque por su cuenta, EP-3 y EP-5 podrían empezar a diferir sin que
+# nadie lo note — y el consumidor vería una empresa distinta según por dónde
+# preguntara.
+
+#: Qué clave de `resultado_de` entrega cada sección.
+SECCIONES = {
+    "legal-representatives": "legalRepresentatives",
+    "company": "company",
+    "shareholders": "businessShareholders",
+}
+
+
+def _seccion(evento: dict, company_id: str, nombre: str, metodo: str) -> dict:
+    """`GET /v1/companies/{companyId}/analysis/{legal-representatives|company|shareholders}`
+
+    Mismas reglas que EP-3: mismo `404`, mismo `environment`, misma lectura. Lo
+    único que cambia es cuánto se devuelve.
+    """
+    u, fallo_ = _corrida_utilizable(evento, company_id, metodo)
+    if fallo_ is not None:
+        return fallo_
+
+    completo = resultado_de(company_id, u)
+    clave = SECCIONES[nombre]
+    return _resp(200, {
+        "companyId": completo["companyId"],
+        "analysisId": completo["analysisId"],
+        clave: (accionistas_de(company_id, u) if clave == "businessShareholders"
+                else completo[clave]),
+        "schemaVersion": completo["schemaVersion"],
+    })
+
+
+def accionistas_de(company_id: str, u: dict) -> dict:
+    """El objeto raíz `BusinessShareholders` de EP-6: cuatro campos.
+
+    Es la estructura que el procesador de accionistas de Onboarding produce hoy.
+    Respetarla es el punto del endpoint: permite retirar ese procesador sin que
+    Onboarding toque su persistencia.
+
+    Los accionistas se serializan con `persona()` y no con `representante()`
+    aunque las dos hagan «una persona»: EP-6 tiene otras claves y otras reglas
+    —el identificador va solo con dígitos, y el vocabulario de
+    `identificationType` es el otro—. Reusar la forma de EP-4 acá emitiría las
+    claves equivocadas con los valores equivocados.
+    """
+    ficha = u.get("result") or {}
+    campos = {c.get("field"): c.get("value") for c in (ficha.get("fields") or [])}
+    avisos = onboarding.Avisos()
+    empresa = onboarding.empresa({
+        "legalName": _dato(campos.get("Razón Social")),
+        "taxId": _dato(campos.get("RUT de la sociedad")),
+    }, avisos)
+
+    def serie(personas: list) -> list:
+        return [p for p in (onboarding.persona(x, avisos) for x in (personas or [])) if p]
+
+    return {
+        "businessName": empresa["legalName"],
+        "businessId": empresa["taxId"],
+        "directOwnership": serie(ficha.get("directOwnership")),
+        "indirectShareholders": serie(ficha.get("indirectShareholders")),
     }
 
 

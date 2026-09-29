@@ -62,13 +62,19 @@ CAMPOS_EP6 = (
     "isPEP",
 )
 
-#: §6.9 — EP-5, el bloque `company`.
+#: §6.9 — EP-5, el bloque `company`. Es TAMBIÉN el de EP-3: la especificación
+#: dice literal «`company`: mismo contenido que EP-5».
+#:
+#: `address` faltaba en esta lista desde la Fase 6, y por eso pasó desapercibido
+#: hasta la 7. Es el campo que Onboarding usa para precargar el domicilio por
+#: componentes, y sin él esa pantalla queda vacía.
 CAMPOS_EMPRESA = (
     "legalName",
     "taxId",
     "taxIdType",
     "constitutionDate",
     "legalForm",
+    "address",
     "activity",
 )
 

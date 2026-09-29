@@ -772,18 +772,16 @@ def empresa(datos: dict, avisos: Avisos | None = None) -> dict:
         "taxIdType": tipo_tax_id(tax_id, datos.get("country") or datos.get("pais"), avisos),
         "constitutionDate": fecha_iso(datos.get("constitutionDate"), avisos),
         "legalForm": recortar(datos.get("legalForm"), TOPE_FORMA_LEGAL, "legalForm", avisos),
+        "address": domicilio(datos.get("address"), avisos),
         "activity": recortar(datos.get("activity"), TOPE_ACTIVIDAD, "activity", avisos),
     }
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# El bloque `company` de EP-3 — Fase 4
+# El domicilio, que es parte del bloque `company`
 # ══════════════════════════════════════════════════════════════════════════
-# NO es `empresa()` con una clave más, aunque lo parezca: EP-3 y EP-5 son dos
-# endpoints con dos bloques distintos, y §6.9 fija los SEIS campos de EP-5. Si
-# `empresa()` empezara a devolver `address`, EP-5 entregaría un campo que su
-# contrato no define — el mismo motivo por el que `representante()` no es
-# `persona()` con un campo más.
+# Vive acá abajo y no junto a `empresa()` solo porque `empresa()` está definida
+# más arriba en el archivo y esto es su ayudante.
 
 #: Palabras que marcan la parte «departamento / oficina» de una dirección.
 #: Se buscan como palabra entera al principio del fragmento: `of` suelto
@@ -853,6 +851,3 @@ def domicilio(texto: Any, avisos: Avisos | None = None) -> dict:
     return {"street": street, "apt": apt, "city": city, "state": state}
 
 
-def empresa_ep3(datos: dict, avisos: Avisos | None = None) -> dict:
-    """El bloque `company` de EP-3 (§6 del plan): los seis de EP-5 más `address`."""
-    return {**empresa(datos, avisos), "address": domicilio(datos.get("address"), avisos)}
