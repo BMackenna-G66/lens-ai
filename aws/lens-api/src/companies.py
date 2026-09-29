@@ -1,0 +1,364 @@
+"""EP-1 · `POST /v1/companies/{companyId}/analyses` — Fase 2 del plan.
+
+La familia de rutas por empresa que pide Onboarding B2B. **Se agrega al lado**:
+`/v1/analisis` y `/v1/analyses` siguen vivas y sin un cambio, que es lo que
+permite migrar sin ventana de corte.
+
+── Una diferencia que no se puede mezclar ──────────────────────────────────
+`/v1/analyses` (el contrato del bot) devuelve **HTTP 200 siempre**, con el
+`statusCode` real adentro del cuerpo. Esta familia NO: usa códigos HTTP de
+verdad —`202`, `400`, `409`, `429`— porque así lo define la especificación v1.2.
+Son dos contratos distintos conviviendo en el mismo handler, y confundirlos
+rompe a uno de los dos consumidores.
+
+── El orden de escritura es el punto de la fase ────────────────────────────
+La corrida se registra **antes** de responder el `202`. Si el `202` saliera
+primero, la primera consulta del front podría ver `NOT_STARTED`, volver a
+mostrar la pantalla de carga y disparar un segundo procesamiento del mismo lote.
+
+── Qué es un error de petición y qué es un fallo de corrida ────────────────
+La división no es estética, decide qué recibe el consumidor:
+
+  · **La forma de la petición** —falta `environment`, no hay documentos, un
+    `s3Uri` que no se puede ni parsear, más documentos que el tope— es un
+    `400` sincrónico. Es un problema de quien llama y lo puede arreglar.
+
+  · **Si el documento se puede bajar y leer** es el resultado de la corrida:
+    `FAILED` o `INCOMPLETE`. No se sabe sin ir a S3, y averiguarlo antes de
+    responder convertiría el `202` en una espera.
+
+Por eso la resolución contra S3 ocurre en el trabajo de fondo y no acá.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+import uuid
+from typing import Any, Callable
+
+import corridas
+import disparador
+import errores
+import ingesta_s3
+
+log = logging.getLogger()
+
+#: `POST /v1/companies/{companyId}/analyses`. El `companyId` puede traer
+#: cualquier cosa menos una barra: es opaco y lo genera ms-company.
+RUTA_ANALYSES = re.compile(r"^/v1/companies/([^/]+)/analyses$")
+
+#: La versión del contrato que se responde. Viaja en el `202` para que el
+#: consumidor sepa contra qué está hablando sin preguntar.
+SCHEMA_VERSION = os.environ.get("SCHEMA_VERSION", "1.2")
+
+#: Tope de documentos por petición. La v1.2 bajó el lote a 2; es su propio tope
+#: y no el de `/v1/analisis` (12), que sigue como estaba.
+MAX_DOCUMENTOS_LOTE = int(os.environ.get("MAX_DOCUMENTOS_LOTE", "2"))
+
+#: Los `documentType` que cuentan como documento PRINCIPAL, separados por coma.
+#:
+#: **Vacío = todos son principales**, y es el default a propósito. La regla del
+#: plan dice que si falla la escritura la corrida termina en `FAILED`, y si falla
+#: un complementario termina en `INCOMPLETE` con aviso. Para aplicarla hay que
+#: saber cuál es cuál — y el vocabulario de `documentType` todavía no está
+#: confirmado con Onboarding.
+#:
+#: Ante la duda se elige el lado conservador: tratar un documento desconocido
+#: como complementario dejaría que la corrida termine «bien» sin haber leído la
+#: escritura. Terminar en `FAILED` de más es visible; terminar en `COMPLETED` de
+#: menos, no.
+TIPOS_PRINCIPALES: tuple[str, ...] = tuple(
+    t.strip().upper() for t in os.environ.get("TIPOS_PRINCIPALES", "").split(",") if t.strip()
+)
+
+
+def _resp(codigo: int, cuerpo: dict) -> dict:
+    return {
+        "statusCode": codigo,
+        "headers": {"content-type": "application/json; charset=utf-8"},
+        "body": json.dumps(cuerpo, ensure_ascii=False),
+    }
+
+
+def _error(nombre: str, mensaje: str = "", **extra) -> dict:
+    codigo, cuerpo = errores.error_http(nombre, mensaje, **extra)
+    return _resp(codigo, cuerpo)
+
+
+# ── Entrada ─────────────────────────────────────────────────────────────────
+
+def _documentos_pedidos(cuerpo: dict) -> tuple[list[dict], str | None]:
+    """Los documentos tal como los nombró el llamador, o el motivo del `400`.
+
+    No se toca S3 acá. Solo se mira la FORMA: que haya documentos, que no pasen
+    del tope, y que cada uno diga de dónde sacarlo.
+    """
+    docs = cuerpo.get("documents")
+    if not isinstance(docs, list) or not docs:
+        return [], "`documents` es obligatorio y tiene que traer al menos un documento."
+    if len(docs) > MAX_DOCUMENTOS_LOTE:
+        return [], f"Se mandaron {len(docs)} documentos y el máximo por petición es {MAX_DOCUMENTOS_LOTE}."
+
+    salida: list[dict] = []
+    for i, d in enumerate(docs):
+        if not isinstance(d, dict):
+            return [], f"El documento {i} no es un objeto."
+        uri = str(d.get("s3Uri") or "").strip()
+        clave = str(d.get("objectKey") or d.get("object_key") or "").strip()
+        if not uri and not clave:
+            return [], f"El documento {i} no trae `s3Uri` ni `objectKey`."
+        # Un `s3Uri` que ni siquiera se puede partir es un error de contrato, no
+        # un documento que no se pudo bajar: se dice ahora y no dentro de tres
+        # minutos por una consulta de estado.
+        if uri and ingesta_s3.parsear_s3_uri(uri) is None:
+            return [], f"El documento {i} trae un `s3Uri` inválido: se espera `s3://bucket/clave`."
+        salida.append({
+            "s3Uri": uri,
+            "objectKey": clave,
+            "fileName": str(d.get("fileName") or d.get("file_name") or ""),
+            "documentType": str(d.get("documentType") or d.get("document_type") or ""),
+        })
+    return salida, None
+
+
+def es_principal(documento: dict) -> bool:
+    """¿Este documento es la escritura, o un complementario?
+
+    Sin vocabulario configurado, todos son principales. Ver `TIPOS_PRINCIPALES`.
+    """
+    if not TIPOS_PRINCIPALES:
+        return True
+    return str(documento.get("documentType") or "").strip().upper() in TIPOS_PRINCIPALES
+
+
+# ── EP-1 ────────────────────────────────────────────────────────────────────
+
+def manejar(evento: dict, ruta: str, metodo: str, *, analizar: Callable) -> dict | None:
+    """La respuesta si la ruta es de esta familia, `None` si no lo es.
+
+    Devolver `None` —y no un `404`— es lo que deja que el handler siga probando
+    las rutas viejas. Un `404` acá se comería `/v1/analisis`.
+    """
+    m = RUTA_ANALYSES.match(ruta)
+    if not m:
+        return None
+    company_id = m.group(1)
+
+    if metodo != "POST":
+        return _error("BAD_REQUEST", f"{metodo} no está permitido en esta ruta.")
+
+    try:
+        cuerpo = json.loads(evento.get("body") or "{}")
+        if not isinstance(cuerpo, dict):
+            raise ValueError("el cuerpo no es un objeto")
+    except Exception as e:  # noqa: BLE001
+        return _error("BAD_REQUEST", f"No se pudo leer el cuerpo: {e}")
+
+    # ── La forma de la petición ────────────────────────────────────────────
+    ambiente = corridas.normalizar_ambiente(cuerpo.get("environment"))
+    if not ambiente:
+        return _error("BAD_REQUEST", "`environment` es obligatorio.")
+    if not corridas.ambiente_admitido(ambiente):
+        return _error(
+            "BAD_REQUEST",
+            f"`environment` no reconocido: {ambiente}. Admitidos: {', '.join(corridas.AMBIENTES)}.",
+        )
+
+    documentos, motivo = _documentos_pedidos(cuerpo)
+    if motivo:
+        return _error("BAD_REQUEST", motivo)
+
+    # ── Una corrida por empresa a la vez ───────────────────────────────────
+    try:
+        viva = corridas.en_curso(ambiente, company_id)
+    except Exception as e:  # noqa: BLE001
+        # No se puede saber si hay una corrida viva. Arrancar otra podría
+        # duplicar el trabajo y el gasto, así que se pide reintentar.
+        log.warning("no se pudo consultar el estado de %s/%s: %s", ambiente, company_id, e)
+        return _error("SERVICE_UNAVAILABLE", "No se pudo consultar el estado de la empresa.")
+
+    if viva is not None:
+        return _error(
+            "CONFLICT",
+            "Ya hay una corrida en curso para esa empresa y ambiente.",
+            analysisId=viva.get("analysisId"),
+            startedAt=viva.get("startedAt"),
+        )
+
+    # ── El registro va ANTES del 202 ───────────────────────────────────────
+    analysis_id = str(cuerpo.get("analysisId") or cuerpo.get("analysis_id") or "").strip() or str(uuid.uuid4())
+    reg = corridas.registrar_inicio(
+        ambiente, company_id, analysis_id,
+        country=str(cuerpo.get("country") or ""),
+        documentos=documentos,
+        schema_version=SCHEMA_VERSION,
+    )
+
+    carga = {
+        "ambiente": ambiente,
+        "companyId": company_id,
+        "analysisId": analysis_id,
+        "country": str(cuerpo.get("country") or ""),
+        "documents": documentos,
+    }
+    modo = disparador.disparar(carga, lambda c: procesar(c, analizar=analizar))
+
+    return _resp(202, {
+        "companyId": company_id,
+        "analysisId": analysis_id,
+        "status": corridas.IN_PROGRESS,
+        "startedAt": reg["startedAt"],
+        "schemaVersion": SCHEMA_VERSION,
+        # Qué tan inmediato fue este 202. En `en_linea` el trabajo YA terminó
+        # cuando llega esta respuesta, así que la consulta de estado va a
+        # devolver un estado terminal de una. Se dice para que no parezca un bug.
+        "dispatch": modo,
+    })
+
+
+# ── El trabajo de fondo ─────────────────────────────────────────────────────
+
+def procesar(carga: dict, *, analizar: Callable) -> dict:
+    """Resuelve los documentos, analiza y cierra la corrida.
+
+    Nunca levanta: lo que sale mal termina la corrida en `FAILED` con su motivo.
+    Una excepción que escapara dejaría la corrida colgada en `IN_PROGRESS` hasta
+    que la libere el tope de caducidad, y el consumidor esperando.
+    """
+    ambiente = carga.get("ambiente", "")
+    company_id = carga.get("companyId", "")
+    analysis_id = carga.get("analysisId", "")
+    pedidos = carga.get("documents") or []
+
+    def cerrar(estado: str, avisos: list[dict] | None = None, error: dict | None = None) -> dict:
+        corridas.cerrar(ambiente, company_id, analysis_id, estado, avisos=avisos, error=error)
+        return {"status": estado, "analysisId": analysis_id}
+
+    try:
+        import boto3
+        s3 = boto3.client("s3")
+    except Exception as e:  # noqa: BLE001
+        return cerrar(corridas.FAILED, error=errores.fallo(
+            "LENS_DOCUMENT_DOWNLOAD_FAILED", f"No se pudo crear el cliente de S3: {e}"))
+
+    objetos, avisos_resolucion = ingesta_s3.resolver_documentos(
+        s3, [ingesta_s3.DocumentoPedido(
+            s3_uri=d.get("s3Uri", ""), clave=d.get("objectKey", ""),
+            nombre_archivo=d.get("fileName", ""), tipo=d.get("documentType", ""),
+        ) for d in pedidos],
+    )
+
+    avisos = [
+        errores.aviso("PARTIALLY_ILLEGIBLE", a, object_key=_clave_de(a, pedidos))
+        for a in avisos_resolucion
+    ]
+
+    # El filtro por nombre NO se aplica: el llamador nombró los documentos uno
+    # por uno y declaró su tipo, así que exigir además un prefijo descartaría
+    # `escritura_constitucion.pdf` entero — y con un aviso, no con un error.
+    aceptados, avisos_filtro = ingesta_s3.filtrar(objetos, exigir_prefijo=False)
+    avisos += [errores.aviso("PARTIALLY_ILLEGIBLE", a) for a in avisos_filtro]
+
+    if not aceptados:
+        return cerrar(corridas.FAILED, avisos=avisos, error=errores.fallo(
+            "LENS_DOCUMENT_NOT_READABLE",
+            "Ninguno de los documentos pudo usarse.",
+        ))
+
+    try:
+        # El bucket por defecto solo se usa para los documentos que vinieron con
+        # `objectKey` suelto: los que traen `s3Uri` llevan el suyo.
+        descargados, avisos_descarga = ingesta_s3.descargar(s3, ingesta_s3.BUCKET, aceptados)
+    except Exception as e:  # noqa: BLE001
+        return cerrar(corridas.FAILED, avisos=avisos, error=errores.fallo(
+            "LENS_DOCUMENT_DOWNLOAD_FAILED", f"Falló la descarga: {e}"))
+
+    avisos += [errores.aviso("PARTIALLY_ILLEGIBLE", a) for a in avisos_descarga]
+
+    # ── Qué documento se perdió, y si importaba ────────────────────────────
+    # El chequeo va ACÁ y una sola vez, contra lo que de verdad se bajó. Un
+    # documento se puede caer en tres lugares —al resolverlo, al filtrarlo o al
+    # descargarlo— y mirar solo el primero dejaba pasar el caso peor: la
+    # escritura falla al bajar, el complementario baja bien, y la corrida
+    # terminaba analizando el anexo sola.
+    leidas = {d.clave for d in descargados}
+    perdidos = [d for d in pedidos if _clave_pedida(d) not in leidas]
+
+    if any(es_principal(d) for d in perdidos):
+        return cerrar(corridas.FAILED, avisos=avisos, error=errores.fallo(
+            "LENS_DOCUMENT_DOWNLOAD_FAILED",
+            "No se pudo obtener el documento principal.",
+        ))
+
+    if not descargados:
+        return cerrar(corridas.FAILED, avisos=avisos, error=errores.fallo(
+            "LENS_DOCUMENT_DOWNLOAD_FAILED", "No se pudo descargar ningún documento."))
+
+    try:
+        resultado = analizar(
+            [(d.nombre, d.contenido) for d in descargados],
+            False,
+            str(carga.get("country") or ""),
+        )
+    except Exception as e:  # noqa: BLE001
+        log.exception("fallo el análisis de la corrida %s", analysis_id)
+        return cerrar(corridas.FAILED, avisos=avisos, error=errores.fallo(
+            "LENS_EXTRACTION_FAILED", f"Error durante el análisis: {e}"))
+
+    campos = {c["field"]: c["value"] for c in (resultado.get("campos") or [])}
+    avisos += [errores.aviso("PARTIALLY_ILLEGIBLE", a) for a in (resultado.get("avisos") or [])]
+
+    # Sin razón social ni RUT el análisis no sirve para nada aguas abajo: es un
+    # fallo, no un resultado degradado.
+    if not _hay_dato(campos.get("Razón Social")) and not _hay_dato(campos.get("RUT de la sociedad")):
+        return cerrar(corridas.FAILED, avisos=avisos, error=errores.fallo(
+            "LENS_REQUIRED_DATA_MISSING",
+            "No se pudo obtener ni la razón social ni el RUT de la sociedad.",
+        ))
+
+    # Llegó hasta acá con la escritura leída. Si se perdió un complementario, el
+    # resultado sirve pero está incompleto, y se dice cuál faltó.
+    if perdidos:
+        avisos += [
+            errores.aviso(
+                "EXPECTED_DATA_MISSING",
+                "No se pudo leer un documento complementario.",
+                object_key=d.get("objectKey") or d.get("s3Uri", ""),
+            )
+            for d in perdidos
+        ]
+        return cerrar(corridas.INCOMPLETE, avisos=avisos)
+
+    return cerrar(corridas.COMPLETED, avisos=avisos)
+
+
+#: Los literales que los 18 campos usan para decir «no está». No son un valor.
+SIN_DATO = ("", "no especificado", "sin documento", "sin porcentaje")
+
+
+def _hay_dato(v: Any) -> bool:
+    return str(v or "").strip().lower() not in SIN_DATO
+
+
+def _clave_pedida(d: dict) -> str:
+    """La clave S3 de un documento pedido, venga por `s3Uri` o por `objectKey`."""
+    partes = ingesta_s3.parsear_s3_uri(d.get("s3Uri", ""))
+    return partes[1] if partes else str(d.get("objectKey") or "")
+
+
+def _clave_de(aviso: str, pedidos: list[dict]) -> str:
+    """La clave del documento al que se refiere un aviso de resolución.
+
+    El aviso viene armado como `«clave»: motivo`, así que alcanza con mirar cuál
+    de los documentos pedidos aparece adentro. Vale la pena: el contrato define
+    `objectKey` en cada aviso, y un aviso sin él obliga a quien integra a
+    adivinar a qué documento se refiere.
+    """
+    for d in pedidos:
+        for candidato in (d.get("objectKey"), d.get("s3Uri"), d.get("fileName")):
+            if candidato and candidato in aviso:
+                return str(d.get("objectKey") or d.get("s3Uri") or "")
+    return ""

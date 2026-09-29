@@ -53,7 +53,10 @@ from urllib.parse import urlparse
 import extraccion
 import contrato
 import almacen
+import companies
 import corridas
+import disparador
+import errores
 import ingesta_s3
 import gemini
 from extraccion import Presupuesto, extraer_texto
@@ -610,6 +613,14 @@ def _correr_analyses(cuerpo: dict, analysis_id: str, session_id: str) -> dict:
 
 
 def lambda_handler(evento: dict, contexto=None) -> dict:
+    # ── El trabajo de fondo se mira ANTES que la ruta ──────────────────────
+    # Un disparo asíncrono no viene de la Function URL: no trae `requestContext`,
+    # así que tratarlo como petición HTTP lo mandaría a `/` —que responde
+    # `/salud`— y el análisis no se haría nunca. En silencio.
+    carga = disparador.es_trabajo_de_fondo(evento)
+    if carga is not None:
+        return companies.procesar(carga, analizar=analizar)
+
     ctx = (evento.get("requestContext") or {}).get("http") or {}
     metodo = (ctx.get("method") or evento.get("httpMethod") or "GET").upper()
     ruta = (evento.get("rawPath") or ctx.get("path") or "/").rstrip("/") or "/"
@@ -634,6 +645,13 @@ def lambda_handler(evento: dict, contexto=None) -> dict:
             # respondería NOT_STARTED sobre corridas que sí ocurrieron.
             "corridas_persistentes": corridas.disponible(),
             "corridas_ambientes": list(corridas.AMBIENTES),
+            # En false, EP-1 responde el 202 DESPUÉS de procesar. El contrato es
+            # el mismo; lo que cambia es cuánto tarda la petición. Una promesa
+            # de 202 inmediato que en realidad tarda tres minutos no se puede
+            # descubrir mirando la respuesta.
+            "disparo_asincrono": disparador.disponible(),
+            "tipos_principales": list(companies.TIPOS_PRINCIPALES),
+            "max_documentos_lote": companies.MAX_DOCUMENTOS_LOTE,
         })
 
     # ── Contrato BusinessShareholders (Fase 5) ─────────────────────────────
@@ -643,6 +661,19 @@ def lambda_handler(evento: dict, contexto=None) -> dict:
         if not _autorizado(evento):
             return _error(401, "Falta o no coincide el header x-api-secret.")
         return _analyses(evento, ruta, metodo)
+
+    # ── Contrato Onboarding B2B (Fase 2) ───────────────────────────────────
+    # SE AGREGA, también al lado. Ojo con la diferencia que no se puede mezclar:
+    # esta familia devuelve códigos HTTP de verdad (202, 400, 409), mientras que
+    # `/v1/analyses` responde 200 siempre con el código adentro del cuerpo.
+    if ruta.startswith("/v1/companies/"):
+        if not _autorizado(evento):
+            codigo, cuerpo = errores.error_http(
+                "UNAUTHORIZED", "Falta o no coincide el header x-api-secret.")
+            return _resp(codigo, cuerpo)
+        r = companies.manejar(evento, ruta, metodo, analizar=analizar)
+        if r is not None:
+            return r
 
     if ruta not in ("/v1/analisis",):
         return _error(404, f"Ruta no encontrada: {ruta}. Disponibles: GET /salud, POST /v1/analisis, POST /v1/analyses")
