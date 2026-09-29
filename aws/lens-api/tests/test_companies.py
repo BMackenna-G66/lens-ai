@@ -548,10 +548,16 @@ def test_el_cuerpo_trae_siempre_las_mismas_claves(s3_falso):
     assert esperadas <= set(con) and esperadas <= set(sin)
 
 
-def test_el_error_va_solo_en_failed(s3_falso):
-    """En INCOMPLETE el análisis SIRVE, y lo degradado se dice en `warnings`.
-    Mandar un `error` ahí haría que Onboarding descarte un resultado utilizable
-    — el error caro que describe `errores.py`."""
+def test_el_error_va_en_null_pero_la_clave_viaja(s3_falso):
+    """Dos reglas distintas que este test confundía, y por eso escondía un bug.
+
+    Que en INCOMPLETE el `error` vaya VACÍO es correcto: ahí el análisis sirve y
+    lo degradado se dice en `warnings`; mandar un error haría que Onboarding
+    descarte un resultado utilizable. Pero omitir la CLAVE es otra cosa — §6.2
+    pide los mismos campos en cualquier estado, y en Java un campo ausente no es
+    lo mismo que uno nulo. La versión anterior de este test pedía que la clave
+    NO estuviera.
+    """
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(co, "TIPOS_PRINCIPALES", ("CONSTITUTION",))
     s3_falso.falla_get.add("b2b/anexo.pdf")
@@ -560,7 +566,8 @@ def test_el_error_va_solo_en_failed(s3_falso):
 
     _, cuerpo = consultar()
     assert cuerpo["status"] == corridas.INCOMPLETE
-    assert "error" not in cuerpo, "INCOMPLETE no lleva error"
+    assert "error" in cuerpo, "la clave viaja en cualquier estado"
+    assert cuerpo["error"] is None, "INCOMPLETE no lleva error con contenido"
     assert cuerpo["warnings"], "lo degradado se dice en warnings"
 
 

@@ -234,7 +234,10 @@ def manejar(evento: dict, ruta: str, metodo: str, *, analizar: Callable,
         "country": str(cuerpo.get("country") or ""),
         "documents": documentos,
     }
-    modo = disparador.disparar(
+    # El modo del disparo NO viaja en la respuesta: el contrato de EP-1 son cinco
+    # campos y uno de más se vuelve contrato de hecho en cuanto alguien lo use.
+    # Es información de operación y vive donde corresponde, en `/salud`.
+    disparador.disparar(
         carga, lambda c: procesar(c, analizar=analizar, extraer_socios=extraer_socios))
 
     return _resp(202, {
@@ -243,10 +246,6 @@ def manejar(evento: dict, ruta: str, metodo: str, *, analizar: Callable,
         "status": corridas.IN_PROGRESS,
         "startedAt": reg["startedAt"],
         "schemaVersion": SCHEMA_VERSION,
-        # Qué tan inmediato fue este 202. En `en_linea` el trabajo YA terminó
-        # cuando llega esta respuesta, así que la consulta de estado va a
-        # devolver un estado terminal de una. Se dice para que no parezca un bug.
-        "dispatch": modo,
     })
 
 
@@ -305,11 +304,12 @@ def estado_de(company_id: str, u: dict | None) -> dict:
     """
     if u is None:
         return {
-            "companyId": company_id,
+            "companyId": identificador(company_id),
             "analysisId": None,
             "status": corridas.NOT_STARTED,
             "startedAt": None,
             "finishedAt": None,
+            "error": None,
             "warnings": [],
             "schemaVersion": SCHEMA_VERSION,
         }
@@ -332,25 +332,29 @@ def estado_de(company_id: str, u: dict | None) -> dict:
             "La corrida dejó de reportar y se da por terminada.",
         )
 
-    cuerpo = {
-        "companyId": u.get("companyId") or company_id,
+    # `error` con CONTENIDO solo en FAILED, pero la CLAVE viaja siempre.
+    #
+    # Son dos reglas distintas y confundirlas fue un bug real: en `INCOMPLETE` el
+    # análisis sirve, y mandar un error ahí haría que Onboarding descarte un
+    # resultado utilizable —el error caro que describe `errores.py`—. Pero omitir
+    # la clave es otra cosa: §6.2 dice que cada endpoint devuelve siempre los
+    # mismos campos en cualquier estado, y los cuatro ejemplos de §6.6 muestran
+    # `"error": null` explícito.
+    #
+    # En JavaScript casi no se nota (`r.error?.reason` no falla). ms-company es
+    # Java, y ahí un campo ausente no es lo mismo que uno nulo.
+    return {
+        "companyId": identificador(u.get("companyId") or company_id),
         "analysisId": u.get("analysisId"),
         "status": estado,
         "startedAt": u.get("startedAt"),
         "finishedAt": u.get("finishedAt"),
+        "error": (error or errores.fallo(
+            "LENS_EXTRACTION_FAILED", "La corrida terminó sin un resultado utilizable.")
+        ) if estado == corridas.FAILED else None,
         "warnings": u.get("warnings") or [],
         "schemaVersion": u.get("schemaVersion") or SCHEMA_VERSION,
     }
-
-    # `error` SOLO en FAILED. En `INCOMPLETE` el análisis sirve, y lo que salió
-    # degradado se dice en `warnings`. Mandar un `error` ahí haría que Onboarding
-    # descarte un resultado utilizable — es el error caro que `errores.py`
-    # describe: confundir un aviso con un fallo.
-    if estado == corridas.FAILED:
-        cuerpo["error"] = error or errores.fallo(
-            "LENS_EXTRACTION_FAILED", "La corrida terminó sin un resultado utilizable.")
-
-    return cuerpo
 
 
 # ── El trabajo de fondo ─────────────────────────────────────────────────────
@@ -641,8 +645,6 @@ def resultado_de(company_id: str, u: dict) -> dict:
         # La jurisdicción con la que se corrió. La pide el contrato de EP-3 y es
         # lo que le dice al consumidor bajo qué reglas se leyó el documento.
         "country": u.get("country") or ficha.get("detectedCountry") or "",
-        "startedAt": u.get("startedAt"),
-        "finishedAt": u.get("finishedAt"),
         "schemaVersion": u.get("schemaVersion") or SCHEMA_VERSION,
         "company": empresa,
         "legalRepresentatives": representantes,

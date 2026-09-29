@@ -416,3 +416,224 @@ def test_es_pep_entiende_el_tipo_crudo_igual_que_tipo_persona():
     contrato pide False."""
     assert ob.es_pep(None, "LEGAL") is False
     assert ob.es_pep(None, "JURIDICA") is False
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# §6.6 — EP-2, el estado
+# ════════════════════════════════════════════════════════════════════════════
+# Este endpoint faltaba en este archivo, y era el ÚNICO que faltaba. La auditoría
+# de las fases 1 a 7 encontró un campo ausente justo acá — `error` no salía
+# cuando no había error—, que es exactamente lo que este archivo existe para
+# atrapar. El agujero no estaba en el código: estaba en el guardia.
+#
+# §6.2 lo dice para todos: «Cada endpoint devuelve siempre los mismos campos, en
+# cualquier estado». Los cuatro ejemplos de §6.6 —NOT_STARTED, IN_PROGRESS,
+# INCOMPLETE y FAILED— muestran las ocho claves, con `"error": null` explícito en
+# los tres primeros.
+#
+# En JavaScript un campo ausente casi no se nota: `r.error?.reason` no falla.
+# ms-company es Java, y ahí un campo que no viene no es lo mismo que uno nulo.
+
+CAMPOS_EP2 = (
+    "companyId",
+    "analysisId",
+    "status",
+    "startedAt",
+    "finishedAt",
+    "error",
+    "warnings",
+    "schemaVersion",
+)
+
+#: Los cinco estados, con una corrida de ejemplo para cada uno. `None` = no hay
+#: corrida, que es como se representa `NOT_STARTED`.
+CORRIDAS_EP2 = {
+    "NOT_STARTED": None,
+    "IN_PROGRESS": {"analysisId": "a1", "status": "IN_PROGRESS", "startedAt": "2026-09-29T10:00:00Z",
+                    "startedTs": 4_102_444_800, "finishedAt": None, "warnings": [], "error": None},
+    "COMPLETED": {"analysisId": "a1", "status": "COMPLETED", "startedAt": "2026-09-29T10:00:00Z",
+                  "startedTs": 4_102_444_800, "finishedAt": "2026-09-29T10:02:00Z",
+                  "warnings": [], "error": None},
+    "INCOMPLETE": {"analysisId": "a1", "status": "INCOMPLETE", "startedAt": "2026-09-29T10:00:00Z",
+                   "startedTs": 4_102_444_800, "finishedAt": "2026-09-29T10:02:00Z",
+                   "warnings": [{"reason": "PARTIALLY_ILLEGIBLE", "objectKey": "a.pdf",
+                                 "message": "Páginas 12 a 18 sin texto legible"}],
+                   "error": None},
+    "FAILED": {"analysisId": "a1", "status": "FAILED", "startedAt": "2026-09-29T10:00:00Z",
+               "startedTs": 4_102_444_800, "finishedAt": "2026-09-29T10:04:00Z", "warnings": [],
+               "error": {"reason": "LENS_EXTRACTION_FAILED", "message": "…"}},
+}
+
+
+@pytest.mark.parametrize("estado", sorted(CORRIDAS_EP2))
+def test_ep2_entrega_sus_campos_en_todos_los_estados(estado):
+    import companies as co
+
+    r = co.estado_de("48213", CORRIDAS_EP2[estado])
+    faltan = [c for c in CAMPOS_EP2 if c not in r]
+    assert not faltan, f"EP-2 en {estado} pide estos campos y no salen: {faltan}"
+
+
+@pytest.mark.parametrize("estado", sorted(CORRIDAS_EP2))
+def test_ep2_no_entrega_campos_de_mas(estado):
+    import companies as co
+
+    r = co.estado_de("48213", CORRIDAS_EP2[estado])
+    sobran = [c for c in r if c not in CAMPOS_EP2]
+    assert not sobran, f"EP-2 no define estos campos: {sobran}"
+
+
+@pytest.mark.parametrize("estado", ["NOT_STARTED", "IN_PROGRESS", "COMPLETED", "INCOMPLETE"])
+def test_el_error_de_ep2_es_null_cuando_no_hay_error(estado):
+    """La clave viaja siempre; lo que cambia es su valor.
+
+    Que en `INCOMPLETE` vaya en `null` no es un detalle: ahí el análisis SIRVE, y
+    mandar un error haría que Onboarding descarte un resultado utilizable.
+    """
+    import companies as co
+
+    assert co.estado_de("48213", CORRIDAS_EP2[estado])["error"] is None
+
+
+def test_el_error_de_ep2_trae_reason_y_message_cuando_falla():
+    import companies as co
+
+    e = co.estado_de("48213", CORRIDAS_EP2["FAILED"])["error"]
+    assert e is not None and {"reason", "message"} <= set(e)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Los SOBRES de cada endpoint — §6.5, §6.7 y §6.8 a §6.10
+# ════════════════════════════════════════════════════════════════════════════
+# El agujero era más grande de lo que decía la auditoría. Este archivo vigilaba
+# los SERIALIZADORES DE BLOQUE —`persona`, `representante`, `empresa`— pero
+# ninguno de los SOBRES: qué claves de primer nivel devuelve cada endpoint.
+# EP-2 fue el primero en quedar cubierto, y por eso el campo faltante apareció
+# ahí. Los otros cinco tenían el mismo agujero, sin nadie mirando.
+#
+# Un campo DE MÁS también cuenta. No es inofensivo: un deserializador estricto
+# —ms-company es Java— puede rechazarlo, y en cuanto alguien del otro lado lo
+# usa se vuelve contrato de hecho, imposible de sacar sin avisar.
+
+#: §6.5 — EP-1, el `202`. Cinco campos: no hay `finishedAt` ni `error` porque
+#: cuando se responde, la corrida recién arranca.
+CAMPOS_EP1 = ("companyId", "analysisId", "status", "startedAt", "schemaVersion")
+
+#: §6.7 — EP-3, el resultado completo.
+CAMPOS_EP3 = ("companyId", "analysisId", "status", "country", "fields", "company",
+              "legalRepresentatives", "documents", "warnings", "schemaVersion")
+
+#: §6.8 a §6.10 — las tres vistas. Mismo sobre, distinto bloque.
+SOBRES_SECCION = {
+    "legal-representatives": "legalRepresentatives",
+    "company": "company",
+    "shareholders": "businessShareholders",
+}
+
+
+def _corrida_terminada() -> dict:
+    return {
+        "companyId": "48213", "analysisId": "a1", "status": "COMPLETED",
+        "startedAt": "2026-09-29T10:00:00Z", "finishedAt": "2026-09-29T10:02:00Z",
+        "startedTs": 4_102_444_800, "country": "chile", "warnings": [], "error": None,
+        "schemaVersion": "1.0.0",
+        "result": {"fields": [{"field": "Razón Social", "value": "X SpA"}],
+                   "documents": [], "detectedCountry": "chile",
+                   "legalRepresentatives": [], "directOwnership": [],
+                   "indirectShareholders": []},
+    }
+
+
+def test_ep3_entrega_su_sobre_completo():
+    import companies as co
+
+    r = co.resultado_de("48213", _corrida_terminada())
+    faltan = [c for c in CAMPOS_EP3 if c not in r]
+    assert not faltan, f"EP-3 pide estos campos y no salen: {faltan}"
+
+
+def test_ep3_no_entrega_campos_de_mas():
+    import companies as co
+
+    r = co.resultado_de("48213", _corrida_terminada())
+    sobran = [c for c in r if c not in CAMPOS_EP3]
+    assert not sobran, f"EP-3 no define estos campos: {sobran}"
+
+
+def test_la_empresa_no_entrega_campos_de_mas():
+    """Faltaba el par de `test_la_empresa_entrega_sus_campos`: se vigilaba que no
+    faltara nada, pero no que no sobrara."""
+    r = ob.empresa({"legalName": "X", "taxId": "76.1-2"}, ob.Avisos())
+    sobran = [c for c in r if c not in CAMPOS_EMPRESA]
+    assert not sobran, f"EP-5 no define estos campos: {sobran}"
+
+
+def test_ep1_entrega_su_sobre_y_nada_mas():
+    """El `202` son CINCO campos. El modo del disparo —si fue asíncrono o en
+    línea— es información de operación y vive en `/salud`: acá sería un sexto
+    campo que se vuelve contrato de hecho en cuanto alguien lo use."""
+    import json as _json
+    import sys as _sys
+
+    import companies as co
+    import corridas
+    import disparador
+
+    corridas._reiniciar_memoria()
+    asincrono = disparador.ASINCRONO
+    disparador.ASINCRONO = False
+    try:
+        ev = {
+            "rawPath": "/v1/companies/48213/analyses",
+            "requestContext": {"http": {"method": "POST"}},
+            "headers": {},
+            "body": _json.dumps({"environment": "prod", "country": "chile",
+                                 "documents": [{"s3Uri": "s3://b/x.pdf"}]}),
+        }
+
+        class _Boto:
+            @staticmethod
+            def client(_):
+                class _S3:
+                    def head_object(self, **__):
+                        raise RuntimeError("NoSuchKey")
+                return _S3()
+
+        _sys.modules["boto3"] = _Boto
+        r = co.manejar(ev, ev["rawPath"], "POST", analizar=lambda *a, **k: {"campos": []})
+        cuerpo = _json.loads(r["body"])
+    finally:
+        disparador.ASINCRONO = asincrono
+        _sys.modules.pop("boto3", None)
+        corridas._reiniciar_memoria()
+
+    assert r["statusCode"] == 202
+    assert set(cuerpo) == set(CAMPOS_EP1), f"EP-1 devuelve {sorted(set(cuerpo) ^ set(CAMPOS_EP1))} de diferencia"
+
+
+@pytest.mark.parametrize("seccion,clave", sorted(SOBRES_SECCION.items()))
+def test_las_tres_vistas_entregan_su_sobre_y_nada_mas(seccion, clave):
+    """Mismo sobre para las tres, distinto bloque: `companyId`, `analysisId`, el
+    bloque, y `schemaVersion`. Nada del resultado completo se filtra."""
+    import json as _json
+
+    import companies as co
+    import corridas
+
+    corridas._reiniciar_memoria()
+    reg = _corrida_terminada()
+    corridas._memoria[corridas.clave("prod", "48213")] = [{**reg, "sk": "z"}]
+    try:
+        ruta = f"/v1/companies/48213/analysis/{seccion}"
+        r = co.manejar({
+            "rawPath": ruta,
+            "requestContext": {"http": {"method": "GET"}},
+            "headers": {},
+            "queryStringParameters": {"environment": "prod"},
+        }, ruta, "GET", analizar=lambda *a, **k: {})
+        cuerpo = _json.loads(r["body"])
+    finally:
+        corridas._reiniciar_memoria()
+
+    assert r["statusCode"] == 200
+    assert set(cuerpo) == {"companyId", "analysisId", clave, "schemaVersion"}
