@@ -244,7 +244,7 @@ campos ausentes.
 Donde dice *derivado*, el valor no sale tal cual de un campo extraído sino de
 una regla; la regla está en la columna de origen.
 
-### 2.1 Bloque `company` — EP-3 y EP-5
+### 2.1 Bloque `company` — EP-5
 
 | Campo | Tipo | Oblig. | Origen | Ejemplo |
 |---|---|---|---|---|
@@ -258,7 +258,26 @@ una regla; la regla está en la columna de origen.
 > `taxIdType` va en `null` cuando `taxId` va en `null`. Un tipo de documento para
 > un documento que no existe es ruido en el camino que decide `NOT_COMPARABLE`.
 
-### 2.2 `legalRepresentatives[]` — EP-3 y EP-4
+### 2.2 Bloque `company` — EP-3
+
+**No es el mismo bloque que el de EP-5.** Son los seis campos de arriba **más
+`address`**, que EP-5 no define. Los dos endpoints tienen contratos distintos y
+mezclarlos haría que EP-5 entregue un campo que su especificación no declara.
+
+| Campo | Tipo | Oblig. | Origen | Ejemplo |
+|---|---|---|---|---|
+| `address.street` | string \\| null | Sí | Derivado de *Domicilio Legal* | `"Av. Providencia 1234"` |
+| `address.apt` | string \\| null | Sí | Derivado; `null` si la dirección no lo trae | `"Of 302"` |
+| `address.city` | string \\| null | Sí | Derivado | `"Santiago"` |
+| `address.state` | string \\| null | Sí | Derivado | `"Región Metropolitana"` |
+
+El domicilio viene escrito a mano en la escritura y no tiene formato. Lo único
+estable es que las partes van separadas por comas y **de lo más específico a lo
+más general**, así que se reparte desde el final, que es la posición confiable.
+Lo que no se puede repartir **queda en `null`**: una comuna adivinada a partir de
+una región es peor que una comuna vacía, porque nadie la va a revisar.
+
+### 2.3 `legalRepresentatives[]` — EP-3 y EP-4
 
 | Campo | Tipo | Oblig. | Origen | Ejemplo |
 |---|---|---|---|---|
@@ -270,7 +289,7 @@ una regla; la regla está en la columna de origen.
 | `identificationNumber` | string \\| null | Sí | **Tal como figura**, no solo dígitos | `"1.020.304-5"` |
 | `role` | string \\| null | Sí | *Representante Legal* (cargo), hasta 60 caracteres | `"Gerente General"` |
 
-### 2.3 `shareholders[]` — EP-3 y EP-6
+### 2.4 `shareholders[]` — EP-3 y EP-6
 
 | Campo | Tipo | Oblig. | Origen | Ejemplo |
 |---|---|---|---|---|

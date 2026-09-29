@@ -612,6 +612,18 @@ def _correr_analyses(cuerpo: dict, analysis_id: str, session_id: str) -> dict:
     return respuesta
 
 
+def _socios_para_companies(descargados, t0: float) -> tuple[dict, list[str]]:
+    """Adaptador entre `companies` y la extracción societaria de este módulo.
+
+    `t0` es el arranque de LA CORRIDA, no de este paso, y tiene que venir de
+    afuera: `_extraer_socios` lo usa para saber si queda presupuesto, y
+    arrancarlo acá le daría el presupuesto entero a un paso que corre al final
+    —cuando la corrida ya gastó tiempo resolviendo documentos y analizando—.
+    El guardia quedaría siempre en verde, que es lo mismo que no tenerlo.
+    """
+    return _extraer_socios(descargados, t0)
+
+
 def lambda_handler(evento: dict, contexto=None) -> dict:
     # ── El trabajo de fondo se mira ANTES que la ruta ──────────────────────
     # Un disparo asíncrono no viene de la Function URL: no trae `requestContext`,
@@ -619,7 +631,8 @@ def lambda_handler(evento: dict, contexto=None) -> dict:
     # `/salud`— y el análisis no se haría nunca. En silencio.
     carga = disparador.es_trabajo_de_fondo(evento)
     if carga is not None:
-        return companies.procesar(carga, analizar=analizar)
+        return companies.procesar(carga, analizar=analizar,
+                                  extraer_socios=_socios_para_companies)
 
     ctx = (evento.get("requestContext") or {}).get("http") or {}
     metodo = (ctx.get("method") or evento.get("httpMethod") or "GET").upper()
@@ -671,7 +684,8 @@ def lambda_handler(evento: dict, contexto=None) -> dict:
             codigo, cuerpo = errores.error_http(
                 "UNAUTHORIZED", "Falta o no coincide el header x-api-secret.")
             return _resp(codigo, cuerpo)
-        r = companies.manejar(evento, ruta, metodo, analizar=analizar)
+        r = companies.manejar(evento, ruta, metodo, analizar=analizar,
+                              extraer_socios=_socios_para_companies)
         if r is not None:
             return r
 

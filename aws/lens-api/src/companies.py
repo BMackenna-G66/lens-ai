@@ -36,6 +36,7 @@ import json
 import logging
 import os
 import re
+import time
 import uuid
 from typing import Any, Callable
 
@@ -43,6 +44,7 @@ import corridas
 import disparador
 import errores
 import ingesta_s3
+import onboarding
 
 log = logging.getLogger()
 
@@ -52,6 +54,9 @@ RUTA_ANALYSES = re.compile(r"^/v1/companies/([^/]+)/analyses$")
 
 #: `GET /v1/companies/{companyId}/analysis/status` — EP-2, Fase 3.
 RUTA_STATUS = re.compile(r"^/v1/companies/([^/]+)/analysis/status$")
+
+#: `GET /v1/companies/{companyId}/analysis` — EP-3, Fase 4.
+RUTA_ANALYSIS = re.compile(r"^/v1/companies/([^/]+)/analysis$")
 
 #: La versión del contrato que se responde. Viaja en el `202` para que el
 #: consumidor sepa contra qué está hablando sin preguntar.
@@ -139,7 +144,8 @@ def es_principal(documento: dict) -> bool:
 
 # ── EP-1 ────────────────────────────────────────────────────────────────────
 
-def manejar(evento: dict, ruta: str, metodo: str, *, analizar: Callable) -> dict | None:
+def manejar(evento: dict, ruta: str, metodo: str, *, analizar: Callable,
+            extraer_socios: Callable | None = None) -> dict | None:
     """La respuesta si la ruta es de esta familia, `None` si no lo es.
 
     Devolver `None` —y no un `404`— es lo que deja que el handler siga probando
@@ -148,6 +154,10 @@ def manejar(evento: dict, ruta: str, metodo: str, *, analizar: Callable) -> dict
     m = RUTA_STATUS.match(ruta)
     if m:
         return _status(evento, m.group(1), metodo)
+
+    m = RUTA_ANALYSIS.match(ruta)
+    if m:
+        return _analysis(evento, m.group(1), metodo)
 
     m = RUTA_ANALYSES.match(ruta)
     if not m:
@@ -211,7 +221,8 @@ def manejar(evento: dict, ruta: str, metodo: str, *, analizar: Callable) -> dict
         "country": str(cuerpo.get("country") or ""),
         "documents": documentos,
     }
-    modo = disparador.disparar(carga, lambda c: procesar(c, analizar=analizar))
+    modo = disparador.disparar(
+        carga, lambda c: procesar(c, analizar=analizar, extraer_socios=extraer_socios))
 
     return _resp(202, {
         "companyId": company_id,
@@ -331,7 +342,7 @@ def estado_de(company_id: str, u: dict | None) -> dict:
 
 # ── El trabajo de fondo ─────────────────────────────────────────────────────
 
-def procesar(carga: dict, *, analizar: Callable) -> dict:
+def procesar(carga: dict, *, analizar: Callable, extraer_socios: Callable | None = None) -> dict:
     """Resuelve los documentos, analiza y cierra la corrida.
 
     Nunca levanta: lo que sale mal termina la corrida en `FAILED` con su motivo.
@@ -342,9 +353,12 @@ def procesar(carga: dict, *, analizar: Callable) -> dict:
     company_id = carga.get("companyId", "")
     analysis_id = carga.get("analysisId", "")
     pedidos = carga.get("documents") or []
+    t0 = time.monotonic()
 
-    def cerrar(estado: str, avisos: list[dict] | None = None, error: dict | None = None) -> dict:
-        corridas.cerrar(ambiente, company_id, analysis_id, estado, avisos=avisos, error=error)
+    def cerrar(estado: str, avisos: list[dict] | None = None, error: dict | None = None,
+               resultado: dict | None = None) -> dict:
+        corridas.cerrar(ambiente, company_id, analysis_id, estado,
+                        avisos=avisos, error=error, resultado=resultado)
         return {"status": estado, "analysisId": analysis_id}
 
     try:
@@ -429,6 +443,21 @@ def procesar(carga: dict, *, analizar: Callable) -> dict:
             "No se pudo obtener ni la razón social ni el RUT de la sociedad.",
         ))
 
+    # Los representantes legales salen de una SEGUNDA extracción, sobre los PDF
+    # nativos: las tablas de propiedad se leen mucho mejor con el documento a la
+    # vista que con su texto. Nunca lanza — si falla, la ficha de 18 campos ya
+    # está lista y perderla por esto sería peor que devolverla sin personas.
+    personas, avisos_personas = ({}, [])
+    if extraer_socios is not None:
+        try:
+            personas, avisos_personas = extraer_socios(descargados, t0)
+        except Exception as e:  # noqa: BLE001
+            log.warning("no se pudo extraer la composición societaria de %s: %s", analysis_id, e)
+            avisos_personas = [f"No se pudo extraer la composición societaria ({e})."]
+    avisos += [errores.aviso("EXPECTED_DATA_MISSING", a) for a in avisos_personas]
+
+    ficha = _ficha(resultado, descargados, pedidos, personas)
+
     # Llegó hasta acá con la escritura leída. Si se perdió un complementario, el
     # resultado sirve pero está incompleto, y se dice cuál faltó.
     if perdidos:
@@ -440,9 +469,181 @@ def procesar(carga: dict, *, analizar: Callable) -> dict:
             )
             for d in perdidos
         ]
-        return cerrar(corridas.INCOMPLETE, avisos=avisos)
+        return cerrar(corridas.INCOMPLETE, avisos=avisos, resultado=ficha)
 
-    return cerrar(corridas.COMPLETED, avisos=avisos)
+    return cerrar(corridas.COMPLETED, avisos=avisos, resultado=ficha)
+
+
+def _ficha(resultado: dict, descargados: list, pedidos: list[dict],
+           personas: dict | None = None) -> dict:
+    """Lo que se guarda de una corrida y después sirve EP-3.
+
+    **No entra el texto de los documentos.** Son escrituras enteras y una fila
+    de DynamoDB tiene un tope de 400 KB; además EP-3 no lo pide. Lo que entra es
+    la ficha: los campos, los metadatos por documento y el país.
+
+    El detalle por documento cruza lo que devolvió la extracción —que solo
+    conoce el nombre del archivo— con lo que pidió el llamador, para agregarle
+    `objectKey` y `documentType`. Sin ese cruce, quien integra no puede
+    relacionar un documento de la respuesta con el que mandó.
+    """
+    por_nombre = {d.nombre: d for d in descargados}
+    pedido_por_clave = {_clave_pedida(p): p for p in pedidos}
+
+    documentos = []
+    for d in resultado.get("documentos") or []:
+        bajado = por_nombre.get(d.get("nombre"))
+        pedido = pedido_por_clave.get(bajado.clave) if bajado else None
+        documentos.append({
+            "fileName": d.get("nombre"),
+            "objectKey": bajado.clave if bajado else None,
+            "documentType": (pedido or {}).get("documentType") or (bajado.tipo if bajado else None),
+            "pagesTotal": d.get("paginas_totales"),
+            "pagesRead": d.get("paginas_leidas"),
+            "pagesFromOcr": d.get("paginas_por_ocr"),
+            "method": d.get("metodo"),
+            "ok": d.get("ok"),
+        })
+
+    p = personas or {}
+    return {
+        "fields": resultado.get("campos") or [],
+        "documents": documentos,
+        "detectedCountry": resultado.get("pais_detectado") or "",
+        # Crudos, sin serializar: la forma de EP-4 la pone `resultado_de` al
+        # momento de responder. Guardarlos ya serializados congelaría el formato
+        # de la fecha en que se corrió el análisis, y un arreglo del contrato no
+        # alcanzaría a las corridas viejas.
+        "legalRepresentatives": p.get("legalRepresentatives") or [],
+        "directOwnership": p.get("directOwnership") or [],
+        "indirectShareholders": p.get("indirectShareholders") or [],
+    }
+
+
+# ── EP-3 · El resultado ─────────────────────────────────────────────────────
+
+#: Los estados en los que hay algo que devolver. Los demás dan `404`.
+UTILIZABLES = (corridas.COMPLETED, corridas.INCOMPLETE)
+
+
+def _analysis(evento: dict, company_id: str, metodo: str) -> dict:
+    """`GET /v1/companies/{companyId}/analysis?environment=…`
+
+    ── El `404` de acá NO contradice el `200` de EP-2 ──────────────────────
+    Son dos preguntas distintas. EP-2 pregunta *«¿en qué anda?»* y «todavía
+    nada» es una respuesta; EP-3 pregunta *«dame el resultado»* y cuando no hay
+    resultado no hay nada que devolver.
+
+    Y el `404` mira **solo la corrida más reciente**, aunque exista una anterior
+    utilizable. Devolver la vieja sería contestar con datos de un análisis que
+    ya se reemplazó, sin que quien pregunta pueda notarlo.
+    """
+    if metodo != "GET":
+        return _error("BAD_REQUEST", f"{metodo} no está permitido en esta ruta.")
+
+    ambiente = _ambiente_de_query(evento)
+    if not ambiente:
+        return _error("BAD_REQUEST", "Falta el parámetro `environment`.")
+    if not corridas.ambiente_admitido(ambiente):
+        return _error(
+            "BAD_REQUEST",
+            f"`environment` no reconocido: {ambiente}. Admitidos: {', '.join(corridas.AMBIENTES)}.",
+        )
+
+    try:
+        u = corridas.ultima(ambiente, company_id)
+    except Exception as e:  # noqa: BLE001
+        log.warning("no se pudo leer el análisis de %s/%s: %s", ambiente, company_id, e)
+        return _error("SERVICE_UNAVAILABLE", "No se pudo leer el análisis de la empresa.")
+
+    if u is None or corridas.caducada(u) or u.get("status") not in UTILIZABLES:
+        return _error(
+            "NOT_FOUND",
+            "No hay un análisis utilizable para esa empresa y ambiente.",
+            status=(corridas.estado(ambiente, company_id) if u else corridas.NOT_STARTED),
+        )
+
+    return _resp(200, resultado_de(company_id, u))
+
+
+def resultado_de(company_id: str, u: dict) -> dict:
+    """El cuerpo de EP-3. Puro: la forma se testea sin montar un evento HTTP."""
+    ficha = u.get("result") or {}
+    campos = {c.get("field"): c.get("value") for c in (ficha.get("fields") or [])}
+    avisos = onboarding.Avisos()
+
+    empresa = onboarding.empresa_ep3({
+        "legalName": _dato(campos.get("Razón Social")),
+        "taxId": _dato(campos.get("RUT de la sociedad")),
+        "country": ficha.get("detectedCountry") or u.get("country") or "",
+        "constitutionDate": _dato(campos.get("Fecha de Constitución")),
+        "legalForm": _forma_legal(campos),
+        "activity": _dato(campos.get("Objeto Social")),
+        "address": _dato(campos.get("Domicilio Legal")),
+    }, avisos)
+
+    representantes = [
+        r for r in (
+            onboarding.representante(p, avisos)
+            for p in (ficha.get("legalRepresentatives") or [])
+        ) if r is not None
+    ]
+
+    return {
+        "companyId": u.get("companyId") or company_id,
+        "analysisId": u.get("analysisId"),
+        "status": u.get("status"),
+        "startedAt": u.get("startedAt"),
+        "finishedAt": u.get("finishedAt"),
+        "schemaVersion": u.get("schemaVersion") or SCHEMA_VERSION,
+        "company": empresa,
+        "legalRepresentatives": representantes,
+        "fields": ficha.get("fields") or [],
+        "documents": ficha.get("documents") or [],
+        # Los de la corrida más los que salieron de serializar. Van juntos
+        # porque para quien integra son lo mismo: algo que no salió redondo.
+        "warnings": (u.get("warnings") or []) + avisos.items,
+    }
+
+
+#: Sufijos que identifican la forma legal dentro de la razón social. Se miran de
+#: más largo a más corto: «S.A.» es sufijo de varias y ganaría por casualidad.
+FORMAS_LEGALES = (
+    ("SOCIEDAD POR ACCIONES", "Sociedad por Acciones"),
+    ("SPA", "Sociedad por Acciones"),
+    ("S.P.A.", "Sociedad por Acciones"),
+    ("LIMITADA", "Sociedad de Responsabilidad Limitada"),
+    ("LTDA", "Sociedad de Responsabilidad Limitada"),
+    ("S.A.S.", "Sociedad por Acciones Simplificada"),
+    ("SAS", "Sociedad por Acciones Simplificada"),
+    ("E.I.R.L.", "Empresa Individual de Responsabilidad Limitada"),
+    ("EIRL", "Empresa Individual de Responsabilidad Limitada"),
+    ("S.A.", "Sociedad Anónima"),
+    ("SA", "Sociedad Anónima"),
+)
+
+
+def _forma_legal(campos: dict) -> str:
+    """La forma legal, derivada del sufijo de la razón social.
+
+    Se deriva y no se extrae porque no es uno de los 18 campos, y esos no se
+    tocan: están fuera de alcance por acuerdo y de ellos depende la cola KYB.
+
+    El sufijo es la señal más confiable que hay — es parte del nombre inscrito—
+    y cuando no se reconoce se devuelve vacío en vez de adivinar: una forma
+    legal equivocada viaja al expediente de compliance sin que nadie la revise.
+    """
+    nombre = _dato(campos.get("Razón Social")).upper().replace(",", " ")
+    palabras = set(nombre.replace(".", ". ").split())
+    for sufijo, forma in FORMAS_LEGALES:
+        if nombre.endswith(" " + sufijo) or sufijo in palabras or nombre.endswith(sufijo):
+            return forma
+    return ""
+
+
+def _dato(v: Any) -> str:
+    """El valor de un campo, o vacío si es uno de los literales de «no está»."""
+    return str(v or "").strip() if _hay_dato(v) else ""
 
 
 #: Los literales que los 18 campos usan para decir «no está». No son un valor.

@@ -180,6 +180,7 @@ def registrar_inicio(
         "documents": documentos or [],
         "warnings": [],
         "error": None,
+        "result": None,
         "schemaVersion": str(schema_version or ""),
     }
     _escribir(reg)
@@ -194,6 +195,7 @@ def cerrar(
     *,
     avisos: list[dict] | None = None,
     error: dict | None = None,
+    resultado: dict | None = None,
     ahora: float | None = None,
 ) -> dict | None:
     """Lleva la corrida a un estado terminal. `None` si no se encontró.
@@ -229,6 +231,14 @@ def cerrar(
         "finishedAt": _ahora_iso(ahora),
         "warnings": avisos if avisos is not None else reg.get("warnings") or [],
         "error": error,
+        # Lo que EP-3 devuelve. Se guarda ACÁ y no en `almacen` porque EP-3
+        # pregunta por empresa y ambiente, que es la clave de este almacén; el
+        # otro solo sabe responder por `analysisId`.
+        #
+        # NO incluye el texto de los documentos: son escrituras enteras, y una
+        # fila de DynamoDB tiene un tope de 400 KB. Lo que entra es la ficha —
+        # campos, metadatos por documento y personas—, que está acotada.
+        "result": resultado if resultado is not None else reg.get("result"),
     }
     _escribir(reg)
     return reg
@@ -254,13 +264,14 @@ def _escribir(reg: dict) -> None:
         return
     try:
         _tabla().put_item(Item={
-            **{k: v for k, v in reg.items() if k not in ("documents", "warnings", "error")},
+            **{k: v for k, v in reg.items() if k not in ("documents", "warnings", "error", "result")},
             # Serializados: DynamoDB no acepta floats y los avisos y documentos
             # pueden traerlos. Convertirlos uno por uno sería frágil, y es el
             # mismo criterio que ya usa `almacen.guardar`.
             "documents": json.dumps(reg.get("documents") or [], ensure_ascii=False),
             "warnings": json.dumps(reg.get("warnings") or [], ensure_ascii=False),
             "error": json.dumps(reg.get("error"), ensure_ascii=False),
+            "result": json.dumps(reg.get("result"), ensure_ascii=False),
             "ttl": int(time.time()) + TTL_DIAS * 86400,
         })
     except Exception as e:  # noqa: BLE001
@@ -292,7 +303,7 @@ def _leer_todas(ambiente: Any, company_id: Any, limite: int = 50) -> list[dict]:
 
 def _deserializar(it: dict) -> dict:
     fuera = dict(it)
-    for campo, vacio in (("documents", []), ("warnings", []), ("error", None)):
+    for campo, vacio in (("documents", []), ("warnings", []), ("error", None), ("result", None)):
         v = fuera.get(campo)
         if isinstance(v, str):
             try:
