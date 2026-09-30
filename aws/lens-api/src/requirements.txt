@@ -1,15 +1,20 @@
-# Dependencias de la API. `sam build` resuelve las dos sin Docker en macOS
-# arm64 — verificado.
+# Dependencias de la API. boto3 ya viene en el runtime de Lambda → no se incluye.
 #
-# `pypdf` es Python puro. `requests` también, pero arrastra
-# `charset_normalizer`, que trae una extensión C opcional; el PythonPipBuilder
-# de SAM baja el wheel de `manylinux aarch64` correcto, así que no hace falta
-# `--use-container`.
+# `pypdf` y `requests` son Python puro. `cryptography` NO: trae una extensión
+# nativa (Rust, `_rust.abi3.so`) y `cffi`. Entró el 30-09-2026 porque sin ella
+# pypdf NO puede abrir un PDF con cifrado AES —«cryptography>=3.1 is required for
+# AES algorithm»—, y los documentos oficiales suelen venir protegidos aunque se
+# abran con contraseña vacía. Pasó en producción con un lote real.
 #
-# boto3 ya viene en el runtime de Lambda → no se incluye.
+# Que sea nativa importa: compila en un Mac y puede fallar en Lambda. `sam build`
+# baja el wheel `manylinux aarch64` correcto sin Docker —verificado: el `.so` que
+# queda en `.aws-sam/build` es ELF aarch64, no Mach-O—. Si alguna vez deja de
+# hacerlo, `sam build --use-container`. El test `test_el_build_trae_cryptography
+# _para_linux_arm` lo verifica sobre el build real.
 #
-# NO se usa PyMuPDF ni Pillow a propósito: son binarios pesados y sin wheel
-# para todas las combinaciones. La rasterización no hace falta porque el OCR lo
-# hace Textract, que recibe la página como PDF.
+# NO se usa PyMuPDF ni Pillow a propósito: son binarios pesados y sin wheel para
+# todas las combinaciones. La rasterización no hace falta porque el OCR lo hace
+# Textract, que recibe la página como PDF.
 pypdf>=5.1,<6
 requests>=2.31,<3
+cryptography>=42,<51
