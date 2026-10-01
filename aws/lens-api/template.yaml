@@ -7,6 +7,14 @@ Description: >
   de quien llama. No toca la SPA.
 
 Parameters:
+  # ── Los defaults son los valores VIVOS (01-10-2026) ──────────────────────────
+  # `CrearTablaCorridas`, `CrearTablaIdempotencia` y `DisparoAsincrono` arrancaron
+  # en 'false' porque al principio faltaban los permisos. Hoy las tablas existen,
+  # y un default en false era una trampa: un deploy que se olvidara de pasar el
+  # flag lo APAGABA. Con las tablas en Retain no se pierden datos, pero la tabla
+  # sale del stack, la variable de entorno queda vacía y la API cae a memoria:
+  # EP-2 respondería NOT_STARTED para todas las empresas. Con el default igual al
+  # valor vivo, olvidarse de un parámetro no cambia nada.
   ApiSecretValue:
     Type: String
     NoEcho: true
@@ -39,7 +47,7 @@ Parameters:
       Vacío desactiva la descarga por URL (default). Sin lista, el servicio sería un SSRF.
   CrearTablaIdempotencia:
     Type: String
-    Default: 'false'
+    Default: 'true'
     AllowedValues: ['true', 'false']
     Description: >
       Si se crea la tabla DynamoDB que da idempotencia a POST /v1/analyses.
@@ -50,7 +58,7 @@ Parameters:
       `almacen_idempotencia`. Poner en `true` apenas exista el permiso.
   CrearTablaCorridas:
     Type: String
-    Default: 'false'
+    Default: 'true'
     AllowedValues: ['true', 'false']
     Description: >
       Si se crea la tabla DynamoDB de la persistencia operacional por empresa
@@ -73,7 +81,7 @@ Parameters:
       sirve para una prueba local.
   DisparoAsincrono:
     Type: String
-    Default: 'false'
+    Default: 'true'
     AllowedValues: ['true', 'false']
     Description: >
       Si EP-1 responde el 202 ANTES de procesar, invocándose a sí misma en
@@ -123,6 +131,10 @@ Globals:
 Resources:
   LensApiFunction:
     Type: AWS::Serverless::Function
+    # Retain por la migración a Terraform, igual que las tablas: recrear la
+    # función cambiaría la Function URL, y Onboarding ya la tiene.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       # `lens-api` NO se puede usar: quedó reservado por un stack en
       # ROLLBACK_FAILED que nadie con `compliance-admin` puede borrar.
@@ -234,8 +246,17 @@ Resources:
   TablaAnalisis:
     Type: AWS::DynamoDB::Table
     Condition: ConTabla
+    # Retain: si la tabla sale del template —que es el paso 2 de la migración a
+    # Terraform— CloudFormation la SUELTA en vez de borrarla. Sin esto, ese paso
+    # borra la tabla con todo el historial adentro.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       BillingMode: PAY_PER_REQUEST
+      # Nativo de DynamoDB: bloquea DeleteTable para CUALQUIERA hasta que se
+      # apague a propósito. No estorba la migración: Retain suelta la tabla sin
+      # borrarla, y `terraform import` funciona con la protección puesta.
+      DeletionProtectionEnabled: true
       AttributeDefinitions:
         - AttributeName: analysis_id
           AttributeType: S
@@ -245,6 +266,64 @@ Resources:
       TimeToLiveSpecification:
         AttributeName: ttl
         Enabled: true
+      # ── Quién puede tocar los datos (Bloque 2) ─────────────────────────────
+      # Pedido de Benjamín: que NINGÚN otro perfil pueda borrar o editar. Son
+      # dos `Deny` con excepción, y lo que no se niega queda como estaba:
+      #
+      #   escribir ítems     SOLO la Lambda
+      #   cambiar la tabla   SOLO el pipeline de Terraform y compliance-admin
+      #   leer               abierto — Onboarding lee todas las tablas
+      #
+      # Simulado contra los roles reales antes de aplicarlo (simulate-principal-
+      # policy con esta política): la Lambda escribe, compliance-admin y
+      # compliance-eng no, y Terraform cambia la tabla pero no los datos.
+      #
+      # La Lambda se reconoce por el PATRÓN del nombre que CloudFormation le da a
+      # su rol, no por `!GetAtt LensApiFunctionRole.Arn`: el rol ya referencia a
+      # esta tabla en su política, y referenciarlo desde acá hace una dependencia
+      # circular que CloudFormation rechaza. Si el patrón no calzara, la API
+      # dejaría de poder escribir y TODAS las corridas fallarían: después de
+      # desplegar, probar EP-1 → EP-2.
+      #
+      # NO se niegan `PutResourcePolicy` ni `DeleteResourcePolicy`: son la salida
+      # de emergencia. Si esta política quedara mal, compliance-admin tiene que
+      # poder sacarla. Una política sin salida no la arregla nadie.
+      #
+      # `Resource: '*'` es «esta tabla»: la política vive en la tabla y su ARN no
+      # existe todavía cuando se escribe. Validado con IAM Access Analyzer.
+      ResourcePolicy:
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Sid: SoloLaLambdaEscribeItems
+              Effect: Deny
+              Principal: '*'
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:UpdateItem
+                - dynamodb:DeleteItem
+                - dynamodb:BatchWriteItem
+                - dynamodb:PartiQLInsert
+                - dynamodb:PartiQLUpdate
+                - dynamodb:PartiQLDelete
+              Resource: '*'
+              Condition:
+                ArnNotLike:
+                  aws:PrincipalArn: !Sub 'arn:aws:iam::${AWS::AccountId}:role/${AWS::StackName}-LensApiFunctionRole-*'
+            - Sid: SoloAdministracionCambiaLaTabla
+              Effect: Deny
+              Principal: '*'
+              Action:
+                - dynamodb:UpdateTable
+                - dynamodb:UpdateTimeToLive
+                - dynamodb:UpdateContinuousBackups
+                - dynamodb:DeleteTable
+              Resource: '*'
+              Condition:
+                ArnNotLike:
+                  aws:PrincipalArn:
+                    - !Sub 'arn:aws:iam::${AWS::AccountId}:role/iac-ai-lens-codebuild-role-ci'
+                    - !Sub 'arn:aws:iam::${AWS::AccountId}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_compliance_admin_*'
 
   # ── Persistencia operacional por empresa (Fase 1) ─────────────────────────
   # Es OTRA tabla, no la de arriba. `TablaAnalisis` indexa por `analysisId` y
@@ -268,8 +347,17 @@ Resources:
   TablaCorridas:
     Type: AWS::DynamoDB::Table
     Condition: ConTablaCorridas
+    # Retain: si la tabla sale del template —que es el paso 2 de la migración a
+    # Terraform— CloudFormation la SUELTA en vez de borrarla. Sin esto, ese paso
+    # borra la tabla con todo el historial adentro.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       BillingMode: PAY_PER_REQUEST
+      # Nativo de DynamoDB: bloquea DeleteTable para CUALQUIERA hasta que se
+      # apague a propósito. No estorba la migración: Retain suelta la tabla sin
+      # borrarla, y `terraform import` funciona con la protección puesta.
+      DeletionProtectionEnabled: true
       AttributeDefinitions:
         - AttributeName: pk
           AttributeType: S
@@ -283,6 +371,64 @@ Resources:
       TimeToLiveSpecification:
         AttributeName: ttl
         Enabled: true
+      # ── Quién puede tocar los datos (Bloque 2) ─────────────────────────────
+      # Pedido de Benjamín: que NINGÚN otro perfil pueda borrar o editar. Son
+      # dos `Deny` con excepción, y lo que no se niega queda como estaba:
+      #
+      #   escribir ítems     SOLO la Lambda
+      #   cambiar la tabla   SOLO el pipeline de Terraform y compliance-admin
+      #   leer               abierto — Onboarding lee todas las tablas
+      #
+      # Simulado contra los roles reales antes de aplicarlo (simulate-principal-
+      # policy con esta política): la Lambda escribe, compliance-admin y
+      # compliance-eng no, y Terraform cambia la tabla pero no los datos.
+      #
+      # La Lambda se reconoce por el PATRÓN del nombre que CloudFormation le da a
+      # su rol, no por `!GetAtt LensApiFunctionRole.Arn`: el rol ya referencia a
+      # esta tabla en su política, y referenciarlo desde acá hace una dependencia
+      # circular que CloudFormation rechaza. Si el patrón no calzara, la API
+      # dejaría de poder escribir y TODAS las corridas fallarían: después de
+      # desplegar, probar EP-1 → EP-2.
+      #
+      # NO se niegan `PutResourcePolicy` ni `DeleteResourcePolicy`: son la salida
+      # de emergencia. Si esta política quedara mal, compliance-admin tiene que
+      # poder sacarla. Una política sin salida no la arregla nadie.
+      #
+      # `Resource: '*'` es «esta tabla»: la política vive en la tabla y su ARN no
+      # existe todavía cuando se escribe. Validado con IAM Access Analyzer.
+      ResourcePolicy:
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Sid: SoloLaLambdaEscribeItems
+              Effect: Deny
+              Principal: '*'
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:UpdateItem
+                - dynamodb:DeleteItem
+                - dynamodb:BatchWriteItem
+                - dynamodb:PartiQLInsert
+                - dynamodb:PartiQLUpdate
+                - dynamodb:PartiQLDelete
+              Resource: '*'
+              Condition:
+                ArnNotLike:
+                  aws:PrincipalArn: !Sub 'arn:aws:iam::${AWS::AccountId}:role/${AWS::StackName}-LensApiFunctionRole-*'
+            - Sid: SoloAdministracionCambiaLaTabla
+              Effect: Deny
+              Principal: '*'
+              Action:
+                - dynamodb:UpdateTable
+                - dynamodb:UpdateTimeToLive
+                - dynamodb:UpdateContinuousBackups
+                - dynamodb:DeleteTable
+              Resource: '*'
+              Condition:
+                ArnNotLike:
+                  aws:PrincipalArn:
+                    - !Sub 'arn:aws:iam::${AWS::AccountId}:role/iac-ai-lens-codebuild-role-ci'
+                    - !Sub 'arn:aws:iam::${AWS::AccountId}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_compliance_admin_*'
 
   # NO se declara un AWS::Logs::LogGroup para fijar la retención.
   #
