@@ -454,7 +454,7 @@ def fecha_iso(valor: Any, avisos: Avisos | None = None) -> str | None:
         avisos.agregar(
             AVISO_FECHA,
             f"No se pudo interpretar la fecha «{crudo}»; se envía vacía.",
-            valor=crudo,
+            campo="constitutionDate",
         )
     return None
 
@@ -466,6 +466,110 @@ def fecha_iso(valor: Any, avisos: Avisos | None = None) -> str | None:
 TOPE_FORMA_LEGAL = 30
 TOPE_ACTIVIDAD = 30
 TOPE_CARGO = 60   # el cargo se entrega completo; Onboarding guarda hasta 60
+
+# ── legalForm ───────────────────────────────────────────────────────────────
+# NO se recorta, se NOMBRA. Recortar «Sociedad de Responsabilidad Limitada» a
+# 30 dejaba «Sociedad de Responsabilidad»: se perdía justo la palabra que la
+# define, y le pasaba a TODAS las limitadas de Chile.
+#
+# Cada forma tiene un nombre fijo que cabe en 30. La regla: el nombre completo si
+# cabe, y si no, el nombre con que se la conoce — nunca un fragmento.
+
+FORMAS_LEGALES: dict[str, str] = {
+    "SPA": "Sociedad por Acciones",
+    "SA": "Sociedad Anónima",
+    "LIMITADA": "Sociedad Limitada",
+    "SAS": "S.A.S.",
+    "EIRL": "E.I.R.L.",
+}
+
+#: Sufijo de la razón social → forma. El sufijo es parte del nombre inscrito, así
+#: que es la señal más confiable que hay — salvo el de Sociedad Anónima.
+_SUFIJOS_FUERTES = {
+    "SPA": "SPA", "SOCIEDAD POR ACCIONES": "SPA",
+    "LIMITADA": "LIMITADA", "LTDA": "LIMITADA",
+    "SAS": "SAS", "SOCIEDAD POR ACCIONES SIMPLIFICADA": "SAS",
+    "EIRL": "EIRL",
+}
+#: «SA» es DÉBIL: es el principio de «SAS», y basta que la extracción se coma la
+#: última letra para que una SAS parezca anónima. Pasó con una SAS colombiana
+#: cuya razón social salió «… S A».
+_SUFIJOS_DEBILES = {"SA": "SA", "SOCIEDAD ANONIMA": "SA"}
+
+
+def _sufijo_societario(razon_social: Any) -> tuple[str | None, bool]:
+    """`(forma, es_fuerte)` según cómo termina la razón social.
+
+    Las siglas con puntos (`S.A.S.`, `E.I.R.L.`) quedan como letras sueltas al
+    sacar los puntos. No se juntan a lo bruto: una razón social con iniciales
+    —«COMERCIAL A Y B S.A.»— terminaría toda pegada en una sigla que no existe.
+    Se prueba cada sigla conocida contra las ÚLTIMAS letras sueltas, de la más
+    larga a la más corta.
+    """
+    nombre = re.sub(r"[.,]", " ", _sin_tildes(str(razon_social or "")).upper())
+    toks = nombre.split()
+    cola = " ".join(toks)
+
+    sueltas: list[str] = []
+    for tok in reversed(toks):
+        if len(tok) == 1 and tok.isalpha():
+            sueltas.insert(0, tok)
+        else:
+            break
+
+    for tabla, fuerte in ((_SUFIJOS_FUERTES, True), (_SUFIJOS_DEBILES, False)):
+        for sufijo, forma in sorted(tabla.items(), key=lambda kv: -len(kv[0])):
+            if cola == sufijo or cola.endswith(" " + sufijo):
+                return forma, fuerte
+            k = len(sufijo)
+            if " " not in sufijo and len(sueltas) >= k and "".join(sueltas[-k:]) == sufijo:
+                return forma, fuerte
+    return None, False
+
+
+def forma_legal(razon_social: Any, del_documento: Any = None,
+                avisos: Avisos | None = None) -> str | None:
+    """La forma legal, con un nombre que cabe en 30 y nunca cortado.
+
+    Dos fuentes, y el orden entre ellas es la regla:
+
+      · el SUFIJO de la razón social, que es parte del nombre inscrito;
+      · lo que DICE EL DOCUMENTO, leído por el modelo en su propia pasada.
+
+    Un sufijo fuerte (`SpA`, `Limitada`, `SAS`, `EIRL`) gana siempre. El débil
+    —`S.A.`— cede ante el documento si el documento dice otra cosa: es el que
+    aparece cuando la extracción se come la última letra de una SAS.
+    """
+    sufijo, fuerte = _sufijo_societario(razon_social)
+    doc = str(del_documento or "").strip().upper() or None
+    doc = doc if doc in FORMAS_LEGALES else None
+
+    forma = sufijo if fuerte else (doc or sufijo)
+    if forma is None and avisos is not None:
+        avisos.agregar(AVISO_DATO_FALTANTE,
+                       "No se pudo determinar la forma legal de la sociedad.",
+                       campo="legalForm")
+    return FORMAS_LEGALES.get(forma) if forma else None
+
+
+def actividad(resumen: Any, avisos: Avisos | None = None) -> str | None:
+    """La actividad principal, RESUMIDA. §7.6: «LENS resume la actividad
+    principal del objeto social sin superar el máximo».
+
+    El resumen lo hace el modelo en una pasada propia. Acá solo se valida: si no
+    cabe en 30, o si quedó colgando de una coma, es `null` + aviso. Nunca se
+    recorta — recortar el objeto social dejaba «Comercialización,» o «Compra,
+    venta, importación,»: un fragmento con la coma colgando, que para Onboarding
+    es peor que un campo vacío porque parece un dato.
+    """
+    txt = " ".join(str(resumen or "").split()).strip(" ,;:.-")
+    if txt and len(txt) <= TOPE_ACTIVIDAD:
+        return txt
+    if avisos is not None:
+        avisos.agregar(AVISO_DATO_FALTANTE,
+                       "No se pudo resumir la actividad principal en 30 caracteres.",
+                       campo="activity")
+    return None
 
 
 def recortar(valor: Any, tope: int, campo: str, avisos: Avisos | None = None) -> str | None:
@@ -771,9 +875,9 @@ def empresa(datos: dict, avisos: Avisos | None = None) -> dict:
         "taxId": id_tal_cual(tax_id),
         "taxIdType": tipo_tax_id(tax_id, datos.get("country") or datos.get("pais"), avisos),
         "constitutionDate": fecha_iso(datos.get("constitutionDate"), avisos),
-        "legalForm": recortar(datos.get("legalForm"), TOPE_FORMA_LEGAL, "legalForm", avisos),
+        "legalForm": forma_legal(datos.get("legalName"), datos.get("legalFormDoc"), avisos),
         "address": domicilio(datos.get("address"), avisos),
-        "activity": recortar(datos.get("activity"), TOPE_ACTIVIDAD, "activity", avisos),
+        "activity": actividad(datos.get("activity"), avisos),
         # §11. `boolean | null`: `null` cuando el documento no permite
         # determinarlo. Solo pasa un booleano de verdad — un `"true"` de texto o
         # un 1 son «no lo dijo». Este valor decide cuántas aprobaciones necesita
@@ -807,55 +911,110 @@ def _es_apto(fragmento: str) -> bool:
     return bool(_RE_APTO.match(fragmento.strip()))
 
 
+#: Lo que marca la parte «calle» de una dirección. Una parte que no tiene ni un
+#: número ni una de estas palabras NO es una calle, aunque venga primera: es el
+#: error que ponía «Santiago» como calle y «Chile» como ciudad.
+_MARCAS_CALLE = (
+    "calle", "avenida", "av", "avda", "pasaje", "psje", "camino", "carrera", "cra",
+    "cr", "kr", "diagonal", "dg", "transversal", "tv", "autopista", "ruta", "km",
+    "kilometro", "kilómetro", "parcela", "lote", "sitio", "fundo", "manzana", "mz",
+    "paseo", "plaza", "boulevard", "bulevar", "costanera", "circunvalacion",
+    "circunvalación", "jiron", "jirón",
+)
+_RE_CALLE = re.compile(r"^(?:" + "|".join(_MARCAS_CALLE) + r")\b\.?", re.IGNORECASE)
+
+#: Lo que marca la parte «región / departamento».
+_RE_REGION = re.compile(
+    r"^(?:regi[oó]n|departamento|depto\.?\s+de|provincia|estado\s+de)\b|\bmetropolitana\b",
+    re.IGNORECASE,
+)
+
+#: Prefijos que acompañan a la comuna o ciudad y que NO son parte de su nombre.
+#: `city` guarda el nombre: «Lo Barnechea», no «Comuna de Lo Barnechea».
+_RE_PREFIJO_CIUDAD = re.compile(
+    r"^(?:comuna|ciudad|municipio|localidad|distrito|cant[oó]n)\s+de\s+", re.IGNORECASE)
+
+
+def _es_calle(parte: str) -> bool:
+    return bool(re.search(r"\d", parte)) or bool(_RE_CALLE.match(parte.strip()))
+
+
+def _es_region(parte: str) -> bool:
+    return bool(_RE_REGION.search(parte.strip()))
+
+
+def _es_pais(parte: str) -> bool:
+    return _sin_tildes(parte) in _INDICE_PAISES
+
+
 def domicilio(texto: Any, avisos: Avisos | None = None) -> dict:
     """Parte *Domicilio Legal* en `street` / `apt` / `city` / `state`.
 
-    ── Por qué por comas y no con algo más listo ───────────────────────────
-    Una dirección chilena o colombiana viene escrita a mano en la escritura y no
-    hay un formato. Lo único estable es que las partes van separadas por comas y
-    **de lo más específico a lo más general**: calle, luego comuna o ciudad,
-    luego región o departamento. Eso se cumple casi siempre; lo que no se cumple
-    es el largo, porque falta la calle, o la región, o las dos.
+    ── Se clasifica cada parte, no se reparte por posición ─────────────────
+    La primera versión repartía por posición —primera parte calle, segunda
+    ciudad, tercera región—, y con escrituras reales falló en 5 de 6: cuando la
+    escritura da el domicilio como ciudad, todo se corre un nivel.
 
-    Así que se reparte desde el final, que es la posición confiable:
+        "Santiago, Chile"   →  street="Santiago"  city="Chile"          ✗
 
-        "10 norte 882, Viña del Mar, Valparaíso"  → street, city, state
-        "Av. Providencia 1234, Of 302, Santiago"  → street, apt, city
-        "Providencia"                             → street
+    Onboarding guarda la dirección por componente, así que eso habría guardado la
+    ciudad como calle y el país como ciudad. Ahora cada parte se reconoce por lo
+    que ES:
 
-    Lo que no se puede repartir **no se inventa**: queda en `null`. Una comuna
-    adivinada a partir de una región es peor que una comuna vacía, porque nadie
-    la va a revisar.
+      · **país** — está en el Anexo A → se descarta: el contrato no tiene campo
+        país, y meterlo en `city` o `state` es un dato equivocado.
+      · **calle** — tiene un número o una palabra de calle (`Av.`, `Calle`,
+        `Pasaje`…). Sin ninguna de las dos no es una calle, venga donde venga.
+      · **apartamento** — `Of`, `Depto`, `Piso`…
+      · **región** — `Región…`, `Departamento…`, `…Metropolitana…`
+      · lo que queda es **comuna / ciudad**, sin el «Comuna de» adelante.
 
-    Un domicilio de una sola parte va entero a `street`: es lo que dice el
-    documento, y partirlo por espacios produciría una ciudad que nunca se
-    escribió.
+        "Santiago, Chile"                                  → city
+        "Comuna de Lo Barnechea, Región Metropolitana…"    → city, state
+        "Los Aromos 1450, comuna de Quilpué, Región…"   → street, city, state
+
+    Solo cuando no hay marca de región se vuelve a la posición —«calle, ciudad,
+    región», de lo específico a lo general—, que es la única señal que queda:
+
+        "10 norte 882, Viña del Mar, Valparaíso"           → street, city, state
+
+    Lo que no se puede clasificar **no se inventa**. Si solo hay ciudad,
+    `street` queda en `null`: una calle adivinada es peor que ninguna, porque
+    nadie la va a revisar.
+
+    El aviso por domicilio faltante NO se emite acá: lo emite la evaluación de
+    datos esperados de `companies`, que es la que decide el estado de la corrida
+    y la única que sabe qué faltó en total. Emitirlo en los dos lados lo duplicaba.
     """
+    vacio = {"street": None, "apt": None, "city": None, "state": None}
     crudo = str(texto or "").strip()
     if not crudo or crudo.lower() in ("no especificado", "sin documento"):
-        if avisos is not None:
-            avisos.agregar(AVISO_DATO_FALTANTE, "El documento no declara un domicilio legal.")
-        return {"street": None, "apt": None, "city": None, "state": None}
+        return vacio
 
     partes = [p.strip() for p in crudo.split(",") if p.strip()]
+    partes = [p for p in partes if not _es_pais(p)]
+    if not partes:
+        return vacio
 
-    apt = None
-    # El apartamento puede venir en cualquier posición intermedia; se saca de la
-    # lista antes de repartir el resto por posición.
+    street = apt = state = None
+    resto: list[str] = []
     for i, p in enumerate(partes):
-        if i > 0 and _es_apto(p):
-            apt = partes.pop(i)
-            break
+        if apt is None and i > 0 and _es_apto(p):
+            apt = p
+        elif street is None and not resto and _es_calle(p):
+            # Solo al principio: un número suelto más adelante («Región 5») no
+            # convierte esa parte en calle.
+            street = p
+        elif state is None and _es_region(p):
+            state = p
+        else:
+            resto.append(p)
 
-    street = partes[0] if partes else None
-    city = partes[1] if len(partes) >= 2 else None
-    state = partes[2] if len(partes) >= 3 else None
-    # Con más de tres partes, las del medio son todas ciudad/comuna: se juntan en
-    # vez de descartarlas. La última sigue siendo la región.
-    if len(partes) > 3:
-        city = ", ".join(partes[1:-1])
-        state = partes[-1]
+    if state is None and len(resto) >= 2:
+        # Sin marca de región, la posición manda: la última es la región.
+        state = resto.pop()
 
+    city = ", ".join(_RE_PREFIJO_CIUDAD.sub("", c).strip() for c in resto) or None
     return {"street": street, "apt": apt, "city": city, "state": state}
 
 

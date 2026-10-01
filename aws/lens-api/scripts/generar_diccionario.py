@@ -252,9 +252,9 @@ una regla; la regla está en la columna de origen.
 | `taxId` | string \\| null | Sí | *RUT de la sociedad*, tal como figura | `"77.111.222-1"` |
 | `taxIdType` | string \\| null | Sí | Derivado del país declarado; el formato solo decide si el país no se sabe | `"RUT"` |
 | `constitutionDate` | string \\| null | Sí | *Fecha de Constitución*, convertida a `YYYY-MM-DD` | `"2019-03-12"` |
-| `legalForm` | string \\| null | Sí | Derivado del sufijo de la razón social, máximo 30 caracteres | `"Sociedad por Acciones"` |
+| `legalForm` | string \\| null | Sí | Nombrada desde el sufijo de la razón social o, si falta, desde el texto del documento. Uno de cinco valores fijos, nunca recortado | `"Sociedad por Acciones"` |
 | `address` | object | Sí | Derivado de *Domicilio Legal* (ver abajo) | |
-| `activity` | string \\| null | Sí | Derivado de *Objeto Social*, máximo 30 caracteres | `"Inversiones"` |
+| `activity` | string \\| null | Sí | Actividad principal RESUMIDA del objeto social, hasta 30 caracteres. `null` si no se puede resumir: nunca un fragmento | `"Inversiones"` |
 | `jointAdministration` | boolean \\| null | Sí | Pasada propia sobre las cláusulas de administración (§11) | `true` |
 
 > **Es un solo bloque, no dos.** La especificación lo dice literal en EP-3:
@@ -274,11 +274,35 @@ una regla; la regla está en la columna de origen.
 | `address.city` | string \\| null | Sí | Derivado | `"Santiago"` |
 | `address.state` | string \\| null | Sí | Derivado | `"Región Metropolitana"` |
 
-El domicilio viene escrito a mano en la escritura y no tiene formato. Lo único
-estable es que las partes van separadas por comas y **de lo más específico a lo
-más general**, así que se reparte desde el final, que es la posición confiable.
-Lo que no se puede repartir **queda en `null`**: una comuna adivinada a partir de
-una región es peor que una comuna vacía, porque nadie la va a revisar.
+El domicilio viene escrito a mano en la escritura y no tiene formato, así que
+cada parte se reconoce por lo que ES, no por dónde está: una **calle** tiene un
+número o una palabra de calle (`Av.`, `Calle`, `Pasaje`…), una **región** dice
+`Región` o `Departamento`, y el **país** se descarta — el contrato no tiene campo
+país. Lo que queda es la comuna o ciudad, sin el «Comuna de» adelante.
+
+Si el documento da solo la ciudad, `street` va en `null`. Lo que no se puede
+clasificar **no se inventa**: una calle adivinada es peor que ninguna, porque
+nadie la va a revisar.
+
+#### Sobre `legalForm` y `activity`
+
+Ninguna de las dos se recorta. Recortar dejaba «Sociedad de Responsabilidad»
+—perdía justo la palabra que define a una limitada— y actividades como
+«Comercialización,» con la coma colgando, que para quien las guarda parecen un
+dato y no lo son.
+
+`legalForm` toma uno de cinco valores fijos, todos de hasta 30 caracteres:
+
+| Tipo | `legalForm` |
+|---|---|
+| Sociedad por acciones | `Sociedad por Acciones` |
+| Sociedad anónima | `Sociedad Anónima` |
+| Sociedad de responsabilidad limitada | `Sociedad Limitada` |
+| Sociedad por acciones simplificada | `S.A.S.` |
+| Empresa individual de responsabilidad limitada | `E.I.R.L.` |
+
+`activity` la resume el modelo a partir del objeto social. Si el resumen no entra
+en 30 caracteres, va `null` con aviso.
 
 #### Sobre `jointAdministration`
 

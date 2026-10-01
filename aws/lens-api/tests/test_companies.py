@@ -53,24 +53,78 @@ def evento(company_id: str = "ACME-1", cuerpo: dict | None = None, metodo: str =
 CUERPO_OK = {
     "environment": "prod",
     "country": "chile",
-    "documents": [{"s3Uri": "s3://un-bucket/b2b/escritura.pdf", "documentType": "CONSTITUTION"}],
+    "documents": [{"s3Uri": "s3://un-bucket/b2b/escritura.pdf",
+                   "documentType": "company_deeds_document"}],
 }
 
 
-def analizar_falso(documentos, incluir_texto, pais=""):
+# ── Las fixtures por defecto: una escritura COMPLETA según §10 ──────────────
+# Todo lo requerido y todo lo esperado está: razón social, un representante con
+# nombre, tipo, documento y cargo, RUT, forma legal, fecha y domicilio. Con esto
+# una corrida sale COMPLETED; cada test que prueba un fallo la DEGRADA a mano,
+# así lo que se está probando se lee en el test y no en la fixture.
+#
+# Los datos son INVENTADOS: el repo es público, y los RUT tienen el dígito
+# verificador mal a propósito.
+
+def _leidos(documentos) -> list[dict]:
+    return [{"nombre": n, "ok": True, "metodo": "capa_texto", "paginas_totales": 12,
+             "paginas_leidas": 12, "paginas_por_ocr": 0} for n, _ in documentos]
+
+
+CAMPOS_COMPLETOS = [
+    {"field": "Razón Social", "value": "COMERCIAL TRIFOLIO SpA"},
+    {"field": "RUT de la sociedad", "value": "77.111.222-1"},
+    {"field": "Fecha de Constitución", "value": "12 de marzo de 2019"},
+    {"field": "Objeto Social", "value": "Inversiones y rentas de toda clase de bienes"},
+    {"field": "Domicilio Legal", "value": "Av. Providencia 1234, Of 302, Santiago, Región Metropolitana"},
+]
+
+
+def analizar_falso(documentos, incluir_texto, pais="", campos=None):
     return {
-        "campos": [
-            {"field": "Razón Social", "value": "COMERCIAL TRIFOLIO SpA"},
-            {"field": "RUT de la sociedad", "value": "77.111.222-1"},
-        ],
+        "ok": True,
+        "campos": campos if campos is not None else CAMPOS_COMPLETOS,
+        "documentos": _leidos(documentos),
+        "pais_detectado": "chile",
         "avisos": [],
-        "documentos": [],
     }
+
+
+def analizar_con(**cambios):
+    """`analizar_falso` con algunos campos cambiados. `None` = el campo falta."""
+    campos = [c for c in CAMPOS_COMPLETOS if c["field"] not in cambios]
+    campos += [{"field": k, "value": v} for k, v in cambios.items() if v is not None]
+    return lambda docs, inc, pais="": analizar_falso(docs, inc, pais, campos=campos)
+
+
+REPRESENTANTE = {
+    "personType": "NATURAL",
+    "shareholderName": "MARTINEZ SOTO CLAUDIA ANDREA",
+    # Partido, como lo devuelve el modelo. Sin partir, la serialización tiene
+    # que adivinar el orden y lo avisa (NAME_SPLIT_INFERRED) — con razón.
+    "name": "CLAUDIA ANDREA",
+    "lastName": "MARTINEZ SOTO",
+    "shareholderId": "10.203.040-5",
+    "countryOfOrigin": "Chile",
+    "position": "Gerente General",
+}
+
+
+def socios_falsos(descargados, t0):
+    return {"legalRepresentatives": [dict(REPRESENTANTE)],
+            "directOwnership": [], "indirectShareholders": []}, []
+
+
+def identidad_falsa(descargado, t0):
+    return {"esConstitutivo": "SI", "tipoDetectado": "escritura de constitución",
+            "activity": "Inversiones", "legalForm": "SPA"}
 
 
 def llamar(cuerpo=None, company_id="ACME-1", metodo="POST", headers=None, analizar=analizar_falso):
     ev = evento(company_id, cuerpo if cuerpo is not None else CUERPO_OK, metodo, headers)
-    r = co.manejar(ev, ev["rawPath"], metodo, analizar=analizar)
+    r = co.manejar(ev, ev["rawPath"], metodo, analizar=analizar,
+                   extraer_socios=socios_falsos, leer_identidad=identidad_falsa)
     return r["statusCode"], json.loads(r["body"])
 
 
@@ -258,13 +312,15 @@ def s3_falso(monkeypatch):
     return cliente
 
 
-def correr(documentos, s3, analizar=analizar_falso, ambiente="prod", company_id="ACME-1"):
+def correr(documentos, s3, analizar=analizar_falso, ambiente="prod", company_id="ACME-1",
+           socios=socios_falsos, identidad=identidad_falsa, admin=None, pais="chile"):
     """Registra la corrida y la procesa, como lo haría el disparo."""
     corridas.registrar_inicio(ambiente, company_id, "a1", documentos=documentos)
     co.procesar({
         "ambiente": ambiente, "companyId": company_id, "analysisId": "a1",
-        "country": "chile", "documents": documentos,
-    }, analizar=analizar)
+        "country": pais, "documents": documentos,
+    }, analizar=analizar, extraer_socios=socios, leer_identidad=identidad,
+       extraer_administracion=admin)
     return corridas.buscar(ambiente, company_id, "a1")
 
 
@@ -339,35 +395,115 @@ def test_un_complementario_que_falla_no_quema_un_intento(s3_falso):
 
 
 def test_sin_documentType_declarado_todos_siguen_siendo_principales(s3_falso, monkeypatch):
-    """Vacío sigue significando «todos principales»: es lo correcto si alguna vez
-    llega un lote sin `documentType`."""
+    """Vacío sigue significando «todos principales». Y con varios principales
+    alcanza con que UNO se pueda usar: perder el otro deja la corrida INCOMPLETE,
+    no FAILED. Es la regla que hace falta en Colombia, donde el lote puede traer
+    la escritura Y el certificado de la Cámara de Comercio."""
     monkeypatch.setattr(co, "TIPOS_PRINCIPALES", ())
     s3_falso.falla_get.add("b2b/anexo.pdf")
+    assert correr([PRINCIPAL, ANEXO], s3_falso)["status"] == corridas.INCOMPLETE
+    s3_falso.falla_get.add("b2b/escritura.pdf")
+    corridas._reiniciar_memoria()
     assert correr([PRINCIPAL, ANEXO], s3_falso)["status"] == corridas.FAILED
 
 
-def test_sin_razon_social_ni_rut_la_corrida_falla(s3_falso):
-    """Sin ninguno de los dos el análisis no sirve aguas abajo: es un fallo, no
-    un resultado degradado."""
-    def vacio(*_, **__):
-        return {"campos": [
-            {"field": "Razón Social", "value": "No especificado"},
-            {"field": "RUT de la sociedad", "value": ""},
-        ], "avisos": []}
+# ── §10 · Requeridos y esperados ────────────────────────────────────────────
+# Estos tests REEMPLAZAN a los que había. Aquellos fijaban la regla «sin razón
+# social NI RUT, FAILED; con solo el RUT, alcanza», que §10 contradice: el RUT es
+# ESPERADO, no requerido, y lo requerido es la razón social y un representante.
 
-    reg = correr([PRINCIPAL], s3_falso, analizar=vacio)
+def test_sin_razon_social_la_corrida_falla_aunque_haya_rut(s3_falso):
+    reg = correr([PRINCIPAL], s3_falso, analizar=analizar_con(**{"Razón Social": "No especificado"}))
     assert reg["status"] == corridas.FAILED
     assert reg["error"]["reason"] == "LENS_REQUIRED_DATA_MISSING"
+    assert "razón social" in reg["error"]["message"]
 
 
-def test_con_solo_el_rut_alcanza(s3_falso):
-    def solo_rut(*_, **__):
-        return {"campos": [
-            {"field": "Razón Social", "value": "No especificado"},
-            {"field": "RUT de la sociedad", "value": "77.111.222-1"},
-        ], "avisos": []}
+def test_sin_ningun_representante_la_corrida_falla(s3_falso):
+    """§10: «al menos un representante con nombre y tipo de persona». Sin esto
+    una empresa salía COMPLETED sin nadie que pudiera operarla."""
+    def sin_nadie(descargados, t0):
+        return {"legalRepresentatives": [], "directOwnership": [], "indirectShareholders": []}, []
 
-    assert correr([PRINCIPAL], s3_falso, analizar=solo_rut)["status"] == corridas.COMPLETED
+    reg = correr([PRINCIPAL], s3_falso, socios=sin_nadie)
+    assert reg["status"] == corridas.FAILED
+    assert reg["error"]["reason"] == "LENS_REQUIRED_DATA_MISSING"
+    assert "representante" in reg["error"]["message"]
+
+
+def test_un_representante_sin_tipo_de_persona_no_cuenta(s3_falso):
+    """El tipo de persona es parte de lo requerido: sin él, la serialización
+    omite a la persona, y un representante omitido no cuenta."""
+    def sin_tipo(descargados, t0):
+        r = {k: v for k, v in REPRESENTANTE.items() if k != "personType"}
+        return {"legalRepresentatives": [r], "directOwnership": [], "indirectShareholders": []}, []
+
+    assert correr([PRINCIPAL], s3_falso, socios=sin_tipo)["status"] == corridas.FAILED
+
+
+def test_sin_rut_la_corrida_queda_incompleta_no_fallida(s3_falso):
+    """El RUT es ESPERADO: si falta, INCOMPLETE — el usuario lo completa en el
+    formulario — y no FAILED, que le quemaría un intento."""
+    reg = correr([PRINCIPAL], s3_falso, analizar=analizar_con(**{"RUT de la sociedad": None}))
+    assert reg["status"] == corridas.INCOMPLETE
+    assert any("identificador tributario" in a["message"] for a in reg["warnings"])
+
+
+@pytest.mark.parametrize("campo,pista", [
+    ("Fecha de Constitución", "fecha de constitución"),
+    ("Domicilio Legal", "domicilio"),
+])
+def test_cada_esperado_que_falta_deja_la_corrida_incompleta_y_lo_dice(s3_falso, campo, pista):
+    reg = correr([PRINCIPAL], s3_falso, analizar=analizar_con(**{campo: "No especificado"}))
+    assert reg["status"] == corridas.INCOMPLETE
+    assert any(pista in a["message"] for a in reg["warnings"]), "warnings tiene que decir QUÉ falta"
+
+
+def test_el_representante_sin_documento_ni_cargo_se_nombra(s3_falso):
+    """Esperados por persona: documento y cargo. El aviso dice de quién."""
+    def incompleto(descargados, t0):
+        r = {k: v for k, v in REPRESENTANTE.items() if k not in ("shareholderId", "position")}
+        return {"legalRepresentatives": [r], "directOwnership": [], "indirectShareholders": []}, []
+
+    reg = correr([PRINCIPAL], s3_falso, socios=incompleto)
+    assert reg["status"] == corridas.INCOMPLETE
+    mensajes = " ".join(a["message"] for a in reg["warnings"])
+    assert "documento de identidad" in mensajes and "cargo" in mensajes
+    assert "MARTINEZ SOTO CLAUDIA ANDREA" in mensajes
+
+
+def test_un_esperado_que_ya_se_aviso_no_se_duplica(s3_falso):
+    """Una fecha que existe pero no se entiende ya tiene su aviso propio
+    (DATE_FORMAT_UNPARSEABLE); sumarle «falta la fecha» diría lo mismo dos
+    veces."""
+    reg = correr([PRINCIPAL], s3_falso,
+                 analizar=analizar_con(**{"Fecha de Constitución": "el día que se firmó"}))
+    sobre_fecha = [a for a in reg["warnings"] if "fecha" in a["message"].lower()]
+    assert len(sobre_fecha) == 1
+    assert sobre_fecha[0]["reason"] == "DATE_FORMAT_UNPARSEABLE"
+
+
+def test_en_colombia_el_nit_sin_digito_verificador_es_esperado(s3_falso):
+    """§10: en Colombia, «el NIT con su dígito verificador»."""
+    reg = correr([PRINCIPAL], s3_falso, pais="colombia",
+                 analizar=analizar_con(**{"RUT de la sociedad": "900123456"}))
+    assert reg["status"] == corridas.INCOMPLETE
+    assert any("dígito verificador" in a["message"] for a in reg["warnings"])
+
+
+@pytest.mark.parametrize("nit", ["900123456-7", "900123456 7", "9001234567"])
+def test_en_colombia_el_nit_con_digito_verificador_no_se_marca(s3_falso, nit):
+    reg = correr([PRINCIPAL], s3_falso, pais="colombia",
+                 analizar=analizar_con(**{"RUT de la sociedad": nit}))
+    assert not any("dígito verificador" in a["message"] for a in reg["warnings"])
+
+
+def test_fuera_de_chile_y_colombia_el_identificador_no_es_esperado(s3_falso):
+    """§10: en el resto de los orígenes «el identificador tributario puede no
+    existir». Marcarlo como faltante le pediría al usuario algo que no tiene."""
+    reg = correr([PRINCIPAL], s3_falso, pais="peru",
+                 analizar=analizar_con(**{"RUT de la sociedad": None}))
+    assert not any("identificador tributario" in a["message"] for a in reg["warnings"])
 
 
 def test_si_el_analisis_revienta_la_corrida_no_queda_colgada(s3_falso):
@@ -710,7 +846,7 @@ def test_el_ciclo_completo_ep1_luego_ep2(s3_falso, monkeypatch):
     monkeypatch.setattr(app, "API_SECRET", SECRETO)
     post = app.lambda_handler(evento("ACME-9", {
         "environment": "prod", "country": "chile",
-        "documents": [{"s3Uri": "s3://b/b2b/escritura.pdf", "documentType": "CONSTITUTION"}],
+        "documents": [{"s3Uri": "s3://b/b2b/escritura.pdf", "documentType": "company_deeds_document"}],
     }))
     assert post["statusCode"] == 202
     analysis_id = json.loads(post["body"])["analysisId"]
@@ -742,42 +878,11 @@ def pedir_resultado(company_id="ACME-1", ambiente="prod", metodo="GET", query=No
     return r["statusCode"], json.loads(r["body"])
 
 
-def analizar_completo(documentos, incluir_texto, pais=""):
-    return {
-        "campos": [
-            {"field": "Razón Social", "value": "COMERCIAL TRIFOLIO SpA"},
-            {"field": "RUT de la sociedad", "value": "77.111.222-1"},
-            {"field": "Fecha de Constitución", "value": "12 de marzo de 2019"},
-            {"field": "Objeto Social", "value": "Inversiones y rentas de toda clase de bienes"},
-            {"field": "Domicilio Legal", "value": "Av. Providencia 1234, Of 302, Santiago, Región Metropolitana"},
-        ],
-        "documentos": [{"nombre": "escritura.pdf", "ok": True, "metodo": "capa_texto",
-                        "paginas_totales": 12, "paginas_leidas": 12, "paginas_por_ocr": 0}],
-        "pais_detectado": "chile",
-        "avisos": [],
-    }
-
-
-def socios_falsos(descargados, t0):
-    return {
-        "legalRepresentatives": [{
-            "personType": "NATURAL",
-            "shareholderName": "MARTINEZ SOTO CLAUDIA ANDREA",
-            "shareholderId": "10.203.040-5",
-            "countryOfOrigin": "Chile",
-            "position": "Gerente General",
-        }],
-        "directOwnership": [],
-        "indirectShareholders": [],
-    }, []
+analizar_completo = analizar_falso
 
 
 def correr_completo(s3, company_id="ACME-1"):
-    corridas.registrar_inicio("prod", company_id, "a1", documentos=[PRINCIPAL])
-    co.procesar({
-        "ambiente": "prod", "companyId": company_id, "analysisId": "a1",
-        "country": "chile", "documents": [PRINCIPAL],
-    }, analizar=analizar_completo, extraer_socios=socios_falsos)
+    return correr([PRINCIPAL], s3, company_id=company_id)
 
 
 # ── La regla del 404 ────────────────────────────────────────────────────────
@@ -945,7 +1050,8 @@ def correr_con_socios(company_id="ACME-1"):
     co.procesar({
         "ambiente": "prod", "companyId": company_id, "analysisId": "a1",
         "country": "chile", "documents": [PRINCIPAL],
-    }, analizar=analizar_completo, extraer_socios=socios_completos)
+    }, analizar=analizar_completo, extraer_socios=socios_completos,
+       leer_identidad=identidad_falsa)
 
 
 # ── Las tres son ventanas del MISMO resultado ───────────────────────────────
@@ -1075,7 +1181,7 @@ def correr_con_admin(s3, admin, company_id="ACME-1"):
         "ambiente": "prod", "companyId": company_id, "analysisId": "a1",
         "country": "chile", "documents": [PRINCIPAL],
     }, analizar=analizar_completo, extraer_socios=socios_completos,
-       extraer_administracion=admin)
+       extraer_administracion=admin, leer_identidad=identidad_falsa)
 
 
 @pytest.mark.parametrize("valor", [True, False])
@@ -1117,7 +1223,9 @@ def test_si_la_pasada_revienta_la_corrida_igual_termina(s3_falso):
 
     correr_con_admin(s3_falso, revienta)
     reg = corridas.buscar("prod", "ACME-1", "a1")
-    assert reg["status"] == corridas.COMPLETED
+    # Termina, no falla. E INCOMPLETE y no COMPLETED: hay un aviso, y §8.1 dice
+    # que COMPLETED es «sin avisos».
+    assert reg["status"] == corridas.INCOMPLETE
     assert any("régimen de administración" in a["message"] for a in reg["warnings"])
     assert pedir_seccion("company")[1]["company"]["jointAdministration"] is None
 
@@ -1154,3 +1262,325 @@ def test_el_campo_no_entro_a_los_18():
 
     assert len(prompts_generado.CAMPOS_PREDEFINIDOS) == 18
     assert not any("dministra" in c for c in prompts_generado.CAMPOS_PREDEFINIDOS)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Los 11 errores de la prueba con documentos reales (30-09-2026)
+# ════════════════════════════════════════════════════════════════════════════
+# Uno o más tests por error, con el número del informe. Los datos son
+# inventados: los documentos de la prueba eran de clientes y no entran al repo.
+
+# ── #1 y #10 · COMPLETED es «sin avisos» (§8.1) ─────────────────────────────
+
+def test_1_una_corrida_sana_sin_avisos_es_completed(s3_falso):
+    reg = correr([PRINCIPAL], s3_falso)
+    assert reg["status"] == corridas.COMPLETED
+    assert reg["warnings"] == []
+
+
+def test_1_cualquier_aviso_deja_la_corrida_incompleta(s3_falso):
+    """Las seis empresas del lote de prueba tenían avisos y salieron COMPLETED:
+    Onboarding muestra INCOMPLETE como «qué no se pudo leer», así que con
+    COMPLETED el usuario nunca se enteraba."""
+    def con_aviso(docs, inc, pais=""):
+        r = analizar_falso(docs, inc, pais)
+        r["avisos"] = ["escritura.pdf: OCR falló en la página 7: timeout"]
+        return r
+
+    reg = correr([PRINCIPAL], s3_falso, analizar=con_aviso)
+    assert reg["status"] == corridas.INCOMPLETE
+    assert reg["warnings"][0]["reason"] == "PARTIALLY_ILLEGIBLE"
+
+
+def test_1_el_tope_de_ocr_tiene_su_propio_motivo(s3_falso):
+    def con_tope(docs, inc, pais=""):
+        r = analizar_falso(docs, inc, pais)
+        r["avisos"] = ["escritura.pdf: 40 páginas sin capa de texto y el tope de OCR es 15: "
+                       "se leyeron las primeras 15."]
+        return r
+
+    reg = correr([PRINCIPAL], s3_falso, analizar=con_tope)
+    assert reg["warnings"][0]["reason"] == "OCR_PAGE_LIMIT_REACHED"
+
+
+def test_1_ep2_y_ep3_muestran_los_mismos_avisos(s3_falso):
+    """§6.7: EP-3 lleva «los mismos avisos de EP-2». Antes EP-3 sumaba al
+    responder avisos que EP-2 no tenía."""
+    correr([PRINCIPAL], s3_falso, analizar=analizar_con(**{"Domicilio Legal": None}))
+    assert consultar()[1]["warnings"] == pedir_resultado()[1]["warnings"]
+
+
+def test_1_todo_aviso_tiene_exactamente_las_tres_claves(s3_falso):
+    """§6.6. Los avisos de forma traían claves de más —alguno el objeto social
+    entero—, y otros no traían `objectKey`."""
+    correr([PRINCIPAL], s3_falso, analizar=analizar_con(**{"Fecha de Constitución": "cuando sea"}))
+    for a in consultar()[1]["warnings"]:
+        assert set(a) == {"reason", "objectKey", "message"}
+
+
+# ── #3 · PDF cifrado ────────────────────────────────────────────────────────
+
+def test_3_un_pdf_con_cifrado_aes_se_puede_leer():
+    """En producción: «cryptography>=3.1 is required for AES algorithm». Los
+    documentos oficiales suelen venir protegidos aunque se abran con contraseña
+    vacía. Se prueba con un PDF cifrado de verdad, armado acá."""
+    pypdf = pytest.importorskip("pypdf")
+    pytest.importorskip("cryptography")
+    import io
+
+    import extraccion
+
+    w = pypdf.PdfWriter()
+    w.add_blank_page(width=200, height=200)
+    w.encrypt(user_password="", owner_password="otra", algorithm="AES-256")
+    buf = io.BytesIO()
+    w.write(buf)
+
+    r = extraccion.extraer_texto("cifrado.pdf", buf.getvalue(), extraccion.Presupuesto(limite_s=30))
+    assert not any("cryptography" in a for a in r.avisos), r.avisos
+    assert r.paginas_totales == 1
+
+
+def test_3_cryptography_esta_en_las_dependencias():
+    req = (RAIZ / "src" / "requirements.txt").read_text(encoding="utf-8")
+    assert any(l.strip().startswith("cryptography") for l in req.splitlines())
+
+
+def test_3_el_build_trae_cryptography_para_linux_arm():
+    """`cryptography` es NATIVA: compila en un Mac y puede fallar en Lambda. Si
+    hay un build, el binario tiene que ser ELF aarch64 y no Mach-O."""
+    so = list((RAIZ / ".aws-sam" / "build").glob("*/cryptography/hazmat/bindings/_rust*.so"))
+    if not so:
+        pytest.skip("no hay un `sam build` para revisar")
+    cabecera = so[0].read_bytes()[:20]
+    assert cabecera[:4] == b"\x7fELF", "no es un binario de Linux"
+    assert int.from_bytes(cabecera[18:20], "little") == 183, "no es aarch64 (EM_AARCH64=183)"
+
+
+# ── #4 · La razón de un fallo de descarga ───────────────────────────────────
+
+def test_4_si_el_objeto_no_esta_en_s3_es_download_failed(s3_falso):
+    """Antes salía LENS_DOCUMENT_NOT_READABLE, que le dice al usuario «suba otro
+    documento» cuando el documento estaba bien y la falla era de Lens."""
+    s3_falso.claves.discard("b2b/escritura.pdf")
+    reg = correr([PRINCIPAL], s3_falso)
+    assert reg["status"] == corridas.FAILED
+    assert reg["error"]["reason"] == "LENS_DOCUMENT_DOWNLOAD_FAILED"
+
+
+def test_4_si_falla_la_descarga_tambien_es_download_failed(s3_falso):
+    s3_falso.falla_get.add("b2b/escritura.pdf")
+    assert correr([PRINCIPAL], s3_falso)["error"]["reason"] == "LENS_DOCUMENT_DOWNLOAD_FAILED"
+
+
+def test_4_un_principal_sin_texto_recuperable_es_not_readable(s3_falso):
+    """Este SÍ es del documento: se bajó y no hay nada que leer."""
+    def ilegible(docs, inc, pais=""):
+        r = analizar_falso(docs, inc, pais)
+        r["documentos"] = [{**d, "ok": False} for d in r["documentos"]]
+        return r
+
+    reg = correr([PRINCIPAL], s3_falso, analizar=ilegible)
+    assert reg["error"]["reason"] == "LENS_DOCUMENT_NOT_READABLE"
+
+
+def test_4_si_la_escritura_es_ilegible_no_se_analiza_el_anexo_solo(s3_falso):
+    """El mismo caso peor que el de la descarga, un paso más adelante: la
+    escritura se baja pero no tiene texto, el anexo sí, y la corrida no puede
+    terminar extrayendo la empresa del anexo."""
+    def escritura_ilegible(docs, inc, pais=""):
+        r = analizar_falso(docs, inc, pais)
+        r["documentos"] = [{**d, "ok": d["nombre"] != "escritura.pdf"} for d in r["documentos"]]
+        return r
+
+    reg = correr([PRINCIPAL, ANEXO], s3_falso, analizar=escritura_ilegible)
+    assert reg["status"] == corridas.FAILED
+    assert reg["error"]["reason"] == "LENS_DOCUMENT_NOT_READABLE"
+
+
+# ── #5 · Un documento que no es la escritura ────────────────────────────────
+
+def no_es_escritura(descargado, t0):
+    return {"esConstitutivo": "NO", "tipoDetectado": "certificado tributario",
+            "activity": None, "legalForm": None}
+
+
+def test_5_un_documento_que_no_es_escritura_falla_con_document_type_not_match(s3_falso):
+    """§5.2. Antes salía COMPLETED y tomaba «USUARIO CEDULA» como cargo."""
+    reg = correr([PRINCIPAL], s3_falso, identidad=no_es_escritura)
+    assert reg["status"] == corridas.FAILED
+    assert reg["error"]["reason"] == "DOCUMENT_TYPE_NOT_MATCH"
+    assert "certificado tributario" in reg["error"]["message"]
+
+
+def test_5_si_no_es_la_escritura_no_se_gasta_nada_mas_en_ella(s3_falso):
+    """La verificación va ANTES de los 18 campos."""
+    def no_llamar(*_, **__):
+        raise AssertionError("no se tiene que analizar un documento equivocado")
+
+    correr([PRINCIPAL], s3_falso, identidad=no_es_escritura, analizar=no_llamar, socios=no_llamar)
+
+
+def test_5_la_duda_no_falla_la_corrida(s3_falso):
+    """Tirar una escritura buena por un error de clasificación nuestro le quema
+    al usuario un intento. Solo un «NO» explícito falla."""
+    def duda(descargado, t0):
+        return {**identidad_falsa(descargado, t0), "esConstitutivo": "DUDA"}
+
+    assert correr([PRINCIPAL], s3_falso, identidad=duda)["status"] == corridas.COMPLETED
+
+
+def test_5_si_no_se_puede_verificar_la_corrida_sigue_y_lo_dice(s3_falso):
+    def revienta(descargado, t0):
+        raise RuntimeError("timeout")
+
+    reg = correr([PRINCIPAL], s3_falso, identidad=revienta)
+    assert reg["status"] == corridas.INCOMPLETE
+    assert any("verificar el tipo" in a["message"] for a in reg["warnings"])
+
+
+def test_5_el_complementario_de_identidad_fiscal_no_se_verifica(s3_falso):
+    """`company_id_document` ES un documento tributario. Descartarlo por eso
+    sería descartar justo lo que §5.2 le pide."""
+    vistos = []
+
+    def registra(descargado, t0):
+        vistos.append(descargado.clave)
+        return identidad_falsa(descargado, t0)
+
+    correr([PRINCIPAL, ANEXO], s3_falso, identidad=registra)
+    assert vistos == ["b2b/escritura.pdf"]
+
+
+# ── #6 · La actividad se resume, no se recorta ──────────────────────────────
+
+def test_6_la_actividad_sale_del_resumen_y_no_del_objeto_social(s3_falso):
+    correr([PRINCIPAL], s3_falso)
+    assert pedir_seccion("company")[1]["company"]["activity"] == "Inversiones"
+
+
+def test_6_si_el_resumen_no_cabe_va_null_con_aviso_nunca_cortado(s3_falso):
+    """«Comercialización,» o «Compra, venta, importación,»: un fragmento con la
+    coma colgando es peor que un campo vacío, porque parece un dato."""
+    def largo(descargado, t0):
+        return {**identidad_falsa(descargado, t0),
+                "activity": "Compra, venta, importación y exportación de toda clase de bienes"}
+
+    reg = correr([PRINCIPAL], s3_falso, identidad=largo)
+    assert pedir_seccion("company")[1]["company"]["activity"] is None
+    assert reg["status"] == corridas.INCOMPLETE
+
+
+# ── #7 · La forma legal se nombra ───────────────────────────────────────────
+
+def test_7_una_limitada_conserva_la_palabra_que_la_define(s3_falso):
+    """«Sociedad de Responsabilidad Limitada» recortada a 30 quedaba «Sociedad
+    de Responsabilidad». Le pasaba a todas las limitadas de Chile."""
+    correr([PRINCIPAL], s3_falso, analizar=analizar_con(**{"Razón Social": "VIÑEDOS DEL SUR LIMITADA"}))
+    forma = pedir_seccion("company")[1]["company"]["legalForm"]
+    assert "Limitada" in forma and len(forma) <= 30
+
+
+def test_7_una_sas_cuya_razon_social_perdio_el_sufijo(s3_falso):
+    """La extracción dejó una SAS como «… S A». El sufijo débil cede ante lo que
+    dice el documento."""
+    def dice_sas(descargado, t0):
+        return {**identidad_falsa(descargado, t0), "legalForm": "SAS"}
+
+    correr([PRINCIPAL], s3_falso, identidad=dice_sas,
+           analizar=analizar_con(**{"Razón Social": "ANDINA DIGITAL S A"}))
+    assert pedir_seccion("company")[1]["company"]["legalForm"] == "S.A.S."
+
+
+# ── #8 · El companyId como número en EP-1 ───────────────────────────────────
+
+def test_8_ep1_devuelve_el_company_id_como_numero(s3_falso):
+    _, cuerpo = llamar(company_id="999999101")
+    assert cuerpo["companyId"] == 999999101
+    assert isinstance(cuerpo["companyId"], int)
+
+
+# ── #9 · Colombia, y el lote sin principal ──────────────────────────────────
+
+CAMARA = {"s3Uri": "s3://b/b2b/camara.pdf", "documentType": "company_trade_chamber_sedpe_document"}
+COMPOSICION = {"s3Uri": "s3://b/b2b/composicion.pdf", "documentType": "company_shareholders_document"}
+
+
+def test_9_en_colombia_la_camara_de_comercio_es_principal():
+    assert co.es_principal(CAMARA, "colombia")
+    assert co.es_principal(CAMARA, "CO")
+    assert not co.es_principal(CAMARA, "chile"), "solo en Colombia"
+
+
+def test_9_un_lote_colombiano_con_camara_se_acepta(s3_falso):
+    s3_falso.claves |= {"b2b/camara.pdf", "b2b/composicion.pdf"}
+    codigo, _ = llamar({"environment": "prod", "country": "colombia",
+                        "documents": [COMPOSICION, CAMARA]})
+    assert codigo == 202
+
+
+def test_9_si_falla_la_camara_en_colombia_la_corrida_falla(s3_falso):
+    """Es el principal: si no se puede usar, FAILED. Antes el lote no tenía
+    principal y la regla no protegía nada."""
+    s3_falso.claves |= {"b2b/camara.pdf", "b2b/composicion.pdf"}
+    s3_falso.falla_get.add("b2b/camara.pdf")
+    reg = correr([COMPOSICION, CAMARA], s3_falso, pais="colombia")
+    assert reg["status"] == corridas.FAILED
+
+
+def test_9_un_lote_sin_ningun_principal_es_400():
+    """Se sabe antes de leer nada, así que es un error de la petición y no de la
+    corrida — y no le consume un intento al usuario."""
+    codigo, cuerpo = llamar({"environment": "prod", "country": "chile",
+                             "documents": [{"s3Uri": "s3://b/b2b/id.pdf",
+                                            "documentType": "company_id_document"}]})
+    assert codigo == 400
+    assert "company_deeds_document" in cuerpo["error"]["message"]
+    assert corridas.estado("prod", "ACME-1") == corridas.NOT_STARTED
+
+
+def test_9_el_400_dice_cuales_son_los_principales_de_ese_pais():
+    _, cuerpo = llamar({"environment": "prod", "country": "colombia",
+                        "documents": [COMPOSICION]})
+    assert "company_trade_chamber_sedpe_document" in cuerpo["error"]["message"]
+
+
+def test_9_country_es_obligatorio():
+    codigo, cuerpo = llamar({"environment": "prod", "documents": CUERPO_OK["documents"]})
+    assert codigo == 400 and "country" in cuerpo["error"]["message"]
+
+
+# ── #11 · El aviso dice qué archivo falló ───────────────────────────────────
+
+def test_11_el_aviso_de_un_documento_que_no_se_pudo_obtener_trae_su_object_key(s3_falso):
+    s3_falso.claves.discard("b2b/anexo.pdf")
+    reg = correr([PRINCIPAL, ANEXO], s3_falso)
+    perdido = [a for a in reg["warnings"] if "anexo" in a["message"]]
+    assert perdido and perdido[0]["objectKey"] == "b2b/anexo.pdf"
+
+
+def test_11_los_avisos_de_lectura_traen_el_object_key_de_su_documento(s3_falso):
+    def con_aviso(docs, inc, pais=""):
+        r = analizar_falso(docs, inc, pais)
+        r["avisos"] = ["anexo.pdf: OCR falló en la página 2: timeout"]
+        return r
+
+    reg = correr([PRINCIPAL, ANEXO], s3_falso, analizar=con_aviso)
+    assert reg["warnings"][0]["objectKey"] == "b2b/anexo.pdf"
+
+
+def test_11_documents_lista_tambien_el_que_se_perdio(s3_falso):
+    """§6.7: «`ok: false` indica un documento complementario que no se pudo usar
+    mientras la corrida siguió con los demás». Si no apareciera, Onboarding no
+    sabría cuál de sus archivos falló."""
+    s3_falso.falla_get.add("b2b/anexo.pdf")
+    correr([PRINCIPAL, ANEXO], s3_falso)
+    docs = {d["objectKey"]: d for d in pedir_resultado()[1]["documents"]}
+    assert docs["b2b/escritura.pdf"]["ok"] is True
+    assert docs["b2b/anexo.pdf"]["ok"] is False
+
+
+def test_11_documents_lleva_las_seis_claves_del_contrato(s3_falso):
+    correr([PRINCIPAL], s3_falso)
+    for d in pedir_resultado()[1]["documents"]:
+        assert set(d) == {"objectKey", "fileName", "documentType", "ok", "pagesTotal", "pagesRead"}

@@ -642,6 +642,21 @@ def _administracion_para_companies(descargados, t0: float) -> dict | None:
     return resultado
 
 
+def _identidad_para_companies(descargado, t0: float) -> dict | None:
+    """¿El principal es el documento esperado? Y su actividad y forma legal.
+
+    Corre ANTES de la extracción de los 18 campos, así que no puede comerse el
+    presupuesto: `gemini.leer_identidad` usa una sola llamada con tope corto. Si
+    el archivo no es PDF ni imagen, no se puede mirar y devuelve `None` —que la
+    corrida trata como «no se pudo verificar», no como «es otra cosa»—.
+    """
+    docs = elegir_documentos([descargado])
+    if not docs:
+        return None
+    resultado, _uso = gemini.leer_identidad(docs)
+    return resultado
+
+
 def lambda_handler(evento: dict, contexto=None) -> dict:
     # ── El trabajo de fondo se mira ANTES que la ruta ──────────────────────
     # Un disparo asíncrono no viene de la Function URL: no trae `requestContext`,
@@ -651,7 +666,8 @@ def lambda_handler(evento: dict, contexto=None) -> dict:
     if carga is not None:
         return companies.procesar(
             carga, analizar=analizar, extraer_socios=_socios_para_companies,
-            extraer_administracion=_administracion_para_companies)
+            extraer_administracion=_administracion_para_companies,
+            leer_identidad=_identidad_para_companies)
 
     ctx = (evento.get("requestContext") or {}).get("http") or {}
     metodo = (ctx.get("method") or evento.get("httpMethod") or "GET").upper()
@@ -706,7 +722,8 @@ def lambda_handler(evento: dict, contexto=None) -> dict:
         r = companies.manejar(
             evento, ruta, metodo, analizar=analizar,
             extraer_socios=_socios_para_companies,
-            extraer_administracion=_administracion_para_companies)
+            extraer_administracion=_administracion_para_companies,
+            leer_identidad=_identidad_para_companies)
         if r is not None:
             return r
 

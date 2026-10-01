@@ -149,21 +149,53 @@ def _documentos_pedidos(cuerpo: dict) -> tuple[list[dict], str | None]:
     return salida, None
 
 
-def es_principal(documento: dict) -> bool:
-    """¿Este documento es la escritura, o un complementario?
+#: Principales que se SUMAN según el país.
+#:
+#: En Colombia el documento constitutivo no llega como escritura: llega como el
+#: certificado de existencia y representación legal de la Cámara de Comercio,
+#: con el `documentType` `company_trade_chamber_sedpe_document`, que §5.2 no
+#: lista. Es la realidad del dato —es el documento que prueba la sociedad y la
+#: representación allá—, así que cuenta como principal.
+#:
+#: Sin esto, un lote colombiano quedaba SIN documento principal y salía
+#: COMPLETED igual: la regla que protege «si falla la escritura, FAILED» no
+#: tenía escritura que proteger. Pasó con un lote real.
+TIPOS_PRINCIPALES_POR_PAIS: dict[str, tuple[str, ...]] = {
+    "colombia": ("COMPANY_TRADE_CHAMBER_SEDPE_DOCUMENT",),
+}
+
+_ALIAS_PAIS = {"co": "colombia", "cl": "chile", "pe": "peru", "mx": "mexico", "ar": "argentina"}
+
+
+def _pais(v: Any) -> str:
+    p = onboarding._sin_tildes(str(v or ""))
+    return _ALIAS_PAIS.get(p, p)
+
+
+def tipos_principales(pais: Any = "") -> tuple[str, ...]:
+    """Los `documentType` principales para ese país. Vacío = todos lo son."""
+    if not TIPOS_PRINCIPALES:
+        return ()
+    return TIPOS_PRINCIPALES + TIPOS_PRINCIPALES_POR_PAIS.get(_pais(pais), ())
+
+
+def es_principal(documento: dict, pais: Any = "") -> bool:
+    """¿Este documento es la escritura (o lo que hace de escritura en ese país)?
 
     Sin vocabulario configurado, todos son principales. Ver `TIPOS_PRINCIPALES`.
     """
-    if not TIPOS_PRINCIPALES:
+    tipos = tipos_principales(pais)
+    if not tipos:
         return True
-    return str(documento.get("documentType") or "").strip().upper() in TIPOS_PRINCIPALES
+    return str(documento.get("documentType") or "").strip().upper() in tipos
 
 
 # ── EP-1 ────────────────────────────────────────────────────────────────────
 
 def manejar(evento: dict, ruta: str, metodo: str, *, analizar: Callable,
             extraer_socios: Callable | None = None,
-            extraer_administracion: Callable | None = None) -> dict | None:
+            extraer_administracion: Callable | None = None,
+            leer_identidad: Callable | None = None) -> dict | None:
     """La respuesta si la ruta es de esta familia, `None` si no lo es.
 
     Devolver `None` —y no un `404`— es lo que deja que el handler siga probando
@@ -210,6 +242,23 @@ def manejar(evento: dict, ruta: str, metodo: str, *, analizar: Callable,
     if motivo:
         return _error("BAD_REQUEST", motivo)
 
+    pais = str(cuerpo.get("country") or "").strip()
+    if not pais:
+        # §6.5 lo declara obligatorio, y acá además decide qué documento es el
+        # principal: sin país, un lote colombiano no tiene escritura.
+        return _error("BAD_REQUEST", "`country` es obligatorio.")
+
+    # Un lote sin documento principal es un error de la PETICIÓN, no de la
+    # corrida: se sabe antes de leer nada, así que es un 400 sincrónico y no un
+    # FAILED — que además le consumiría al usuario uno de sus 3 intentos por
+    # algo que no hizo él. §5.2: la escritura viaja «siempre».
+    if not any(es_principal(d, pais) for d in documentos):
+        esperados = ", ".join(t.lower() for t in tipos_principales(pais))
+        return _error(
+            "BAD_REQUEST",
+            f"El lote no trae el documento principal. Se espera un `documentType` entre: {esperados}.",
+        )
+
     # ── Una corrida por empresa a la vez ───────────────────────────────────
     try:
         viva = corridas.en_curso(ambiente, company_id)
@@ -231,7 +280,7 @@ def manejar(evento: dict, ruta: str, metodo: str, *, analizar: Callable,
     analysis_id = str(cuerpo.get("analysisId") or cuerpo.get("analysis_id") or "").strip() or str(uuid.uuid4())
     reg = corridas.registrar_inicio(
         ambiente, company_id, analysis_id,
-        country=str(cuerpo.get("country") or ""),
+        country=pais,
         documentos=documentos,
         schema_version=SCHEMA_VERSION,
     )
@@ -240,7 +289,7 @@ def manejar(evento: dict, ruta: str, metodo: str, *, analizar: Callable,
         "ambiente": ambiente,
         "companyId": company_id,
         "analysisId": analysis_id,
-        "country": str(cuerpo.get("country") or ""),
+        "country": pais,
         "documents": documentos,
     }
     # El modo del disparo NO viaja en la respuesta: el contrato de EP-1 son cinco
@@ -248,10 +297,12 @@ def manejar(evento: dict, ruta: str, metodo: str, *, analizar: Callable,
     # Es información de operación y vive donde corresponde, en `/salud`.
     disparador.disparar(carga, lambda c: procesar(
         c, analizar=analizar, extraer_socios=extraer_socios,
-        extraer_administracion=extraer_administracion))
+        extraer_administracion=extraer_administracion, leer_identidad=leer_identidad))
 
     return _resp(202, {
-        "companyId": company_id,
+        # Como número, igual que EP-2 a EP-6: §6.2 lo declara numérico, y
+        # ms-company es Java — un texto y un número se deserializan distinto.
+        "companyId": identificador(company_id),
         "analysisId": analysis_id,
         "status": corridas.IN_PROGRESS,
         "startedAt": reg["startedAt"],
@@ -362,189 +413,293 @@ def estado_de(company_id: str, u: dict | None) -> dict:
         "error": (error or errores.fallo(
             "LENS_EXTRACTION_FAILED", "La corrida terminó sin un resultado utilizable.")
         ) if estado == corridas.FAILED else None,
-        "warnings": u.get("warnings") or [],
+        "warnings": normalizar_avisos(u.get("warnings") or []),
         "schemaVersion": u.get("schemaVersion") or SCHEMA_VERSION,
     }
 
 
 # ── El trabajo de fondo ─────────────────────────────────────────────────────
 
+#: Por qué se cayó un documento, según DÓNDE se cayó. La etapa decide la razón,
+#: y la razón decide lo que le pasa al usuario: §8 separa «FAILED por el
+#: documento» —se le pide subir otro— de «FAILED por el servicio» —reintento—.
+#:
+#: El caso que motivó separarlo: el objeto no existía en S3, `head_object`
+#: falló, y la corrida salía LENS_DOCUMENT_NOT_READABLE. Eso le dice al usuario
+#: «suba otro documento» cuando el documento estaba bien y la falla era de Lens.
+RAZON_POR_ETAPA = {
+    "resolucion": "LENS_DOCUMENT_DOWNLOAD_FAILED",   # head_object: no está o no hay permiso
+    "descarga": "LENS_DOCUMENT_DOWNLOAD_FAILED",     # get_object
+    "filtro": "LENS_DOCUMENT_NOT_READABLE",          # extensión o tamaño: es del documento
+    "lectura": "LENS_DOCUMENT_NOT_READABLE",         # se bajó y no tiene texto recuperable
+    "tipo": "DOCUMENT_TYPE_NOT_MATCH",               # no es el documento declarado
+}
+
+#: El aviso que deja un documento complementario que se perdió, según la etapa.
+AVISO_POR_ETAPA = {
+    "resolucion": ("EXPECTED_DATA_MISSING", "No se pudo obtener el documento"),
+    "descarga": ("EXPECTED_DATA_MISSING", "No se pudo descargar el documento"),
+    "filtro": ("PARTIALLY_ILLEGIBLE", "No se pudo usar el documento"),
+    "lectura": ("PARTIALLY_ILLEGIBLE", "No se pudo leer el documento"),
+    "tipo": ("EXPECTED_DATA_MISSING", "El documento no es del tipo declarado"),
+}
+
+
+def _motivo(avisos: list[str], *claves: str) -> str:
+    """El texto del aviso que habla de alguna de estas claves, sin el prefijo."""
+    for a in avisos:
+        for c in claves:
+            if c and (a.startswith(c + ":") or a.startswith(c.rsplit("/", 1)[-1] + ":")):
+                return a.split(":", 1)[1].strip()
+    return ""
+
+
 def procesar(carga: dict, *, analizar: Callable, extraer_socios: Callable | None = None,
-             extraer_administracion: Callable | None = None) -> dict:
+             extraer_administracion: Callable | None = None,
+             leer_identidad: Callable | None = None) -> dict:
     """Resuelve los documentos, analiza y cierra la corrida.
 
     Nunca levanta: lo que sale mal termina la corrida en `FAILED` con su motivo.
     Una excepción que escapara dejaría la corrida colgada en `IN_PROGRESS` hasta
     que la libere el tope de caducidad, y el consumidor esperando.
+
+    ── Cada documento lleva su propio seguimiento ─────────────────────────────
+    Un documento se puede caer en cinco lugares —al resolverlo, al filtrarlo, al
+    descargarlo, al leerlo o al verificar que es lo que se dijo—, y lo que se
+    haga con eso depende de DÓNDE se cayó y de SI ERA EL PRINCIPAL. Antes se
+    reconstruía a partir de los textos de los avisos, y así se perdían dos cosas:
+    la razón correcta de un fallo de descarga, y el `objectKey` en el aviso.
     """
     ambiente = carga.get("ambiente", "")
     company_id = carga.get("companyId", "")
     analysis_id = carga.get("analysisId", "")
+    pais = carga.get("country", "")
     pedidos = carga.get("documents") or []
     t0 = time.monotonic()
 
-    def cerrar(estado: str, avisos: list[dict] | None = None, error: dict | None = None,
-               resultado: dict | None = None) -> dict:
+    claves = [_clave_pedida(d) for d in pedidos]
+    etapa: list[str | None] = [None] * len(pedidos)
+    detalle: list[str] = [""] * len(pedidos)
+    avisos: list[dict] = []
+
+    def cerrar(estado: str, error: dict | None = None, resultado: dict | None = None) -> dict:
         corridas.cerrar(ambiente, company_id, analysis_id, estado,
-                        avisos=avisos, error=error, resultado=resultado)
+                        avisos=normalizar_avisos(avisos), error=error, resultado=resultado)
         return {"status": estado, "analysisId": analysis_id}
+
+    def fallar(razon: str, mensaje: str) -> dict:
+        return cerrar(corridas.FAILED, error=errores.fallo(razon, mensaje))
+
+    principales = [i for i, d in enumerate(pedidos) if es_principal(d, pais)]
+
+    def principales_vivos() -> list[int]:
+        return [i for i in principales if etapa[i] is None]
+
+    def fallar_por_principal() -> dict:
+        """No quedó ningún principal utilizable: la razón es la de su etapa."""
+        if not principales:
+            return fallar("DOCUMENT_TYPE_NOT_MATCH", "El lote no trae el documento principal.")
+        i = principales[0]
+        e = etapa[i] or "lectura"
+        nombre = pedidos[i].get("fileName") or claves[i]
+        return fallar(RAZON_POR_ETAPA[e],
+                      f"No se pudo usar el documento principal «{nombre}»: {detalle[i] or e}.")
 
     try:
         import boto3
         s3 = boto3.client("s3")
     except Exception as e:  # noqa: BLE001
-        return cerrar(corridas.FAILED, error=errores.fallo(
-            "LENS_DOCUMENT_DOWNLOAD_FAILED", f"No se pudo crear el cliente de S3: {e}"))
+        return fallar("LENS_DOCUMENT_DOWNLOAD_FAILED", f"No se pudo crear el cliente de S3: {e}")
 
-    objetos, avisos_resolucion = ingesta_s3.resolver_documentos(
+    # ── 1 · Resolver ───────────────────────────────────────────────────────
+    objetos, avisos_res = ingesta_s3.resolver_documentos(
         s3, [ingesta_s3.DocumentoPedido(
             s3_uri=d.get("s3Uri", ""), clave=d.get("objectKey", ""),
             nombre_archivo=d.get("fileName", ""), tipo=d.get("documentType", ""),
         ) for d in pedidos],
     )
+    resueltos = {o.clave: o for o in objetos}
+    for i, c in enumerate(claves):
+        if c not in resueltos:
+            etapa[i], detalle[i] = "resolucion", _motivo(avisos_res, c) or "no está en S3"
 
-    avisos = [
-        errores.aviso("PARTIALLY_ILLEGIBLE", a, object_key=_clave_de(a, pedidos))
-        for a in avisos_resolucion
-    ]
-
+    # ── 2 · Filtrar ────────────────────────────────────────────────────────
     # El filtro por nombre NO se aplica: el llamador nombró los documentos uno
     # por uno y declaró su tipo, así que exigir además un prefijo descartaría
     # `escritura_constitucion.pdf` entero — y con un aviso, no con un error.
-    aceptados, avisos_filtro = ingesta_s3.filtrar(objetos, exigir_prefijo=False)
-    avisos += [errores.aviso("PARTIALLY_ILLEGIBLE", a) for a in avisos_filtro]
+    aceptados, avisos_filtro = ingesta_s3.filtrar(list(resueltos.values()), exigir_prefijo=False)
+    aceptadas = {o.clave for o in aceptados}
+    for i, c in enumerate(claves):
+        if etapa[i] is None and c not in aceptadas:
+            etapa[i], detalle[i] = "filtro", _motivo(avisos_filtro, c) or "formato o tamaño no admitido"
 
-    if not aceptados:
-        return cerrar(corridas.FAILED, avisos=avisos, error=errores.fallo(
-            "LENS_DOCUMENT_NOT_READABLE",
-            "Ninguno de los documentos pudo usarse.",
-        ))
-
+    # ── 3 · Descargar ──────────────────────────────────────────────────────
     try:
         # El bucket por defecto solo se usa para los documentos que vinieron con
         # `objectKey` suelto: los que traen `s3Uri` llevan el suyo.
-        descargados, avisos_descarga = ingesta_s3.descargar(s3, ingesta_s3.BUCKET, aceptados)
+        descargados, avisos_desc = ingesta_s3.descargar(s3, ingesta_s3.BUCKET, aceptados)
     except Exception as e:  # noqa: BLE001
-        return cerrar(corridas.FAILED, avisos=avisos, error=errores.fallo(
-            "LENS_DOCUMENT_DOWNLOAD_FAILED", f"Falló la descarga: {e}"))
+        return fallar("LENS_DOCUMENT_DOWNLOAD_FAILED", f"Falló la descarga: {e}")
+    bajados = {d.clave: d for d in descargados}
+    for i, c in enumerate(claves):
+        if etapa[i] is None and c not in bajados:
+            etapa[i], detalle[i] = "descarga", _motivo(avisos_desc, c) or "falló la descarga"
 
-    avisos += [errores.aviso("PARTIALLY_ILLEGIBLE", a) for a in avisos_descarga]
+    if not principales_vivos():
+        return fallar_por_principal()
 
-    # ── Qué documento se perdió, y si importaba ────────────────────────────
-    # El chequeo va ACÁ y una sola vez, contra lo que de verdad se bajó. Un
-    # documento se puede caer en tres lugares —al resolverlo, al filtrarlo o al
-    # descargarlo— y mirar solo el primero dejaba pasar el caso peor: la
-    # escritura falla al bajar, el complementario baja bien, y la corrida
-    # terminaba analizando el anexo sola.
-    leidas = {d.clave for d in descargados}
-    perdidos = [d for d in pedidos if _clave_pedida(d) not in leidas]
+    # ── 4 · ¿Es el documento que se dijo? ──────────────────────────────────
+    # Antes de gastar nada más. Solo sobre los principales: el complementario de
+    # identidad fiscal ES un documento tributario, y descartarlo por eso sería
+    # descartar justo lo que §5.2 le pide.
+    identidad: dict[int, dict] = {}
+    if leer_identidad is not None:
+        for i in principales_vivos():
+            try:
+                r = leer_identidad(bajados[claves[i]], t0)
+            except Exception as e:  # noqa: BLE001
+                log.warning("no se pudo verificar el tipo de %s: %s", claves[i], e)
+                r = None
+            if r is None:
+                avisos.append(errores.aviso(
+                    "EXPECTED_DATA_MISSING",
+                    "No se pudo verificar el tipo de documento ni resumir su actividad.",
+                    object_key=claves[i]))
+                continue
+            identidad[i] = r
+            if r.get("esConstitutivo") == "NO":
+                declarado = pedidos[i].get("documentType") or "documento principal"
+                visto = r.get("tipoDetectado") or "otro tipo de documento"
+                etapa[i], detalle[i] = "tipo", f"se declaró {declarado} y el documento es {visto}"
+        if not principales_vivos():
+            return fallar_por_principal()
 
-    if any(es_principal(d) for d in perdidos):
-        return cerrar(corridas.FAILED, avisos=avisos, error=errores.fallo(
-            "LENS_DOCUMENT_DOWNLOAD_FAILED",
-            "No se pudo obtener el documento principal.",
-        ))
-
-    if not descargados:
-        return cerrar(corridas.FAILED, avisos=avisos, error=errores.fallo(
-            "LENS_DOCUMENT_DOWNLOAD_FAILED", "No se pudo descargar ningún documento."))
-
+    # ── 5 · Leer y extraer los 18 campos ───────────────────────────────────
+    # Se leen todos los que llegaron vivos, complementarios incluidos: la
+    # identidad fiscal es fuente del RUT y la razón social cuando la escritura
+    # no los trae. Lo que NO entra es un principal que resultó ser otra cosa —es
+    # lo que metía «USUARIO CEDULA» como cargo de un representante—.
+    a_leer = [bajados[claves[i]] for i in range(len(pedidos)) if etapa[i] is None]
     try:
-        resultado = analizar(
-            [(d.nombre, d.contenido) for d in descargados],
-            False,
-            str(carga.get("country") or ""),
-        )
+        resultado = analizar([(d.nombre, d.contenido) for d in a_leer], False, str(pais or ""))
     except Exception as e:  # noqa: BLE001
         log.exception("fallo el análisis de la corrida %s", analysis_id)
-        return cerrar(corridas.FAILED, avisos=avisos, error=errores.fallo(
-            "LENS_EXTRACTION_FAILED", f"Error durante el análisis: {e}"))
+        return fallar("LENS_EXTRACTION_FAILED", f"Error durante el análisis: {e}")
 
-    campos = {c["field"]: c["value"] for c in (resultado.get("campos") or [])}
-    avisos += [errores.aviso("PARTIALLY_ILLEGIBLE", a) for a in (resultado.get("avisos") or [])]
+    # Qué se pudo leer, documento por documento.
+    por_nombre = {d.nombre: d.clave for d in a_leer}
+    ilegibles = {por_nombre.get(d.get("nombre")) for d in (resultado.get("documentos") or [])
+                 if not d.get("ok")}
+    for i, c in enumerate(claves):
+        if etapa[i] is None and c in ilegibles:
+            etapa[i], detalle[i] = "lectura", "no tiene texto recuperable"
 
-    # Sin razón social ni RUT el análisis no sirve para nada aguas abajo: es un
-    # fallo, no un resultado degradado.
-    if not _hay_dato(campos.get("Razón Social")) and not _hay_dato(campos.get("RUT de la sociedad")):
-        return cerrar(corridas.FAILED, avisos=avisos, error=errores.fallo(
-            "LENS_REQUIRED_DATA_MISSING",
-            "No se pudo obtener ni la razón social ni el RUT de la sociedad.",
-        ))
+    if not principales_vivos():
+        return fallar_por_principal()
+    if not resultado.get("ok"):
+        return fallar("LENS_EXTRACTION_FAILED",
+                      str(resultado.get("error") or "La extracción no produjo un resultado."))
 
-    # Los representantes legales salen de una SEGUNDA extracción, sobre los PDF
-    # nativos: las tablas de propiedad se leen mucho mejor con el documento a la
-    # vista que con su texto. Nunca lanza — si falla, la ficha de 18 campos ya
-    # está lista y perderla por esto sería peor que devolverla sin personas.
+    # Los avisos de la lectura, cada uno con el documento del que habla. Los de
+    # un documento que ya quedó marcado como ilegible no se repiten: lo cubre el
+    # aviso de documento perdido.
+    for a in resultado.get("avisos") or []:
+        nombre, sep, resto = a.partition(": ")
+        clave = por_nombre.get(nombre, "") if sep else ""
+        if clave and clave in ilegibles:
+            continue
+        razon = "OCR_PAGE_LIMIT_REACHED" if "tope de OCR" in a else "PARTIALLY_ILLEGIBLE"
+        avisos.append(errores.aviso(razon, a, object_key=clave))
+
+    # ── 6 · Personas y administración, sobre los PDF nativos ───────────────
+    # Nunca lanzan: si fallan, la ficha de 18 campos ya está lista y perderla
+    # por esto sería peor que devolverla sin personas.
+    vivos = [bajados[claves[i]] for i in range(len(pedidos)) if etapa[i] is None]
     personas, avisos_personas = ({}, [])
     if extraer_socios is not None:
         try:
-            personas, avisos_personas = extraer_socios(descargados, t0)
+            personas, avisos_personas = extraer_socios(vivos, t0)
         except Exception as e:  # noqa: BLE001
             log.warning("no se pudo extraer la composición societaria de %s: %s", analysis_id, e)
             avisos_personas = [f"No se pudo extraer la composición societaria ({e})."]
     avisos += [errores.aviso("EXPECTED_DATA_MISSING", a) for a in avisos_personas]
 
-    # El régimen de administración, en su propia pasada (§11). Va después de la
-    # societaria y con el mismo reloj: si no queda presupuesto, `None` y aviso.
-    # Nunca se adivina — es el dato que decide cuántas aprobaciones necesita una
+    # El régimen de administración (§11). Si no queda presupuesto, `None` y
+    # aviso: nunca se adivina, porque decide cuántas aprobaciones necesita una
     # empresa para operar.
     administracion = None
     if extraer_administracion is not None:
         try:
-            administracion = extraer_administracion(descargados, t0)
+            administracion = extraer_administracion(vivos, t0)
         except Exception as e:  # noqa: BLE001
             log.warning("no se pudo leer el régimen de administración de %s: %s", analysis_id, e)
             avisos.append(errores.aviso(
                 "EXPECTED_DATA_MISSING",
                 f"No se pudo determinar el régimen de administración ({e})."))
 
-    ficha = _ficha(resultado, descargados, pedidos, personas, administracion)
+    # ── 7 · Los documentos que se perdieron en el camino ───────────────────
+    for i, e in enumerate(etapa):
+        if e is None:
+            continue
+        razon, texto = AVISO_POR_ETAPA[e]
+        nombre = pedidos[i].get("fileName") or claves[i].rsplit("/", 1)[-1]
+        avisos.append(errores.aviso(razon, f"{texto} «{nombre}»: {detalle[i]}.", object_key=claves[i]))
 
-    # Llegó hasta acá con la escritura leída. Si se perdió un complementario, el
-    # resultado sirve pero está incompleto, y se dice cuál faltó.
-    if perdidos:
-        avisos += [
-            errores.aviso(
-                "EXPECTED_DATA_MISSING",
-                "No se pudo leer un documento complementario.",
-                object_key=d.get("objectKey") or d.get("s3Uri", ""),
-            )
-            for d in perdidos
-        ]
-        return cerrar(corridas.INCOMPLETE, avisos=avisos, resultado=ficha)
+    # ── 8 · Cerrar: el estado sale de §8.1 y §10, no de si se perdió algo ──
+    ident = next((identidad[i] for i in principales_vivos() if i in identidad), {})
+    ficha = _ficha(resultado, pedidos, claves, etapa, personas, administracion, ident)
+    cuerpo, avisos_forma = _serializar(company_id, {"result": ficha, "country": pais})
+    avisos += avisos_forma
 
-    return cerrar(corridas.COMPLETED, avisos=avisos, resultado=ficha)
+    faltan_requeridos, faltan_esperados = evaluar(cuerpo, pais)
+    if faltan_requeridos:
+        return fallar("LENS_REQUIRED_DATA_MISSING",
+                      "Faltan datos requeridos: " + "; ".join(faltan_requeridos) + ".")
+
+    ya_avisados = {a.get("campo") for a in avisos_forma if a.get("campo")}
+    for campo, mensaje in faltan_esperados:
+        if campo not in ya_avisados:
+            avisos.append(errores.aviso("EXPECTED_DATA_MISSING", mensaje))
+
+    # §8.1: COMPLETED es «están todos los datos requeridos y esperados y no hay
+    # avisos». Antes se miraba solo si se había perdido un documento, y las seis
+    # empresas del lote de prueba salieron COMPLETED con avisos: Onboarding no le
+    # mostraba al usuario lo que faltaba.
+    estado = corridas.INCOMPLETE if normalizar_avisos(avisos) else corridas.COMPLETED
+    return cerrar(estado, resultado=ficha)
 
 
-def _ficha(resultado: dict, descargados: list, pedidos: list[dict],
-           personas: dict | None = None, administracion: dict | None = None) -> dict:
+def _ficha(resultado: dict, pedidos: list[dict], claves: list[str], etapa: list,
+           personas: dict | None = None, administracion: dict | None = None,
+           identidad: dict | None = None) -> dict:
     """Lo que se guarda de una corrida y después sirve EP-3.
 
     **No entra el texto de los documentos.** Son escrituras enteras y una fila
-    de DynamoDB tiene un tope de 400 KB; además EP-3 no lo pide. Lo que entra es
-    la ficha: los campos, los metadatos por documento y el país.
+    de DynamoDB tiene un tope de 400 KB; además EP-3 no lo pide.
 
-    El detalle por documento cruza lo que devolvió la extracción —que solo
-    conoce el nombre del archivo— con lo que pidió el llamador, para agregarle
-    `objectKey` y `documentType`. Sin ese cruce, quien integra no puede
-    relacionar un documento de la respuesta con el que mandó.
+    `documents[]` lleva UNA ENTRADA POR DOCUMENTO PEDIDO, en el orden en que se
+    pidieron, también los que se perdieron. §6.7: «`ok: false` indica un
+    documento complementario que no se pudo usar mientras la corrida siguió con
+    los demás». Si el perdido no apareciera, Onboarding no tendría cómo saber
+    cuál de sus archivos falló.
     """
-    por_nombre = {d.nombre: d for d in descargados}
-    pedido_por_clave = {_clave_pedida(p): p for p in pedidos}
+    leidos = {d.get("nombre"): d for d in (resultado.get("documentos") or [])}
 
     documentos = []
-    for d in resultado.get("documentos") or []:
-        bajado = por_nombre.get(d.get("nombre"))
-        pedido = pedido_por_clave.get(bajado.clave) if bajado else None
+    for i, d in enumerate(pedidos):
+        nombre = d.get("fileName") or claves[i].rsplit("/", 1)[-1]
+        meta = leidos.get(claves[i].rsplit("/", 1)[-1]) or leidos.get(nombre) or {}
         documentos.append({
-            "fileName": d.get("nombre"),
-            "objectKey": bajado.clave if bajado else None,
-            "documentType": (pedido or {}).get("documentType") or (bajado.tipo if bajado else None),
-            "pagesTotal": d.get("paginas_totales"),
-            "pagesRead": d.get("paginas_leidas"),
-            "pagesFromOcr": d.get("paginas_por_ocr"),
-            "method": d.get("metodo"),
-            "ok": d.get("ok"),
+            "objectKey": claves[i],
+            "fileName": nombre,
+            "documentType": d.get("documentType") or None,
+            "ok": bool(meta.get("ok")) and etapa[i] is None,
+            "pagesTotal": meta.get("paginas_totales"),
+            "pagesRead": meta.get("paginas_leidas"),
+            # Para diagnóstico y para el espejo analítico. NO salen en EP-3: el
+            # contrato de `documents[]` son seis claves.
+            "_method": meta.get("metodo"),
+            "_pagesFromOcr": meta.get("paginas_por_ocr"),
         })
 
     p = personas or {}
@@ -552,16 +707,20 @@ def _ficha(resultado: dict, descargados: list, pedidos: list[dict],
         "fields": resultado.get("campos") or [],
         "documents": documentos,
         "detectedCountry": resultado.get("pais_detectado") or "",
-        # Crudos, sin serializar: la forma de EP-4 la pone `resultado_de` al
-        # momento de responder. Guardarlos ya serializados congelaría el formato
-        # de la fecha en que se corrió el análisis, y un arreglo del contrato no
-        # alcanzaría a las corridas viejas.
+        # Crudos, sin serializar: la forma de EP-4 la pone `_serializar` al
+        # responder. Guardarlos ya serializados congelaría el formato de la
+        # fecha en que se corrió el análisis.
         "legalRepresentatives": p.get("legalRepresentatives") or [],
         "directOwnership": p.get("directOwnership") or [],
         "indirectShareholders": p.get("indirectShareholders") or [],
-        # §11. Solo el booleano viaja en EP-5; el detalle queda guardado para
-        # cuando Compliance defina la marca por persona.
         "administration": administracion or {},
+        # La pasada de identidad: la actividad resumida y la forma legal según
+        # el texto del documento.
+        "identity": {
+            "activity": (identidad or {}).get("activity"),
+            "legalForm": (identidad or {}).get("legalForm"),
+            "documentKind": (identidad or {}).get("tipoDetectado"),
+        },
     }
 
 
@@ -643,19 +802,33 @@ def identificador(company_id: Any) -> Any:
     return int(texto) if texto.isdigit() else company_id
 
 
-def resultado_de(company_id: str, u: dict) -> dict:
-    """El cuerpo de EP-3. Puro: la forma se testea sin montar un evento HTTP."""
+#: Las claves de cada entrada de `documents[]` que viajan en EP-3 (§6.7). Las
+#: que empiezan con `_` quedan guardadas para diagnóstico y no salen.
+CLAVES_DOCUMENTO = ("objectKey", "fileName", "documentType", "ok", "pagesTotal", "pagesRead")
+
+
+def _serializar(company_id: str, u: dict) -> tuple[dict, list[dict]]:
+    """`(cuerpo_de_EP3, avisos_de_forma)`. Puro.
+
+    Se llama DOS veces en la vida de una corrida, y es a propósito: al cerrarla,
+    para que el estado tenga en cuenta todo lo que salió mal al darle forma a
+    los datos; y al responder EP-3, para armar la respuesta. Los avisos de la
+    segunda vez se descartan: los que valen son los guardados al cerrar, que son
+    los mismos que muestra EP-2. §6.7: EP-3 lleva «los mismos avisos de EP-2».
+    """
     ficha = u.get("result") or {}
     campos = {c.get("field"): c.get("value") for c in (ficha.get("fields") or [])}
+    ident = ficha.get("identity") or {}
     avisos = onboarding.Avisos()
 
     empresa = onboarding.empresa({
         "legalName": _dato(campos.get("Razón Social")),
         "taxId": _dato(campos.get("RUT de la sociedad")),
-        "country": ficha.get("detectedCountry") or u.get("country") or "",
+        # El país DECLARADO manda; el detectado es solo para cuando no vino.
+        "country": u.get("country") or ficha.get("detectedCountry") or "",
         "constitutionDate": _dato(campos.get("Fecha de Constitución")),
-        "legalForm": _forma_legal(campos),
-        "activity": _dato(campos.get("Objeto Social")),
+        "legalFormDoc": ident.get("legalForm"),
+        "activity": ident.get("activity"),
         "address": _dato(campos.get("Domicilio Legal")),
         "jointAdministration": (ficha.get("administration") or {}).get("jointAdministration"),
     }, avisos)
@@ -667,22 +840,122 @@ def resultado_de(company_id: str, u: dict) -> dict:
         ) if r is not None
     ]
 
-    return {
+    cuerpo = {
         "companyId": identificador(u.get("companyId") or company_id),
         "analysisId": u.get("analysisId"),
         "status": u.get("status"),
-        # La jurisdicción con la que se corrió. La pide el contrato de EP-3 y es
-        # lo que le dice al consumidor bajo qué reglas se leyó el documento.
+        # La jurisdicción con la que se corrió: le dice al consumidor bajo qué
+        # reglas se leyó el documento.
         "country": u.get("country") or ficha.get("detectedCountry") or "",
         "schemaVersion": u.get("schemaVersion") or SCHEMA_VERSION,
         "company": empresa,
         "legalRepresentatives": representantes,
         "fields": ficha.get("fields") or [],
-        "documents": ficha.get("documents") or [],
-        # Los de la corrida más los que salieron de serializar. Van juntos
-        # porque para quien integra son lo mismo: algo que no salió redondo.
-        "warnings": (u.get("warnings") or []) + avisos.items,
+        "documents": [{k: d.get(k) for k in CLAVES_DOCUMENTO}
+                      for d in (ficha.get("documents") or [])],
+        "warnings": [],
     }
+    return cuerpo, avisos.items
+
+
+def resultado_de(company_id: str, u: dict) -> dict:
+    """El cuerpo de EP-3. Puro: la forma se testea sin montar un evento HTTP."""
+    cuerpo, _ = _serializar(company_id, u)
+    cuerpo["warnings"] = normalizar_avisos(u.get("warnings") or [])
+    return cuerpo
+
+
+def normalizar_avisos(avisos: list[dict]) -> list[dict]:
+    """Cada aviso con EXACTAMENTE las tres claves del contrato, sin repetidos.
+
+    §6.6: `warnings[]` lleva `reason`, `objectKey` y `message`. Los avisos que
+    nacen al darle forma a los datos traían claves de más —`campo`, `original`—,
+    y alguno el objeto social entero; y los de la serialización no traían
+    `objectKey`. Un aviso sin `objectKey` obliga a quien integra a adivinar de
+    qué documento habla.
+    """
+    fuera: list[dict] = []
+    vistos: set[tuple] = set()
+    for a in avisos or []:
+        limpio = {
+            "reason": str(a.get("reason") or "EXPECTED_DATA_MISSING"),
+            "objectKey": str(a.get("objectKey") or ""),
+            "message": str(a.get("message") or ""),
+        }
+        firma = (limpio["reason"], limpio["objectKey"], limpio["message"])
+        if firma not in vistos:
+            vistos.add(firma)
+            fuera.append(limpio)
+    return fuera
+
+
+# ── §10 · Qué es requerido y qué es esperado ────────────────────────────────
+
+def _nit_con_dv(tax_id: Any) -> bool:
+    """¿El NIT trae su dígito verificador? `900123456-7`, `900123456 7` o diez
+    dígitos seguidos. §10 lo pide explícitamente para Colombia."""
+    s = str(tax_id or "").strip()
+    return bool(re.search(r"\d[\s-]\d$", s)) or len(re.sub(r"\D", "", s)) >= 10
+
+
+def evaluar(cuerpo: dict, pais: Any) -> tuple[list[str], list[tuple[str, str]]]:
+    """`(requeridos_que_faltan, esperados_que_faltan)` según §10.
+
+    ── Por qué esto decide el estado y no otra cosa ──────────────────────────
+    §8.1 define los tres estados terminales POR LOS DATOS, no por cómo fue la
+    lectura:
+
+      FAILED      falta al menos un dato REQUERIDO
+      INCOMPLETE  están los requeridos, pero hay avisos o falta un ESPERADO
+      COMPLETED   están todos los requeridos y esperados, y no hay avisos
+
+    **Requeridos**, en todos los orígenes: la razón social y al menos un
+    representante con nombre y tipo de persona. La versión anterior exigía
+    «razón social O RUT» —el RUT es esperado, no requerido— y no miraba a los
+    representantes: una corrida sin ningún representante salía COMPLETED, y
+    para Onboarding eso es una empresa sin nadie que pueda operarla.
+
+    **Esperados**: documento y cargo de los representantes, RUT de la sociedad,
+    forma legal, fecha de constitución y domicilio. En Colombia, el NIT con su
+    dígito verificador. En el resto de los orígenes el identificador tributario
+    puede no existir, así que ahí no cuenta.
+    """
+    empresa = cuerpo.get("company") or {}
+    reps = cuerpo.get("legalRepresentatives") or []
+    p = _pais(pais)
+
+    requeridos: list[str] = []
+    if not empresa.get("legalName"):
+        requeridos.append("la razón social")
+    if not any((r.get("fullName") or r.get("name")) and r.get("personType") for r in reps):
+        requeridos.append("al menos un representante con nombre y tipo de persona")
+
+    esperados: list[tuple[str, str]] = []
+    if p in ("chile", "colombia"):
+        if not empresa.get("taxId"):
+            esperados.append(("taxId", "El documento no trae el identificador tributario de la sociedad."))
+        elif p == "colombia" and not _nit_con_dv(empresa.get("taxId")):
+            esperados.append(("taxId", "El NIT de la sociedad viene sin dígito verificador."))
+    if not empresa.get("legalForm"):
+        esperados.append(("legalForm", "No se pudo determinar la forma legal de la sociedad."))
+    if not empresa.get("constitutionDate"):
+        esperados.append(("constitutionDate", "El documento no trae la fecha de constitución."))
+    domicilio = empresa.get("address") or {}
+    if not (domicilio.get("street") or domicilio.get("city")):
+        esperados.append(("address", "El documento no declara un domicilio legal."))
+
+    def nombres(faltan: list[dict]) -> str:
+        return ", ".join(str(r.get("fullName") or r.get("name") or "?") for r in faltan)
+
+    sin_documento = [r for r in reps if not r.get("identificationNumber")]
+    if sin_documento:
+        esperados.append(("identificationNumber",
+                          f"Falta el documento de identidad de: {nombres(sin_documento)}."))
+    sin_cargo = [r for r in reps if not r.get("role")]
+    if sin_cargo:
+        esperados.append(("role", f"Falta el cargo de: {nombres(sin_cargo)}."))
+
+    return requeridos, esperados
 
 
 # ── EP-4, EP-5 y EP-6 · Las vistas filtradas — Fase 7 ───────────────────────
@@ -753,41 +1026,6 @@ def accionistas_de(company_id: str, u: dict) -> dict:
     }
 
 
-#: Sufijos que identifican la forma legal dentro de la razón social. Se miran de
-#: más largo a más corto: «S.A.» es sufijo de varias y ganaría por casualidad.
-FORMAS_LEGALES = (
-    ("SOCIEDAD POR ACCIONES", "Sociedad por Acciones"),
-    ("SPA", "Sociedad por Acciones"),
-    ("S.P.A.", "Sociedad por Acciones"),
-    ("LIMITADA", "Sociedad de Responsabilidad Limitada"),
-    ("LTDA", "Sociedad de Responsabilidad Limitada"),
-    ("S.A.S.", "Sociedad por Acciones Simplificada"),
-    ("SAS", "Sociedad por Acciones Simplificada"),
-    ("E.I.R.L.", "Empresa Individual de Responsabilidad Limitada"),
-    ("EIRL", "Empresa Individual de Responsabilidad Limitada"),
-    ("S.A.", "Sociedad Anónima"),
-    ("SA", "Sociedad Anónima"),
-)
-
-
-def _forma_legal(campos: dict) -> str:
-    """La forma legal, derivada del sufijo de la razón social.
-
-    Se deriva y no se extrae porque no es uno de los 18 campos, y esos no se
-    tocan: están fuera de alcance por acuerdo y de ellos depende la cola KYB.
-
-    El sufijo es la señal más confiable que hay — es parte del nombre inscrito—
-    y cuando no se reconoce se devuelve vacío en vez de adivinar: una forma
-    legal equivocada viaja al expediente de compliance sin que nadie la revise.
-    """
-    nombre = _dato(campos.get("Razón Social")).upper().replace(",", " ")
-    palabras = set(nombre.replace(".", ". ").split())
-    for sufijo, forma in FORMAS_LEGALES:
-        if nombre.endswith(" " + sufijo) or sufijo in palabras or nombre.endswith(sufijo):
-            return forma
-    return ""
-
-
 def _dato(v: Any) -> str:
     """El valor de un campo, o vacío si es uno de los literales de «no está»."""
     return str(v or "").strip() if _hay_dato(v) else ""
@@ -805,18 +1043,3 @@ def _clave_pedida(d: dict) -> str:
     """La clave S3 de un documento pedido, venga por `s3Uri` o por `objectKey`."""
     partes = ingesta_s3.parsear_s3_uri(d.get("s3Uri", ""))
     return partes[1] if partes else str(d.get("objectKey") or "")
-
-
-def _clave_de(aviso: str, pedidos: list[dict]) -> str:
-    """La clave del documento al que se refiere un aviso de resolución.
-
-    El aviso viene armado como `«clave»: motivo`, así que alcanza con mirar cuál
-    de los documentos pedidos aparece adentro. Vale la pena: el contrato define
-    `objectKey` en cada aviso, y un aviso sin él obliga a quien integra a
-    adivinar a qué documento se refiere.
-    """
-    for d in pedidos:
-        for candidato in (d.get("objectKey"), d.get("s3Uri"), d.get("fileName")):
-            if candidato and candidato in aviso:
-                return str(d.get("objectKey") or d.get("s3Uri") or "")
-    return ""

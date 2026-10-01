@@ -285,14 +285,14 @@ def test_una_empresa_entera():
         "legalName": "INVERSIONES ACME SpA",
         "taxId": "76.123.456-K",
         "constitutionDate": "doce de marzo de dos mil diecinueve",
-        "legalForm": "Sociedad por Acciones de responsabilidad limitada",
         "activity": "Inversiones",
     }, av)
-    assert r["taxId"] == "76.123.456-K"          # tal cual
-    assert r["constitutionDate"] == "2019-03-12"  # ISO
-    assert len(r["legalForm"]) <= 30              # recortado
+    assert r["taxId"] == "76.123.456-K"                    # tal cual
+    assert r["constitutionDate"] == "2019-03-12"            # ISO
+    assert r["legalForm"] == "Sociedad por Acciones"        # NOMBRADA, no recortada
     assert r["activity"] == "Inversiones"
-    assert any(a["reason"] == ob.AVISO_TRUNCADO for a in av.items)
+    assert not any(a["reason"] == ob.AVISO_TRUNCADO for a in av.items), \
+        "legalForm y activity ya no se recortan nunca"
 
 
 def test_un_accionista_juridico_entero():
@@ -344,19 +344,49 @@ def test_el_contrato_viejo_no_se_toca():
     ("Calle 93 # 11-30, Oficina 501, Chapinero, Bogotá, Cundinamarca",
      {"street": "Calle 93 # 11-30", "apt": "Oficina 501",
       "city": "Chapinero, Bogotá", "state": "Cundinamarca"}),
-    # Una sola parte: va entera a `street`.
+    # Una sola parte, sin número ni palabra de calle: es la CIUDAD, no la calle.
     ("Providencia",
-     {"street": "Providencia", "apt": None, "city": None, "state": None}),
+     {"street": None, "apt": None, "city": "Providencia", "state": None}),
+    # Los cinco casos reales que fallaban (5 de 6 empresas del lote de prueba):
+    # la escritura da el domicilio como ciudad y todo se corría un nivel.
+    ("Santiago, Chile",
+     {"street": None, "apt": None, "city": "Santiago", "state": None}),
+    ("Comuna de Lo Barnechea, Región Metropolitana de Santiago, Chile",
+     {"street": None, "apt": None, "city": "Lo Barnechea",
+      "state": "Región Metropolitana de Santiago"}),
+    ("Bogotá D.C., Colombia",
+     {"street": None, "apt": None, "city": "Bogotá D.C.", "state": None}),
+    ("Los Aromos 1450, comuna de Quilpué, Región de Valparaíso",
+     {"street": "Los Aromos 1450", "apt": None, "city": "Quilpué",
+      "state": "Región de Valparaíso"}),
 ])
 def test_el_domicilio_se_reparte_desde_la_posicion_confiable(crudo, esperado):
     assert ob.domicilio(crudo) == esperado
 
 
-def test_un_domicilio_de_una_parte_no_se_inventa_ciudad():
-    """Partirlo por espacios produciría una ciudad que nunca se escribió. Una
-    comuna adivinada es peor que una vacía: nadie la va a revisar."""
-    d = ob.domicilio("Providencia")
-    assert d["city"] is None and d["state"] is None
+def test_una_ciudad_sola_no_se_convierte_en_calle():
+    """El error que reportó la auditoría: «Santiago» como calle y «Chile» como
+    ciudad. Onboarding guarda por componente, así que habría guardado la ciudad
+    en la calle. Sin número ni palabra de calle, no es una calle."""
+    d = ob.domicilio("Santiago")
+    assert d["street"] is None and d["city"] == "Santiago"
+
+
+def test_el_pais_no_va_en_ningun_campo():
+    """El contrato no tiene campo país. Meterlo en `city` o `state` es guardar
+    un dato equivocado, no uno de más."""
+    d = ob.domicilio("Santiago, Región Metropolitana, Chile")
+    assert "Chile" not in (d["city"] or "") and "Chile" not in (d["state"] or "")
+
+
+def test_la_ciudad_se_guarda_sin_el_comuna_de():
+    assert ob.domicilio("comuna de Quilpué, Región de Valparaíso")["city"] == "Quilpué"
+
+
+def test_un_numero_de_region_no_convierte_la_parte_en_calle():
+    """Solo al principio cuenta un número como señal de calle."""
+    d = ob.domicilio("Santiago, Región 13")
+    assert d["street"] is None
 
 
 @pytest.mark.parametrize("vacio", ["", "   ", "No especificado", "sin documento"])
@@ -367,11 +397,13 @@ def test_sin_domicilio_las_cuatro_claves_van_en_null(vacio):
     assert all(v is None for v in d.values())
 
 
-def test_sin_domicilio_queda_dicho_en_los_avisos():
+def test_el_domicilio_no_avisa_por_su_cuenta_que_falta():
+    """El aviso de domicilio faltante lo emite la evaluación de datos esperados
+    (`companies.evaluar`), que es la que decide el estado y sabe qué faltó en
+    total. Emitirlo también acá lo duplicaba."""
     avisos = ob.Avisos()
     ob.domicilio("", avisos)
-    assert len(avisos) == 1
-    assert avisos.items[0]["reason"] == ob.AVISO_DATO_FALTANTE
+    assert len(avisos) == 0
 
 
 def test_el_bloque_company_lleva_el_domicilio():

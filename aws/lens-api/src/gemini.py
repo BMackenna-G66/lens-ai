@@ -82,23 +82,30 @@ def _clave() -> str:
     return k
 
 
-def _generar(partes: list[dict], config: dict) -> tuple[str, dict]:
+def _generar(partes: list[dict], config: dict, *, timeout_s: int | None = None,
+             intentos: int | None = None) -> tuple[str, dict]:
     """POST a generateContent con reintentos. Devuelve (texto, usageMetadata).
 
     `partes` es la lista de `parts` del contenido: un solo `{"text": ...}` para
     el camino de texto, o el archivo seguido del prompt para el multimodal.
+
+    `timeout_s` e `intentos` son para las pasadas que corren ANTES del
+    presupuesto de la corrida —hoy, la de identidad—: con los valores por
+    defecto (120 s × reintentos) una sola llamada podría comerse el presupuesto
+    entero. Sin pasarlos, el comportamiento es exactamente el de siempre.
     """
     url = f"{BASE}/{MODELO}:generateContent"
     cuerpo = {"contents": [{"parts": partes}], "generationConfig": config}
+    tope_intentos = intentos or MAX_INTENTOS
 
     ultimo = ""
-    for intento in range(1, MAX_INTENTOS + 1):
+    for intento in range(1, tope_intentos + 1):
         try:
             resp = requests.post(
                 url,
                 params={"key": _clave()},
                 json=cuerpo,
-                timeout=TIMEOUT_S,
+                timeout=timeout_s or TIMEOUT_S,
                 headers={"Content-Type": "application/json"},
             )
             if resp.status_code >= 400:
@@ -122,12 +129,12 @@ def _generar(partes: list[dict], config: dict) -> tuple[str, dict]:
         except ErrorGemini as e:
             ultimo = str(e)
             m = ultimo.lower()
-            if _es_permanente(m) or not _es_transitorio(m) or intento == MAX_INTENTOS:
+            if _es_permanente(m) or not _es_transitorio(m) or intento == tope_intentos:
                 break
             time.sleep(intento * 1.2)                      # 1,2 s y 2,4 s, igual que la SPA
         except requests.RequestException as e:
             ultimo = str(e)
-            if intento == MAX_INTENTOS:
+            if intento == tope_intentos:
                 break
             time.sleep(intento * 1.2)
 
@@ -177,7 +184,8 @@ def mime_de(nombre: str) -> str | None:
     return MIME_POR_EXTENSION.get(ext)
 
 
-def _llamar_con_archivos(docs: list[tuple[str, bytes]], prompt: str, config: dict) -> tuple[str, dict]:
+def _llamar_con_archivos(docs: list[tuple[str, bytes]], prompt: str, config: dict,
+                        **opciones) -> tuple[str, dict]:
     """Varios archivos en la MISMA llamada, en el orden en que se pasan.
 
     Van todos y no solo el mejor: medido sobre 87 análisis de producción donde
@@ -212,7 +220,7 @@ def _llamar_con_archivos(docs: list[tuple[str, bytes]], prompt: str, config: dic
     # Google para que las instrucciones se lean con los documentos ya en
     # contexto, y es el mismo que usa la SPA.
     partes.append({"text": prompt})
-    return _generar(partes, config)
+    return _generar(partes, config, **opciones)
 
 
 def _llamar_con_archivo(nombre: str, contenido: bytes, prompt: str, config: dict) -> tuple[str, dict]:
@@ -613,4 +621,97 @@ def extraer_administracion(docs) -> tuple[dict, dict]:
         "jointAdministration": conjunta if isinstance(conjunta, bool) else None,
         "minimumSignatures": datos.get("minimumSignatures"),
         "administrators": [a for a in (datos.get("administrators") or []) if isinstance(a, dict)],
+    }, uso
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Identidad del documento principal — tres cosas en una sola lectura
+# ══════════════════════════════════════════════════════════════════════════
+# Una pasada propia de la API, igual que la de administración y por los mismos
+# motivos: no se tocan los 18 campos ni el prompt que comparte la SPA. Responde
+# tres preguntas que el resto del pipeline no puede contestar bien:
+#
+#   1. ¿Es un documento constitutivo? §5.2: si la escritura «no es el documento
+#      esperado», la corrida es FAILED con DOCUMENT_TYPE_NOT_MATCH. Sin esto, un
+#      documento tributario enviado como escritura salía COMPLETED y tomaba
+#      «USUARIO CEDULA» como cargo del representante.
+#
+#   2. La actividad RESUMIDA. §7.6 pide resumir, no recortar el objeto social.
+#      Recortar dejaba «Comercialización,» con la coma colgando.
+#
+#   3. La forma legal según el TEXTO. La razón social extraída a veces pierde el
+#      sufijo —una SAS salió «… S A»—, y el tipo societario está escrito con
+#      todas las letras en la cláusula de constitución.
+#
+# Va ANTES de la extracción de los 18 campos: si el documento no es el esperado,
+# no se gasta nada más en él.
+
+TIMEOUT_IDENTIDAD_S = int(os.environ.get("GEMINI_TIMEOUT_IDENTIDAD_S", "25"))
+
+PROMPT_IDENTIDAD = """Leé el documento adjunto y respondé cuatro cosas.
+
+1. `esConstitutivo`: ¿es un documento constitutivo o societario de una empresa?
+   SÍ cuentan: escritura pública de constitución o de modificación de sociedad,
+   estatutos, extracto inscrito, certificado de estatuto o de vigencia de una
+   sociedad, certificado de existencia y representación legal de una Cámara de
+   Comercio.
+   NO cuentan: cédula o documento de identidad de una persona, RUT o e-RUT,
+   certificado del SII o de la DIAN, comprobante o formulario tributario, estado
+   de cuenta, factura, contrato comercial.
+   Respondé "SI" si es constitutivo, "NO" solo si es CLARAMENTE otra cosa, y
+   "DUDA" si no se puede saber. Ante la duda, "DUDA": nunca "NO".
+
+2. `tipoDetectado`: en pocas palabras, qué documento es.
+
+3. `activity`: la actividad principal de la sociedad, RESUMIDA a partir del
+   objeto social, en español, en MÁXIMO 30 caracteres. Una frase corta, sin
+   listas y sin comas al final. Ejemplos: "Inversiones", "Comercio de calzado",
+   "Asesorías y consultorías", "Explotación agrícola".
+   null si el documento no declara objeto social.
+
+4. `legalForm`: el tipo societario que declara el documento. Uno de:
+   SPA (sociedad por acciones), SA (sociedad anónima), LIMITADA (sociedad de
+   responsabilidad limitada), SAS (sociedad por acciones simplificada), EIRL
+   (empresa individual de responsabilidad limitada), OTRA.
+   null si el documento no lo dice.
+
+No inventes nada que el documento no diga."""
+
+ESQUEMA_IDENTIDAD = {
+    "type": "OBJECT",
+    "properties": {
+        "esConstitutivo": {"type": "STRING", "enum": ["SI", "NO", "DUDA"]},
+        "tipoDetectado": {"type": "STRING"},
+        "activity": {"type": "STRING", "nullable": True},
+        "legalForm": {"type": "STRING", "nullable": True,
+                      "enum": ["SPA", "SA", "LIMITADA", "SAS", "EIRL", "OTRA"]},
+    },
+    "required": ["esConstitutivo"],
+}
+
+
+def leer_identidad(docs) -> tuple[dict, dict]:
+    """`(resultado, uso)` con la identidad del documento principal.
+
+    `esConstitutivo` solo vuelve "NO" cuando el modelo lo dijo explícitamente.
+    Cualquier otra cosa —una respuesta rara, un campo ausente— se trata como
+    "DUDA", que NO falla la corrida: tirar una escritura buena le quema al
+    usuario uno de sus tres intentos por un error de clasificación nuestro.
+    """
+    pares = [(d.nombre, d.contenido) if hasattr(d, "nombre") else d for d in docs]
+    # Una llamada de 25 s como máximo, sin reintentos: corre antes del
+    # presupuesto de la corrida y no puede comérselo. Si no alcanza, la corrida
+    # sigue sin clasificar —que no es lo mismo que clasificar mal—.
+    texto, uso = _llamar_con_archivos(
+        pares, PROMPT_IDENTIDAD, _config_multimodal(ESQUEMA_IDENTIDAD),
+        timeout_s=TIMEOUT_IDENTIDAD_S, intentos=1,
+    )
+    datos = _objeto_de(texto, "identidad")
+    veredicto = datos.get("esConstitutivo")
+    forma = datos.get("legalForm")
+    return {
+        "esConstitutivo": veredicto if veredicto in ("SI", "NO", "DUDA") else "DUDA",
+        "tipoDetectado": str(datos.get("tipoDetectado") or "").strip(),
+        "activity": datos.get("activity") if isinstance(datos.get("activity"), str) else None,
+        "legalForm": forma if forma in ("SPA", "SA", "LIMITADA", "SAS", "EIRL") else None,
     }, uso
