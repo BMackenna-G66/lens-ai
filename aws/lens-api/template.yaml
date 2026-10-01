@@ -181,6 +181,13 @@ Resources:
           SECRETO_ARN_CI: !Ref SecretoApiCi
           SECRETO_ARN_PROD: !Ref SecretoApiProd
           ACEPTAR_SECRETO_LEGADO: !Ref AceptarSecretoLegado
+          # Bloque 3b: la clave de Gemini y el secreto de siempre, en Secrets
+          # Manager. Por NOMBRE: se crean vacíos, fuera de este stack —para que
+          # nadie escriba un valor de relleno que después pise el real—, y entran
+          # directo a Terraform. Mientras no tengan valor, la Lambda sigue con
+          # GEMINI_API_KEY y API_SECRET de arriba.
+          SECRETO_GEMINI_ID: lens-api/gemini-api-key
+          SECRETO_LEGADO_ID: lens-api/x-api-secret/legado
           GEMINI_API_KEY: !Ref GeminiApiKey
           MOTOR_OCR: !Ref MotorOcr
           MAX_PAGINAS_OCR: !Ref MaxPaginasOcr
@@ -253,6 +260,10 @@ Resources:
                 - !Ref SecretoApiDev
                 - !Ref SecretoApiCi
                 - !Ref SecretoApiProd
+                # Los del Bloque 3b. `-*` porque el ARN de un secreto termina en
+                # un sufijo al azar que no se conoce hasta crearlo.
+                - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:lens-api/gemini-api-key-*'
+                - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:lens-api/x-api-secret/legado-*'
       FunctionUrlConfig:
         AuthType: NONE
         Cors:

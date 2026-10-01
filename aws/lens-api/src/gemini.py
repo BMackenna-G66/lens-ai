@@ -46,6 +46,8 @@ import time
 
 import requests
 
+import secretos
+
 from prompts_generado import (
     CAMPOS_PREDEFINIDOS,
     CONTEXTO_POR_DEFECTO,
@@ -96,7 +98,9 @@ def _es_transitorio(msg: str) -> bool:
 
 
 def _clave() -> str:
-    k = os.environ.get("GEMINI_API_KEY", "").strip()
+    # Secrets Manager primero (Bloque 3b); la variable de entorno es el respaldo
+    # mientras el secreto no tenga valor cargado.
+    k = secretos.desde_manager(secretos.ID_GEMINI, "gemini") or os.environ.get("GEMINI_API_KEY", "").strip()
     if not k:
         raise ErrorGemini("No hay una API Key de Gemini configurada en el servicio.")
     return k
