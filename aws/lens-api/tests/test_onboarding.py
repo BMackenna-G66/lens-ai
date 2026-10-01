@@ -433,3 +433,37 @@ def test_la_administracion_conjunta_solo_acepta_booleanos(valor, esperado):
     operar, y adivinarlo es peor que no tenerlo."""
     c = ob.empresa({"legalName": "X", "jointAdministration": valor}, ob.Avisos())
     assert c["jointAdministration"] is esperado
+
+
+# ── Pendientes de la segunda corrida del lote (01-10-2026) ──────────────────
+
+@pytest.mark.parametrize("crudo,ciudad", [
+    ("Santiago, Chile.", "Santiago"),
+    ("Bogotá D.C.", "Bogotá D.C."),              # el punto de la sigla se queda
+    ("Bogotá D.C., Colombia.", "Bogotá D.C."),
+    ("Santiago, Chile;", "Santiago"),
+])
+def test_la_puntuacion_que_cierra_la_frase_sale_y_la_de_la_sigla_no(crudo, ciudad):
+    assert ob.domicilio(crudo)["city"] == ciudad
+
+
+def test_una_comuna_repetida_no_se_duplica_en_la_ciudad():
+    d = ob.domicilio("LO BARNECHEA, Región Metropolitana, Lo Barnechea, Chile.")
+    assert d["city"] == "LO BARNECHEA"
+
+
+OBJETO = "Comercialización nacional e internacional, distribución, importación de bienes; ventas"
+
+
+@pytest.mark.parametrize("resumen,esperado", [
+    ("Comercio nacional e internac", "Comercio nacional"),           # palabra cortada
+    ("Comercialización y distribución de energía solar", "Comercialización"),  # largo
+    ("Asesorías y", "Asesorías"),                                    # conector colgando
+    ("Venta", "Venta"),               # «ventas» es UNA letra más: no es un corte
+    ("Inversiones", "Inversiones"),
+    ("Compra, venta, importación y exportación de toda clase", None),  # lista larga
+    ("internac", None),                                              # no queda nada
+    (None, None),
+])
+def test_el_resumen_de_actividad_queda_siempre_en_palabras_enteras(resumen, esperado):
+    assert ob.actividad(resumen, OBJETO) == esperado

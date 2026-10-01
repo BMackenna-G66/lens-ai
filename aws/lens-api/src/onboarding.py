@@ -552,22 +552,72 @@ def forma_legal(razon_social: Any, del_documento: Any = None,
     return FORMAS_LEGALES.get(forma) if forma else None
 
 
-def actividad(resumen: Any, avisos: Avisos | None = None) -> str | None:
+#: Palabras que no pueden cerrar un resumen: dejan la frase colgando.
+_CONECTORES = {"y", "e", "o", "u", "de", "del", "la", "las", "el", "los", "en", "para",
+               "con", "a", "al", "por", "su", "sus", "sin", "entre", "sobre"}
+
+
+def _palabra_cortada(palabra: str, objeto_social: str) -> bool:
+    """¿`palabra` es el comienzo de una palabra MÁS LARGA del objeto social?
+
+    El modelo, para caber en 30, a veces corta su propio resumen a mitad de
+    palabra: pasó «Comercio nacional e internac». Largo y puntuación están bien,
+    así que lo único que lo delata es comparar contra el texto de donde salió:
+    «internac» no está entera en el objeto social, y es el comienzo de
+    «internacional».
+
+    Se exige que la palabra larga tenga al menos tres letras más, para no tomar
+    un singular por un corte: «venta» no es «ventas» cortada.
+    """
+    p = _sin_tildes(palabra.strip(" ,;:.-"))
+    if len(p) < 3:
+        return False
+    palabras = set(re.findall(r"\w+", _sin_tildes(objeto_social or "")))
+    if p in palabras:
+        return False
+    return any(o.startswith(p) and len(o) >= len(p) + 3 for o in palabras)
+
+
+def actividad(resumen: Any, objeto_social: Any = "", avisos: Avisos | None = None) -> str | None:
     """La actividad principal, RESUMIDA. §7.6: «LENS resume la actividad
     principal del objeto social sin superar el máximo».
 
-    El resumen lo hace el modelo en una pasada propia. Acá solo se valida: si no
-    cabe en 30, o si quedó colgando de una coma, es `null` + aviso. Nunca se
-    recorta — recortar el objeto social dejaba «Comercialización,» o «Compra,
-    venta, importación,»: un fragmento con la coma colgando, que para Onboarding
-    es peor que un campo vacío porque parece un dato.
+    El resumen lo hace el modelo en su pasada propia, y acá se valida y se
+    ajusta — siempre por PALABRAS ENTERAS, nunca cortando una:
+
+      1. si la última palabra está cortada, sale;
+      2. si no entra en 30, salen palabras del final hasta que entre;
+      3. si queda colgando de un conector («… y», «… de»), sale el conector.
+
+    Achicar así el RESUMEN no es lo mismo que recortar el objeto social, que es
+    lo que se hacía antes y dejaba «Comercialización,» o «Compra, venta,
+    importación,»: un fragmento que parece un dato y no lo es. Acá siempre queda
+    una frase completa.
+
+    Pero una LISTA que no entra no se achica: si el modelo devolvió «Compra,
+    venta, importación y exportación…» en vez de un resumen, quedarse con las
+    primeras palabras da «Compra, venta, importación» —un pedazo de lista, que es
+    justo lo que no se quiere—. Eso es que el modelo no resumió, y va `null`.
+
+    Si no queda nada —o el modelo no devolvió resumen—, `null` + aviso. Nunca un
+    fragmento.
     """
     txt = " ".join(str(resumen or "").split()).strip(" ,;:.-")
-    if txt and len(txt) <= TOPE_ACTIVIDAD:
-        return txt
+    palabras = txt.split()
+    if palabras and _palabra_cortada(palabras[-1], str(objeto_social or "")):
+        palabras.pop()
+    if len(" ".join(palabras)) > TOPE_ACTIVIDAD and re.search(r"[,;]", " ".join(palabras)):
+        palabras = []
+    while palabras and len(" ".join(palabras)) > TOPE_ACTIVIDAD:
+        palabras.pop()
+    while palabras and _sin_tildes(palabras[-1].strip(" ,;:.-")) in _CONECTORES:
+        palabras.pop()
+    limpio = " ".join(palabras).strip(" ,;:.-")
+    if limpio:
+        return limpio
     if avisos is not None:
         avisos.agregar(AVISO_DATO_FALTANTE,
-                       "No se pudo resumir la actividad principal en 30 caracteres.",
+                       "No se pudo obtener un resumen de la actividad principal.",
                        campo="activity")
     return None
 
@@ -877,7 +927,7 @@ def empresa(datos: dict, avisos: Avisos | None = None) -> dict:
         "constitutionDate": fecha_iso(datos.get("constitutionDate"), avisos),
         "legalForm": forma_legal(datos.get("legalName"), datos.get("legalFormDoc"), avisos),
         "address": domicilio(datos.get("address"), avisos),
-        "activity": actividad(datos.get("activity"), avisos),
+        "activity": actividad(datos.get("activity"), datos.get("objetoSocial"), avisos),
         # §11. `boolean | null`: `null` cuando el documento no permite
         # determinarlo. Solo pasa un booleano de verdad — un `"true"` de texto o
         # un 1 son «no lo dijo». Este valor decide cuántas aprobaciones necesita
@@ -947,6 +997,25 @@ def _es_pais(parte: str) -> bool:
     return _sin_tildes(parte) in _INDICE_PAISES
 
 
+#: Una sigla al final de la parte: `D.C.`, `S.A.`. Su punto final es parte del
+#: nombre y no se saca.
+_RE_SIGLA_FINAL = re.compile(r"(?:^|\s)(?:\w\.)+$")
+
+
+def _limpiar_parte(parte: str) -> str:
+    """Saca la puntuación que cierra la frase, no la que es parte del nombre.
+
+    Las escrituras terminan el domicilio con punto: «…, Lo Barnechea, Chile.».
+    Con ese punto, «Chile.» no se reconocía como país y terminaba metido en la
+    ciudad —pasó con una escritura real: `city = «Lo Barnechea, Chile.»`—. Pero
+    «Bogotá D.C.» tiene que quedar como está: ese punto es de la sigla.
+    """
+    p = parte.strip().rstrip(";:").strip()
+    if p.endswith(".") and not _RE_SIGLA_FINAL.search(p):
+        p = p[:-1].rstrip()
+    return p
+
+
 def domicilio(texto: Any, avisos: Avisos | None = None) -> dict:
     """Parte *Domicilio Legal* en `street` / `apt` / `city` / `state`.
 
@@ -991,8 +1060,8 @@ def domicilio(texto: Any, avisos: Avisos | None = None) -> dict:
     if not crudo or crudo.lower() in ("no especificado", "sin documento"):
         return vacio
 
-    partes = [p.strip() for p in crudo.split(",") if p.strip()]
-    partes = [p for p in partes if not _es_pais(p)]
+    partes = [_limpiar_parte(p) for p in crudo.split(",")]
+    partes = [p for p in partes if p and not _es_pais(p)]
     if not partes:
         return vacio
 
@@ -1014,7 +1083,14 @@ def domicilio(texto: Any, avisos: Avisos | None = None) -> dict:
         # Sin marca de región, la posición manda: la última es la región.
         state = resto.pop()
 
-    city = ", ".join(_RE_PREFIJO_CIUDAD.sub("", c).strip() for c in resto) or None
+    # Sin repetidos: hay escrituras que nombran la comuna dos veces —«comuna de
+    # X, … , X»—, y `city = "X, X"` no es una ciudad.
+    ciudades: list[str] = []
+    for c in resto:
+        nombre = _RE_PREFIJO_CIUDAD.sub("", c).strip()
+        if nombre and _sin_tildes(nombre) not in {_sin_tildes(x) for x in ciudades}:
+            ciudades.append(nombre)
+    city = ", ".join(ciudades) or None
     return {"street": street, "apt": apt, "city": city, "state": state}
 
 

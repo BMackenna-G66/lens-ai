@@ -197,16 +197,19 @@ def fallo(nombre: str, mensaje: str = "", **extra: Any) -> dict:
     return {"reason": r.nombre, "message": mensaje or r.descripcion, **extra}
 
 
-def aviso(nombre: str, mensaje: str = "", object_key: str = "", **extra: Any) -> dict:
+def aviso(nombre: str, mensaje: str = "", object_key: str | None = None, **extra: Any) -> dict:
     """Una entrada de `warnings[]` (canal 3).
 
-    `objectKey` viaja aunque esté vacío: el contrato lo define y un consumidor
-    no tiene que defenderse de campos ausentes.
+    `objectKey` viaja SIEMPRE —el contrato lo define y un consumidor no tiene que
+    defenderse de campos ausentes—, y va en `null` cuando el aviso no es de un
+    archivo en particular. §6.6: «`string | null` … `null` si no corresponde a un
+    archivo». Hasta el 01-10-2026 iba como `""`: para ms-company, que es Java,
+    un texto vacío y un nulo no son lo mismo.
     """
     r = AVISO.get(nombre) or AVISO["EXPECTED_DATA_MISSING"]
     return {
         "reason": r.nombre,
-        "objectKey": object_key,
+        "objectKey": object_key or None,
         "message": mensaje or r.descripcion,
         **extra,
     }

@@ -1584,3 +1584,112 @@ def test_11_documents_lleva_las_seis_claves_del_contrato(s3_falso):
     correr([PRINCIPAL], s3_falso)
     for d in pedir_resultado()[1]["documents"]:
         assert set(d) == {"objectKey", "fileName", "documentType", "ok", "pagesTotal", "pagesRead"}
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Pendientes de la segunda corrida del lote (01-10-2026)
+# ════════════════════════════════════════════════════════════════════════════
+
+# ── N1 · La extracción tiene que ser determinística ─────────────────────────
+
+def test_n1_toda_llamada_al_modelo_va_con_temperatura_cero(monkeypatch):
+    """Mismo documento, mismo prompt: una corrida devolvió la fecha y otra «No
+    especificado». En la API, re-analizar no puede PERDER un dato que antes
+    salía. Se fija en `_generar`, que es por donde pasan TODAS: así ninguna se la
+    puede olvidar, que es como llegó a no estar en ninguna."""
+    import gemini
+
+    enviados = []
+
+    class Resp:
+        status_code = 200
+
+        def json(self):
+            return {"candidates": [{"content": {"parts": [{"text": '{"x": 1}'}]}}]}
+
+    monkeypatch.setattr(gemini, "_clave", lambda: "k")
+    monkeypatch.setattr(gemini.requests, "post",
+                        lambda url, **kw: enviados.append(kw["json"]) or Resp())
+
+    gemini._llamar("hola", {"thinkingConfig": {"thinkingBudget": 0}})
+    gemini._llamar_con_archivos([("a.pdf", b"%PDF")], "hola", gemini._config_multimodal({}))
+    gemini._llamar_con_archivos([("a.pdf", b"%PDF")], "hola", {}, timeout_s=5, intentos=1)
+
+    assert enviados and all(c["generationConfig"]["temperature"] == 0 for c in enviados)
+
+
+def test_n1_una_llamada_puede_pedir_otra_temperatura_a_proposito(monkeypatch):
+    import gemini
+
+    enviados = []
+
+    class Resp:
+        status_code = 200
+
+        def json(self):
+            return {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}
+
+    monkeypatch.setattr(gemini, "_clave", lambda: "k")
+    monkeypatch.setattr(gemini.requests, "post",
+                        lambda url, **kw: enviados.append(kw["json"]) or Resp())
+    gemini._llamar("hola", {"temperature": 0.7})
+    assert enviados[0]["generationConfig"]["temperature"] == 0.7
+
+
+# ── #2 · El punto final de la escritura ─────────────────────────────────────
+
+def test_2_el_pais_con_punto_final_igual_se_descarta(s3_falso):
+    """Las escrituras terminan el domicilio con punto. «Chile.» no se reconocía
+    como país y quedaba `city = «Lo Barnechea, Chile.»`."""
+    correr([PRINCIPAL], s3_falso, analizar=analizar_con(
+        **{"Domicilio Legal": "Comuna de Lo Barnechea, Región Metropolitana de Santiago, Chile."}))
+    a = pedir_seccion("company")[1]["company"]["address"]
+    assert a["city"] == "Lo Barnechea"
+    assert a["state"] == "Región Metropolitana de Santiago"
+
+
+# ── #6 · El resumen, por palabras enteras ───────────────────────────────────
+
+def test_6_un_resumen_con_la_ultima_palabra_cortada_la_pierde(s3_falso):
+    """El modelo acortó su propio resumen y cortó una palabra: «Comercio
+    nacional e internac». Largo y puntuación estaban bien; lo delata que
+    «internac» es el comienzo de «internacional» en el objeto social."""
+    def cortado(descargado, t0):
+        return {**identidad_falsa(descargado, t0), "activity": "Comercio nacional e internac"}
+
+    correr([PRINCIPAL], s3_falso, identidad=cortado, analizar=analizar_con(
+        **{"Objeto Social": "Comercio nacional e internacional de toda clase de bienes"}))
+    assert pedir_seccion("company")[1]["company"]["activity"] == "Comercio nacional"
+
+
+def test_6_un_resumen_largo_sin_comas_se_achica_por_palabras(s3_falso):
+    """Antes se descartaba entero y la actividad salía vacía en la mitad de las
+    empresas, teniendo objeto social."""
+    def largo(descargado, t0):
+        return {**identidad_falsa(descargado, t0),
+                "activity": "Comercialización y distribución de energía solar"}
+
+    reg = correr([PRINCIPAL], s3_falso, identidad=largo)
+    assert pedir_seccion("company")[1]["company"]["activity"] == "Comercialización"
+    assert reg["status"] == corridas.COMPLETED, "un resumen achicado sigue siendo un resumen"
+
+
+# ── objectKey en null ───────────────────────────────────────────────────────
+
+def test_el_aviso_que_no_es_de_un_archivo_va_con_object_key_null(s3_falso):
+    """§6.6: «`null` si no corresponde a un archivo». Iba como `""`, y para
+    ms-company —Java— un texto vacío y un nulo no son lo mismo."""
+    correr([PRINCIPAL], s3_falso, analizar=analizar_con(**{"Domicilio Legal": None}))
+    sin_archivo = [a for a in consultar()[1]["warnings"] if "domicilio" in a["message"]]
+    assert sin_archivo and sin_archivo[0]["objectKey"] is None
+
+
+# ── Lentitud: medir, no adivinar ────────────────────────────────────────────
+
+def test_la_corrida_guarda_cuanto_tardo_cada_etapa(s3_falso):
+    """Una corrida tardó 101 s donde antes tardaba 16, y no había forma de saber
+    qué etapa fue. Se guarda con la corrida; no sale en EP-3."""
+    correr([PRINCIPAL], s3_falso)
+    tiempos = corridas.buscar("prod", "ACME-1", "a1")["result"]["timingsMs"]
+    assert {"s3", "identidad", "lectura_y_18_campos", "personas", "administracion"} <= set(tiempos)
+    assert "timingsMs" not in pedir_resultado()[1]

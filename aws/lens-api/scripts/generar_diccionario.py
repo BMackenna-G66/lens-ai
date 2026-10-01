@@ -301,8 +301,10 @@ dato y no lo son.
 | Sociedad por acciones simplificada | `S.A.S.` |
 | Empresa individual de responsabilidad limitada | `E.I.R.L.` |
 
-`activity` la resume el modelo a partir del objeto social. Si el resumen no entra
-en 30 caracteres, va `null` con aviso.
+`activity` la resume el modelo a partir del objeto social, y se ajusta siempre
+por **palabras enteras**: si el resumen no entra en 30 se le sacan palabras del
+final, y nunca queda colgando de un «y» o un «de». Si el modelo devolvió una
+lista en vez de un resumen, o no queda nada, va `null` con aviso.
 
 #### Sobre `jointAdministration`
 

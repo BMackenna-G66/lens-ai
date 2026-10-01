@@ -477,6 +477,18 @@ def procesar(carga: dict, *, analizar: Callable, extraer_socios: Callable | None
     pedidos = carga.get("documents") or []
     t0 = time.monotonic()
 
+    # Cuánto tarda cada etapa. Se guarda con la corrida —no sale en EP-3— porque
+    # una corrida lenta no se diagnostica adivinando: una prueba con escrituras
+    # reales tardó 101 s donde antes tardaba 16, y sin esto no había forma de
+    # saber si fue la verificación de identidad, la lectura o las personas.
+    tiempos: dict[str, int] = {}
+    marca = [time.monotonic()]
+
+    def medir(etapa_: str) -> None:
+        ahora = time.monotonic()
+        tiempos[etapa_] = int((ahora - marca[0]) * 1000)
+        marca[0] = ahora
+
     claves = [_clave_pedida(d) for d in pedidos]
     etapa: list[str | None] = [None] * len(pedidos)
     detalle: list[str] = [""] * len(pedidos)
@@ -544,6 +556,7 @@ def procesar(carga: dict, *, analizar: Callable, extraer_socios: Callable | None
     for i, c in enumerate(claves):
         if etapa[i] is None and c not in bajados:
             etapa[i], detalle[i] = "descarga", _motivo(avisos_desc, c) or "falló la descarga"
+    medir("s3")
 
     if not principales_vivos():
         return fallar_por_principal()
@@ -573,6 +586,7 @@ def procesar(carga: dict, *, analizar: Callable, extraer_socios: Callable | None
                 etapa[i], detalle[i] = "tipo", f"se declaró {declarado} y el documento es {visto}"
         if not principales_vivos():
             return fallar_por_principal()
+    medir("identidad")
 
     # ── 5 · Leer y extraer los 18 campos ───────────────────────────────────
     # Se leen todos los que llegaron vivos, complementarios incluidos: la
@@ -585,6 +599,7 @@ def procesar(carga: dict, *, analizar: Callable, extraer_socios: Callable | None
     except Exception as e:  # noqa: BLE001
         log.exception("fallo el análisis de la corrida %s", analysis_id)
         return fallar("LENS_EXTRACTION_FAILED", f"Error durante el análisis: {e}")
+    medir("lectura_y_18_campos")
 
     # Qué se pudo leer, documento por documento.
     por_nombre = {d.nombre: d.clave for d in a_leer}
@@ -623,6 +638,7 @@ def procesar(carga: dict, *, analizar: Callable, extraer_socios: Callable | None
             log.warning("no se pudo extraer la composición societaria de %s: %s", analysis_id, e)
             avisos_personas = [f"No se pudo extraer la composición societaria ({e})."]
     avisos += [errores.aviso("EXPECTED_DATA_MISSING", a) for a in avisos_personas]
+    medir("personas")
 
     # El régimen de administración (§11). Si no queda presupuesto, `None` y
     # aviso: nunca se adivina, porque decide cuántas aprobaciones necesita una
@@ -636,6 +652,7 @@ def procesar(carga: dict, *, analizar: Callable, extraer_socios: Callable | None
             avisos.append(errores.aviso(
                 "EXPECTED_DATA_MISSING",
                 f"No se pudo determinar el régimen de administración ({e})."))
+    medir("administracion")
 
     # ── 7 · Los documentos que se perdieron en el camino ───────────────────
     for i, e in enumerate(etapa):
@@ -648,6 +665,8 @@ def procesar(carga: dict, *, analizar: Callable, extraer_socios: Callable | None
     # ── 8 · Cerrar: el estado sale de §8.1 y §10, no de si se perdió algo ──
     ident = next((identidad[i] for i in principales_vivos() if i in identidad), {})
     ficha = _ficha(resultado, pedidos, claves, etapa, personas, administracion, ident)
+    ficha["timingsMs"] = tiempos
+    log.info("corrida %s · tiempos por etapa (ms): %s", analysis_id, json.dumps(tiempos))
     cuerpo, avisos_forma = _serializar(company_id, {"result": ficha, "country": pais})
     avisos += avisos_forma
 
@@ -829,6 +848,8 @@ def _serializar(company_id: str, u: dict) -> tuple[dict, list[dict]]:
         "constitutionDate": _dato(campos.get("Fecha de Constitución")),
         "legalFormDoc": ident.get("legalForm"),
         "activity": ident.get("activity"),
+        # Contra qué se verifica que el resumen no traiga una palabra cortada.
+        "objetoSocial": _dato(campos.get("Objeto Social")),
         "address": _dato(campos.get("Domicilio Legal")),
         "jointAdministration": (ficha.get("administration") or {}).get("jointAdministration"),
     }, avisos)
@@ -879,7 +900,8 @@ def normalizar_avisos(avisos: list[dict]) -> list[dict]:
     for a in avisos or []:
         limpio = {
             "reason": str(a.get("reason") or "EXPECTED_DATA_MISSING"),
-            "objectKey": str(a.get("objectKey") or ""),
+            # `null` cuando no es de un archivo (§6.6), nunca `""`.
+            "objectKey": str(a.get("objectKey")) if a.get("objectKey") else None,
             "message": str(a.get("message") or ""),
         }
         firma = (limpio["reason"], limpio["objectKey"], limpio["message"])

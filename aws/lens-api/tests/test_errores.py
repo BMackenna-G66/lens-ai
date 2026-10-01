@@ -154,11 +154,15 @@ def test_un_reason_desconocido_no_inventa_uno_nuevo():
     assert cuerpo["error"]["reason"] == "SERVICE_UNAVAILABLE"
 
 
-def test_el_aviso_siempre_trae_object_key():
-    """Aunque vaya vacío: el contrato lo define y un consumidor no tiene que
-    defenderse de campos ausentes."""
+def test_el_aviso_siempre_trae_object_key_y_en_null_si_no_es_de_un_archivo():
+    """La clave viaja siempre —el consumidor no se defiende de campos ausentes—,
+    y en `null` cuando no corresponde a un archivo (§6.6). Este test pedía `""`
+    hasta el 01-10-2026, y estaba mal: para ms-company, que es Java, un texto
+    vacío y un nulo no son lo mismo."""
     a = er.aviso("PARTIALLY_ILLEGIBLE")
-    assert "objectKey" in a and a["objectKey"] == ""
+    assert "objectKey" in a and a["objectKey"] is None
+    assert er.aviso("PARTIALLY_ILLEGIBLE", object_key="")["objectKey"] is None
+    assert er.aviso("PARTIALLY_ILLEGIBLE", object_key="a/b.pdf")["objectKey"] == "a/b.pdf"
 
 
 def test_el_fallo_desconocido_cae_en_extraction_failed():
