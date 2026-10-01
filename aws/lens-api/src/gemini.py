@@ -13,6 +13,24 @@ Y una cuarta que no está en el schema: la salida se **rellena** hasta los 18
 campos con "No especificado". Quien consume no tiene que defenderse de campos
 ausentes, igual que en la SPA.
 
+── Donde la API se aparta de la herramienta A PROPÓSITO: la temperatura ────
+Desde el 01-10-2026 todas las llamadas de la API van con `temperature: 0`, y la
+SPA no. Es una diferencia deliberada, no un olvido de sincronizar.
+
+Sin fijarla, el modelo usa la suya por defecto y la extracción NO es
+determinística. Medido con una escritura real, mismo documento y mismo prompt:
+
+    corrida 1   Fecha de Constitución = «27 de Junio de dos mil seis»
+    corrida 2   Fecha de Constitución = «No especificado»
+
+En la herramienta hay un analista mirando cada resultado. En la API no: lo que
+sale se guarda y alimenta una integración, y re-analizar un documento no puede
+PERDER un dato que antes salía. Para una integración, la misma entrada tiene
+que dar la misma salida.
+
+La herramienta de los analistas no se toca desde acá. Probablemente tenga el
+mismo problema; si se decide arreglarlo, es en `services/geminiService.ts`.
+
 Los prompts NO están acá: viven en `prompts_generado.py`, que se genera leyendo
 `constants.ts`. Ver `scripts/generar_prompts.py`.
 """
@@ -44,6 +62,8 @@ log = logging.getLogger(__name__)
 MODELO = os.environ.get("GEMINI_MODELO", "gemini-3.5-flash")
 BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 TIMEOUT_S = int(os.environ.get("GEMINI_TIMEOUT_S", "120"))
+#: Ver el docstring del módulo: 0 para que la misma entrada dé la misma salida.
+TEMPERATURA = float(os.environ.get("GEMINI_TEMPERATURA", "0"))
 
 MAX_INTENTOS = 3
 VALOR_AUSENTE = "No especificado"
@@ -95,6 +115,10 @@ def _generar(partes: list[dict], config: dict, *, timeout_s: int | None = None,
     entero. Sin pasarlos, el comportamiento es exactamente el de siempre.
     """
     url = f"{BASE}/{MODELO}:generateContent"
+    # La temperatura va acá y no en cada llamada: así ninguna se la olvida, que
+    # es exactamente cómo llegó a no estar en ninguna. Una llamada que quiera
+    # otra la pasa en su `config` y gana la suya.
+    config = {"temperature": TEMPERATURA, **config}
     cuerpo = {"contents": [{"parts": partes}], "generationConfig": config}
     tope_intentos = intentos or MAX_INTENTOS
 
@@ -664,15 +688,18 @@ PROMPT_IDENTIDAD = """Leé el documento adjunto y respondé cuatro cosas.
 2. `tipoDetectado`: en pocas palabras, qué documento es.
 
 3. `activity`: la actividad principal de la sociedad, RESUMIDA a partir del
-   objeto social, en español, en MÁXIMO 30 caracteres. Una frase corta, sin
-   listas y sin comas al final. Ejemplos: "Inversiones", "Comercio de calzado",
-   "Asesorías y consultorías", "Explotación agrícola".
+   objeto social, en español, en MÁXIMO 25 caracteres. Una frase corta de una
+   a tres palabras COMPLETAS, sin listas y sin comas. Nunca cortes una palabra
+   para que entre: elegí palabras más cortas. Ejemplos: "Inversiones",
+   "Comercio de calzado", "Asesorías", "Explotación agrícola", "Energía solar".
    null si el documento no declara objeto social.
 
 4. `legalForm`: el tipo societario que declara el documento. Uno de:
    SPA (sociedad por acciones), SA (sociedad anónima), LIMITADA (sociedad de
    responsabilidad limitada), SAS (sociedad por acciones simplificada), EIRL
    (empresa individual de responsabilidad limitada), OTRA.
+   Ojo con SAS y SA: si en cualquier parte del documento dice "S.A.S.", "SAS" o
+   "sociedad por acciones simplificada", es SAS aunque en otro lado diga "S.A.".
    null si el documento no lo dice.
 
 No inventes nada que el documento no diga."""
