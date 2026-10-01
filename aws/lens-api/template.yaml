@@ -110,6 +110,18 @@ Parameters:
       Tope de documentos por petición de EP-1. La especificación v1.2 lo bajó a
       2. Es el tope de ESE contrato: `MaxDocumentos` (12) sigue siendo el de
       `/v1/analisis` y no se toca.
+  AceptarSecretoLegado:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >
+      Si el x-api-secret de siempre sigue abriendo /v1/companies/… en cualquier
+      ambiente. Prendido mientras Onboarding no tenga los tres secretos nuevos
+      (uno por ambiente). Apagarlo cierra el agujero de que la clave de dev abra
+      prod — pero ANTES hay que ver en /salud `secretos_por_ambiente` con los
+      tres en true: si la Lambda no pudiera leer Secrets Manager, apagarlo deja
+      /v1/companies/… respondiendo 401 a todo. No afecta a /v1/analisis ni a
+      /v1/analyses, que siguen con el secreto de siempre.
   BucketDocumentos:
     Type: String
     Default: g66-company
@@ -162,6 +174,13 @@ Resources:
           TIPOS_PRINCIPALES: !Ref TiposPrincipales
           MAX_DOCUMENTOS_LOTE: !Ref MaxDocumentosLote
           API_SECRET: !Ref ApiSecretValue
+          # Bloque 3: un secreto por ambiente para /v1/companies/…. `!Ref` de un
+          # secreto devuelve su ARN, no su valor: el valor lo lee la Lambda en
+          # tiempo de ejecución y nunca pasa por el template ni por el deploy.
+          SECRETO_ARN_DEV: !Ref SecretoApiDev
+          SECRETO_ARN_CI: !Ref SecretoApiCi
+          SECRETO_ARN_PROD: !Ref SecretoApiProd
+          ACEPTAR_SECRETO_LEGADO: !Ref AceptarSecretoLegado
           GEMINI_API_KEY: !Ref GeminiApiKey
           MOTOR_OCR: !Ref MotorOcr
           MAX_PAGINAS_OCR: !Ref MaxPaginasOcr
@@ -226,6 +245,14 @@ Resources:
                 Action: lambda:InvokeFunction
                 Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:lens-analisis'
           - !Ref AWS::NoValue
+        # Leer los tres secretos de Onboarding, y ninguno más.
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource:
+                - !Ref SecretoApiDev
+                - !Ref SecretoApiCi
+                - !Ref SecretoApiProd
       FunctionUrlConfig:
         AuthType: NONE
         Cors:
@@ -429,6 +456,45 @@ Resources:
                   aws:PrincipalArn:
                     - !Sub 'arn:aws:iam::${AWS::AccountId}:role/iac-ai-lens-codebuild-role-ci'
                     - !Sub 'arn:aws:iam::${AWS::AccountId}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_compliance_admin_*'
+
+  # ── Los secretos de Onboarding, uno por ambiente (Bloque 3) ──────────────
+  # Los GENERA AWS al crearlos: el valor no pasa por este template, ni por el
+  # deploy, ni por nadie. Se lee con permiso desde la consola o la CLI para
+  # entregárselo a Onboarding. 48 caracteres sin puntuación, para que viaje en un
+  # header sin escapar nada.
+  #
+  # Retain, como el resto: la migración a Terraform los saca del template, y sin
+  # Retain eso los borraría — y con ellos, la integración de Onboarding.
+  SecretoApiDev:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: lens-api/x-api-secret/dev
+      Description: x-api-secret de Onboarding B2B para el ambiente dev. Abre SOLO ese ambiente.
+      GenerateSecretString:
+        PasswordLength: 48
+        ExcludePunctuation: true
+  SecretoApiCi:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: lens-api/x-api-secret/ci
+      Description: x-api-secret de Onboarding B2B para el ambiente ci. Abre SOLO ese ambiente.
+      GenerateSecretString:
+        PasswordLength: 48
+        ExcludePunctuation: true
+  SecretoApiProd:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: lens-api/x-api-secret/prod
+      Description: x-api-secret de Onboarding B2B para el ambiente prod. Abre SOLO ese ambiente.
+      GenerateSecretString:
+        PasswordLength: 48
+        ExcludePunctuation: true
 
   # NO se declara un AWS::Logs::LogGroup para fijar la retención.
   #
