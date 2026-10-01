@@ -15,14 +15,10 @@ Parameters:
   # sale del stack, la variable de entorno queda vacía y la API cae a memoria:
   # EP-2 respondería NOT_STARTED para todas las empresas. Con el default igual al
   # valor vivo, olvidarse de un parámetro no cambia nada.
-  ApiSecretValue:
-    Type: String
-    NoEcho: true
-    Description: Secreto del header x-api-secret que valida el handler.
-  GeminiApiKey:
-    Type: String
-    NoEcho: true
-    Description: API Key de Gemini.
+  # `ApiSecretValue` y `GeminiApiKey` ya no existen (Bloque 3b, 01-10-2026): los
+  # dos valores viven en Secrets Manager —lens-api/x-api-secret/legado y
+  # lens-api/gemini-api-key— y la Lambda los lee en tiempo de ejecución. Ningún
+  # secreto pasa por el template, por el deploy ni por las variables de entorno.
   MotorOcr:
     Type: String
     Default: textract
@@ -173,7 +169,6 @@ Resources:
           DISPARO_ASINCRONO: !Ref DisparoAsincrono
           TIPOS_PRINCIPALES: !Ref TiposPrincipales
           MAX_DOCUMENTOS_LOTE: !Ref MaxDocumentosLote
-          API_SECRET: !Ref ApiSecretValue
           # Bloque 3: un secreto por ambiente para /v1/companies/…. `!Ref` de un
           # secreto devuelve su ARN, no su valor: el valor lo lee la Lambda en
           # tiempo de ejecución y nunca pasa por el template ni por el deploy.
@@ -182,13 +177,14 @@ Resources:
           SECRETO_ARN_PROD: !Ref SecretoApiProd
           ACEPTAR_SECRETO_LEGADO: !Ref AceptarSecretoLegado
           # Bloque 3b: la clave de Gemini y el secreto de siempre, en Secrets
-          # Manager. Por NOMBRE: se crean vacíos, fuera de este stack —para que
-          # nadie escriba un valor de relleno que después pise el real—, y entran
-          # directo a Terraform. Mientras no tengan valor, la Lambda sigue con
-          # GEMINI_API_KEY y API_SECRET de arriba.
+          # Manager, por NOMBRE. Se crearon vacíos y fuera de este stack —para
+          # que nadie escriba un valor de relleno que después pise el real— y
+          # van a Terraform. Desde el paso 2 (01-10-2026) son la ÚNICA fuente:
+          # GEMINI_API_KEY y API_SECRET ya no están en las variables de entorno.
+          # Antes de sacarlas se verificó que cada secreto fuera IGUAL a su
+          # variable, sin mostrar ninguno de los dos.
           SECRETO_GEMINI_ID: lens-api/gemini-api-key
           SECRETO_LEGADO_ID: lens-api/x-api-secret/legado
-          GEMINI_API_KEY: !Ref GeminiApiKey
           MOTOR_OCR: !Ref MotorOcr
           MAX_PAGINAS_OCR: !Ref MaxPaginasOcr
           MAX_DOCUMENTOS: !Ref MaxDocumentos

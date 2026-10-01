@@ -290,7 +290,10 @@ def _secreto_legado() -> str:
 def _autorizado(evento: dict) -> bool:
     secreto = _secreto_legado()
     if not secreto:
-        log.error("API_SECRET no está configurado: se rechaza todo.")
+        # Desde el 01-10-2026 no hay variable de respaldo: si llega acá, es que
+        # Secrets Manager no devolvió lens-api/x-api-secret/legado. El log de
+        # `secretos` dice por qué (el código de error de AWS).
+        log.error("no se pudo obtener el x-api-secret de siempre: se rechaza todo.")
         return False
     headers = {k.lower(): v for k, v in (evento.get("headers") or {}).items()}
     return hmac.compare_digest(str(headers.get("x-api-secret", "")), secreto)

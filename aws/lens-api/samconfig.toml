@@ -23,5 +23,5 @@ profile = "compliance-admin"
 # esa lista REEMPLAZA a esta entera —no se mezclan—; por eso los defaults del
 # template también son los valores vivos.
 parameter_overrides = "CrearTablaCorridas=true CrearTablaIdempotencia=true DisparoAsincrono=true AmbientesCorridas=dev,ci,prod TiposPrincipales=company_deeds_document MaxDocumentosLote=2 MaxDocumentos=12 MaxPaginasOcr=15 MotorOcr=textract BucketDocumentos=g66-company AceptarSecretoLegado=true"
-# Los secretos (`ApiSecretValue`, `GeminiApiKey`) NO van acá: el repo es
-# público. SAM conserva el valor anterior si no se pasan.
+# No hay secretos que pasar: desde el 01-10-2026 todos viven en Secrets Manager
+# y la Lambda los lee en tiempo de ejecución.
