@@ -17,11 +17,6 @@ capabilities = "CAPABILITY_IAM"
 confirm_changeset = true
 # Perfil AWS SSO de compliance (cuenta 561521480266). Único con CloudFormation.
 profile = "compliance-admin"
-# Los parámetros que NO son secretos, con sus valores vivos. Son el registro de
-# cómo está desplegado el servicio, y la segunda red debajo de los defaults del
-# template. OJO: si un deploy pasa `--parameter-overrides` por línea de comandos,
-# esa lista REEMPLAZA a esta entera —no se mezclan—; por eso los defaults del
-# template también son los valores vivos.
-parameter_overrides = "CrearTablaCorridas=true CrearTablaIdempotencia=true DisparoAsincrono=true AmbientesCorridas=dev,ci,prod TiposPrincipales=company_deeds_document MaxDocumentosLote=2 MaxDocumentos=12 MaxPaginasOcr=15 MotorOcr=textract BucketDocumentos=g66-company AceptarSecretoLegado=true"
-# No hay secretos que pasar: desde el 01-10-2026 todos viven en Secrets Manager
-# y la Lambda los lee en tiempo de ejecución.
+# Sin `parameter_overrides`: desde el 01-10-2026 el template no tiene parámetros.
+# El stack solo conserva un recurso de relleno; lo de lens-api está en Terraform
+# (iac-ai-lens). El código se despliega con `scripts/desplegar_codigo.sh`.
