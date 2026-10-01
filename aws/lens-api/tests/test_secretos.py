@@ -236,3 +236,98 @@ def test_las_rutas_viejas_siguen_con_el_secreto_de_siempre(sm, monkeypatch):
     r = app.lambda_handler({"rawPath": "/v1/analisis", "requestContext": {"http": {"method": "POST"}},
                             "headers": {"x-api-secret": LEGADO}, "body": "{}"})
     assert r["statusCode"] != 401, "la de siempre las sigue abriendo"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Bloque 3b · la clave de Gemini y el secreto de siempre
+# ════════════════════════════════════════════════════════════════════════════
+# Pasan a Secrets Manager para poder importar la Lambda a Terraform sin
+# escribirlos en el estado. Se crean VACÍOS y se cargan a mano; mientras tanto,
+# cada uno sigue con su variable de entorno. Lo que estos tests cuidan es que ese
+# intervalo no rompa nada: ni el modelo ni la autenticación.
+
+class ErrorDeAws(Exception):
+    def __init__(self, codigo):
+        super().__init__(codigo)
+        self.response = {"Error": {"Code": codigo, "Message": "arn:aws:secretsmanager:…"}}
+
+
+class ManagerConVacios:
+    """Los secretos en `valores` tienen valor; el resto existe pero está vacío."""
+
+    def __init__(self, valores):
+        self.valores = valores
+
+    def get_secret_value(self, SecretId):
+        if SecretId not in self.valores:
+            raise ErrorDeAws("ResourceNotFoundException")
+        return {"SecretString": self.valores[SecretId]}
+
+
+@pytest.fixture
+def manager(monkeypatch):
+    secretos._reiniciar()
+    monkeypatch.setattr(secretos, "ID_GEMINI", "lens-api/gemini-api-key")
+    monkeypatch.setattr(secretos, "ID_LEGADO", "lens-api/x-api-secret/legado")
+    estado = {"valores": {}}
+    monkeypatch.setattr(secretos, "_cliente", lambda: ManagerConVacios(estado["valores"]))
+    yield estado
+    secretos._reiniciar()
+
+
+def test_3b_mientras_el_secreto_de_gemini_esta_vacio_se_usa_la_variable(manager, monkeypatch):
+    """EL caso que no puede romper: si la Lambda leyera un secreto vacío como
+    clave, TODAS las llamadas al modelo fallarían."""
+    import gemini
+    monkeypatch.setenv("GEMINI_API_KEY", "clave-de-la-variable")
+    assert gemini._clave() == "clave-de-la-variable"
+
+
+def test_3b_con_el_secreto_de_gemini_cargado_se_usa_el_secreto(manager, monkeypatch):
+    import gemini
+    monkeypatch.setenv("GEMINI_API_KEY", "clave-de-la-variable")
+    manager["valores"]["lens-api/gemini-api-key"] = "clave-del-secreto"
+    assert gemini._clave() == "clave-del-secreto"
+
+
+def test_3b_sin_variable_y_con_el_secreto_cargado_gemini_funciona(manager, monkeypatch):
+    """El estado final: sin variable de entorno, que es lo que permite importar
+    la Lambda a Terraform sin el valor en el estado."""
+    import gemini
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    manager["valores"]["lens-api/gemini-api-key"] = "clave-del-secreto"
+    assert gemini._clave() == "clave-del-secreto"
+
+
+def test_3b_el_secreto_de_siempre_vacio_sigue_abriendo_con_la_variable(manager, monkeypatch):
+    import app
+    monkeypatch.setattr(app, "API_SECRET", "clave-de-siempre")
+    r = app.lambda_handler({"rawPath": "/v1/analisis", "requestContext": {"http": {"method": "POST"}},
+                            "headers": {"x-api-secret": "clave-de-siempre"}, "body": "{}"})
+    assert r["statusCode"] != 401
+
+
+def test_3b_el_secreto_de_siempre_cargado_manda_sobre_la_variable(manager, monkeypatch):
+    import app
+    monkeypatch.setattr(app, "API_SECRET", "")
+    manager["valores"]["lens-api/x-api-secret/legado"] = "clave-cargada"
+    r = app.lambda_handler({"rawPath": "/v1/analisis", "requestContext": {"http": {"method": "POST"}},
+                            "headers": {"x-api-secret": "clave-cargada"}, "body": "{}"})
+    assert r["statusCode"] != 401, "sin variable de entorno, abre con el del manager"
+
+
+def test_3b_un_secreto_vacio_no_es_un_error_en_el_log(manager, caplog):
+    """Recién creado, esperando la carga, responde ResourceNotFound. No es una
+    falla: el respaldo lo cubre, y un ERROR cada 30 segundos taparía los reales."""
+    with caplog.at_level("INFO"):
+        secretos.desde_manager("lens-api/gemini-api-key", "gemini")
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+    assert "todavía no tiene valor" in caplog.text
+
+
+def test_3b_salud_dice_cuales_estan_cargados_y_nunca_el_valor(manager):
+    assert secretos.cargados() == {"gemini": False, "legado": False}
+    manager["valores"]["lens-api/gemini-api-key"] = "clave-del-secreto"
+    secretos._reiniciar()
+    assert secretos.cargados() == {"gemini": True, "legado": False}
+    assert "clave" not in json.dumps(secretos.cargados())

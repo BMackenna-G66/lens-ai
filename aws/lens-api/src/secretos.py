@@ -71,12 +71,22 @@ def _cliente():
 
 def secreto_de(ambiente: str, ahora: float | None = None) -> str | None:
     """El secreto vigente de ese ambiente, o `None` si no hay o no se pudo leer."""
-    arn = ARNS.get(ambiente or "")
+    return desde_manager(ARNS.get(ambiente or ""), ambiente, ahora)
+
+
+def desde_manager(secret_id: str, etiqueta: str = "", ahora: float | None = None) -> str | None:
+    """El valor de un secreto de Secrets Manager, o `None` si no se pudo leer.
+
+    `None` incluye el caso de un secreto que existe pero todavía NO TIENE VALOR:
+    así nacen los que se cargan a mano (Bloque 3b), y quien llama tiene que
+    seguir con su respaldo mientras tanto.
+    """
+    arn = (secret_id or "").strip()
     if not arn:
         return None
     t = ahora if ahora is not None else time.monotonic()
-    if ambiente in _cache:
-        valor, cuando = _cache[ambiente]
+    if arn in _cache:
+        valor, cuando = _cache[arn]
         if t - cuando < (TTL_S if valor else TTL_FALLA_S):
             return valor
     try:
@@ -87,10 +97,36 @@ def secreto_de(ambiente: str, ahora: float | None = None) -> str | None:
         # MENSAJE puede traer el ARN, así que no se escribe: un secreto no tiene
         # que aparecer ni de refilón en un log.
         codigo = ((getattr(e, "response", None) or {}).get("Error") or {}).get("Code")
-        log.error("no se pudo leer el secreto de %s (%s)", ambiente, codigo or type(e).__name__)
+        if codigo == "ResourceNotFoundException":
+            # Un secreto sin valor todavía —recién creado, esperando la carga a
+            # mano— responde así. No es un error: el respaldo lo cubre.
+            log.info("el secreto de %s todavía no tiene valor; se usa el respaldo", etiqueta)
+        else:
+            log.error("no se pudo leer el secreto de %s (%s)", etiqueta, codigo or type(e).__name__)
         valor = None
-    _cache[ambiente] = (valor, t)
+    _cache[arn] = (valor, t)
     return valor
+
+
+# ── Los dos secretos que todavía viven en variables de entorno (Bloque 3b) ───
+# `GEMINI_API_KEY` y el `x-api-secret` de siempre. Pasan a Secrets Manager para
+# que la Lambda pueda importarse a Terraform sin escribirlos en el estado: la
+# convención de Arquitectura (iac-gereo/secrets.tf) es que Terraform maneja el
+# CONTENEDOR y nunca el valor.
+#
+# Se leen por NOMBRE, no por ARN: el ARN de un secreto lleva un sufijo al azar
+# que no se conoce hasta crearlo, y estos dos se crean vacíos, fuera del stack.
+#
+# Mientras no tengan valor, cada uno sigue con su variable de entorno. Con los dos
+# cargados —`/salud` → `secretos_cargados`—, las variables se pueden sacar.
+ID_GEMINI = os.environ.get("SECRETO_GEMINI_ID", "").strip()
+ID_LEGADO = os.environ.get("SECRETO_LEGADO_ID", "").strip()
+
+
+def cargados() -> dict[str, bool]:
+    """Para `/salud`: si cada uno ya tiene valor en Secrets Manager. NUNCA el valor."""
+    return {"gemini": bool(desde_manager(ID_GEMINI, "gemini")),
+            "legado": bool(desde_manager(ID_LEGADO, "legado"))}
 
 
 def autorizado_en(ambiente: str, presentado: Any, legado: str = "") -> bool:

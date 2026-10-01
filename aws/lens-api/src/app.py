@@ -281,12 +281,19 @@ def analizar(documentos: list[tuple[str, bytes]], incluir_texto: bool, pais_forz
 
 
 # ── Handler ─────────────────────────────────────────────────────────────────
+def _secreto_legado() -> str:
+    """El `x-api-secret` de siempre: de Secrets Manager si ya está cargado
+    (Bloque 3b), y si no, de la variable de entorno."""
+    return secretos.desde_manager(secretos.ID_LEGADO, "legado") or API_SECRET
+
+
 def _autorizado(evento: dict) -> bool:
-    if not API_SECRET:
+    secreto = _secreto_legado()
+    if not secreto:
         log.error("API_SECRET no está configurado: se rechaza todo.")
         return False
     headers = {k.lower(): v for k, v in (evento.get("headers") or {}).items()}
-    return hmac.compare_digest(str(headers.get("x-api-secret", "")), API_SECRET)
+    return hmac.compare_digest(str(headers.get("x-api-secret", "")), secreto)
 
 
 def _analyses(evento: dict, ruta: str, metodo: str) -> dict:
@@ -724,6 +731,10 @@ def lambda_handler(evento: dict, contexto=None) -> dict:
             # transición sin miedo a dejar la API respondiendo 401 a todo.
             "secretos_por_ambiente": secretos.estado(),
             "acepta_secreto_legado": secretos.ACEPTAR_LEGADO,
+            # Bloque 3b: si la clave de Gemini y el secreto de siempre ya tienen
+            # valor en Secrets Manager. Con los dos en true se pueden sacar las
+            # variables de entorno, y la Lambda queda lista para Terraform.
+            "secretos_cargados": secretos.cargados(),
         })
 
     # ── Contrato BusinessShareholders (Fase 5) ─────────────────────────────
@@ -745,7 +756,7 @@ def lambda_handler(evento: dict, contexto=None) -> dict:
         # arriba y de abajo siguen con `_autorizado`, sin cambios.
         headers = {k.lower(): v for k, v in (evento.get("headers") or {}).items()}
         if not secretos.autorizado_en(_ambiente_pedido(evento, metodo),
-                                      headers.get("x-api-secret"), API_SECRET):
+                                      headers.get("x-api-secret"), _secreto_legado()):
             codigo, cuerpo = errores.error_http(
                 "UNAUTHORIZED", "Falta o no coincide el header x-api-secret.")
             return _resp(codigo, cuerpo)
