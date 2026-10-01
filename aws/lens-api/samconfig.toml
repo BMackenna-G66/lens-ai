@@ -22,6 +22,6 @@ profile = "compliance-admin"
 # template. OJO: si un deploy pasa `--parameter-overrides` por línea de comandos,
 # esa lista REEMPLAZA a esta entera —no se mezclan—; por eso los defaults del
 # template también son los valores vivos.
-parameter_overrides = "CrearTablaCorridas=true CrearTablaIdempotencia=true DisparoAsincrono=true AmbientesCorridas=dev,ci,prod TiposPrincipales=company_deeds_document MaxDocumentosLote=2 MaxDocumentos=12 MaxPaginasOcr=15 MotorOcr=textract BucketDocumentos=g66-company"
+parameter_overrides = "CrearTablaCorridas=true CrearTablaIdempotencia=true DisparoAsincrono=true AmbientesCorridas=dev,ci,prod TiposPrincipales=company_deeds_document MaxDocumentosLote=2 MaxDocumentos=12 MaxPaginasOcr=15 MotorOcr=textract BucketDocumentos=g66-company AceptarSecretoLegado=true"
 # Los secretos (`ApiSecretValue`, `GeminiApiKey`) NO van acá: el repo es
 # público. SAM conserva el valor anterior si no se pasan.

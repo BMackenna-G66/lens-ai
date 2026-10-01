@@ -57,6 +57,7 @@ import companies
 import corridas
 import disparador
 import errores
+import secretos
 import ingesta_s3
 import gemini
 from extraccion import Presupuesto, extraer_texto
@@ -612,6 +613,24 @@ def _correr_analyses(cuerpo: dict, analysis_id: str, session_id: str) -> dict:
     return respuesta
 
 
+def _ambiente_pedido(evento: dict, metodo: str) -> str:
+    """El ambiente que pide la petición, para saber CON QUÉ secreto validarla.
+
+    En EP-1 viaja en el cuerpo; en EP-2 a EP-6, en la query. Leerlo antes de
+    autenticar no tiene efectos: es parsear un JSON chico. Si no viene o no se
+    entiende, queda vacío y solo puede abrirlo el secreto de siempre — y después
+    `companies` responde el 400 que corresponde.
+    """
+    if metodo == "GET":
+        q = evento.get("queryStringParameters") or {}
+        return corridas.normalizar_ambiente(q.get("environment") or q.get("ambiente"))
+    try:
+        cuerpo = json.loads(evento.get("body") or "{}")
+    except (ValueError, TypeError):
+        return ""
+    return corridas.normalizar_ambiente(cuerpo.get("environment")) if isinstance(cuerpo, dict) else ""
+
+
 def _socios_para_companies(descargados, t0: float) -> tuple[dict, list[str]]:
     """Adaptador entre `companies` y la extracción societaria de este módulo.
 
@@ -700,6 +719,11 @@ def lambda_handler(evento: dict, contexto=None) -> dict:
             "disparo_asincrono": disparador.disponible(),
             "tipos_principales": list(companies.TIPOS_PRINCIPALES),
             "max_documentos_lote": companies.MAX_DOCUMENTOS_LOTE,
+            # Ambiente por ambiente, si su secreto se pudo leer de Secrets
+            # Manager. NUNCA el valor. Con los tres en true, se puede apagar la
+            # transición sin miedo a dejar la API respondiendo 401 a todo.
+            "secretos_por_ambiente": secretos.estado(),
+            "acepta_secreto_legado": secretos.ACEPTAR_LEGADO,
         })
 
     # ── Contrato BusinessShareholders (Fase 5) ─────────────────────────────
@@ -715,7 +739,13 @@ def lambda_handler(evento: dict, contexto=None) -> dict:
     # esta familia devuelve códigos HTTP de verdad (202, 400, 409), mientras que
     # `/v1/analyses` responde 200 siempre con el código adentro del cuerpo.
     if ruta.startswith("/v1/companies/"):
-        if not _autorizado(evento):
+        # UN SECRETO POR AMBIENTE (Bloque 3): la clave de `dev` no abre `prod`.
+        # Con un secreto único, quien tenía la de desarrollo mandaba
+        # `environment: prod` y escribía en producción. Las rutas viejas de
+        # arriba y de abajo siguen con `_autorizado`, sin cambios.
+        headers = {k.lower(): v for k, v in (evento.get("headers") or {}).items()}
+        if not secretos.autorizado_en(_ambiente_pedido(evento, metodo),
+                                      headers.get("x-api-secret"), API_SECRET):
             codigo, cuerpo = errores.error_http(
                 "UNAUTHORIZED", "Falta o no coincide el header x-api-secret.")
             return _resp(codigo, cuerpo)
