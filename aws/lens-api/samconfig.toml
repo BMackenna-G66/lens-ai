@@ -17,6 +17,11 @@ capabilities = "CAPABILITY_IAM"
 confirm_changeset = true
 # Perfil AWS SSO de compliance (cuenta 561521480266). Único con CloudFormation.
 profile = "compliance-admin"
-# NOTA: los secretos NO se guardan acá. Se pasan en cada deploy con
-# --parameter-overrides "ApiSecretValue=... GeminiApiKey=...", leyéndolos de
-# archivo o del entorno para que no queden en el historial del shell.
+# Los parámetros que NO son secretos, con sus valores vivos. Son el registro de
+# cómo está desplegado el servicio, y la segunda red debajo de los defaults del
+# template. OJO: si un deploy pasa `--parameter-overrides` por línea de comandos,
+# esa lista REEMPLAZA a esta entera —no se mezclan—; por eso los defaults del
+# template también son los valores vivos.
+parameter_overrides = "CrearTablaCorridas=true CrearTablaIdempotencia=true DisparoAsincrono=true AmbientesCorridas=dev,ci,prod TiposPrincipales=company_deeds_document MaxDocumentosLote=2 MaxDocumentos=12 MaxPaginasOcr=15 MotorOcr=textract BucketDocumentos=g66-company"
+# Los secretos (`ApiSecretValue`, `GeminiApiKey`) NO van acá: el repo es
+# público. SAM conserva el valor anterior si no se pasan.
