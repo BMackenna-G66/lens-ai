@@ -63,15 +63,14 @@ Parameters:
       `analysisId` y la otra por ambiente + `companyId`.
   AmbientesCorridas:
     Type: String
-    Default: ''
+    Default: dev,ci,prod
     Description: >
-      Ambientes admitidos, separados por coma. VACÍO ACEPTA CUALQUIERA, y es el
-      default porque los tres nombres todavía no están confirmados con
-      Onboarding: adivinarlos bloquearía tráfico legítimo el primer día.
-      Dejarlo abierto tiene su costo — un `prod` contra un `production` crea dos
-      particiones distintas sin avisar, y la consulta de estado devuelve
-      NOT_STARTED sobre una corrida que sí ocurrió. Setearlo cierra esa trampa
-      sin tocar código.
+      Ambientes admitidos, separados por coma. Los tres están confirmados con
+      Onboarding: `dev`, `ci` y `prod`. Con la lista puesta, un `production` en
+      vez de `prod` devuelve 400 en vez de guardar la corrida en un ambiente
+      fantasma — que es lo que pasaba con la lista vacía: EP-2 respondía
+      NOT_STARTED sobre algo que sí se analizó. VACÍO acepta cualquiera y solo
+      sirve para una prueba local.
   DisparoAsincrono:
     Type: String
     Default: 'false'
