@@ -149,6 +149,46 @@ def _documentos_pedidos(cuerpo: dict) -> tuple[list[dict], str | None]:
     return salida, None
 
 
+def ubicacion_invalida(documentos: list[dict], ambiente: str, company_id: str) -> str | None:
+    """Por qué algún documento está fuera de su lugar, o `None` si están todos bien.
+
+    ── Por qué EP-1 lo exige ──────────────────────────────────────────────────
+    La Lambda puede leer todo el bucket de documentos, de los tres ambientes. Sin
+    esto, quien tenía la credencial de `dev` pedía un análisis sobre un documento
+    de `prod/…` y se lo llevaba entero por EP-3: el secreto por ambiente cuidaba
+    la ruta, pero no el documento.
+
+    Cada documento tiene que estar en el bucket de documentos y bajo
+    `{environment}/{companyId}/`: el ambiente normalizado, y el `companyId` tal
+    cual viene en la ruta. Vale para `s3Uri` y para `objectKey`, cuando vienen.
+    Se rechaza también un segmento `.` o `..`: no tiene uso legítimo en una clave,
+    y es la forma de que una clave que EMPIEZA con el prefijo apunte afuera de él.
+    """
+    prefijo = f"{ambiente}/{company_id}/"
+
+    def motivo_clave(clave: str) -> str | None:
+        if not clave.startswith(prefijo):
+            return f"tiene que estar bajo «{prefijo}» (el ambiente y la empresa de la petición), y es «{clave}»"
+        if any(s in (".", "..") for s in clave.split("/")):
+            return f"no puede tener segmentos «.» ni «..» («{clave}»)"
+        return None
+
+    for i, d in enumerate(documentos):
+        if d.get("s3Uri"):
+            bucket, clave = ingesta_s3.parsear_s3_uri(d["s3Uri"]) or ("", "")
+            if bucket != ingesta_s3.BUCKET:
+                return (f"El documento {i} está en el bucket «{bucket}» y tiene que estar en "
+                        f"«{ingesta_s3.BUCKET}».")
+            m = motivo_clave(clave)
+            if m:
+                return f"El documento {i}: el `s3Uri` {m}."
+        if d.get("objectKey"):
+            m = motivo_clave(d["objectKey"])
+            if m:
+                return f"El documento {i}: el `objectKey` {m}."
+    return None
+
+
 #: Principales que se SUMAN según el país.
 #:
 #: En Colombia el documento constitutivo no llega como escritura: llega como el
@@ -242,6 +282,10 @@ def manejar(evento: dict, ruta: str, metodo: str, *, analizar: Callable,
     if motivo:
         return _error("BAD_REQUEST", motivo)
 
+    motivo = ubicacion_invalida(documentos, ambiente, company_id)
+    if motivo:
+        return _error("BAD_REQUEST", motivo)
+
     pais = str(cuerpo.get("country") or "").strip()
     if not pais:
         # §6.5 lo declara obligatorio, y acá además decide qué documento es el
@@ -259,31 +303,31 @@ def manejar(evento: dict, ruta: str, metodo: str, *, analizar: Callable,
             f"El lote no trae el documento principal. Se espera un `documentType` entre: {esperados}.",
         )
 
-    # ── Una corrida por empresa a la vez ───────────────────────────────────
+    # ── Una corrida por empresa a la vez, y el registro ANTES del 202 ──────
+    # Mirar si hay una viva y registrar la nueva es UNA escritura condicional
+    # (ver `corridas`, «El candado»): de dos EP-1 simultáneos, uno registra y el
+    # otro recibe el 409 con los datos del primero.
+    analysis_id = str(cuerpo.get("analysisId") or cuerpo.get("analysis_id") or "").strip() or str(uuid.uuid4())
     try:
-        viva = corridas.en_curso(ambiente, company_id)
-    except Exception as e:  # noqa: BLE001
-        # No se puede saber si hay una corrida viva. Arrancar otra podría
-        # duplicar el trabajo y el gasto, así que se pide reintentar.
-        log.warning("no se pudo consultar el estado de %s/%s: %s", ambiente, company_id, e)
-        return _error("SERVICE_UNAVAILABLE", "No se pudo consultar el estado de la empresa.")
-
-    if viva is not None:
+        reg = corridas.registrar_inicio(
+            ambiente, company_id, analysis_id,
+            country=pais,
+            documentos=documentos,
+            schema_version=SCHEMA_VERSION,
+        )
+    except corridas.EnCurso as e:
         return _error(
             "CONFLICT",
             "Ya hay una corrida en curso para esa empresa y ambiente.",
-            analysisId=viva.get("analysisId"),
-            startedAt=viva.get("startedAt"),
+            analysisId=e.viva.get("analysisId"),
+            startedAt=e.viva.get("startedAt"),
         )
-
-    # ── El registro va ANTES del 202 ───────────────────────────────────────
-    analysis_id = str(cuerpo.get("analysisId") or cuerpo.get("analysis_id") or "").strip() or str(uuid.uuid4())
-    reg = corridas.registrar_inicio(
-        ambiente, company_id, analysis_id,
-        country=pais,
-        documentos=documentos,
-        schema_version=SCHEMA_VERSION,
-    )
+    except Exception as e:  # noqa: BLE001
+        # Sin registro no hay corrida: un 202 acá prometería algo que ninguna
+        # consulta de estado va a poder confirmar. ms-company reintenta un 503
+        # sin cobrarle el intento al usuario.
+        log.warning("no se pudo registrar la corrida de %s/%s: %s", ambiente, company_id, e)
+        return _error("SERVICE_UNAVAILABLE", "No se pudo registrar la corrida. Se puede reintentar.")
 
     carga = {
         "ambiente": ambiente,
@@ -292,22 +336,30 @@ def manejar(evento: dict, ruta: str, metodo: str, *, analizar: Callable,
         "country": pais,
         "documents": documentos,
     }
-    # El modo del disparo NO viaja en la respuesta: el contrato de EP-1 son cinco
-    # campos y uno de más se vuelve contrato de hecho en cuanto alguien lo use.
-    # Es información de operación y vive donde corresponde, en `/salud`.
-    disparador.disparar(carga, lambda c: procesar(
-        c, analizar=analizar, extraer_socios=extraer_socios,
-        extraer_administracion=extraer_administracion, leer_identidad=leer_identidad))
+    try:
+        # El modo del disparo NO viaja en la respuesta: el contrato de EP-1 son
+        # cinco campos y uno de más se vuelve contrato de hecho en cuanto alguien
+        # lo use. Es información de operación y vive en `/salud`.
+        disparador.disparar(carga, lambda c: procesar(
+            c, analizar=analizar, extraer_socios=extraer_socios,
+            extraer_administracion=extraer_administracion, leer_identidad=leer_identidad))
 
-    return _resp(202, {
-        # Como número, igual que EP-2 a EP-6: §6.2 lo declara numérico, y
-        # ms-company es Java — un texto y un número se deserializan distinto.
-        "companyId": identificador(company_id),
-        "analysisId": analysis_id,
-        "status": corridas.IN_PROGRESS,
-        "startedAt": reg["startedAt"],
-        "schemaVersion": SCHEMA_VERSION,
-    })
+        return _resp(202, {
+            # Como número, igual que EP-2 a EP-6: §6.2 lo declara numérico, y
+            # ms-company es Java — un texto y un número se deserializan distinto.
+            "companyId": identificador(company_id),
+            "analysisId": analysis_id,
+            "status": corridas.IN_PROGRESS,
+            "startedAt": reg["startedAt"],
+            "schemaVersion": SCHEMA_VERSION,
+        })
+    except Exception:  # noqa: BLE001
+        # Ya registrada, el 202 no llega a salir. El 503 le dice al consumidor
+        # que reintente sin cobrar, así que la corrida no puede quedar
+        # `IN_PROGRESS`: EP-2 mentiría y el reintento chocaría con un 409.
+        log.exception("EP-1 falló después de registrar la corrida %s", analysis_id)
+        corridas.anular(reg)
+        return _error("SERVICE_UNAVAILABLE", "No se pudo iniciar la corrida. Se puede reintentar.")
 
 
 # ── EP-2 · Estado ───────────────────────────────────────────────────────────
