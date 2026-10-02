@@ -591,7 +591,7 @@ def test_ep1_entrega_su_sobre_y_nada_mas():
             "requestContext": {"http": {"method": "POST"}},
             "headers": {},
             "body": _json.dumps({"environment": "prod", "country": "chile",
-                                 "documents": [{"s3Uri": "s3://b/x.pdf",
+                                 "documents": [{"s3Uri": "s3://g66-company/prod/48213/x.pdf",
                                                 "documentType": "company_deeds_document"}]}),
         }
 

@@ -686,6 +686,25 @@ def _identidad_para_companies(descargado, t0: float) -> dict | None:
     return resultado
 
 
+def _companies(evento: dict, ruta: str, metodo: str) -> dict | None:
+    """La familia `/v1/companies/…`: autorización por ambiente y despacho."""
+    # UN SECRETO POR AMBIENTE (Bloque 3): la clave de `dev` no abre `prod`.
+    # Con un secreto único, quien tenía la de desarrollo mandaba
+    # `environment: prod` y escribía en producción. Las rutas viejas siguen con
+    # `_autorizado`, sin cambios.
+    headers = {k.lower(): v for k, v in (evento.get("headers") or {}).items()}
+    if not secretos.autorizado_en(_ambiente_pedido(evento, metodo),
+                                  headers.get("x-api-secret"), _secreto_legado()):
+        codigo, cuerpo = errores.error_http(
+            "UNAUTHORIZED", "Falta o no coincide el header x-api-secret.")
+        return _resp(codigo, cuerpo)
+    return companies.manejar(
+        evento, ruta, metodo, analizar=analizar,
+        extraer_socios=_socios_para_companies,
+        extraer_administracion=_administracion_para_companies,
+        leer_identidad=_identidad_para_companies)
+
+
 def lambda_handler(evento: dict, contexto=None) -> dict:
     # ── El trabajo de fondo se mira ANTES que la ruta ──────────────────────
     # Un disparo asíncrono no viene de la Function URL: no trae `requestContext`,
@@ -753,21 +772,18 @@ def lambda_handler(evento: dict, contexto=None) -> dict:
     # esta familia devuelve códigos HTTP de verdad (202, 400, 409), mientras que
     # `/v1/analyses` responde 200 siempre con el código adentro del cuerpo.
     if ruta.startswith("/v1/companies/"):
-        # UN SECRETO POR AMBIENTE (Bloque 3): la clave de `dev` no abre `prod`.
-        # Con un secreto único, quien tenía la de desarrollo mandaba
-        # `environment: prod` y escribía en producción. Las rutas viejas de
-        # arriba y de abajo siguen con `_autorizado`, sin cambios.
-        headers = {k.lower(): v for k, v in (evento.get("headers") or {}).items()}
-        if not secretos.autorizado_en(_ambiente_pedido(evento, metodo),
-                                      headers.get("x-api-secret"), _secreto_legado()):
+        # NUNCA UN 502 PROPIO. Una excepción que se escapa del handler la
+        # convierte la Function URL en un 502 con cuerpo de AWS, y ms-company
+        # decide por el código: un 503 lo reintenta sin cobrarle el intento al
+        # usuario, cualquier otro 5xx se lo cobra. EP-1 ya deja la corrida
+        # anulada antes de llegar acá; esto es la red para lo no previsto.
+        try:
+            r = _companies(evento, ruta, metodo)
+        except Exception:  # noqa: BLE001
+            log.exception("excepción no prevista en %s %s", metodo, ruta)
             codigo, cuerpo = errores.error_http(
-                "UNAUTHORIZED", "Falta o no coincide el header x-api-secret.")
+                "SERVICE_UNAVAILABLE", "LENS no pudo atender la petición. Se puede reintentar.")
             return _resp(codigo, cuerpo)
-        r = companies.manejar(
-            evento, ruta, metodo, analizar=analizar,
-            extraer_socios=_socios_para_companies,
-            extraer_administracion=_administracion_para_companies,
-            leer_identidad=_identidad_para_companies)
         if r is not None:
             return r
 

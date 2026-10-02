@@ -39,9 +39,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import re
+import threading
 import time
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 log = logging.getLogger()
@@ -76,9 +79,13 @@ TTL_DIAS = int(os.environ.get("CORRIDAS_TTL_DIAS", "90"))
 #: siempre y EP-1 devuelve `409` sobre esa empresa hasta que alguien borre la
 #: fila a mano. El plan no lo menciona; aparece al construirlo.
 #:
-#: 15 minutos es el tope de una Lambda. Una corrida viva más que eso no está
-#: viva.
-TOPE_EN_CURSO_S = int(os.environ.get("CORRIDAS_TOPE_EN_CURSO_S", "900"))
+#: 6 minutos (antes 15). El techo de una corrida viva es el timeout de la
+#: función, 300 s, por los dos caminos: el asíncrono corre en su propia
+#: invocación, y el en línea dentro de la petición que la registró. Con 900,
+#: una corrida muerta dejaba a la empresa con `409` un cuarto de hora, y
+#: Onboarding corta la espera a los 7. A partir de este tope la corrida se lee
+#: `FAILED`, EP-1 acepta otra, y `cerrar` ya no la puede cambiar.
+TOPE_EN_CURSO_S = int(os.environ.get("CORRIDAS_TOPE_EN_CURSO_S", "360"))
 
 #: Ambientes admitidos, separados por coma. **Vacío = se acepta cualquiera.**
 #:
@@ -101,6 +108,75 @@ SEP = "#"
 _RE_AMBIENTE = re.compile(r"[^a-z0-9_-]+")
 
 _memoria: dict[str, list[dict]] = {}
+
+#: En modo memoria, lo que en DynamoDB hace la escritura condicional: que mirar
+#: si hay una corrida viva y registrar la nueva sea UN paso.
+_cerrojo_memoria = threading.Lock()
+
+
+# ── El candado: una corrida viva por ambiente + empresa ─────────────────────
+#
+# El control «¿hay una en curso?» y el registro eran dos operaciones —una
+# consulta y un `put_item`—, y dos EP-1 simultáneos pasaban los dos por el medio:
+# dos corridas de la misma empresa, dos análisis, dos cobros. Ahora son UNA
+# escritura: una transacción que pone el candado de la empresa CON CONDICIÓN y,
+# en el mismo paso, la fila de la corrida. De dos EP-1 simultáneos, uno toma el
+# candado y el otro recibe el `409` con los datos del primero.
+#
+# El candado es un ítem aparte, en OTRA partición: su clave empieza con `#`, que
+# un ambiente normalizado no puede tener. Por eso `_leer_todas` y `ultima` no lo
+# ven nunca — no aparece como corrida.
+#
+# Está libre si no existe, si su corrida ya cerró, o si su corrida pasó el tope
+# de caducidad: esto último es lo que sigue liberando a la empresa cuando el
+# proceso murió sin cerrar.
+
+SK_CANDADO = "candado"
+
+#: El candado se puede tomar. `#st` porque `status` es palabra reservada.
+COND_CANDADO_LIBRE = "attribute_not_exists(pk) OR #st <> :en_curso OR startedTs < :limite"
+#: La fila de la corrida es nueva: nunca se pisa una que ya existe.
+COND_FILA_NUEVA = "attribute_not_exists(pk)"
+#: La corrida se puede cerrar: sigue viva y no pasó el tope. Una que EP-2 ya
+#: informó `FAILED` por caducada no cambia más de estado.
+COND_CORRIDA_VIVA = "#st = :en_curso AND startedTs >= :limite"
+#: El candado es de esta corrida (o no existe: una corrida registrada antes de
+#: que hubiera candados).
+COND_CANDADO_PROPIO = "attribute_not_exists(pk) OR analysisId = :aid"
+#: Lo que se puede anular: una corrida que sigue `IN_PROGRESS`, y es esta.
+COND_ANULABLE = "#st = :en_curso AND analysisId = :aid"
+
+#: Cuántas veces se reintenta una transacción que chocó con otra simultánea
+#: (`TransactionConflict`). Al reintentar, la otra ya terminó: o se toma el
+#: candado, o se ve quién lo tiene y se responde el `409` con sus datos.
+#:
+#: Con 3 intentos fijos no alcanzaba: probado contra DynamoDB de verdad, de
+#: ocho registros simultáneos dos seguían chocando al tercero y habrían salido
+#: `503` en vez de `409`. Por eso la espera crece y lleva azar —para que los que
+#: chocaron no vuelvan a chocar juntos—, y si igual se agotan, `registrar_inicio`
+#: lee el candado antes de rendirse.
+INTENTOS_TRANSACCION = 5
+
+
+class EnCurso(Exception):
+    """Ya hay una corrida viva de esa empresa en ese ambiente. Trae la que corre,
+    para que EP-1 responda el `409` con su `analysisId` y su `startedAt`."""
+
+    def __init__(self, viva: dict):
+        super().__init__(f"ya hay una corrida en curso: {viva.get('analysisId')}")
+        self.viva = viva
+
+
+def clave_candado(ambiente: Any, company_id: Any) -> str:
+    """`#candado#ambiente#companyId`: nunca coincide con la clave de una corrida,
+    que empieza por el ambiente."""
+    return f"{SEP}{SK_CANDADO}{SEP}{clave(ambiente, company_id)}"
+
+
+def _limite(t: float) -> Decimal:
+    """`startedTs` por debajo de esto = caducada. Es el MISMO criterio que
+    `caducada()`, (t − inicio) > tope, escrito como lo puede comparar DynamoDB."""
+    return Decimal(f"{t - TOPE_EN_CURSO_S:.3f}")
 
 
 # ── Claves y normalización ──────────────────────────────────────────────────
@@ -151,15 +227,18 @@ def registrar_inicio(
     schema_version: str = "",
     ahora: float | None = None,
 ) -> dict:
-    """Deja la corrida como `IN_PROGRESS` y devuelve el registro.
+    """Deja la corrida como `IN_PROGRESS` y devuelve el registro, o levanta
+    `EnCurso` si la empresa ya tiene una corrida viva en ese ambiente.
 
     **Se llama ANTES de responder el `202`.** No es una preferencia de diseño: si
     el `202` sale primero, la primera consulta del front puede ver `NOT_STARTED`,
     volver a mostrar la pantalla de carga y disparar un segundo procesamiento del
     mismo lote.
 
-    El registro que devuelve trae `sk`, así que quien lo tenga puede cerrar la
-    corrida sin buscarla.
+    **Mirar y registrar es UN paso** (ver «El candado»). Cualquier otra falla se
+    PROPAGA: si no se pudo registrar, no hay corrida, y EP-1 tiene que decirlo con
+    un `503` en vez de responder un `202` que ninguna consulta de estado va a
+    poder confirmar.
     """
     t = ahora if ahora is not None else time.time()
     iniciado = _ahora_iso(t)
@@ -183,8 +262,109 @@ def registrar_inicio(
         "result": None,
         "schemaVersion": str(schema_version or ""),
     }
-    _escribir(reg)
+
+    if not TABLA:
+        with _cerrojo_memoria:
+            viva = _viva_en_memoria(reg["pk"], t)
+            if viva is not None:
+                raise EnCurso(viva)
+            _escribir(reg)
+        return reg
+
+    candado = {
+        "pk": clave_candado(ambiente, company_id),
+        "sk": SK_CANDADO,
+        "analysisId": reg["analysisId"],
+        "startedAt": iniciado,
+        "startedTs": reg["startedTs"],
+        "status": IN_PROGRESS,
+        "ttl": int(t) + TTL_DIAS * 86400,
+    }
+    valores = {":en_curso": IN_PROGRESS, ":limite": _limite(t)}
+    try:
+        _transaccion([
+            {"Put": {
+                "Item": candado,
+                "ConditionExpression": COND_CANDADO_LIBRE,
+                "ExpressionAttributeNames": {"#st": "status"},
+                "ExpressionAttributeValues": valores,
+                # Si está tomado, DynamoDB devuelve el candado en la cancelación:
+                # el `409` sale con los datos de la que corre sin otra lectura.
+                "ReturnValuesOnConditionCheckFailure": "ALL_OLD",
+            }},
+            {"Put": {"Item": _item(reg), "ConditionExpression": COND_FILA_NUEVA}},
+        ])
+    except _Cancelada as c:
+        if c.fallo(0):
+            otro = c.item(0)
+            raise EnCurso({"analysisId": otro.get("analysisId"),
+                           "startedAt": otro.get("startedAt")}) from None
+        # Se agotaron los reintentos por choques con otras transacciones: hay
+        # registros simultáneos de esta empresa. Si alguno ya tomó el candado,
+        # la respuesta correcta es el 409 con sus datos, no un 503.
+        otro = _candado_tomado(candado["pk"], t)
+        if otro is not None:
+            raise EnCurso(otro) from None
+        raise
     return reg
+
+
+def _candado_tomado(pk_candado: str, t: float) -> dict | None:
+    """La corrida que tiene el candado, si lo tiene y no caducó. Lectura fuerte:
+    una eventual podría no ver el candado recién tomado."""
+    it = _tabla().get_item(Key={"pk": pk_candado, "sk": SK_CANDADO}, ConsistentRead=True).get("Item")
+    if not it or it.get("status") != IN_PROGRESS or int(it.get("startedTs") or 0) < _limite(t):
+        return None
+    return {"analysisId": it.get("analysisId"), "startedAt": it.get("startedAt")}
+
+
+def _viva_en_memoria(pk: str, t: float) -> dict | None:
+    for f in reversed(_memoria.get(pk, [])):
+        if f.get("status") == IN_PROGRESS and not caducada(f, t):
+            return dict(f)
+    return None
+
+
+def anular(reg: dict) -> bool:
+    """Deshace un registro de inicio cuyo `202` no llegó a salir.
+
+    Si después de registrar algo revienta, EP-1 responde `503` y el consumidor
+    reintenta SIN cobrarle el intento al usuario. Dejar la corrida `IN_PROGRESS`
+    contradiría ese `503`: EP-2 diría que algo corre, y el reintento chocaría con
+    un `409` hasta el tope de caducidad.
+
+    Solo borra si la corrida sigue `IN_PROGRESS` y es esta: si el trabajo llegó a
+    cerrarla, lo que pasó se respeta. Best-effort —si falla, queda el tope—, y
+    devuelve si se anuló.
+    """
+    if not TABLA:
+        with _cerrojo_memoria:
+            filas = _memoria.get(reg["pk"], [])
+            for i, f in enumerate(filas):
+                if f["sk"] == reg["sk"] and f.get("status") == IN_PROGRESS:
+                    del filas[i]
+                    return True
+        return False
+
+    pk_candado = f"{SEP}{SK_CANDADO}{SEP}{reg['pk']}"
+    try:
+        _transaccion([
+            {"Delete": {
+                "Key": {"pk": reg["pk"], "sk": reg["sk"]},
+                "ConditionExpression": COND_ANULABLE,
+                "ExpressionAttributeNames": {"#st": "status"},
+                "ExpressionAttributeValues": {":en_curso": IN_PROGRESS, ":aid": reg["analysisId"]},
+            }},
+            {"Delete": {
+                "Key": {"pk": pk_candado, "sk": SK_CANDADO},
+                "ConditionExpression": COND_CANDADO_PROPIO,
+                "ExpressionAttributeValues": {":aid": reg["analysisId"]},
+            }},
+        ])
+        return True
+    except Exception as e:  # noqa: BLE001
+        log.warning("no se pudo anular la corrida %s; la libera el tope: %s", reg.get("analysisId"), e)
+        return False
 
 
 def cerrar(
@@ -198,13 +378,22 @@ def cerrar(
     resultado: dict | None = None,
     ahora: float | None = None,
 ) -> dict | None:
-    """Lleva la corrida a un estado terminal. `None` si no se encontró.
+    """Lleva la corrida a un estado terminal y suelta el candado. `None` si no se
+    encontró o si ya no se puede cerrar.
 
     Un `estado_final` que no sea terminal se trata como `FAILED` en vez de
     guardarse: dejar una corrida en un estado que el contrato no define le
     daría al consumidor un valor contra el que no puede programar. Mismo criterio
     que ya usan `contrato.error` y `errores.error_http`.
+
+    ── Una corrida que ya se informó FAILED no cambia más ──────────────────────
+    Solo se cierra una corrida que sigue `IN_PROGRESS` y NO pasó el tope. Pasado
+    el tope, EP-2 ya dijo `FAILED` y Onboarding ya le cobró el intento al
+    usuario: si un proceso rezagado la llevara después a `COMPLETED`, el mismo
+    análisis tendría dos finales. Es una condición de la escritura, no una
+    lectura previa, así que tampoco se pisan dos cierres simultáneos.
     """
+    t = ahora if ahora is not None else time.time()
     if estado_final not in TERMINALES:
         log.warning("estado final no válido (%s); se cierra como FAILED", estado_final)
         estado_final = FAILED
@@ -228,7 +417,7 @@ def cerrar(
     reg = {
         **reg,
         "status": estado_final,
-        "finishedAt": _ahora_iso(ahora),
+        "finishedAt": _ahora_iso(t),
         "warnings": avisos if avisos is not None else reg.get("warnings") or [],
         "error": error,
         # Lo que EP-3 devuelve. Se guarda ACÁ y no en `almacen` porque EP-3
@@ -240,42 +429,152 @@ def cerrar(
         # campos, metadatos por documento y personas—, que está acotada.
         "result": resultado if resultado is not None else reg.get("result"),
     }
-    _escribir(reg)
-    return reg
+
+    if not TABLA:
+        with _cerrojo_memoria:
+            actual = next((f for f in _memoria.get(reg["pk"], []) if f["sk"] == reg["sk"]), None)
+            if actual is None or actual.get("status") != IN_PROGRESS or caducada(actual, t):
+                log.warning("la corrida %s ya no se puede cerrar (cerrada o caducada)", analysis_id)
+                return None
+            _escribir(reg)
+        return reg
+
+    viva = {":en_curso": IN_PROGRESS, ":limite": _limite(t)}
+    corrida = {"Put": {
+        "Item": _item(reg),
+        "ConditionExpression": COND_CORRIDA_VIVA,
+        "ExpressionAttributeNames": {"#st": "status"},
+        "ExpressionAttributeValues": viva,
+    }}
+    candado = {"Put": {
+        "Item": {
+            "pk": clave_candado(ambiente, company_id), "sk": SK_CANDADO,
+            "analysisId": reg["analysisId"], "startedAt": reg.get("startedAt"),
+            "startedTs": int(reg.get("startedTs") or 0), "status": estado_final,
+            "ttl": int(t) + TTL_DIAS * 86400,
+        },
+        "ConditionExpression": COND_CANDADO_PROPIO,
+        "ExpressionAttributeValues": {":aid": reg["analysisId"]},
+    }}
+    try:
+        _transaccion([corrida, candado])
+        return reg
+    except _Cancelada as c:
+        if c.fallo(0):
+            log.warning("la corrida %s ya no se puede cerrar (cerrada o caducada)", analysis_id)
+            return None
+        if c.fallo(1):
+            # El candado lo tiene otra corrida. Solo pasa con una corrida
+            # registrada antes de que existieran los candados, durante el
+            # despliegue: se cierra la fila sola, con la misma condición.
+            try:
+                _transaccion([corrida])
+                return reg
+            except Exception as e:  # noqa: BLE001
+                log.warning("no se pudo cerrar la corrida %s: %s", analysis_id, e)
+                return None
+        log.warning("no se pudo cerrar la corrida %s: %s", analysis_id, c)
+        return None
+    except Exception as e:  # noqa: BLE001
+        # Queda `IN_PROGRESS` y la libera el tope de caducidad.
+        log.warning("no se pudo cerrar la corrida %s: %s", analysis_id, e)
+        return None
+
+
+def _item(reg: dict) -> dict:
+    """La fila como se guarda en DynamoDB."""
+    return {
+        **{k: v for k, v in reg.items() if k not in ("documents", "warnings", "error", "result")},
+        # Serializados: DynamoDB no acepta floats y los avisos y documentos
+        # pueden traerlos. Convertirlos uno por uno sería frágil, y es el
+        # mismo criterio que ya usa `almacen.guardar`.
+        "documents": json.dumps(reg.get("documents") or [], ensure_ascii=False),
+        "warnings": json.dumps(reg.get("warnings") or [], ensure_ascii=False),
+        "error": json.dumps(reg.get("error"), ensure_ascii=False),
+        "result": json.dumps(reg.get("result"), ensure_ascii=False),
+        "ttl": int(time.time()) + TTL_DIAS * 86400,
+    }
+
+
+# ── Transacciones ───────────────────────────────────────────────────────────
+
+class _Cancelada(Exception):
+    """DynamoDB canceló la transacción. Dice qué paso falló y, si se pidió,
+    trae el ítem que hizo fallar la condición."""
+
+    def __init__(self, razones: list[dict]):
+        super().__init__("transacción cancelada: " + ", ".join(r.get("Code", "?") for r in razones))
+        self.razones = razones
+
+    def fallo(self, i: int) -> bool:
+        return i < len(self.razones) and self.razones[i].get("Code") == "ConditionalCheckFailed"
+
+    def item(self, i: int) -> dict:
+        crudo = self.razones[i].get("Item") if i < len(self.razones) else None
+        if not crudo:
+            return {}
+        from boto3.dynamodb.types import TypeDeserializer
+        d = TypeDeserializer()
+        return {k: d.deserialize(v) for k, v in crudo.items()}
+
+
+def _cliente():
+    import boto3  # import perezoso, igual que `_tabla`
+    return boto3.client("dynamodb")
+
+
+def _transaccion(pasos: list[dict]) -> None:
+    """`TransactWriteItems` con los ítems en tipos de Python.
+
+    Reintenta solo `TransactionConflict` —otra transacción tocaba el mismo ítem
+    en ese instante—; una condición que no se cumple se levanta como
+    `_Cancelada`, y cualquier otra falla se propaga tal cual.
+    """
+    from boto3.dynamodb.types import TypeSerializer
+    from botocore.exceptions import ClientError
+    s = TypeSerializer()
+
+    def bajo(d: dict) -> dict:
+        return {k: s.serialize(v) for k, v in d.items()}
+
+    items = []
+    for paso in pasos:
+        (op, cuerpo), = paso.items()
+        cuerpo = {"TableName": TABLA, **cuerpo}
+        for campo in ("Item", "Key", "ExpressionAttributeValues"):
+            if campo in cuerpo:
+                cuerpo[campo] = bajo(cuerpo[campo])
+        items.append({op: cuerpo})
+
+    for intento in range(INTENTOS_TRANSACCION):
+        try:
+            _cliente().transact_write_items(TransactItems=items)
+            return
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") != "TransactionCanceledException":
+                raise
+            razones = e.response.get("CancellationReasons") or []
+            if any(r.get("Code") == "ConditionalCheckFailed" for r in razones):
+                raise _Cancelada(razones) from None
+            if any(r.get("Code") == "TransactionConflict" for r in razones) \
+                    and intento < INTENTOS_TRANSACCION - 1:
+                time.sleep(0.05 * (2 ** intento) * random.uniform(0.5, 1.5))
+                continue
+            raise _Cancelada(razones) from None
 
 
 def _escribir(reg: dict) -> None:
-    """Best-effort igual que `almacen.guardar`, con una diferencia que importa.
-
-    Si falla el guardado de un cierre, la corrida queda `IN_PROGRESS` y el tope
-    de caducidad la libera sola. Si falla el registro del inicio, el `409` no
-    protege y dos corridas de la misma empresa pueden convivir. Las dos cosas se
-    loguean en WARNING porque ninguna es visible de otra forma.
-    """
-    if not TABLA:
-        filas = _memoria.setdefault(reg["pk"], [])
-        for i, f in enumerate(filas):
-            if f["sk"] == reg["sk"]:
-                filas[i] = dict(reg)
-                break
-        else:
-            filas.append(dict(reg))
-        filas.sort(key=lambda f: f["sk"])
-        return
-    try:
-        _tabla().put_item(Item={
-            **{k: v for k, v in reg.items() if k not in ("documents", "warnings", "error", "result")},
-            # Serializados: DynamoDB no acepta floats y los avisos y documentos
-            # pueden traerlos. Convertirlos uno por uno sería frágil, y es el
-            # mismo criterio que ya usa `almacen.guardar`.
-            "documents": json.dumps(reg.get("documents") or [], ensure_ascii=False),
-            "warnings": json.dumps(reg.get("warnings") or [], ensure_ascii=False),
-            "error": json.dumps(reg.get("error"), ensure_ascii=False),
-            "result": json.dumps(reg.get("result"), ensure_ascii=False),
-            "ttl": int(time.time()) + TTL_DIAS * 86400,
-        })
-    except Exception as e:  # noqa: BLE001
-        log.warning("no se pudo guardar la corrida %s: %s", reg.get("analysisId"), e)
+    """La escritura del modo memoria. En DynamoDB, el registro y el cierre van
+    por `_transaccion`, cada uno con su condición; esto se llama con el cerrojo
+    tomado."""
+    filas = _memoria.setdefault(reg["pk"], [])
+    for i, f in enumerate(filas):
+        if f["sk"] == reg["sk"]:
+            filas[i] = dict(reg)
+            break
+    else:
+        filas.append(dict(reg))
+    filas.sort(key=lambda f: f["sk"])
 
 
 # ── Lectura ─────────────────────────────────────────────────────────────────

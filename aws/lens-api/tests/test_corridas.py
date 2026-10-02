@@ -254,17 +254,21 @@ def test_buscar_encuentra_una_corrida_vieja():
     perdiera en el camino de una invocación asíncrona, la corrida quedaría
     colgada en `IN_PROGRESS`."""
     for i in range(5):
-        co.registrar_inicio("prod", "ACME-1", f"a{i}", ahora=T0 + i)
+        co.registrar_inicio("prod", "ACME-1", f"a{i}", ahora=T0 + i * 10)
+        co.cerrar("prod", "ACME-1", f"a{i}", co.COMPLETED, ahora=T0 + i * 10 + 5)
     assert co.buscar("prod", "ACME-1", "a0")["analysisId"] == "a0"
     assert co.buscar("prod", "ACME-1", "no-existe") is None
 
 
-def test_se_puede_cerrar_una_corrida_que_no_es_la_ultima():
-    """Dos corridas de la misma empresa pueden solaparse si el `409` no las
-    frenó. Cerrar la vieja no puede tocar la nueva."""
+def test_una_corrida_caducada_no_se_cierra_ni_toca_la_nueva():
+    """Dos corridas de la misma empresa solo conviven si la vieja caducó. Para
+    entonces EP-2 ya la informó `FAILED`, así que un proceso rezagado que quiera
+    cerrarla no puede: ni la cambia a ella, ni toca la nueva."""
     co.registrar_inicio("prod", "ACME-1", "vieja", ahora=T0)
-    co.registrar_inicio("prod", "ACME-1", "nueva", ahora=T0 + 60)
-    co.cerrar("prod", "ACME-1", "vieja", co.COMPLETED, ahora=T0 + 70)
+    nueva_t = T0 + co.TOPE_EN_CURSO_S + 1
+    co.registrar_inicio("prod", "ACME-1", "nueva", ahora=nueva_t)
+    assert co.cerrar("prod", "ACME-1", "vieja", co.COMPLETED, ahora=nueva_t + 10) is None
+    assert co.buscar("prod", "ACME-1", "vieja")["status"] == co.IN_PROGRESS, "la fila no se tocó"
     assert co.buscar("prod", "ACME-1", "nueva")["status"] == co.IN_PROGRESS
 
 
@@ -303,27 +307,99 @@ def test_este_almacen_no_reemplaza_al_de_idempotencia():
 # que separa «está escrito» de «funciona».
 
 
+#: Las condiciones que usa `corridas`, en Python. Van indexadas por la MISMA
+#: constante: si el código cambia una expresión sin cambiar esto, el test revienta
+#: con KeyError en vez de probar una condición que ya no existe. Que la sintaxis
+#: sea la que DynamoDB entiende lo prueba `test_corridas_dynamodb_real.py`.
+CONDICIONES = {
+    co.COND_CANDADO_LIBRE: lambda it, v: it is None or it["status"] != v[":en_curso"]
+                                         or it["startedTs"] < v[":limite"],
+    co.COND_FILA_NUEVA: lambda it, v: it is None,
+    co.COND_CORRIDA_VIVA: lambda it, v: it is not None and it["status"] == v[":en_curso"]
+                                        and it["startedTs"] >= v[":limite"],
+    co.COND_CANDADO_PROPIO: lambda it, v: it is None or it.get("analysisId") == v[":aid"],
+    co.COND_ANULABLE: lambda it, v: it is not None and it["status"] == v[":en_curso"]
+                                    and it.get("analysisId") == v[":aid"],
+}
+
+
 class TablaFalsa:
-    """Lo justo de DynamoDB: `put_item` reemplaza por (pk, sk) y `query` devuelve
-    ordenado por `sk`, con `ScanIndexForward` y `Limit`."""
+    """Lo justo de DynamoDB para `corridas`: `query` ordenado por `sk`, con
+    `ScanIndexForward` y `Limit`, y `transact_write_items` TODO O NADA, con las
+    condiciones evaluadas antes de escribir y bajo un cerrojo —que es lo que hace
+    que dos transacciones simultáneas se excluyan, como en DynamoDB—.
+
+    Recibe los ítems en el formato de bajo nivel (`{"S": …}`) y los guarda en
+    tipos de Python, que es lo que devuelve `query` a través del recurso.
+    """
 
     def __init__(self):
+        import threading
+        from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
         self.items: dict[tuple, dict] = {}
         self.consultas = 0
+        self.transacciones = 0
+        self.conflictos_pendientes = 0
+        self._cerrojo = threading.Lock()
+        self._des = TypeDeserializer()
+        self._ser = TypeSerializer()
 
-    def put_item(self, Item):
-        for k, v in Item.items():
-            assert not isinstance(v, float), f"DynamoDB no acepta floats y `{k}` es uno"
-        self.items[(Item["pk"], Item["sk"])] = dict(Item)
+    def _py(self, bajo: dict | None) -> dict:
+        return {k: self._des.deserialize(v) for k, v in (bajo or {}).items()}
 
     def query(self, KeyConditionExpression, ScanIndexForward=True, Limit=None):
         self.consultas += 1
         pk = KeyConditionExpression._values[1]
         filas = sorted(
-            (v for (p, _), v in self.items.items() if p == pk),
+            (dict(v) for (p, _), v in self.items.items() if p == pk),
             key=lambda f: f["sk"], reverse=not ScanIndexForward,
         )
         return {"Items": filas[: Limit or len(filas)]}
+
+    def get_item(self, Key, ConsistentRead=False):
+        assert ConsistentRead, "el candado se lee con lectura fuerte"
+        it = self.items.get((Key["pk"], Key["sk"]))
+        return {"Item": dict(it)} if it else {}
+
+    def transact_write_items(self, TransactItems):
+        from botocore.exceptions import ClientError
+        with self._cerrojo:
+            self.transacciones += 1
+            if self.conflictos_pendientes:
+                self.conflictos_pendientes -= 1
+                raise ClientError({"Error": {"Code": "TransactionCanceledException"},
+                                   "CancellationReasons": [{"Code": "TransactionConflict"}]
+                                   * len(TransactItems)}, "TransactWriteItems")
+            pasos = []
+            for t in TransactItems:
+                (op, c), = t.items()
+                assert c["TableName"] == co.TABLA
+                clave = self._py(c.get("Item") or c.get("Key"))
+                pasos.append((op, c, (clave["pk"], clave["sk"])))
+            razones, fallo = [], False
+            for op, c, k in pasos:
+                actual = self.items.get(k)
+                cond = c.get("ConditionExpression")
+                ok = cond is None or CONDICIONES[cond](actual, self._py(c.get("ExpressionAttributeValues")))
+                razon = {"Code": "None" if ok else "ConditionalCheckFailed"}
+                if not ok and actual is not None and c.get("ReturnValuesOnConditionCheckFailure") == "ALL_OLD":
+                    razon["Item"] = {kk: self._ser.serialize(vv) for kk, vv in actual.items()}
+                razones.append(razon)
+                fallo = fallo or not ok
+            if fallo:
+                raise ClientError({"Error": {"Code": "TransactionCanceledException"},
+                                   "CancellationReasons": razones}, "TransactWriteItems")
+            for op, c, k in pasos:
+                if op == "Put":
+                    self.items[k] = self._py(c["Item"])
+                elif op == "Delete":
+                    self.items.pop(k, None)
+
+    def corridas(self) -> list[dict]:
+        return [v for (p, _), v in self.items.items() if not p.startswith(co.SEP)]
+
+    def candados(self) -> list[dict]:
+        return [v for (p, _), v in self.items.items() if p.startswith(co.SEP)]
 
 
 @pytest.fixture
@@ -331,6 +407,7 @@ def dynamo(monkeypatch):
     t = TablaFalsa()
     monkeypatch.setattr(co, "TABLA", "lens-corridas")
     monkeypatch.setattr(co, "_tabla", lambda: t)
+    monkeypatch.setattr(co, "_cliente", lambda: t)
     return t
 
 
@@ -368,6 +445,7 @@ def test_un_porcentaje_no_rompe_la_escritura(dynamo):
 def test_el_historial_viene_ordenado_de_la_tabla(dynamo):
     for i in range(3):
         co.registrar_inicio("prod", "ACME-1", f"a{i}", ahora=T0 + i * 60)
+        co.cerrar("prod", "ACME-1", f"a{i}", co.COMPLETED, ahora=T0 + i * 60 + 30)
     assert [f["analysisId"] for f in co.historial("prod", "ACME-1")] == ["a2", "a1", "a0"]
 
 
@@ -375,7 +453,8 @@ def test_la_ultima_pide_una_sola_fila(dynamo):
     """`ultima` no se trae el historial entero para descartarlo: con muchas
     corridas por empresa eso se paga en cada consulta de estado."""
     for i in range(10):
-        co.registrar_inicio("prod", "ACME-1", f"a{i}", ahora=T0 + i)
+        co.registrar_inicio("prod", "ACME-1", f"a{i}", ahora=T0 + i * 10)
+        co.cerrar("prod", "ACME-1", f"a{i}", co.COMPLETED, ahora=T0 + i * 10 + 5)
     dynamo.consultas = 0
     co.ultima("prod", "ACME-1")
     assert dynamo.consultas == 1
@@ -395,19 +474,175 @@ def test_si_la_lectura_falla_no_se_hace_pasar_por_not_started(monkeypatch):
         co.estado("prod", "ACME-1")
 
 
-def test_si_la_escritura_falla_no_rompe_pero_queda_en_el_log(monkeypatch, caplog):
-    """Best-effort igual que `almacen.guardar`: el análisis ya está hecho. Pero
-    tiene que quedar dicho, porque un inicio que no se guardó significa que el
-    `409` no protege."""
+def test_si_el_registro_falla_se_propaga(monkeypatch):
+    """Antes era best-effort, y un inicio que no se guardaba dejaba salir un
+    `202` que ninguna consulta de estado podía confirmar. Ahora se propaga, y
+    EP-1 responde `503`: sin registro no hay corrida."""
     class Rota:
-        def put_item(self, **_):
+        def transact_write_items(self, **_):
             raise RuntimeError("ThrottlingException")
 
     monkeypatch.setattr(co, "TABLA", "lens-corridas")
-    monkeypatch.setattr(co, "_tabla", lambda: Rota())
-    with caplog.at_level("WARNING"):
+    monkeypatch.setattr(co, "_cliente", lambda: Rota())
+    with pytest.raises(RuntimeError):
         co.registrar_inicio("prod", "ACME-1", "a1", ahora=T0)
-    assert "no se pudo guardar la corrida" in caplog.text
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Una sola corrida por ambiente + empresa: el candado
+# ════════════════════════════════════════════════════════════════════════════
+
+def test_con_tabla_una_segunda_corrida_viva_es_en_curso_con_los_datos_de_la_primera(dynamo):
+    co.registrar_inicio("prod", "ACME-1", "primera", ahora=T0)
+    with pytest.raises(co.EnCurso) as e:
+        co.registrar_inicio("prod", "ACME-1", "segunda", ahora=T0 + 5)
+    assert e.value.viva["analysisId"] == "primera"
+    assert e.value.viva["startedAt"] == co._ahora_iso(T0)
+    assert [f["analysisId"] for f in dynamo.corridas()] == ["primera"], "la segunda no se registró"
+
+
+def test_el_candado_no_aparece_como_corrida(dynamo):
+    """Vive en otra partición: ni `ultima` ni el historial lo ven."""
+    co.registrar_inicio("prod", "ACME-1", "a1", ahora=T0)
+    assert len(dynamo.candados()) == 1
+    assert co.ultima("prod", "ACME-1")["analysisId"] == "a1"
+    assert [f["analysisId"] for f in co.historial("prod", "ACME-1")] == ["a1"]
+    assert co.ultima("#candado#prod", "ACME-1") is None
+
+
+def test_cerrar_suelta_el_candado(dynamo):
+    co.registrar_inicio("prod", "ACME-1", "a1", ahora=T0)
+    co.cerrar("prod", "ACME-1", "a1", co.COMPLETED, ahora=T0 + 30)
+    co.registrar_inicio("prod", "ACME-1", "a2", ahora=T0 + 31)
+    assert co.ultima("prod", "ACME-1")["analysisId"] == "a2"
+
+
+def test_la_caducidad_sigue_liberando_a_la_empresa(dynamo):
+    """Una corrida que murió sin cerrar deja el candado tomado. Pasado el tope,
+    EP-1 tiene que aceptar otra: si no, la empresa queda bloqueada para siempre."""
+    co.registrar_inicio("prod", "ACME-1", "muerta", ahora=T0)
+    with pytest.raises(co.EnCurso):
+        co.registrar_inicio("prod", "ACME-1", "antes-del-tope", ahora=T0 + co.TOPE_EN_CURSO_S)
+    co.registrar_inicio("prod", "ACME-1", "despues", ahora=T0 + co.TOPE_EN_CURSO_S + 1)
+    assert co.ultima("prod", "ACME-1")["analysisId"] == "despues"
+
+
+def test_una_corrida_informada_failed_no_cambia_mas(dynamo):
+    """Pasado el tope, EP-2 la informa `FAILED` y Onboarding cobra el intento. Un
+    proceso rezagado que después la quiera cerrar `COMPLETED` no puede."""
+    co.registrar_inicio("prod", "ACME-1", "a1", ahora=T0)
+    tarde = T0 + co.TOPE_EN_CURSO_S + 1
+    assert co.estado("prod", "ACME-1", ahora=tarde) == co.FAILED
+    assert co.cerrar("prod", "ACME-1", "a1", co.COMPLETED, ahora=tarde) is None
+    assert co.estado("prod", "ACME-1", ahora=tarde + 60) == co.FAILED
+
+
+def test_una_corrida_cerrada_no_se_cierra_dos_veces(dynamo):
+    co.registrar_inicio("prod", "ACME-1", "a1", ahora=T0)
+    assert co.cerrar("prod", "ACME-1", "a1", co.FAILED, ahora=T0 + 10) is not None
+    assert co.cerrar("prod", "ACME-1", "a1", co.COMPLETED, ahora=T0 + 20) is None
+    assert co.ultima("prod", "ACME-1")["status"] == co.FAILED
+
+
+def test_una_corrida_de_antes_de_los_candados_se_sigue_cerrando(dynamo):
+    """Una corrida registrada antes del despliegue no tiene candado, y otra puede
+    haberlo tomado. Igual se tiene que poder cerrar."""
+    vieja = {"pk": co.clave("prod", "ACME-1"), "sk": f"{co._ahora_iso(T0)}#vieja",
+             "analysisId": "vieja", "status": co.IN_PROGRESS, "startedAt": co._ahora_iso(T0),
+             "startedTs": int(T0), "documents": "[]", "warnings": "[]", "error": "null", "result": "null"}
+    dynamo.items[(vieja["pk"], vieja["sk"])] = vieja
+    co.registrar_inicio("prod", "ACME-1", "nueva", ahora=T0 + 5)   # sin candado previo: entra
+    assert co.cerrar("prod", "ACME-1", "vieja", co.COMPLETED, ahora=T0 + 10) is not None
+    assert co.buscar("prod", "ACME-1", "vieja")["status"] == co.COMPLETED
+    assert co.buscar("prod", "ACME-1", "nueva")["status"] == co.IN_PROGRESS
+
+
+def test_un_choque_de_transacciones_se_reintenta(dynamo):
+    """`TransactionConflict` = otra transacción tocaba el mismo ítem. Al
+    reintentar, o se toma el candado o se ve quién lo tiene."""
+    dynamo.conflictos_pendientes = 1
+    co.registrar_inicio("prod", "ACME-1", "a1", ahora=T0)
+    assert dynamo.transacciones == 2
+    assert co.ultima("prod", "ACME-1")["analysisId"] == "a1"
+
+
+def test_si_los_choques_no_ceden_se_lee_quien_tiene_el_candado(dynamo, monkeypatch):
+    """Probado contra DynamoDB de verdad: con ocho registros simultáneos, dos
+    seguían chocando después de los reintentos y habrían salido 503. Si alguno
+    ya tomó el candado, la respuesta es el 409 con sus datos."""
+    monkeypatch.setattr(co.time, "sleep", lambda _: None)
+    co.registrar_inicio("prod", "ACME-1", "la-que-gano", ahora=T0)
+    dynamo.conflictos_pendientes = co.INTENTOS_TRANSACCION
+    with pytest.raises(co.EnCurso) as e:
+        co.registrar_inicio("prod", "ACME-1", "otra", ahora=T0 + 1)
+    assert e.value.viva["analysisId"] == "la-que-gano"
+
+
+def test_si_los_choques_no_ceden_y_nadie_tiene_el_candado_se_propaga(dynamo, monkeypatch):
+    """Sin nadie con el candado no hay a quién señalar: EP-1 responde 503 y
+    ms-company reintenta sin cobrar."""
+    monkeypatch.setattr(co.time, "sleep", lambda _: None)
+    dynamo.conflictos_pendientes = co.INTENTOS_TRANSACCION
+    with pytest.raises(co._Cancelada):
+        co.registrar_inicio("prod", "ACME-1", "a1", ahora=T0)
+
+
+def _carrera(n: int) -> tuple[list[str], list[co.EnCurso], list[Exception]]:
+    """`n` registros simultáneos de la misma empresa, todos soltados a la vez."""
+    import threading
+    largada = threading.Barrier(n)
+    ok, en_curso, otros = [], [], []
+
+    def uno(i):
+        largada.wait()
+        try:
+            co.registrar_inicio("prod", "ACME-1", f"a{i}", ahora=T0 + i * 0.001)
+            ok.append(f"a{i}")
+        except co.EnCurso as e:
+            en_curso.append(e)
+        except Exception as e:  # noqa: BLE001
+            otros.append(e)
+
+    hilos = [threading.Thread(target=uno, args=(i,)) for i in range(n)]
+    for h in hilos:
+        h.start()
+    for h in hilos:
+        h.join()
+    return ok, en_curso, otros
+
+
+@pytest.mark.parametrize("modo", ["memoria", "tabla"])
+def test_de_registros_simultaneos_gana_uno_y_los_demas_ven_cual(modo, request):
+    """La carrera que abría dos corridas: dos EP-1 a la vez pasaban los dos por
+    «¿hay una en curso?» antes de que el otro registrara."""
+    if modo == "tabla":
+        request.getfixturevalue("dynamo")
+    ok, en_curso, otros = _carrera(8)
+    assert not otros
+    assert len(ok) == 1, f"tienen que registrar exactamente una, registraron {ok}"
+    assert len(en_curso) == 7
+    assert {e.viva["analysisId"] for e in en_curso} == set(ok), "el 409 dice cuál es la que corre"
+    assert [f["analysisId"] for f in co.historial("prod", "ACME-1")] == ok
+
+
+@pytest.mark.parametrize("modo", ["memoria", "tabla"])
+def test_anular_deja_a_la_empresa_como_antes(modo, request):
+    if modo == "tabla":
+        request.getfixturevalue("dynamo")
+    reg = co.registrar_inicio("prod", "ACME-1", "a1", ahora=T0)
+    assert co.anular(reg) is True
+    assert co.ultima("prod", "ACME-1") is None, "la corrida no queda IN_PROGRESS"
+    co.registrar_inicio("prod", "ACME-1", "a2", ahora=T0 + 1)   # y el candado quedó libre
+
+
+@pytest.mark.parametrize("modo", ["memoria", "tabla"])
+def test_anular_no_toca_una_corrida_que_ya_cerro(modo, request):
+    if modo == "tabla":
+        request.getfixturevalue("dynamo")
+    reg = co.registrar_inicio("prod", "ACME-1", "a1", ahora=T0)
+    co.cerrar("prod", "ACME-1", "a1", co.COMPLETED, ahora=T0 + 10)
+    assert co.anular(reg) is False
+    assert co.ultima("prod", "ACME-1")["status"] == co.COMPLETED
 
 
 def test_si_no_se_puede_leer_para_cerrar_no_revienta_el_worker(monkeypatch, caplog):

@@ -53,7 +53,9 @@ def evento(company_id: str = "ACME-1", cuerpo: dict | None = None, metodo: str =
 CUERPO_OK = {
     "environment": "prod",
     "country": "chile",
-    "documents": [{"s3Uri": "s3://un-bucket/b2b/escritura.pdf",
+    # En el bucket de documentos y bajo `{environment}/{companyId}/`: EP-1
+    # rechaza con 400 cualquier otra ubicación.
+    "documents": [{"s3Uri": "s3://g66-company/prod/ACME-1/escritura.pdf",
                    "documentType": "company_deeds_document"}],
 }
 
@@ -255,16 +257,145 @@ def test_una_corrida_viva_en_otro_ambiente_no_bloquea(s3_falso):
     assert codigo == 202
 
 
-def test_si_no_se_puede_leer_el_estado_no_se_arranca_igual(monkeypatch):
-    """Arrancar sin saber si hay una corrida viva podría duplicar el trabajo y el
-    gasto. Se pide reintentar en vez de adivinar."""
+def test_si_no_se_puede_registrar_es_503_y_no_queda_nada(s3_falso, monkeypatch):
+    """Arrancar sin poder registrar podría duplicar el trabajo y el gasto, y un
+    202 prometería una corrida que EP-2 no va a encontrar. ms-company reintenta
+    un 503 sin cobrarle el intento al usuario."""
     def rota(*_, **__):
         raise RuntimeError("AccessDenied")
 
-    monkeypatch.setattr(corridas, "en_curso", rota)
+    monkeypatch.setattr(corridas, "registrar_inicio", rota)
     codigo, r = llamar()
     assert codigo == 503
+    assert set(r) == {"error"} and set(r["error"]) == {"reason", "message"}
     assert r["error"]["reason"] == "SERVICE_UNAVAILABLE"
+    assert corridas.estado("prod", "ACME-1") == corridas.NOT_STARTED
+
+
+def test_si_falla_despues_de_registrar_es_503_y_la_corrida_se_anula(s3_falso, monkeypatch):
+    """Ya registrada, el 202 no llega a salir. La corrida no puede quedar
+    IN_PROGRESS: EP-2 mentiría y el reintento chocaría con un 409."""
+    def disparo_roto(*_, **__):
+        raise RuntimeError("algo no previsto")
+
+    original = disparador.disparar
+    monkeypatch.setattr(disparador, "disparar", disparo_roto)
+    codigo, r = llamar()
+    assert codigo == 503 and r["error"]["reason"] == "SERVICE_UNAVAILABLE"
+    assert corridas.estado("prod", "ACME-1") == corridas.NOT_STARTED
+
+    monkeypatch.setattr(disparador, "disparar", original)
+    codigo, _ = llamar()
+    assert codigo == 202, "el reintento entra: no quedó nada tomado"
+
+
+def test_de_dos_ep1_simultaneos_uno_es_202_y_el_otro_409(s3_falso, monkeypatch):
+    """La carrera que abría dos corridas de la misma empresa. El disparo se hace
+    asíncrono (no procesa nada) para que la primera siga viva cuando llega la
+    segunda, que es lo que pasa en producción."""
+    import threading
+
+    monkeypatch.setattr(disparador, "disparar", lambda carga, en_linea: "asincrono")
+    largada = threading.Barrier(2)
+    respuestas = []
+
+    def uno(aid):
+        largada.wait()
+        respuestas.append(llamar({**CUERPO_OK, "analysisId": aid}))
+
+    hilos = [threading.Thread(target=uno, args=(a,)) for a in ("uno", "dos")]
+    for h in hilos:
+        h.start()
+    for h in hilos:
+        h.join()
+
+    codigos = sorted(c for c, _ in respuestas)
+    assert codigos == [202, 409]
+    ganadora = next(r for c, r in respuestas if c == 202)
+    conflicto = next(r for c, r in respuestas if c == 409)["error"]
+    assert conflicto["reason"] == "CONFLICT"
+    assert conflicto["analysisId"] == ganadora["analysisId"]
+    assert conflicto["startedAt"] == ganadora["startedAt"]
+    assert len(corridas.historial("prod", "ACME-1")) == 1
+
+
+def test_pasado_el_tope_la_corrida_es_failed_y_ep1_acepta_otra(s3_falso, monkeypatch):
+    """La corrida que deja de reportar sale FAILED / LENS_EXTRACTION_FAILED a los
+    6 minutos de `startedAt`, y desde ahí la empresa no queda bloqueada."""
+    assert corridas.TOPE_EN_CURSO_S == 360
+    hace = __import__("time").time() - corridas.TOPE_EN_CURSO_S - 1
+    corridas.registrar_inicio("prod", "ACME-1", "muerta", ahora=hace)
+    u = co.estado_de("ACME-1", corridas.ultima("prod", "ACME-1"))
+    assert u["status"] == corridas.FAILED
+    assert u["error"]["reason"] == "LENS_EXTRACTION_FAILED"
+    codigo, _ = llamar()
+    assert codigo == 202
+
+
+@pytest.mark.parametrize("metodo,ruta,query", [
+    ("POST", "/v1/companies/ACME-1/analyses", None),
+    ("GET", "/v1/companies/ACME-1/analysis/status", {"environment": "prod"}),
+    ("GET", "/v1/companies/ACME-1/analysis", {"environment": "prod"}),
+    ("GET", "/v1/companies/ACME-1/analysis/legal-representatives", {"environment": "prod"}),
+    ("GET", "/v1/companies/ACME-1/analysis/company", {"environment": "prod"}),
+    ("GET", "/v1/companies/ACME-1/analysis/shareholders", {"environment": "prod"}),
+])
+def test_ninguna_ruta_de_companies_deja_salir_un_502(monkeypatch, metodo, ruta, query):
+    """Una excepción que se escapa la convierte la Function URL en un 502 con
+    cuerpo de AWS, y ms-company le cobra el intento al usuario. Tiene que salir
+    503 SERVICE_UNAVAILABLE, con el cuerpo de error del contrato."""
+    import app
+
+    def revienta(*_, **__):
+        raise KeyError("algo no previsto")
+
+    monkeypatch.setattr(app, "API_SECRET", SECRETO)
+    monkeypatch.setattr(co, "manejar", revienta)
+    r = app.lambda_handler({
+        "rawPath": ruta, "requestContext": {"http": {"method": metodo}},
+        "headers": {"x-api-secret": SECRETO}, "queryStringParameters": query,
+        "body": json.dumps(CUERPO_OK) if metodo == "POST" else None,
+    })
+    assert r["statusCode"] == 503
+    cuerpo = json.loads(r["body"])
+    assert set(cuerpo) == {"error"} and set(cuerpo["error"]) == {"reason", "message"}
+    assert cuerpo["error"]["reason"] == "SERVICE_UNAVAILABLE"
+
+
+# ── La ubicación de cada documento ──────────────────────────────────────────
+
+@pytest.mark.parametrize("doc,que", [
+    ({"s3Uri": "s3://otro-bucket/prod/ACME-1/escritura.pdf"}, "bucket"),
+    ({"s3Uri": "s3://g66-company/dev/ACME-1/escritura.pdf"}, "prod/ACME-1/"),
+    ({"s3Uri": "s3://g66-company/prod/OTRA/escritura.pdf"}, "prod/ACME-1/"),
+    ({"s3Uri": "s3://g66-company/prueba/escritura.pdf"}, "prod/ACME-1/"),
+    ({"s3Uri": "s3://g66-company/prod/ACME-1/../OTRA/escritura.pdf"}, ".."),
+    ({"objectKey": "dev/ACME-1/escritura.pdf"}, "objectKey"),
+    ({"objectKey": "prod/ACME-10/escritura.pdf"}, "prod/ACME-1/"),
+    ({"s3Uri": "s3://g66-company/prod/ACME-1/e.pdf", "objectKey": "dev/ACME-1/e.pdf"}, "objectKey"),
+])
+def test_un_documento_fuera_de_su_lugar_es_400_y_no_se_registra(s3_falso, doc, que):
+    """Con la credencial de `dev` se podía pedir un documento de `prod/…` y
+    llevárselo por EP-3. Cada documento tiene que estar en el bucket de
+    documentos y bajo `{environment}/{companyId}/`."""
+    codigo, r = llamar({**CUERPO_OK, "documents": [
+        CUERPO_OK["documents"][0], {**doc, "documentType": "company_id_document"}]})
+    assert codigo == 400
+    assert r["error"]["reason"] == "BAD_REQUEST"
+    assert "documento 1" in r["error"]["message"], "dice cuál"
+    assert que in r["error"]["message"], "y por qué"
+    assert corridas.estado("prod", "ACME-1") == corridas.NOT_STARTED
+
+
+def test_el_ambiente_del_prefijo_es_el_normalizado(s3_falso):
+    codigo, _ = llamar({**CUERPO_OK, "environment": "PROD"})
+    assert codigo == 202
+
+
+def test_un_object_key_en_su_lugar_se_acepta(s3_falso):
+    codigo, _ = llamar({**CUERPO_OK, "documents": [
+        {"objectKey": "prod/ACME-1/escritura.pdf", "documentType": "company_deeds_document"}]})
+    assert codigo == 202
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -301,7 +432,8 @@ class _Cuerpo:
 @pytest.fixture
 def s3_falso(monkeypatch):
     """Por defecto, todo lo que se pida existe y se baja bien."""
-    cliente = S3Falso(claves={"b2b/escritura.pdf", "b2b/anexo.pdf"})
+    cliente = S3Falso(claves={"b2b/escritura.pdf", "b2b/anexo.pdf", "prod/ACME-1/escritura.pdf",
+                              "prod/ACME-9/escritura.pdf", "prod/999999101/escritura.pdf"})
 
     class BotoFalso:
         @staticmethod
@@ -328,6 +460,14 @@ def correr(documentos, s3, analizar=analizar_falso, ambiente="prod", company_id=
 #: principal y el de identidad fiscal es complementario.
 PRINCIPAL = {"s3Uri": "s3://b/b2b/escritura.pdf", "documentType": "company_deeds_document"}
 ANEXO = {"s3Uri": "s3://b/b2b/anexo.pdf", "documentType": "company_id_document"}
+
+
+def en_lugar(doc: dict, ambiente: str = "prod", company_id: str = "ACME-1") -> dict:
+    """El mismo documento, en el lugar que EP-1 exige: el bucket de documentos y
+    `{environment}/{companyId}/`. Los de arriba sirven tal cual para el trabajo
+    de fondo, que se prueba sin pasar por EP-1."""
+    nombre = doc["s3Uri"].rsplit("/", 1)[-1]
+    return {**doc, "s3Uri": f"s3://g66-company/{ambiente}/{company_id}/{nombre}"}
 
 
 def test_una_corrida_que_sale_bien_queda_completed(s3_falso):
@@ -846,7 +986,8 @@ def test_el_ciclo_completo_ep1_luego_ep2(s3_falso, monkeypatch):
     monkeypatch.setattr(app, "API_SECRET", SECRETO)
     post = app.lambda_handler(evento("ACME-9", {
         "environment": "prod", "country": "chile",
-        "documents": [{"s3Uri": "s3://b/b2b/escritura.pdf", "documentType": "company_deeds_document"}],
+        "documents": [{"s3Uri": "s3://g66-company/prod/ACME-9/escritura.pdf",
+                       "documentType": "company_deeds_document"}],
     }))
     assert post["statusCode"] == 202
     analysis_id = json.loads(post["body"])["analysisId"]
@@ -1495,7 +1636,8 @@ def test_7_una_sas_cuya_razon_social_perdio_el_sufijo(s3_falso):
 # ── #8 · El companyId como número en EP-1 ───────────────────────────────────
 
 def test_8_ep1_devuelve_el_company_id_como_numero(s3_falso):
-    _, cuerpo = llamar(company_id="999999101")
+    _, cuerpo = llamar({**CUERPO_OK, "documents": [en_lugar(PRINCIPAL, company_id="999999101")]},
+                       company_id="999999101")
     assert cuerpo["companyId"] == 999999101
     assert isinstance(cuerpo["companyId"], int)
 
@@ -1513,9 +1655,9 @@ def test_9_en_colombia_la_camara_de_comercio_es_principal():
 
 
 def test_9_un_lote_colombiano_con_camara_se_acepta(s3_falso):
-    s3_falso.claves |= {"b2b/camara.pdf", "b2b/composicion.pdf"}
+    s3_falso.claves |= {"prod/ACME-1/camara.pdf", "prod/ACME-1/composicion.pdf"}
     codigo, _ = llamar({"environment": "prod", "country": "colombia",
-                        "documents": [COMPOSICION, CAMARA]})
+                        "documents": [en_lugar(COMPOSICION), en_lugar(CAMARA)]})
     assert codigo == 202
 
 
@@ -1532,7 +1674,7 @@ def test_9_un_lote_sin_ningun_principal_es_400():
     """Se sabe antes de leer nada, así que es un error de la petición y no de la
     corrida — y no le consume un intento al usuario."""
     codigo, cuerpo = llamar({"environment": "prod", "country": "chile",
-                             "documents": [{"s3Uri": "s3://b/b2b/id.pdf",
+                             "documents": [{"s3Uri": "s3://g66-company/prod/ACME-1/id.pdf",
                                             "documentType": "company_id_document"}]})
     assert codigo == 400
     assert "company_deeds_document" in cuerpo["error"]["message"]
@@ -1541,7 +1683,7 @@ def test_9_un_lote_sin_ningun_principal_es_400():
 
 def test_9_el_400_dice_cuales_son_los_principales_de_ese_pais():
     _, cuerpo = llamar({"environment": "prod", "country": "colombia",
-                        "documents": [COMPOSICION]})
+                        "documents": [en_lugar(COMPOSICION)]})
     assert "company_trade_chamber_sedpe_document" in cuerpo["error"]["message"]
 
 
