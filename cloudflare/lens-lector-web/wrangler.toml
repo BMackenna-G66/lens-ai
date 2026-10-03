@@ -1,0 +1,10 @@
+# lens-lector-web — lectura de sitios públicos para la Revisión web de Lens.
+#
+# SIN secretos, SIN variables y SIN bindings: nada de KV, R2, D1, colas ni
+# servicios, y nada que llegue a AWS. Es a propósito y es la regla de este
+# Worker: lee sitios elegidos por el analista, y si alguna vez se abusa, no hay
+# nada adentro que exponer. No agregar ninguno sin pasar por Compliance.
+name = "lens-lector-web"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+workers_dev = true
