@@ -1,10 +1,11 @@
 // REVISIÓN WEB — puntaje (§7), severidad (§8), decisión (§9) y la salida (§12).
 // Todo en código y puro. El puntaje mide EVIDENCIA OBTENIDA: lo que no se
-// verificó vale 0 y se nombra como «no verificable»; no se estima.
+// verificó vale 0 y se nombra como «no verificable»; no se estima. Lo que no
+// aplica sale del cálculo (ver `acreditacionDe`).
 //
 // Las reglas de cada dimensión están escritas abajo, con sus puntos. El
-// procedimiento fija los máximos pero no el reparto interno: el reparto es una
-// propuesta que tiene que confirmar Compliance.
+// procedimiento fija los máximos pero no el reparto interno: el reparto lo
+// confirmó Benjamín el 03-10-2026.
 
 import { analizarTelefono, declaraLicencia, mismoNombre, soloCredencialesAutodeclaradas } from './reglas';
 import { nombreCalzaConDominio, type EvaluacionA, type EvaluacionB } from './evaluacion';
@@ -17,8 +18,27 @@ export function ordenarHallazgos(h: Hallazgo[]): Hallazgo[] {
   return [...h].sort((a, b) => ORDEN_SEVERIDAD.indexOf(a.severidad) - ORDEN_SEVERIDAD.indexOf(b.severidad));
 }
 
+/** «No aplica» y «no verificable» valen 0 los dos, pero NO son lo mismo:
+ *  la que no aplica sale del denominador (ver `acreditacionDe`), la que no se
+ *  verificó se queda adentro con 0 y se nombra. */
 const dim = (clave: Dimension['clave'], nombre: string, max: number, puntos: number, estado: Dimension['estado'], justificacion: string): Dimension =>
-  ({ clave, nombre, max, puntos: estado === 'no_aplica' ? max : estado === 'no_verificable' ? 0 : Math.max(0, Math.min(max, puntos)), estado, justificacion });
+  ({ clave, nombre, max, puntos: estado === 'verificado' ? Math.max(0, Math.min(max, puntos)) : 0, estado, justificacion });
+
+/** Una parte de una dimensión, que puede no aplicar. */
+interface Parte { puntos: number; max: number; aplica: boolean; texto: string }
+
+/** Los puntos de una dimensión a partir de sus partes, con la MISMA regla que
+ *  la acreditación: lo que no aplica sale del denominador y el resto se escala
+ *  al máximo de la dimensión. Regalar la parte que no aplica le daba puntos a
+ *  un sitio sin evidencia. */
+function escalarPartes(partes: Parte[], max: number): { puntos: number; justificacion: string } {
+  const aplican = partes.filter(p => p.aplica);
+  const tope = aplican.reduce((s, p) => s + p.max, 0);
+  const obtenido = aplican.reduce((s, p) => s + p.puntos, 0);
+  const puntos = tope ? Math.round(max * obtenido / tope) : 0;
+  const texto = partes.map(p => p.aplica ? `${p.texto} (${p.puntos}/${p.max})` : `${p.texto} (no aplica)`).join('; ');
+  return { puntos, justificacion: `${texto}${tope && tope !== max ? ` → ${obtenido} de ${tope} aplicables, escalado a ${puntos}/${max}` : ''}.` };
+}
 
 export function calcularDimensiones(a: EvaluacionA, b: EvaluacionB | null, e: Extraccion | null): Dimension[] {
   const sinSitio = !a.legible || !e;
@@ -67,7 +87,7 @@ export function calcularDimensiones(a: EvaluacionA, b: EvaluacionB | null, e: Ex
 
   // ── Situación regulatoria (15)
   if (sinSitio) d.push(dim('regulatoria', 'Situación regulatoria', 15, 0, 'no_verificable', 'El sitio no se pudo leer.'));
-  else if (!a.regulado) d.push(dim('regulatoria', 'Situación regulatoria', 15, 15, 'no_aplica', 'No ofrece servicios que requieran licencia: la búsqueda de alertas no corresponde (§5, prioridad 2).'));
+  else if (!a.regulado) d.push(dim('regulatoria', 'Situación regulatoria', 15, 0, 'no_aplica', 'No ofrece servicios que requieran licencia: la búsqueda de alertas no corresponde (§5, prioridad 2). Sale del cálculo.'));
   else {
     const j: string[] = [];
     let p = 0;
@@ -90,24 +110,25 @@ export function calcularDimensiones(a: EvaluacionA, b: EvaluacionB | null, e: Ex
   }
 
   // ── Medios de pago legítimos y a nombre de la empresa (15):
-  //    pasarela integrada si vende en línea 7 · sin medios ilegítimos 4 ·
-  //    titular = razón social 4. Lo que no aplica suma su parte.
+  //    pasarela integrada 7 (si vende en línea) · sin medios ilegítimos 4 ·
+  //    titular = razón social 4 (si publica titular). La parte que no aplica
+  //    sale del denominador y el resto se escala a 15.
   if (sinSitio) d.push(dim('pagos', 'Medios de pago', 15, 0, 'no_verificable', 'El sitio no se pudo leer.'));
   else if (!e!.declaraVentaEnLinea && !e!.titularCuentaPago && !(e!.mediosPagoSolicitados || []).length) {
-    d.push(dim('pagos', 'Medios de pago', 15, 15, 'no_aplica', 'No cobra en el sitio ni publica instrucciones de pago.'));
+    d.push(dim('pagos', 'Medios de pago', 15, 0, 'no_aplica', 'No cobra en el sitio ni publica instrucciones de pago. Sale del cálculo.'));
   } else {
-    const j: string[] = [];
-    let p = 0;
-    if (!e!.declaraVentaEnLinea) { p += 7; j.push('no vende en línea (+7)'); }
-    else if (a.cascaronJs) j.push('pasarela no evaluable sin navegador (0)');
-    else if (a.pasarelas.length) { p += 7; j.push(`pasarela integrada: ${a.pasarelas.join(', ')} (+7)`); }
-    else j.push('vende en línea sin pasarela (0)');
-    if (!a.gatillos.some(g => g.numero === 4)) { p += 4; j.push('sin medios de pago ilegítimos (+4)'); }
-    else j.push('medio de pago ilegítimo (0)');
-    if (!e!.titularCuentaPago) { p += 4; j.push('no publica titular de cuenta (+4)'); }
-    else if (e!.razonSocial && mismoNombre(e!.titularCuentaPago, e!.razonSocial)) { p += 4; j.push('titular = razón social (+4)'); }
-    else j.push('titular distinto de la razón social (0)');
-    d.push(dim('pagos', 'Medios de pago', 15, p, 'verificado', j.join('; ') + '.'));
+    const ventaEnLinea = e!.declaraVentaEnLinea;
+    const titular = e!.titularCuentaPago;
+    const conPasarela = ventaEnLinea && !a.cascaronJs && a.pasarelas.length > 0;
+    const legitimos = !a.gatillos.some(g => g.numero === 4);
+    const titularOk = !!titular && !!e!.razonSocial && mismoNombre(titular, e!.razonSocial);
+    const r = escalarPartes([
+      { aplica: ventaEnLinea, max: 7, puntos: conPasarela ? 7 : 0,
+        texto: !ventaEnLinea ? 'pasarela' : a.cascaronJs ? 'pasarela no evaluable sin navegador' : conPasarela ? `pasarela integrada: ${a.pasarelas.join(', ')}` : 'vende en línea sin pasarela' },
+      { aplica: true, max: 4, puntos: legitimos ? 4 : 0, texto: legitimos ? 'sin medios de pago ilegítimos' : 'medio de pago ilegítimo' },
+      { aplica: !!titular, max: 4, puntos: titularOk ? 4 : 0, texto: !titular ? 'titular de cuenta' : titularOk ? 'titular = razón social' : 'titular distinto de la razón social' },
+    ], 15);
+    d.push(dim('pagos', 'Medios de pago', 15, r.puntos, 'verificado', r.justificacion));
   }
 
   // ── Rastro externo independiente (10): dominios ajenos con fuente real
@@ -121,7 +142,20 @@ export function calcularDimensiones(a: EvaluacionA, b: EvaluacionB | null, e: Ex
   return d;
 }
 
-export const acreditacionDe = (d: Dimension[]) => d.reduce((s, x) => s + x.puntos, 0);
+/** La acreditación, 0–100 (§7). Mide EVIDENCIA OBTENIDA:
+ *
+ *  · una dimensión que NO APLICA sale del denominador, y lo obtenido se escala
+ *    a 100 sobre el máximo de las que sí aplican. Regalarle el máximo hacía que
+ *    un sitio folleto sumara 30 puntos sin acreditar nada (decisión de
+ *    Benjamín, 03-10-2026). 50 de 70 aplicables = 71 / 100.
+ *  · una dimensión NO VERIFICABLE se queda en el denominador con 0, y se nombra.
+ */
+export function acreditacionDe(d: Dimension[]): number {
+  const aplican = d.filter(x => x.estado !== 'no_aplica');
+  const tope = aplican.reduce((s, x) => s + x.max, 0);
+  const obtenido = aplican.reduce((s, x) => s + x.puntos, 0);
+  return tope ? Math.round(100 * obtenido / tope) : 0;
+}
 
 // ── Decisión (§9) ──────────────────────────────────────────────────────────
 

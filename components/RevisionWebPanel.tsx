@@ -210,7 +210,7 @@ export const RevisionWebPanel: React.FC<Props> = ({ abierto, onMinimizar, onAbri
             {verDetalle && (
               <ul className="bg-white rounded-lg p-3 shadow-sm space-y-1 text-xs">
                 {resultado.dimensiones.map(d => (
-                  <li key={d.clave}><b>{d.nombre}</b> {d.puntos} / {d.max}{d.estado !== 'verificado' ? ` · ${d.estado.replace('_', ' ')}` : ''} — <span className="text-slate-600">{d.justificacion}</span></li>
+                  <li key={d.clave}><b>{d.nombre}</b> {d.estado === 'no_aplica' ? 'no aplica' : `${d.puntos} / ${d.max}${d.estado === 'no_verificable' ? ' · no verificable' : ''}`} — <span className="text-slate-600">{d.justificacion}</span></li>
                 ))}
               </ul>
             )}

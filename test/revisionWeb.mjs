@@ -204,13 +204,44 @@ ok('identidad confirmada fuera del sitio', bAlerta.identidadConfirmada && bAlert
 console.log('\n── Puntaje: lo no verificado vale 0 y no se estima (§7) ──');
 let d = calcularDimensiones(a, null, e);
 ok('sin Ronda B, el rastro externo es no verificable y vale 0', d.find(x => x.clave === 'rastro').estado === 'no_verificable' && d.find(x => x.clave === 'rastro').puntos === 0);
-ok('no regulado: la situación regulatoria no aplica y suma sus 15', d.find(x => x.clave === 'regulatoria').estado === 'no_aplica' && d.find(x => x.clave === 'regulatoria').puntos === 15);
+ok('no regulado: la situación regulatoria no aplica y NO suma', d.find(x => x.clave === 'regulatoria').estado === 'no_aplica' && d.find(x => x.clave === 'regulatoria').puntos === 0);
 ok('las seis dimensiones suman como máximo 100', d.reduce((s, x) => s + x.max, 0) === 100);
 const bSana = evaluarRondaB(armarBusquedas([consultas[0]], crudo, fuentes, ['"76.354.771-K"']), a, e);
 d = calcularDimensiones(a, bSana, e);
 ok('identidad: publicado + DV + confirmado = 25', d.find(x => x.clave === 'identidad').puntos === 25, d.find(x => x.clave === 'identidad'));
 const sinSitio = evaluarRondaA(ctxA({ inicio: null, extraccion: null, textoTotal: '', htmlTotal: '' }));
 ok('sin sitio: acreditación 0', acreditacionDe(calcularDimensiones(sinSitio, null, null)) === 0);
+
+console.log('\n── «No aplica» sale del denominador; «no verificable» no (Benjamín, 03-10) ──');
+const D = (max, puntos, estado) => ({ clave: 'x', nombre: 'x', max, puntos, estado, justificacion: '' });
+ok('50 de 70 aplicables → 71 / 100', acreditacionDe([D(25, 20, 'verificado'), D(20, 15, 'verificado'), D(25, 15, 'verificado'), D(15, 0, 'no_aplica'), D(15, 0, 'no_aplica')]) === 71);
+ok('la misma dimensión NO VERIFICABLE se queda en el denominador con 0 → 50',
+  acreditacionDe([D(50, 50, 'verificado'), D(50, 0, 'no_verificable')]) === 50);
+ok('  y NO APLICA sale del denominador → 100',
+  acreditacionDe([D(50, 50, 'verificado'), D(50, 0, 'no_aplica')]) === 100);
+ok('nada aplica → 0, no una división por cero', acreditacionDe([D(15, 0, 'no_aplica')]) === 0);
+// El sitio folleto: no regulado y sin cobros. Antes sumaba 30 regalados.
+const folleto = calcularDimensiones(a, bSana, e);
+const aplican = folleto.filter(x => x.estado !== 'no_aplica');
+ok('sitio folleto: regulatoria y pagos no aplican, sin puntos',
+  ['regulatoria', 'pagos'].every(c => { const x = folleto.find(y => y.clave === c); return x.estado === 'no_aplica' && x.puntos === 0; }), folleto);
+ok('  y la acreditación se escala sobre las 4 que aplican (70)',
+  acreditacionDe(folleto) === Math.round(100 * aplican.reduce((s, x) => s + x.puntos, 0) / 70), { acreditacion: acreditacionDe(folleto), aplican });
+// Dentro de Medios de pago, la parte que no aplica tampoco se regala.
+const conTitular = { ...e, titularCuentaPago: 'ACME Pagos SpA', mediosPagoSolicitados: ['transferencia'] };
+const pagos = calcularDimensiones(evaluarRondaA(ctxA({ extraccion: conTitular })), bSana, conTitular).find(x => x.clave === 'pagos');
+ok('pagos: no vende en línea → la pasarela sale del cálculo; 8 de 8 aplicables = 15', pagos.puntos === 15 && pagos.justificacion.includes('no aplica'), pagos);
+const titularMal = { ...conTitular, titularCuentaPago: 'Inversiones Beta Ltda' };
+const pagosMal = calcularDimensiones(evaluarRondaA(ctxA({ extraccion: titularMal })), bSana, titularMal).find(x => x.clave === 'pagos');
+ok('pagos: titular distinto → 4 de 8 aplicables, escalado a 8 / 15', pagosMal.puntos === 8, pagosMal);
+
+console.log('\n── Sin TLS y redirección a otro dominio: MENOR (Benjamín, 03-10) ──');
+const sinTls = evaluarRondaA(ctxA({ inicio: { ...ctxA().inicio, urlFinal: 'http://acme.cl/' } })).hallazgos.find(h => h.codigo === 'SIN_TLS');
+ok('sitio servido por http → SIN_TLS MENOR', sinTls?.severidad === 'MENOR', sinTls);
+const redirige = evaluarRondaA(ctxA({ urlPedida: 'https://acme-antiguo.cl/' })).hallazgos.find(h => h.codigo === 'REDIRIGE_OTRO_DOMINIO');
+ok('redirige a otro dominio → MENOR', redirige?.severidad === 'MENOR', redirige);
+const ambos = evaluarRondaA(ctxA({ urlPedida: 'https://acme-antiguo.cl/', inicio: { ...ctxA().inicio, urlFinal: 'http://acme.cl/' } })).hallazgos;
+ok('  y las dos juntas ya no topean en ON_HOLD (MEDIO 70 → APPROVED)', decidir('MEDIO', 70, [], ambos).decision === 'ONBOARDING_APPROVED', ambos.map(h => `${h.codigo}:${h.severidad}`));
 
 // ════════════════════════════════════════════════════════════════════════════
 console.log('\n── Decisión (§8 y §9) ──');

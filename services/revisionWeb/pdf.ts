@@ -67,7 +67,9 @@ export function exportarPdf(r: Resultado): void {
   autoTable(doc, {
     startY: y + 10, margin: { left: margen, right: margen },
     head: [['Dimensión', 'Puntos', 'Estado', 'Justificación']],
-    body: r.dimensiones.map(d => [d.nombre, `${d.puntos} / ${d.max}`, d.estado.replace('_', ' '), d.justificacion]),
+    // La que no aplica va sin puntos: salió del cálculo y la acreditación se
+    // escaló sobre las demás.
+    body: r.dimensiones.map(d => [d.nombre, d.estado === 'no_aplica' ? 'no aplica' : `${d.puntos} / ${d.max}`, d.estado.replace('_', ' '), d.justificacion]),
     styles: { fontSize: 8, overflow: 'linebreak' }, columnStyles: { 0: { cellWidth: 110 }, 1: { cellWidth: 50 }, 2: { cellWidth: 70 } },
   });
   autoTable(doc, {

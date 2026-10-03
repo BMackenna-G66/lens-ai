@@ -88,9 +88,11 @@ export function evaluarRondaA(c: ContextoRondaA): EvaluacionA {
   if (dominio.punycode || dominioPedido.punycode) add('PUNYCODE', 'MAYOR', 'Dominio en punycode (xn--): posible uso de homoglifos.', `dominio ${hostSitio}`);
   if (dominio.tldBajoCosto) add('TLD_BAJO_COSTO', 'MENOR', `Dominio en TLD de bajo costo (.${dominio.registrable.split('.').pop()}).`, `dominio ${hostSitio}`);
   if (dominio.sufijoSospechoso && !imitada) add('SUFIJO_SOSPECHOSO', 'MENOR', `Dominio con sufijo «-${dominio.sufijoSospechoso}».`, `dominio ${hostSitio}`);
-  if (legible && /^http:/i.test(urlFinal)) add('SIN_TLS', 'MAYOR', 'El sitio se sirve sin TLS (http).', fuenteSitio);
+  // MENOR y no MAYOR (Benjamín, 03-10-2026): las dos son comunes en pymes
+  // reales, y con dos MAYOR la decisión queda topeada en ON_HOLD.
+  if (legible && /^http:/i.test(urlFinal)) add('SIN_TLS', 'MENOR', 'El sitio se sirve sin TLS (http).', fuenteSitio);
   if (legible && hostPedido && dominioRegistrable(hostPedido) !== dominioRegistrable(hostSitio)) {
-    add('REDIRIGE_OTRO_DOMINIO', 'MAYOR', `${hostPedido} redirige a otro dominio (${hostSitio}).`, `redirecciones de ${c.urlPedida}`);
+    add('REDIRIGE_OTRO_DOMINIO', 'MENOR', `${hostPedido} redirige a otro dominio (${hostSitio}).`, `redirecciones de ${c.urlPedida}`);
   }
 
   if (!legible) {
