@@ -50,4 +50,5 @@ aws/flujo-autonomo/.aws-sam/
 # Bundles generados para correr los tests con node (ver test/*.mjs)
 test/wl.mjs
 test/decision.mjs
+test/rw/
 cloudflare/empresadocs-proxy/test/tipos.mjs

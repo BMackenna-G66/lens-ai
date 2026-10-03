@@ -23,6 +23,8 @@ import { fetchRegcheqEnrichment, hasRegcheqKey } from '../services/regcheqEnrich
 import { generateCsv } from '../services/csvGenerator';
 import { IconJson, IconCsv, IconAlertTriangle, IconAlertTriangleSolid, IconFileText, IconFiles, IconImport, IconExport } from './IconComponents';
 import { DocumentChat } from './DocumentChat';
+// La Revisión web es un análisis APARTE: solo comparte dónde vive el botón.
+import { RevisionWebPanel } from './RevisionWebPanel';
 import { KEYWORDS_BY_COUNTRY } from '../services/countryKeywords';
 import { nuevoAnalisisId, persistirAnalisis, persistirFicha, sha256Hex } from '../services/lensPersistenciaService';
 import { pendientesEnBuffer, reintentarPendientes } from '../services/colasLogService';
@@ -119,6 +121,11 @@ export const DocumentAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> =
   const [globalError, setGlobalError] = useState<string | null>(null);
   const [globalSuccess, setGlobalSuccess] = useState<string | null>(null);
   const [activeChatDocumentId, setActiveChatDocumentId] = useState<string | null>(null);
+  // Revisión web: una vez abierta queda montada, para que siga corriendo
+  // aunque se minimice el panel.
+  const [revisionWebMontada, setRevisionWebMontada] = useState(false);
+  const [revisionWebAbierta, setRevisionWebAbierta] = useState(false);
+  const abrirRevisionWeb = () => { setRevisionWebMontada(true); setRevisionWebAbierta(true); };
   const [analysisMode, setAnalysisMode] = useState<'single' | 'consolidated'>('single');
   const [analysisPurpose, setAnalysisPurpose] = useState<AnalysisPurpose>('extract');
 
@@ -786,6 +793,7 @@ export const DocumentAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> =
                                     isChatActive={activeChatDocumentId === doc.id}
                                     isApiKeyOk={isKeyValid}
                                     onOpen360={onOpen360}
+                                    onAbrirRevisionWeb={abrirRevisionWeb}
                                 />
                             </div>
                             {activeChatDocumentId === doc.id && (
@@ -804,6 +812,14 @@ export const DocumentAnalyzer: React.FC<{ onOpen360?: (rut: string) => void }> =
                 ))}
             </div>
         }
+
+        {revisionWebMontada && (
+          <RevisionWebPanel
+            abierto={revisionWebAbierta}
+            onMinimizar={() => setRevisionWebAbierta(false)}
+            onAbrir={() => setRevisionWebAbierta(true)}
+          />
+        )}
     </>
   );
 };
