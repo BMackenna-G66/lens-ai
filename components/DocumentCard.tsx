@@ -5,6 +5,7 @@ import { ProcessedDocument, FileProcessingStatus, SupplementaryDocumentAnalysis,
 import { LoadingSpinner } from './LoadingSpinner';
 import { SEVERITY_META } from '../services/validationRules';
 import { IconPdf, IconCheckCircle, IconXCircle, IconAlertTriangle, IconTrash, IconUpload, IconChevronDown, IconChevronUp, IconChatBubbleLeftRight, IconFiles, IconShieldCheck } from './IconComponents';
+import { Globe } from 'lucide-react';
 
 interface DocumentCardProps {
   document: ProcessedDocument;
@@ -17,6 +18,9 @@ interface DocumentCardProps {
   isChatActive: boolean;
   isApiKeyOk: boolean;
   onOpen360?: (rut: string) => void;
+  /** Abre la Revisión web. NO recibe nada de la ficha: el análisis web es
+   *  independiente y sus entradas las carga el analista en el panel. */
+  onAbrirRevisionWeb?: () => void;
 }
 
 const StatusIndicator: React.FC<{ status: FileProcessingStatus | SupplementaryAnalysisStatus, isSupplementary?: boolean }> = ({ status, isSupplementary }) => {
@@ -125,6 +129,7 @@ export const DocumentCard: React.FC<DocumentCardProps> = ({
     isChatActive,
     isApiKeyOk,
     onOpen360,
+    onAbrirRevisionWeb,
 }) => {
   const [isExpanded, setIsExpanded] = useState(true);
   const supplementaryFileInputRef = useRef<HTMLInputElement>(null);
@@ -548,7 +553,7 @@ export const DocumentCard: React.FC<DocumentCardProps> = ({
       </div>
 
        {document.status === FileProcessingStatus.COMPLETED && (
-        <div className="p-3 bg-slate-50 border-t border-slate-200 grid grid-cols-2 sm:grid-cols-4 gap-2 text-center">
+        <div className={`p-3 bg-slate-50 border-t border-slate-200 grid grid-cols-2 ${onAbrirRevisionWeb ? 'sm:grid-cols-5' : 'sm:grid-cols-4'} gap-2 text-center`}>
             <button
                 onClick={onToggleChat}
                 className={`flex flex-col items-center justify-center p-2 rounded-lg transition-colors text-sm font-medium space-y-1
@@ -587,6 +592,17 @@ export const DocumentCard: React.FC<DocumentCardProps> = ({
                 <IconPdf className="w-5 h-5" />
                 <span>Descargar Ficha PDF</span>
             </button>
+            {onAbrirRevisionWeb && (
+              <button
+                  onClick={onAbrirRevisionWeb}
+                  className="flex flex-col items-center justify-center p-2 rounded-lg transition-colors text-sm font-medium space-y-1 bg-indigo-100 hover:bg-indigo-200 text-indigo-800 disabled:opacity-50 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-500"
+                  disabled={!isApiKeyOk}
+                  title={isApiKeyOk ? "Revisar el sitio web de una contraparte (análisis independiente de esta ficha)" : "La revisión web requiere una API Key"}
+              >
+                  <Globe className="w-5 h-5" />
+                  <span>Revisión web</span>
+              </button>
+            )}
         </div>
       )}
     </div>
