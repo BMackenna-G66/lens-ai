@@ -11,8 +11,12 @@
 //     services/revisionWeb/paso0.ts services/revisionWeb/busquedas.ts \
 //     services/revisionWeb/evaluacion.ts services/revisionWeb/puntaje.ts \
 //     services/revisionWeb/gemini.ts --bundle --format=esm --platform=node \
-//     --outdir=test/rw --log-level=warning
+//     --packages=external --outdir=test/rw --log-level=warning
 //   node test/revisionWeb.mjs
+//
+// `--packages=external` hace falta: `@google/genai` no se deja empaquetar para
+// Node en ESM («Dynamic require of child_process»), y así se carga desde
+// node_modules.
 //
 // Los datos son INVENTADOS. Los NIT de referencia del anexo A son públicos.
 
