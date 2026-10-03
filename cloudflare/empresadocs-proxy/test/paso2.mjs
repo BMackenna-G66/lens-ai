@@ -25,7 +25,8 @@ let llamadas = [];
 let modo = {};
 let creado = false;
 let resueltos = [];
-let cmtCreado = 'COMPLIANCE_OFFICER_REQUEST';
+// El comment de «Bloqueado» desde el 02-10-2026 (antes COMPLIANCE_OFFICER_REQUEST).
+let cmtCreado = 'OFAC_SUSPECTED';
 // El estado que ms-customer DERIVA del comment del create. En el real sale del
 // catálogo; acá lo fija el caso de prueba.
 let statusCreado = 'BLOCKED';
@@ -89,7 +90,7 @@ const correr = async (env, status, extra = {}) => {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Origin': 'http://localhost:5173' },
     body: JSON.stringify({
-      customerIds: ['4535350'], status, comment: 'COMPLIANCE_OFFICER_REQUEST',
+      customerIds: ['4535350'], status, comment: 'OFAC_SUSPECTED',
       observation: 'Cliente revisado, sin hallazgos.', agent: 'ana@global66.com',
       countryCode: 'CL', ofacFlag: true, ...extra,
     }),
@@ -148,7 +149,7 @@ console.log('\n── Duplicado en BO es error, para nosotros es "ya estaba" ─
 // NUESTRO comment ya está vigente. Sin la guarda por comment, el bucle lo
 // resolvería —no hay `idCreado` porque el create falló— y desharía el bloqueo.
 sinResolver = [
-  { id: 4225468, status: 'BLOCKED', comment: 'COMPLIANCE_OFFICER_REQUEST', isTerminal: false, isResolved: false },
+  { id: 4225468, status: 'BLOCKED', comment: 'OFAC_SUSPECTED', isTerminal: false, isResolved: false },
   { id: 4223019, status: 'NORMAL', comment: 'NORMAL', isTerminal: true, isResolved: false },
 ];
 modo = {}; r = await correr(ENV, 'BLOCKED');
@@ -193,6 +194,7 @@ ok('el bloqueo se crea', msc(r).some(l => l.met === 'POST'));
 ok('el cierre NO falla por eso', paso(r).ok === true, paso(r).data.discrepancia);
 ok('pero queda anotado que el estado no fue el anticipado',
    !!paso(r).data.estadoDistintoDelPedido, paso(r).data);
+cmtCreado = 'OFAC_SUSPECTED';   // de vuelta al comment de hoy
 
 console.log('\n── Y sigue fallando cuando NUESTRO bloqueo no quedó vigente ──');
 modo = { crearFalla: true }; r = await correr(ENV, 'BLOCKED');
@@ -230,7 +232,7 @@ ok('Liberar Normal → corre', hayLastStep(r), r.llamadas.map(l => l.u));
 modo = {}; cmtCreado = 'UCR_CRIMINAL_RISK'; statusCreado = 'UNDER_COMPLIANCE_REVIEW';
 r = await correr(ENV, 'UNDER_COMPLIANCE_REVIEW', { lastStep: true, comment: 'UCR_CRIMINAL_RISK' });
 ok('Liberar UCR → corre', hayLastStep(r), r.llamadas.map(l => l.u));
-cmtCreado = 'COMPLIANCE_OFFICER_REQUEST'; statusCreado = 'BLOCKED';
+cmtCreado = 'OFAC_SUSPECTED'; statusCreado = 'BLOCKED';
 modo = {}; r = await correr(ENV, 'BLOCKED', { lastStep: true });
 ok('Bloqueado → NO corre (no corresponde)', !hayLastStep(r), r.llamadas.map(l => l.u));
 ok('y queda escrito por qué', JSON.stringify(paso(r)).length > 0 && JSON.stringify(r.body.results[0].steps.lastStep || {}).includes('no requiere'), r.body.results[0].steps.lastStep);

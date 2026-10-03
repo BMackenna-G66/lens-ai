@@ -32,7 +32,7 @@ export interface TipoCierreAdmin {
   id: string;
   label: string;
   status: string;        // NORMAL | UNDER_COMPLIANCE_REVIEW | FULLY_BLOCKED
-  comment: string;       // NO_COMMENTS | UCR_CRIMINAL_RISK | COMPLIANCE_OFFICER_REQUEST
+  comment: string;       // NO_COMMENTS | UCR_CRIMINAL_RISK | OFAC_SUSPECTED | PEP_REQUEST
   observation: string;
   // Qué hacer en el modelo nuevo de ms-customer. El Worker lo usa solo cuando
   // está en modo `nuevo`; en modo `anterior` lo ignora por completo.
@@ -76,17 +76,25 @@ export const TIPOS_CIERRE_ADMIN: TipoCierreAdmin[] = [
     // Decisión del 17-09-2026: baja de FULLY_BLOCKED a BLOCKED "de momento",
     // hasta medir la gravedad real del bloqueo total.
     //
-    // Además queda ALINEADO con el catálogo nuevo, que era el problema de
-    // fondo: `COMPLIANCE_OFFICER_REQUEST` es id 40 y produce **BLOCKED**, no
-    // FULLY_BLOCKED. Como en el modelo nuevo el estado se DERIVA del comment,
-    // mandar FULLY_BLOCKED con ese comment dejaba al cliente en BLOCKED igual,
-    // sin fallar — o sea, menos bloqueado de lo que el analista decidió.
+    // Comment `OFAC_SUSPECTED` (id 44 del catálogo `compliance_status_comment`):
+    // produce **BLOCKED**, no es terminal y es del área COMPLIANCE. Decisión de
+    // Benjamín del 02-10-2026: el bloqueo de la cola OFAC dice que es por OFAC,
+    // y el cliente sigue quedando BLOCKED como hasta ahora. Antes era
+    // `COMPLIANCE_OFFICER_REQUEST` (id 40), que produce el mismo estado pero no
+    // decía el motivo. Se eligió frente a `OFAC_CONFIRMED` (id 46), que
+    // produciría FULLY_BLOCKED.
     //
-    // Para volver a bloqueo total hay que cambiar las DOS cosas: el status y el
-    // comment (a uno FULLY_BLOCKED del área COMPLIANCE, p. ej. `OFAC_CONFIRMED`
-    // o `BLACK_LIST_G66`). Cambiar solo el status no hace nada.
+    // En el modelo nuevo el estado se DERIVA del comment, no del status que se
+    // manda. Para volver a bloqueo total hay que cambiar las DOS cosas: el
+    // status y el comment (a uno FULLY_BLOCKED del área COMPLIANCE, p. ej.
+    // `OFAC_CONFIRMED` o `BLACK_LIST_G66`). Cambiar solo el status no hace nada.
+    //
+    // Lo usan el cierre manual (CasosInbox) Y el flujo automático
+    // (`flujoDecision` → `tipoBloquear`, que empaqueta el Lambda
+    // lens-flujo-autonomo): la SPA y el Lambda se despliegan JUNTOS, o los
+    // cierres manuales y los automáticos quedan con comments distintos.
     status: 'BLOCKED',
-    comment: 'COMPLIANCE_OFFICER_REQUEST',
+    comment: 'OFAC_SUSPECTED',
     // Se mantiene la marca de blacklist que tenía cuando era FULLY_BLOCKED: el
     // paso 1 no migra y esta decisión no era sobre él.
     ofacFlag: true,
@@ -128,7 +136,7 @@ export const ADMIN_ASSIGNEE_DEFAULT = 'compliance.masivo@global66.com';
 // Valores válidos de status/comment de la API de admin (editables en la ficha).
 // Si la API acepta otros, agregarlos acá.
 export const ADMIN_STATUS_OPTIONS = ['NORMAL', 'UNDER_COMPLIANCE_REVIEW', 'UNDER_COMPLIANCE_REVIEW_2', 'BLOCKED', 'FULLY_BLOCKED'] as const;
-export const ADMIN_COMMENT_OPTIONS = ['NO_COMMENTS', 'UCR_CRIMINAL_RISK', 'COMPLIANCE_OFFICER_REQUEST', 'PEP_REQUEST'] as const;
+export const ADMIN_COMMENT_OPTIONS = ['NO_COMMENTS', 'UCR_CRIMINAL_RISK', 'OFAC_SUSPECTED', 'COMPLIANCE_OFFICER_REQUEST', 'PEP_REQUEST'] as const;
 
 // El flag OFAC / blacklist del paso 1. Regla única para el cierre individual, el
 // masivo y el flujo automático.

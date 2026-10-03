@@ -28,6 +28,9 @@ const CATALOGO = {
   UCR_CRIMINAL_RISK:         { id: 32, estado: 'UNDER_COMPLIANCE_REVIEW', terminal: false, area: 'COMPLIANCE' },
   PEP_REQUEST:               { id: 38, estado: 'BLOCKED',                 terminal: false, area: 'COMPLIANCE' },
   COMPLIANCE_OFFICER_REQUEST:{ id: 40, estado: 'BLOCKED',                 terminal: false, area: 'COMPLIANCE' },
+  // El de «Bloqueado» desde el 02-10-2026. Fuente: el catálogo completo en
+  // BRIEF_MS_CUSTOMER_BO_RESPUESTA.md (fila 44).
+  OFAC_SUSPECTED:            { id: 44, estado: 'BLOCKED',                 terminal: false, area: 'COMPLIANCE' },
   OFAC_CONFIRMED:            { id: 46, estado: 'FULLY_BLOCKED',           terminal: false, area: 'COMPLIANCE' },
   BLACK_LIST_G66:            { id: 53, estado: 'FULLY_BLOCKED',           terminal: false, area: 'COMPLIANCE' },
 };
