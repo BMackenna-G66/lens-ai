@@ -7,8 +7,13 @@ import { normalizeDelito } from '../services/criminalDataProcessor';
 import { InspektorColombia } from './InspektorColombia';
 import { evaluateValidationRules, ValidationAlert, SEVERITY_META } from '../services/validationRules';
 import { Lens360Tributaria } from '../types/lens360';
+import {
+  listasPeru, derivarNivelPepPeru, resumenPepPeru, normalizaDniPeru, esDniPeruValido,
+  consultarPeru, procesarFilaPeru, filaMasivoPeru, columnaDniPeru, FichaNoExiste,
+  type ResumenPepPeru, type DepsRegcheq,
+} from '../services/regcheqPeru';
 
-type CountryMode = null | 'chile' | 'colombia' | 'global';
+type CountryMode = null | 'chile' | 'colombia' | 'global' | 'peru';
 
 // ─── Config ────────────────────────────────────────────────────────────────────
 const API_BASE = 'https://external-api.regcheq.com';
@@ -100,6 +105,9 @@ interface PerfilResult {
   formularios?: Record<string, Record<string, unknown>>;
   auditoria?: Record<string, unknown>;
   alerts?: ValidationAlert[];
+  // Solo en fichas peruanas: el foco PEP de la tarjeta y de los exportes.
+  pais?: 'peru';
+  pepPeru?: ResumenPepPeru;
 }
 interface ListaInteres {
   dni: string;
@@ -269,9 +277,21 @@ async function fetchPerfil(dniVal: string): Promise<PerfilResult> {
   const resp = await fetch(`${API_BASE}/record/${dniVal}/${API_KEY}`);
   if (!resp.ok) throw new Error(`API ${resp.status}: ${resp.statusText}`);
   const perfil = await resp.json();
+  return perfilDesdeJson(perfil, dniVal, 'chile');
+}
 
+/** La ficha de Regcheq como la muestra el módulo. `pais` solo cambia algo en
+ *  Perú: sus listas, el nivel PEP derivado y nada de causas penales ni SII. El
+ *  camino de Chile y del modo global es el de siempre. */
+function perfilDesdeJson(perfil: Record<string, any>, dniVal: string, pais: 'chile' | 'peru'): PerfilResult {
+  const esPeru = pais === 'peru';
   const listasRaw = ((perfil.listas ?? {}) as Record<string, Record<string,unknown>>);
-  const listas: Record<string, ListaEntry> = {};
+  let listas: Record<string, ListaEntry> = {};
+  if (esPeru) {
+    // Las cuatro de Perú siempre, las conocidas solo si vienen, y cualquier
+    // clave nueva con su nombre: ver services/regcheqPeru.
+    listas = listasPeru(listasRaw, NOMBRE_LISTA);
+  } else {
   // Smart-merge: iterate all known keys. When two keys share the same display label
   // (e.g. 'rtp' and 'rtpResult' → 'RTP / PDI'), keep whichever has coincidence=true.
   // This way Chile responses use the old keys and global responses use the *Result keys
@@ -287,6 +307,7 @@ async function fetchPerfil(dniVal: string): Promise<PerfilResult> {
       listas[nombre] = incoming;
     }
   }
+  }
 
   const FICHA_MAP: [string, string][] = [
     ['name','Nombre'],['fatherName','Apellido paterno'],['motherName','Apellido materno'],
@@ -298,8 +319,8 @@ async function fetchPerfil(dniVal: string): Promise<PerfilResult> {
   const ficha: Record<string,string> = {};
   for (const [k, label] of FICHA_MAP) { const v = perfil[k]; if (v) ficha[label] = String(v); }
 
-  // Compute local decision from Causas Penales Chile crimes
-  const causasEntry = listas['Causas Penales Chile'];
+  // Compute local decision from Causas Penales Chile crimes (no aplica en Perú)
+  const causasEntry = esPeru ? undefined : listas['Causas Penales Chile'];
   let decision: DecisionResult | undefined;
   if (causasEntry?.coincidence && causasEntry.data) {
     const raw = causasEntry.data as Record<string,unknown>;
@@ -327,22 +348,30 @@ async function fetchPerfil(dniVal: string): Promise<PerfilResult> {
     situacionesIrregulares: (situacion.situaciones_irregulares as string[] | undefined) ?? [],
     actividades: [],
   };
-  const tieneSii = !!(tributariaAlertas.rutContribuyente || tributariaAlertas.nombreSii || tributariaAlertas.fechaInicioActividades || tributariaAlertas.situacionesIrregulares.length);
+  // El SII es de Chile: en Perú no aplica.
+  const tieneSii = !esPeru && !!(tributariaAlertas.rutContribuyente || tributariaAlertas.nombreSii || tributariaAlertas.fechaInicioActividades || tributariaAlertas.situacionesIrregulares.length);
+  // En Perú el `pepLevel` de la raíz viene null aunque haya coincidencia PEP:
+  // el nivel se deriva de las listas.
+  const pepLevel = esPeru ? derivarNivelPepPeru(listasRaw) : (perfil.pepLevel ?? '');
   const alerts = evaluateValidationRules({
     regcheqRisk: String(perfil.effectiveRisk ?? perfil.calculatedRisk ?? ''),
-    pepLevel: String(perfil.pepLevel ?? ''),
+    pepLevel: String(pepLevel),
     amlHits: Object.entries(listas).map(([nombre, e]) => ({ nombre, coincidence: e.coincidence, risk: e.risk })),
     tributaria: tieneSii ? tributariaAlertas : undefined,
   });
 
   return {
     dni: dniVal,
-    nombre: perfil.name ?? perfil.socialReason ?? '',
+    // En Perú el nombre completo: es lo que quedó en la ficha.
+    nombre: esPeru
+      ? [perfil.name, perfil.fatherName, perfil.motherName].filter(Boolean).join(' ')
+      : perfil.name ?? perfil.socialReason ?? '',
     riesgo_final: perfil.effectiveRisk ?? perfil.calculatedRisk ?? '',
-    pep_level: perfil.pepLevel ?? '',
+    pep_level: pepLevel,
     listas,
     ficha,
     decision,
+    ...(esPeru ? { pais: 'peru' as const, pepPeru: resumenPepPeru(listasRaw) } : {}),
     personType: String(perfil.personType ?? ''),
     datosContacto: {
       country:       perfil.country,
@@ -465,7 +494,7 @@ async function generatePDF(result: PerfilResult) {
     doc.setFontSize(8); doc.setFont('helvetica', 'bold'); doc.setTextColor(...PDF_MGRAY);
     doc.text('PEP', pageW - 50, 53);
     doc.setFontSize(9); doc.setFont('helvetica', 'normal'); doc.setTextColor(...PDF_DTEXT);
-    doc.text(`Nivel ${result.pep_level}`, pageW - 50, 59);
+    doc.text(result.pais === 'peru' && !/^\d+$/.test(String(result.pep_level)) ? String(result.pep_level) : `Nivel ${result.pep_level}`, pageW - 50, 59);
   }
 
   doc.setFontSize(7); doc.setFont('helvetica', 'normal'); doc.setTextColor(...PDF_MGRAY);
@@ -487,6 +516,50 @@ async function generatePDF(result: PerfilResult) {
     doc.text(`✓  Sin alertas — perfil limpio en todas las listas consultadas`, margin + 4, curY + 6.5);
   }
   curY += 14;
+
+  // ── Perú: el bloque PEP, arriba ──
+  if (result.pepPeru) {
+    const p = result.pepPeru;
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(...PDF_NAVY);
+    doc.text('PEP · PERÚ', margin, curY + 4);
+    doc.setFillColor(...PDF_INDIGO); doc.rect(margin, curY + 5.5, pageW - margin * 2, 0.5, 'F');
+    const siNo = (b: boolean) => (b ? 'Sí' : 'No');
+    autoTable(doc, {
+      startY: curY + 8,
+      head: [['Es PEP', 'Familiar de PEP', 'Nivel PEP', 'Funcionario público']],
+      body: [[siNo(p.esPep), siNo(p.familiarDePep), p.nivel || '—', siNo(p.funcionarioPublico)]],
+      theme: 'grid',
+      headStyles: { fillColor: PDF_NAVY, textColor: PDF_WHITE, fontSize: 7, fontStyle: 'bold' },
+      bodyStyles: { fontSize: 8, textColor: PDF_DTEXT, fontStyle: 'bold' },
+      margin: { left: margin, right: margin },
+    });
+    curY = getLastY() + 3;
+    if (p.coincidencias.length || p.funcionario.length) {
+      autoTable(doc, {
+        startY: curY,
+        head: [['Lista', 'Origen', 'Conclusión', '% coinc.', 'Res. nombramiento', 'Res. retiro']],
+        body: [...p.coincidencias, ...p.funcionario].map(c => [c.lista || '—', c.origen || '—', c.conclusion || '—', c.porcentaje || '—', c.resolucionNombramiento || '—', c.resolucionRetiro || '—']),
+        theme: 'grid',
+        headStyles: { fillColor: PDF_NAVY, textColor: PDF_WHITE, fontSize: 7, fontStyle: 'bold' },
+        bodyStyles: { fontSize: 7, textColor: PDF_DTEXT },
+        margin: { left: margin, right: margin },
+      });
+      curY = getLastY() + 3;
+    }
+    if (p.familiares.length) {
+      autoTable(doc, {
+        startY: curY,
+        head: [['Relación', 'PEP vinculado', 'DNI PEP', 'Nivel', 'Base regulatoria']],
+        body: p.familiares.map(f => [f.relacion || '—', f.pepVinculado || '—', f.dniPep || '—', f.nivel || '—', f.baseRegulatoria || '—']),
+        theme: 'grid',
+        headStyles: { fillColor: PDF_NAVY, textColor: PDF_WHITE, fontSize: 7, fontStyle: 'bold' },
+        bodyStyles: { fontSize: 7, textColor: PDF_DTEXT },
+        margin: { left: margin, right: margin },
+      });
+      curY = getLastY() + 3;
+    }
+    curY += 3;
+  }
 
   // ── Alertas de validación (motor de reglas) ──
   if (result.alerts && result.alerts.length) {
@@ -1220,6 +1293,65 @@ function LegalPersonDetail({ result, dark }: { result: PerfilResult; dark: boole
   );
 }
 
+// ── Perú: el bloque PEP, ARRIBA de todo lo demás ─────────────────────────────
+function PepPeruBox({ pep, dark }: { pep: ResumenPepPeru; dark: boolean }) {
+  const alerta = pep.esPep || pep.familiarDePep;
+  const box = alerta
+    ? (dark ? 'bg-purple-950/40 border-purple-700/60' : 'bg-purple-50 border-purple-300')
+    : (dark ? 'bg-slate-900/40 border-slate-700/50' : 'bg-slate-50 border-slate-200');
+  const label = dark ? 'text-slate-400' : 'text-slate-500';
+  const val = dark ? 'text-white' : 'text-slate-900';
+  const si = (b: boolean) => <span className={`font-black ${b ? 'text-purple-500' : dark ? 'text-emerald-400' : 'text-emerald-700'}`}>{b ? 'Sí' : 'No'}</span>;
+  const celda = (t: string, v: React.ReactNode) => (
+    <div><div className={`text-[9px] font-bold uppercase tracking-widest ${label}`}>{t}</div><div className={`text-sm ${val}`}>{v}</div></div>
+  );
+  return (
+    <div className={`border rounded-xl px-4 py-3 mb-3 ${box}`}>
+      <p className={`text-[10px] font-bold uppercase tracking-widest mb-2 ${label}`}>PEP · Perú</p>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        {celda('Es PEP', si(pep.esPep))}
+        {celda('Familiar de PEP', si(pep.familiarDePep))}
+        {celda('Nivel PEP', <span className="font-black">{pep.nivel || '—'}</span>)}
+        {celda('Funcionario público', si(pep.funcionarioPublico))}
+      </div>
+      {pep.coincidencias.length > 0 && (
+        <div className="mt-3 space-y-1.5">
+          <p className={`text-[9px] font-bold uppercase tracking-widest ${label}`}>Coincidencias PEP</p>
+          {pep.coincidencias.map((c, i) => (
+            <div key={i} className={`text-xs ${val}`}>
+              <strong>{c.lista || 'PEP Perú'}</strong>{c.origen ? ` · ${c.origen}` : ''}{c.conclusion ? ` · ${c.conclusion}` : ''}
+              {c.porcentaje ? ` · ${c.porcentaje}% de coincidencia` : ''}
+              {c.resolucionNombramiento ? ` · Res. nombramiento ${c.resolucionNombramiento}` : ''}
+              {c.resolucionRetiro ? ` · Res. retiro ${c.resolucionRetiro}` : ''}
+            </div>
+          ))}
+        </div>
+      )}
+      {pep.familiares.length > 0 && (
+        <div className="mt-3 space-y-1.5">
+          <p className={`text-[9px] font-bold uppercase tracking-widest ${label}`}>Familiares de PEP</p>
+          {pep.familiares.map((f, i) => (
+            <div key={i} className={`text-xs ${val}`}>
+              <strong>{f.relacion || 'Familiar'}</strong> de {f.pepVinculado || 'PEP'}{f.dniPep ? ` (DNI ${f.dniPep})` : ''}
+              {f.nivel ? ` · nivel ${f.nivel}` : ''}{f.baseRegulatoria ? ` · ${f.baseRegulatoria}` : ''}
+            </div>
+          ))}
+        </div>
+      )}
+      {pep.funcionario.length > 0 && (
+        <div className="mt-3 space-y-1.5">
+          <p className={`text-[9px] font-bold uppercase tracking-widest ${label}`}>Funcionarios públicos</p>
+          {pep.funcionario.map((c, i) => (
+            <div key={i} className={`text-xs ${val}`}>
+              <strong>{c.lista || 'Funcionarios públicos Perú'}</strong>{c.origen ? ` · ${c.origen}` : ''}{c.conclusion ? ` · ${c.conclusion}` : ''}{c.porcentaje ? ` · ${c.porcentaje}%` : ''}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ResultCard({ result, dark }: { result: PerfilResult; dark: boolean }) {
   const hitCount = Object.values(result.listas).filter(e => e.coincidence).length;
   const bg    = dark ? 'bg-slate-800/50 border-slate-700/50' : 'bg-white border-violet-200/70 shadow-sm';
@@ -1238,7 +1370,8 @@ function ResultCard({ result, dark }: { result: PerfilResult; dark: boolean }) {
           <RiskBadge risk={result.riesgo_final} />
           {result.pep_level && (
             <span className="text-[10px] font-black uppercase tracking-widest px-2.5 py-1 rounded-full bg-purple-500/20 text-purple-400 border border-purple-500/40">
-              PEP Nivel {result.pep_level}
+              {/* En Perú el nivel puede ser «PEP» o «Familiar de PEP», no un número */}
+              {result.pais === 'peru' && !/^\d+$/.test(String(result.pep_level)) ? result.pep_level : `PEP Nivel ${result.pep_level}`}
             </span>
           )}
           <code className={`ml-auto text-xs font-mono px-3 py-1.5 rounded-lg border ${dark ? 'text-slate-400 bg-slate-900/60 border-slate-700' : 'text-slate-500 bg-slate-100 border-slate-200'}`}>
@@ -1251,6 +1384,8 @@ function ResultCard({ result, dark }: { result: PerfilResult; dark: boolean }) {
             📄 PDF
           </button>
         </div>
+
+        {result.pepPeru && <PepPeruBox pep={result.pepPeru} dark={dark} />}
 
         {hitCount > 0 ? (
           <div className={`border rounded-xl px-4 py-3 text-sm font-medium ${dark ? 'bg-red-950/40 border-red-800/50 text-red-300' : 'bg-red-50 border-red-300 text-red-700'}`}>
@@ -1434,8 +1569,40 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) =>
     );
   }
 
+  // ── Perú ────────────────────────────────────────────────────────────────────
+  // Las llamadas viven en services/regcheqPeru, con el fetch inyectado: así se
+  // testea que toda creación lleve nationality «Peru» y el dniType de Perú, y
+  // que el refresco vaya sin nombre.
+  const depsRegcheq: DepsRegcheq = { fetch: (input, init) => fetch(input, init), base: API_BASE, key: API_KEY };
+
+  async function analizarPerfilPeru() {
+    const dni = normalizaDniPeru(natDni);
+    if (!esDniPeruValido(dni)) { setError('El DNI peruano tiene que tener 8 dígitos.'); return; }
+    if (crearFicha && (!natNombre.trim() || !natAp.trim())) {
+      setError('Para crear o actualizar la ficha, Nombres y Apellido paterno son obligatorios.'); return;
+    }
+    if (!API_KEY) { setError('Falta la variable de entorno VITE_REGCHEQ_API_KEY.'); return; }
+    setNatDni(dni);   // que se vea el DNI con sus ceros
+    setLoading(true); setError(''); setResult(null);
+    try {
+      const perfil = await consultarPeru(dni, crearFicha,
+        { nombres: natNombre, apellidoPaterno: natAp, apellidoMaterno: natAp2, email: natEmail, telefono: natTel }, depsRegcheq);
+      setResult(perfilDesdeJson(perfil, dni, 'peru'));
+      setTimeout(() => resultRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(e instanceof FichaNoExiste ? msg
+        : msg.includes('Failed to fetch') || msg.includes('NetworkError')
+          ? 'Error de red (posible bloqueo CORS de la API). Verifica tu conexión o usa la versión local Python.'
+          : msg);
+    } finally {
+      setLoading(false);
+    }
+  }
+
   // ── Individual analysis ─────────────────────────────────────────────────────
   async function analizarPerfil() {
+    if (countryMode === 'peru') return analizarPerfilPeru();
     const dniVal = normalizaRutChileno(tipo === 'natural' ? natDni : legRut);
     if (!dniVal) { setError('El campo DNI / RUT es obligatorio.'); return; }
     if (!API_KEY) { setError('Falta la variable de entorno VITE_REGCHEQ_API_KEY.'); return; }
@@ -1504,6 +1671,8 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) =>
       setMasivoError(`Error leyendo Excel: ${e instanceof Error ? e.message : String(e)}`);
       setMasivoRunning(false); return;
     }
+
+    if (countryMode === 'peru') { await procesarMasivoPeru(rows); return; }
 
     // Find DNI column
     const dniColCandidates = countryMode === 'global'
@@ -1616,8 +1785,126 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) =>
     setCarouselIdx(0);
   }
 
+  /** Masivo de Perú: mismo delay, límite, cancelación y log que Chile. Cada
+   *  fila va por `procesarFilaPeru`, que crea —también ante un 404— SIEMPRE con
+   *  el body peruano, y refresca sin nombre lo que ya existe. */
+  async function procesarMasivoPeru(rows: Record<string, string>[]) {
+    const dniCol = columnaDniPeru(Object.keys(rows[0] ?? {}));
+    if (!dniCol) {
+      setMasivoError('El archivo no tiene columna "dni" (o "documento" / "nro documento"). Verifica el formato.');
+      setMasivoRunning(false); return;
+    }
+    const toProcess = limite > 0 ? rows.slice(0, limite) : rows;
+    setMasivoTotal(toProcess.length);
+    addLog('info', `📂 ${masivoFile?.name ?? ''} — ${toProcess.length} registros a procesar (Perú)`);
+
+    const results: PerfilResult[] = [];
+    let high = 0, alerts = 0, ok = 0, err = 0;
+
+    for (let i = 0; i < toProcess.length; i++) {
+      if (abortRef.current) { addLog('info', '⛔ Proceso cancelado por el usuario'); break; }
+      const fila = filaMasivoPeru(toProcess[i]);
+      const nombre = [fila.datos.nombres, fila.datos.apellidoPaterno, fila.datos.apellidoMaterno].filter(Boolean).join(' ') || fila.datos.nombreCompleto;
+      const label = nombre ? `${fila.dni} (${nombre})` : fila.dni;
+
+      if (!esDniPeruValido(fila.dni)) {
+        addLog('err', `Fila ${i + 1}: DNI inválido «${fila.dni || 'vacío'}» (tienen que ser 8 dígitos), omitida`);
+        err++; setMasivoProgress(i + 1); continue;
+      }
+
+      try {
+        const perfil = await procesarFilaPeru(fila, crearMasivo, depsRegcheq, t => addLog('info', t));
+        const r = perfilDesdeJson(perfil, fila.dni, 'peru');
+        results.push(r);
+        const hitCount = Object.values(r.listas).filter(e => e.coincidence).length;
+        const riskLow  = (r.riesgo_final || '').toLowerCase();
+        if (riskLow === 'high' || riskLow === 'high risk') high++;
+        if (hitCount > 0) alerts++;
+        else ok++;
+        const pep = r.pepPeru?.esPep ? ' · PEP' : r.pepPeru?.familiarDePep ? ' · familiar de PEP' : '';
+        addLog(hitCount > 0 ? 'err' : 'ok', `${hitCount > 0 ? '⚠' : '✓'} [${i + 1}/${toProcess.length}] ${label} — ${hitCount} alerta${hitCount !== 1 ? 's' : ''}${pep} · ${r.riesgo_final || 'N/D'}`);
+      } catch (e: unknown) {
+        err++;
+        addLog('err', `✗ [${i + 1}/${toProcess.length}] ${label} — Error: ${e instanceof Error ? e.message : String(e)}`);
+      }
+
+      setMasivoProgress(i + 1);
+      setMasivoResults([...results]);
+      setMasivoStats({ total: i + 1, high, alerts, ok, err });
+
+      if (delay > 0 && i < toProcess.length - 1) await new Promise(res => setTimeout(res, delay * 1000));
+    }
+
+    addLog('info', `✅ Proceso completado — ${results.length} procesados, ${err} errores`);
+    setMasivoRunning(false);
+    setCarouselIdx(0);
+  }
+
+  /** El Excel de Perú: las listas que vinieron —incluidas las cuatro de Perú—,
+   *  las columnas PEP, y una hoja con el detalle de cada coincidencia PEP. */
+  function exportarExcelPeru() {
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const ts  = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+    const fileName = `resultado_regcheq_peru_${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.xlsx`;
+    const siNo = (b?: boolean) => (b ? 'Sí' : 'No');
+    const etiquetas = [...new Set(masivoResults.flatMap(r => Object.keys(r.listas)))];
+
+    const resultadosRows = masivoResults.map(r => {
+      const fila: Record<string, string | number> = {
+        'DNI':                 r.dni,
+        'Nombre completo':     r.nombre,
+        'Nombres':             r.ficha['Nombre'] || '',
+        'Apellido paterno':    r.ficha['Apellido paterno'] || '',
+        'Apellido materno':    r.ficha['Apellido materno'] || '',
+        'Riesgo final Ficha':  r.riesgo_final,
+        'Es PEP':              siNo(r.pepPeru?.esPep),
+        'Familiar de PEP':     siNo(r.pepPeru?.familiarDePep),
+        'Nivel PEP':           r.pep_level || '',
+        'Funcionario público': siNo(r.pepPeru?.funcionarioPublico),
+        'listas_total_coincidencias': Object.values(r.listas).filter(e => e.coincidence).length,
+      };
+      for (const e of etiquetas) fila[`Coincidencia_${e}`] = r.listas[e]?.coincidence ? 'True' : 'False';
+      fila['Alertas validación'] = (r.alerts ?? []).map(a => `[${SEVERITY_META[a.severity].label}] ${a.title}`).join(' · ');
+      return fila;
+    });
+
+    const pepRows: Record<string, string>[] = [];
+    for (const r of masivoResults) {
+      const p = r.pepPeru;
+      if (!p) continue;
+      for (const [tipoPep, lista] of [['PEP', p.coincidencias], ['Funcionario público', p.funcionario]] as const) {
+        for (const c of lista) pepRows.push({
+          'DNI': r.dni, 'Nombre': r.nombre, 'Tipo': tipoPep, 'Lista': c.lista, 'Origen': c.origen,
+          'Conclusión': c.conclusion, '% coincidencia': c.porcentaje,
+          'Res. nombramiento': c.resolucionNombramiento, 'Res. retiro': c.resolucionRetiro, 'Actualizado': c.fechaUpdate,
+        });
+      }
+      for (const f of p.familiares) pepRows.push({
+        'DNI': r.dni, 'Nombre': r.nombre, 'Tipo': 'Familiar de PEP', 'Relación': f.relacion,
+        'PEP vinculado': f.pepVinculado, 'DNI PEP': f.dniPep, 'Nivel': f.nivel,
+        'Base regulatoria': f.baseRegulatoria, 'Veracidad': f.veracidad, 'Riesgo': f.riesgo,
+      });
+    }
+
+    const resumenRows = [
+      { 'Generado': 'Total personas',      [ts]: masivoResults.length },
+      { 'Generado': 'High Risk',           [ts]: masivoResults.filter(r => (r.riesgo_final || '').toLowerCase().includes('high')).length },
+      { 'Generado': 'PEP',                 [ts]: masivoResults.filter(r => r.pepPeru?.esPep).length },
+      { 'Generado': 'Familiar de PEP',     [ts]: masivoResults.filter(r => r.pepPeru?.familiarDePep).length },
+      { 'Generado': 'Funcionario público', [ts]: masivoResults.filter(r => r.pepPeru?.funcionarioPublico).length },
+    ];
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(resultadosRows), 'Resultados Regcheq Perú');
+    if (pepRows.length > 0) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(pepRows), 'PEP Perú');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(resumenRows), 'Resumen');
+    XLSX.writeFile(wb, fileName);
+  }
+
   function exportarExcel() {
     if (masivoResults.length === 0) return;
+    if (countryMode === 'peru') return exportarExcelPeru();
 
     const now = new Date();
     const pad = (n: number) => String(n).padStart(2, '0');
@@ -1809,7 +2096,7 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) =>
           <p className={`text-sm mb-10 ${dark ? 'text-slate-400' : 'text-slate-500'}`}>
             Selecciona la nacionalidad para acceder a las fuentes correspondientes.
           </p>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
             {/* Chile */}
             <button
               onClick={() => setCountryMode('chile')}
@@ -1857,6 +2144,22 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) =>
                 Regcheq — OFAC, ONU, Unión Europea, INTERPOL, GAFI y Screening Global para cualquier nacionalidad.
               </p>
             </button>
+
+            {/* Perú */}
+            <button
+              onClick={() => { setCountryMode('peru'); setTab('individual'); setResult(null); setError(''); }}
+              className={`group rounded-3xl p-8 text-left transition-all duration-300 border hover:shadow-2xl active:scale-[0.98] ${
+                dark
+                  ? 'bg-slate-800/60 border-slate-700/50 hover:border-red-500/40 hover:bg-red-950/20 hover:shadow-red-950/30'
+                  : 'bg-white border-violet-200 hover:border-red-400 hover:shadow-red-100/50'
+              }`}
+            >
+              <div className="text-5xl mb-4">🇵🇪</div>
+              <h3 className={`text-xl font-black mb-2 ${dark ? 'text-white' : 'text-slate-900'}`}>Peruanos</h3>
+              <p className={`text-sm leading-relaxed ${dark ? 'text-slate-400' : 'text-slate-500'}`}>
+                Regcheq — PEP Perú y sus familiares, funcionarios públicos, OFAC, ONU, GAFI y Screening Global. Por DNI.
+              </p>
+            </button>
           </div>
         </div>
       </div>
@@ -1876,12 +2179,12 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) =>
         </button>
         <div className={`h-4 w-px ${dark ? 'bg-slate-700' : 'bg-violet-200'}`} />
         <span className="text-sm font-black">
-          {countryMode === 'global' ? '🌍 Internacional' : '🇨🇱 Chilenos'}
+          {countryMode === 'global' ? '🌍 Internacional' : countryMode === 'peru' ? '🇵🇪 Peruanos' : '🇨🇱 Chilenos'}
         </span>
         <span className={`text-xs font-medium ${textMuted}`}>Regcheq · AML / KYC</span>
 
         <div className={`flex gap-1 rounded-xl p-1 ml-2 ${dark ? 'bg-slate-800/60' : 'bg-violet-100/70'}`}>
-          {(countryMode === 'global' ? (['individual','masivo'] as Tab[]) : (['individual','masivo','lista'] as Tab[])).map(t => {
+          {(countryMode === 'global' || countryMode === 'peru' ? (['individual','masivo'] as Tab[]) : (['individual','masivo','lista'] as Tab[])).map(t => {
             const labels: Record<Tab,string> = { individual:'🔍 Individual', masivo:'📊 Masivo', lista:'📋 Lista de Interés' };
             return (
               <button
@@ -1908,12 +2211,15 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) =>
               <p className={`text-sm mt-1 ${textMuted}`}>
                 {countryMode === 'global'
                   ? 'Consulta OFAC, ONU, Unión Europea, INTERPOL, GAFI y Screening Global para cualquier nacionalidad.'
-                  : 'Consulta listas de vigilancia, PEP, OFAC, causas penales y más.'}
+                  : countryMode === 'peru'
+                    ? 'Consulta por DNI: PEP Perú y sus familiares, funcionarios públicos, OFAC, ONU, GAFI y Screening Global. Cada consulta refresca la ficha.'
+                    : 'Consulta listas de vigilancia, PEP, OFAC, causas penales y más.'}
               </p>
             </div>
 
             <div className={`border rounded-2xl p-6 space-y-5 ${cardBg}`}>
-              {/* Type toggle */}
+              {/* Type toggle (Perú: solo personas naturales, por DNI) */}
+              {countryMode !== 'peru' && (
               <div className={`flex gap-0 rounded-xl overflow-hidden w-fit border ${dark ? 'bg-slate-900/50 border-slate-700/50' : 'bg-violet-50 border-violet-200'}`}>
                 {(['natural','legal'] as PersonType[]).map(t => (
                   <button key={t} onClick={() => { setTipo(t); setResult(null); setError(''); }}
@@ -1922,11 +2228,29 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) =>
                   </button>
                 ))}
               </div>
+              )}
 
               {/* Natural form */}
-              {tipo === 'natural' && (
+              {(tipo === 'natural' || countryMode === 'peru') && (
                 <div className="space-y-4">
-                  {countryMode === 'global' ? (
+                  {countryMode === 'peru' ? (
+                    <>
+                      {/* Perú: DNI de 8 dígitos; el nombre solo viaja al crear o actualizar */}
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                        {inputField('DNI *', natDni, setNatDni, { placeholder:'01234567', inputMode:'numeric', onKeyDown: e => e.key==='Enter' && analizarPerfil() })}
+                        {inputField(`Nombres${crearFicha ? ' *' : ''}`, natNombre, setNatNombre, { placeholder:'JUAN CARLOS' })}
+                        {inputField(`Apellido paterno${crearFicha ? ' *' : ''}`, natAp, setNatAp, { placeholder:'QUISPE' })}
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                        {inputField('Apellido materno', natAp2, setNatAp2, { placeholder:'MAMANI' })}
+                        {inputField('Email', natEmail, setNatEmail, { type:'email', placeholder:'correo@ejemplo.pe' })}
+                        {inputField('Teléfono', natTel, setNatTel, { placeholder:'+51912345678' })}
+                      </div>
+                      <p className={`text-xs ${dark ? 'text-slate-400' : 'text-slate-500'}`}>
+                        Sin «Crear o actualizar ficha», la consulta refresca una ficha que ya existe, sin tocar su nombre. Con la opción marcada, crea o actualiza la ficha como peruana con DNI y nombre completo.
+                      </p>
+                    </>
+                  ) : countryMode === 'global' ? (
                     <>
                       {/* Global layout: nationality prominently up front */}
                       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
@@ -1970,7 +2294,7 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) =>
               )}
 
               {/* Legal form */}
-              {tipo === 'legal' && (
+              {tipo === 'legal' && countryMode !== 'peru' && (
                 <div className="space-y-4">
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                     {inputField(countryMode === 'global' ? 'ID / NIT / Registro *' : 'RUT Empresa *', legRut, setLegRut, { placeholder: countryMode === 'global' ? 'ID-123456' : '76543210-K', onKeyDown: e => e.key==='Enter' && analizarPerfil() })}
@@ -1994,7 +2318,7 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) =>
                   className={`w-10 h-6 rounded-full border transition-all relative ${crearFicha ? 'bg-indigo-600 border-indigo-500' : dark ? 'bg-slate-700 border-slate-600' : 'bg-slate-200 border-slate-300'}`}>
                   <div className={`absolute top-1 w-4 h-4 rounded-full bg-white transition-transform ${crearFicha ? 'translate-x-5' : 'translate-x-1'}`} />
                 </div>
-                <span className={`text-sm ${dark ? 'text-slate-300' : 'text-slate-700'}`}>Crear / actualizar ficha antes de consultar</span>
+                <span className={`text-sm ${dark ? 'text-slate-300' : 'text-slate-700'}`}>{countryMode === 'peru' ? 'Crear o actualizar ficha' : 'Crear / actualizar ficha antes de consultar'}</span>
               </label>
 
               <button onClick={analizarPerfil} disabled={loading}
@@ -2015,7 +2339,13 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) =>
           <div className="space-y-6">
             <div>
               <h2 className={`text-2xl font-black ${dark ? 'text-white' : 'text-slate-800'}`}>Consulta Masiva</h2>
-              {countryMode === 'global' ? (
+              {countryMode === 'peru' ? (
+                <p className={`text-sm mt-1 ${textMuted}`}>
+                  Sube un Excel con columna <code className="font-mono text-indigo-400">dni</code> (o <code className="font-mono text-indigo-400">documento</code> / <code className="font-mono text-indigo-400">nro documento</code>).
+                  Para crear fichas: <code className="font-mono text-indigo-400">nombres</code>, <code className="font-mono text-indigo-400">apellido paterno</code> y <code className="font-mono text-indigo-400">apellido materno</code>, o <code className="font-mono text-indigo-400">nombre completo</code>.
+                  El DNI se completa con ceros a la izquierda (Excel se los come).
+                </p>
+              ) : countryMode === 'global' ? (
                 <p className={`text-sm mt-1 ${textMuted}`}>
                   Sube un Excel con columna <code className="font-mono text-indigo-400">dni</code> (obligatorio).
                   Columnas opcionales: <code className="font-mono text-indigo-400">nombre</code>, <code className="font-mono text-indigo-400">apellido</code>, <code className="font-mono text-indigo-400">pais</code> / <code className="font-mono text-indigo-400">nacionalidad</code>.
@@ -2043,7 +2373,9 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) =>
                   {masivoFile ? masivoFile.name : 'Arrastra tu Excel aquí o haz clic para seleccionar'}
                 </p>
                 <p className={`text-xs ${textMuted}`}>
-                  {countryMode === 'global'
+                  {countryMode === 'peru'
+                    ? <>Formato: <code className="font-mono text-indigo-400">.xlsx</code> · Columna obligatoria: <code className="font-mono text-indigo-400">dni</code> · Opcionales: <code className="font-mono text-indigo-400">nombres</code>, <code className="font-mono text-indigo-400">apellido paterno</code>, <code className="font-mono text-indigo-400">apellido materno</code></>
+                    : countryMode === 'global'
                     ? <>Formato: <code className="font-mono text-indigo-400">.xlsx</code> · Columna obligatoria: <code className="font-mono text-indigo-400">dni</code> · Opcionales: <code className="font-mono text-indigo-400">nombre</code>, <code className="font-mono text-indigo-400">apellido</code>, <code className="font-mono text-indigo-400">pais</code></>
                     : <>Formato: <code className="font-mono text-indigo-400">.xlsx</code> · Columna obligatoria: <code className="font-mono text-indigo-400">rut</code> o <code className="font-mono text-indigo-400">dni</code></>
                   }
