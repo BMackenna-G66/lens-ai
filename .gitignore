@@ -51,4 +51,5 @@ aws/flujo-autonomo/.aws-sam/
 test/wl.mjs
 test/decision.mjs
 test/rw/
+test/regcheqPeru.bundle.mjs
 cloudflare/empresadocs-proxy/test/tipos.mjs
