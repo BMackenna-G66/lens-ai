@@ -247,6 +247,19 @@ export interface DepsRegcheq {
   esperar?: (ms: number) => Promise<void>;
 }
 
+/** La ficha peruana se crea con el DNI Y EL NOMBRE COMPLETO (pedido de
+ *  Benjamín): nombres + apellido paterno, o el nombre completo entero. */
+export function tieneNombreParaCrear(d: DatosPersonaPeru): boolean {
+  return (!!d.nombres?.trim() && !!d.apellidoPaterno?.trim()) || !!d.nombreCompleto?.trim();
+}
+
+export class SinNombre extends Error {
+  constructor(dni: string) {
+    super(`sin nombre: no se crea la ficha peruana ${dni} (faltan nombres y apellido paterno, o nombre completo)`);
+    this.name = 'SinNombre';
+  }
+}
+
 export class FichaNoExiste extends Error {
   constructor(dni: string) {
     super(`No hay ficha en Regcheq para el DNI ${dni}. Para crearla, marcá «Crear o actualizar ficha» y cargá nombres y apellido paterno.`);
@@ -282,8 +295,11 @@ async function leerTrasPost(dni: string, deps: DepsRegcheq, ms: number): Promise
   return g.json;
 }
 
-/** Crear o actualizar: el POST con el nombre. Su respuesta ya trae las listas. */
+/** Crear o actualizar: el POST con el nombre. Su respuesta ya trae las listas.
+ *  Sin nombre completo NO se crea: ni con «crear» marcado ni en la creación
+ *  automática del masivo. Se levanta `SinNombre` y la fila queda como error. */
 async function crearOActualizar(dni: string, datos: DatosPersonaPeru, deps: DepsRegcheq): Promise<Crudo> {
+  if (!tieneNombreParaCrear(datos)) throw new SinNombre(dni);
   const p = await postFicha(bodyCreacionPeru(dni, datos), deps);
   if (!p.ok) throw new Error(`Regcheq rechazó crear o actualizar la ficha ${dni} (API ${p.status})`);
   return tieneListas(p.json) ? p.json : leerTrasPost(dni, deps, 800);

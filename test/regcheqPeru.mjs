@@ -18,7 +18,7 @@
 import {
   normalizaDniPeru, esDniPeruValido, bodyRefrescoPeru, bodyCreacionPeru, DNI_TYPE_PERU,
   listasPeru, derivarNivelPepPeru, resumenPepPeru, filaMasivoPeru, columnaDniPeru,
-  consultarPeru, procesarFilaPeru, FichaNoExiste, NOMBRE_LISTA_PERU,
+  consultarPeru, procesarFilaPeru, FichaNoExiste, SinNombre, tieneNombreParaCrear, NOMBRE_LISTA_PERU,
 } from './regcheqPeru.bundle.mjs';
 
 let f = 0;
@@ -175,6 +175,28 @@ s = regcheqFalso();
 await procesarFilaPeru({ dni: DNI, datos: { nombres: 'Ana', apellidoPaterno: 'Rojas' } }, true, s.deps);
 ok('con «crear fichas», POST con nombre y body peruano', posts(s.llamadas)[0].body.name === 'ANA' && posts(s.llamadas)[0].body.nationality === 'Peru');
 ok('la clave va en la URL, nunca en el body', s.llamadas.every(x => !JSON.stringify(x.body || {}).includes('CLAVE-DE-PRUEBA')));
+
+console.log('\n── Sin nombre completo NO se crea la ficha peruana (Benjamín) ──');
+const intentar = async (fn) => { try { await fn(); return null; } catch (e) { return e; } };
+s = regcheqFalso({ existe: false });
+error = await intentar(() => procesarFilaPeru({ dni: DNI, datos: {} }, false, s.deps));
+ok('404 sin nombre → error «sin nombre» y NO se crea', error instanceof SinNombre && /^sin nombre: no se crea la ficha peruana/.test(error.message) && posts(s.llamadas).length === 0, { error: String(error), llamadas: s.llamadas.map(x => x.metodo) });
+s = regcheqFalso({ existe: false });
+error = await intentar(() => procesarFilaPeru({ dni: DNI, datos: {} }, true, s.deps));
+ok('«crear» marcado sin nombre → error y NO se crea', error instanceof SinNombre && posts(s.llamadas).length === 0, s.llamadas);
+s = regcheqFalso({ existe: false });
+error = await intentar(() => procesarFilaPeru({ dni: DNI, datos: { apellidoPaterno: 'Rojas' } }, false, s.deps));
+ok('solo apellido paterno no alcanza', error instanceof SinNombre && posts(s.llamadas).length === 0);
+s = regcheqFalso({ existe: false });
+error = await intentar(() => procesarFilaPeru({ dni: DNI, datos: { nombres: 'Ana' } }, false, s.deps));
+ok('solo nombres no alcanza', error instanceof SinNombre && posts(s.llamadas).length === 0);
+s = regcheqFalso({ existe: false });
+await procesarFilaPeru({ dni: DNI, datos: { nombreCompleto: 'Ana Rojas Vega' } }, false, s.deps);
+ok('con «nombre completo» sí se crea', posts(s.llamadas)[0]?.body.name === 'ANA ROJAS VEGA', posts(s.llamadas)[0]?.body);
+s = regcheqFalso();
+perfil = await procesarFilaPeru({ dni: DNI, datos: {} }, false, s.deps);
+ok('una ficha que YA existe se refresca igual sin nombre', !!perfil.listas && !('name' in posts(s.llamadas)[0].body));
+ok('tieneNombreParaCrear', tieneNombreParaCrear({ nombres: 'A', apellidoPaterno: 'B' }) && tieneNombreParaCrear({ nombreCompleto: 'A B' }) && !tieneNombreParaCrear({ nombres: 'A' }) && !tieneNombreParaCrear({}));
 
 console.log(f ? `\n  ${f} FALLARON` : '\n  Todo OK.');
 process.exit(f ? 1 : 0);
