@@ -7,7 +7,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { ArrowLeft, Sun, Moon, FileSpreadsheet, Download, Search, X, ChevronRight, ChevronLeft, ChevronUp, ChevronDown, ArrowUpDown, AlertTriangle } from 'lucide-react';
 import type { AnalysisAction } from '../../types/criminalTypes';
-import { parsePeruMasivo, otrasListas, tieneSancion, rangoNivel, rangoRiesgo, type PeruProfile } from '../../services/peruCriminalParser';
+import { parsePeruMasivo, otrasListas, tieneSancion, rangoNivel, rangoRiesgo, pasaFiltros, type PeruProfile } from '../../services/peruCriminalParser';
 import { generatePeruProfilePdf } from '../../services/pdfGenerator';
 
 interface Props {
@@ -98,25 +98,9 @@ export const PeruCriminalApp: React.FC<Props> = ({ onBack, darkMode, onToggleDar
   }), [perfiles]);
 
   const filtrados = useMemo(() => {
-    const q = busqueda.trim().toLowerCase();
-    const lista = perfiles.filter(p => {
-      if (q && !`${p.dni} ${p.nombre}`.toLowerCase().includes(q)) return false;
-      if (fTipo === 'PEP' && !p.esPep) return false;
-      if (fTipo === 'Familiar' && !p.familiarDePep) return false;
-      if (fTipo === 'Funcionario' && !p.funcionarioPublico) return false;
-      if (fTipo === 'Sin PEP' && (p.esPep || p.familiarDePep || p.funcionarioPublico)) return false;
-      if (fNivel !== 'Todos' && (fNivel === 'sin' ? !!p.nivelPep : p.nivelPep !== fNivel)) return false;
-      if (fRiesgo !== 'Todos' && rangoRiesgo(p.riesgoFinal) !== rangoRiesgo(fRiesgo)) return false;
-      const otras = otrasListas(p);
-      if (fOtras === 'Con otras' && otras.length === 0) return false;
-      if (fOtras === 'Sin otras' && otras.length > 0) return false;
-      if (fOtras === 'Con sanción' && !tieneSancion(p)) return false;
-      if (!['Todas', 'Con otras', 'Sin otras', 'Con sanción'].includes(fOtras) && !otras.includes(fOtras)) return false;
-      if (fEstado === 'Pendiente' || fEstado === 'Revisado') { if (p.estado !== fEstado) return false; }
-      else if (fEstado === 'Sin acción') { if (p.accion) return false; }
-      else if (fEstado !== 'Todos' && p.accion !== fEstado) return false;
-      return true;
-    });
+    // La lógica vive en el parser (pasaFiltros), pura y testeada.
+    const filtros = { busqueda, tipo: fTipo, nivel: fNivel, riesgo: fRiesgo, otras: fOtras, estado: fEstado };
+    const lista = perfiles.filter(p => pasaFiltros(p, filtros));
     if (!sort.order) return lista;
     const dir = sort.order === 'asc' ? 1 : -1;
     const val = (p: PeruProfile): string | number =>
@@ -415,7 +399,9 @@ const FichaPeru: React.FC<{ p: PeruProfile; onClose: () => void; onUpdate: (dni:
         <div className="flex-grow overflow-y-auto px-8 py-5 text-sm">
           {tieneSancion(p) && (
             <div className="mb-4 bg-red-600 text-white rounded-xl px-4 py-3 text-sm font-bold flex items-center gap-2">
-              <AlertTriangle size={16} /> SANCIÓN — {p.otras.filter(o => o.sancion).length} hit(s) del tipo «sanction» en otras listas. Se lee aparte de PEP.
+              <AlertTriangle size={16} /> SANCIÓN — {p.otras.some(o => o.sancion)
+                ? `${p.otras.filter(o => o.sancion).length} hit(s) del tipo «sanction» en otras listas`
+                : `coincidió una lista de sanciones: ${p.listasConCoincidencia.filter(l => /ofac|sanci/i.test(l)).join(', ')}`}. Se lee aparte de PEP.
             </div>
           )}
           {p.listasConCoincidencia.length > 0 && (

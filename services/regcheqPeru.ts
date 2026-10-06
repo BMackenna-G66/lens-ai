@@ -196,10 +196,11 @@ export function derivarNivelPepPeru(listasRaw: Crudo): string {
 // ── Lectura de campos ────────────────────────────────────────────────────────
 //
 // Las claves se comparan SIN mayúsculas ni separadores: `nroResolucionNombramiento`,
-// `nro_resolucion_nombramiento` y `nroresolucionnombramiento` son la misma. El
-// export salía con las dos resoluciones vacías en las 518 filas PEP aunque la
-// fecha de actualización —de la misma fila— venía llena: el nombre de la clave
-// no calzaba, no faltaba el dato.
+// `nro_resolucion_nombramiento` y `nroresolucionnombramiento` son la misma. Es
+// una defensa ante variantes del proveedor. OJO: las resoluciones que salían
+// vacías en el export NO eran un nombre mal puesto —la clave real es
+// `nroresolucionnombramiento` y viene vacía en el dato—; lo que se perdía era
+// `record` (ver aCoincidencia).
 
 const normalClave = (k: string) => String(k).toLowerCase().replace(/[^a-z0-9]/g, '');
 

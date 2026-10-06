@@ -2567,10 +2567,13 @@ export const generatePeruProfilePdf = async (p: PeruProfile): Promise<void> => {
   doc.text(`PEP: ${siNo(p.esPep)} · Familiar de PEP: ${siNo(p.familiarDePep)} · Funcionario público: ${siNo(p.funcionarioPublico)}`, margin + 4, y + 21);
   y += 32;
 
-  if (p.otras.some(o => o.sancion)) {
+  const hitsSancion = p.otras.filter(o => o.sancion).length;
+  const listasSancion = p.listasConCoincidencia.filter(l => /ofac|sanci/i.test(l));
+  if (hitsSancion || listasSancion.length) {
     doc.setFillColor(185, 28, 28); doc.roundedRect(margin, y, pageWidth - margin * 2, 9, 1.5, 1.5, 'F');
     doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(...WHITE);
-    doc.text(`SANCIÓN — ${p.otras.filter(o => o.sancion).length} hit(s) del tipo «sanction» en otras listas`, margin + 4, y + 6);
+    doc.text(hitsSancion ? `SANCIÓN — ${hitsSancion} hit(s) del tipo «sanction» en otras listas`
+      : `SANCIÓN — coincidió una lista de sanciones: ${listasSancion.join(', ')}`, margin + 4, y + 6);
     y += 14;
   }
 

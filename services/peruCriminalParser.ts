@@ -111,8 +111,17 @@ function hoja(wb: XLSX.WorkBook, ...nombres: string[]): Fila[] | null {
 
 // ── Orden de severidad, para fusionar y ordenar ───────────────────────────────
 
-export const RANGO_RIESGO: Record<string, number> = { high: 3, 'high risk': 3, alto: 3, medium: 2, medio: 2, low: 1, bajo: 1 };
-export const rangoRiesgo = (r: string) => RANGO_RIESGO[String(r).trim().toLowerCase()] ?? 0;
+/** Por CONTENIDO, no por igualdad: el dato real viene «High Risk», «Medium
+ *  Risk» y «Low Risk». Con igualdad exacta solo se reconocía «high risk», y los
+ *  filtros Medium y Low daban 0 perfiles. */
+export function rangoRiesgo(r: string): number {
+  const t = String(r ?? '').toLowerCase();
+  if (/cr[ií]tic/.test(t)) return 4;
+  if (/high|alto/.test(t)) return 3;
+  if (/medium|medio/.test(t)) return 2;
+  if (/low|bajo/.test(t)) return 1;
+  return 0;
+}
 
 /** Un nivel numérico de Regcheq pesa más que «PEP», y «PEP» más que «Familiar». */
 export function rangoNivel(n: string): number {
@@ -260,5 +269,45 @@ export async function parsePeruMasivo(file: File): Promise<CargaPeru> {
 /** Las listas con coincidencia que no son PEP ni funcionario (Screening Global…). */
 export const otrasListas = (p: PeruProfile) => p.listasConCoincidencia.filter(l => !/pep|funcionario/i.test(l));
 
-/** ¿Algún hit de otras listas es una sanción? */
-export const tieneSancion = (p: PeruProfile) => p.otras.some(o => o.sancion);
+/** ¿Hay una sanción? Por los hits de «Otras coincidencias» o, en un export
+ *  viejo sin esa hoja, por la etiqueta de una lista que coincidió (OFAC…). */
+export const tieneSancion = (p: PeruProfile) =>
+  p.otras.some(o => o.sancion) || p.listasConCoincidencia.some(l => /ofac|sanci/i.test(l));
+
+// ── Filtros del dashboard (puros, para poder testearlos) ──────────────────────
+
+export interface FiltrosPeru {
+  busqueda: string;
+  /** Todos | PEP | Familiar | Funcionario | Sin PEP */
+  tipo: string;
+  /** Todos | sin | un nivel exacto */
+  nivel: string;
+  /** Todos | High | Medium | Low */
+  riesgo: string;
+  /** Todas | Con otras | Sin otras | Con sanción | una lista exacta */
+  otras: string;
+  /** Todos | Pendiente | Revisado | Sin acción | una acción */
+  estado: string;
+}
+
+export const FILTROS_PERU_TODOS: FiltrosPeru = { busqueda: '', tipo: 'Todos', nivel: 'Todos', riesgo: 'Todos', otras: 'Todas', estado: 'Todos' };
+
+export function pasaFiltros(p: PeruProfile, f: FiltrosPeru): boolean {
+  const q = f.busqueda.trim().toLowerCase();
+  if (q && !`${p.dni} ${p.nombre}`.toLowerCase().includes(q)) return false;
+  if (f.tipo === 'PEP' && !p.esPep) return false;
+  if (f.tipo === 'Familiar' && !p.familiarDePep) return false;
+  if (f.tipo === 'Funcionario' && !p.funcionarioPublico) return false;
+  if (f.tipo === 'Sin PEP' && (p.esPep || p.familiarDePep || p.funcionarioPublico)) return false;
+  if (f.nivel !== 'Todos' && (f.nivel === 'sin' ? !!p.nivelPep : p.nivelPep !== f.nivel)) return false;
+  if (f.riesgo !== 'Todos' && rangoRiesgo(p.riesgoFinal) !== rangoRiesgo(f.riesgo)) return false;
+  const otras = otrasListas(p);
+  if (f.otras === 'Con otras' && otras.length === 0) return false;
+  if (f.otras === 'Sin otras' && otras.length > 0) return false;
+  if (f.otras === 'Con sanción' && !tieneSancion(p)) return false;
+  if (!['Todas', 'Con otras', 'Sin otras', 'Con sanción'].includes(f.otras) && !otras.includes(f.otras)) return false;
+  if (f.estado === 'Pendiente' || f.estado === 'Revisado') { if (p.estado !== f.estado) return false; }
+  else if (f.estado === 'Sin acción') { if (p.accion) return false; }
+  else if (f.estado !== 'Todos' && p.accion !== f.estado) return false;
+  return true;
+}

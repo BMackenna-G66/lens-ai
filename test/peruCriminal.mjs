@@ -23,7 +23,7 @@ import XLSX from 'xlsx';
 import {
   listasPeru, resumenPepPeru, otrasCoincidencias, armarWorkbookPeru, HOJAS_PERU, legible, NOMBRE_LISTA_PERU,
 } from './pc/regcheqPeru.js';
-import { parsePeruWorkbook, parsePeruMasivo, otrasListas, tieneSancion } from './pc/peruCriminalParser.js';
+import { parsePeruWorkbook, parsePeruMasivo, otrasListas, tieneSancion, rangoRiesgo, pasaFiltros, FILTROS_PERU_TODOS } from './pc/peruCriminalParser.js';
 import { archivoDesdeWorkbook, confirmarEnvio } from './pc/envioCriminal.js';
 
 let f = 0;
@@ -148,6 +148,35 @@ ok('sin la hoja «Otras coincidencias»: se avisa', viejo.avisos.some(a => a.inc
 let error = null;
 try { parsePeruWorkbook(XLSX.utils.book_new()); } catch (e) { error = e; }
 ok('un archivo que no es el del masivo de Perú se rechaza con un motivo', error && /Resultados Regcheq Perú/.test(error.message), String(error));
+
+console.log('\n── Riesgo final tal como viene: «High Risk», «Medium Risk», «Low Risk» ──');
+for (const [v, n] of [['High Risk', 3], ['Medium Risk', 2], ['Low Risk', 1], ['High', 3], ['medio', 2], ['', 0]]) ok(`rangoRiesgo(«${v}») = ${n}`, rangoRiesgo(v) === n, rangoRiesgo(v));
+const wbR = XLSX.utils.book_new();
+XLSX.utils.book_append_sheet(wbR, hoja([
+  { 'DNI': '11111111', 'Riesgo final Ficha': 'High Risk' },
+  { 'DNI': '22222222', 'Riesgo final Ficha': 'Medium Risk' },
+  { 'DNI': '33333333', 'Riesgo final Ficha': 'Low Risk' },
+  { 'DNI': '44444444', 'Riesgo final Ficha': 'Low Risk' },
+  { 'DNI': '55555555', 'Riesgo final Ficha': 'Medium Risk' },   // fusión: Medium y después Low
+  { 'DNI': '55555555', 'Riesgo final Ficha': 'Low Risk' },
+  { 'DNI': '66666666', 'Riesgo final Ficha': 'Low Risk' },      // fusión: Low y después Medium
+  { 'DNI': '66666666', 'Riesgo final Ficha': 'Medium Risk' },
+]), 'Resultados Regcheq Perú');
+const perR = parsePeruWorkbook(wbR).perfiles;
+const filtrar = (riesgo) => perR.filter(x => pasaFiltros(x, { ...FILTROS_PERU_TODOS, riesgo })).map(x => x.dni).sort();
+ok('filtro High → 1', JSON.stringify(filtrar('High')) === '["11111111"]', filtrar('High'));
+ok('filtro Medium → los 3 Medium (antes daba 0)', JSON.stringify(filtrar('Medium')) === '["22222222","55555555","66666666"]', filtrar('Medium'));
+ok('filtro Low → los 2 Low (antes daba 0)', JSON.stringify(filtrar('Low')) === '["33333333","44444444"]', filtrar('Low'));
+ok('fusión Medium + Low → Medium, en cualquier orden', perR.find(x => x.dni === '55555555').riesgoFinal === 'Medium Risk' && perR.find(x => x.dni === '66666666').riesgoFinal === 'Medium Risk');
+ok('el orden por riesgo ya no empata Medium con Low', rangoRiesgo('Medium Risk') > rangoRiesgo('Low Risk'));
+
+console.log('\n── Sanción con un export viejo (sin «Otras coincidencias») ──');
+const wbS = XLSX.utils.book_new();
+XLSX.utils.book_append_sheet(wbS, hoja([{ 'DNI': '12121212', 'Coincidencia_OFAC': 'True' }]), 'Resultados Regcheq Perú');
+const pS = parsePeruWorkbook(wbS).perfiles[0];
+ok('una lista OFAC con coincidencia cuenta como sanción aunque no haya hits', pS.otras.length === 0 && tieneSancion(pS));
+ok('  y el filtro «Con sanción» la encuentra', pasaFiltros(pS, { ...FILTROS_PERU_TODOS, otras: 'Con sanción' }));
+ok('sin listas de sanción, no', !tieneSancion(parsePeruWorkbook(wbR).perfiles[0]));
 
 console.log('\n── El aviso antes de navegar ──');
 let descargado = 0;
