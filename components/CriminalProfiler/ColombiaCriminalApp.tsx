@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import * as XLSX from 'xlsx';
 import { ArrowLeft, Sun, Moon, FileSpreadsheet, Download, Search, X, ChevronRight, ChevronLeft, ChevronUp, ChevronDown, ArrowUpDown, Clock, List, Settings2 } from 'lucide-react';
 import { AnalysisAction } from '../../types/criminalTypes';
@@ -13,7 +13,11 @@ const RISK_RANK: Record<string, number> = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW
 const LP_RANK: Record<string, number> = { REVIEW_CRITICAL: 4, REVIEW_WARNING: 3, MANUAL_REVIEW: 2, RELEASE: 1 };
 type SortOrder = 'asc' | 'desc' | null;
 
-interface Props { onBack: () => void; darkMode: boolean; onToggleDarkMode: () => void; }
+interface Props {
+  onBack: () => void; darkMode: boolean; onToggleDarkMode: () => void;
+  /** El archivo que llega desde el masivo con «Enviar al Criminal Profile». */
+  archivoInicial?: File | null;
+}
 
 const ACCIONES: AnalysisAction[] = ['Liberar', 'Revisar', 'Liberar + UCR', 'Fully Blocked'];
 
@@ -52,7 +56,7 @@ const SortTh: React.FC<{ label: string; k: SortKey; sort: { key: SortKey; order:
   </th>
 );
 
-export const ColombiaCriminalApp: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode }) => {
+export const ColombiaCriminalApp: React.FC<Props> = ({ onBack, darkMode, onToggleDarkMode, archivoInicial }) => {
   const [profiles, setProfiles] = useState<ColombiaProfile[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -80,6 +84,13 @@ export const ColombiaCriminalApp: React.FC<Props> = ({ onBack, darkMode, onToggl
       setError(e instanceof Error ? e.message : String(e));
     } finally { setLoading(false); }
   };
+
+  // El archivo del botón del masivo: misma ruta que subirlo (parseColombiaMasivo).
+  const cargadoInicial = useRef(false);
+  useEffect(() => {
+    if (archivoInicial && !cargadoInicial.current) { cargadoInicial.current = true; handleFile(archivoInicial); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [archivoInicial]);
 
   const update = (dni: string, patch: Partial<ColombiaProfile>) =>
     setProfiles(prev => prev.map(p => p.numeroDni === dni ? { ...p, ...patch } : p));

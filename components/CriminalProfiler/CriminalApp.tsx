@@ -8,6 +8,8 @@ import { CatalogManager } from './CatalogManager';
 import { ComparisonView } from './ComparisonView';
 import { TriageView } from './TriageView';
 import { ColombiaCriminalApp } from './ColombiaCriminalApp';
+import { PeruCriminalApp } from './PeruCriminalApp';
+import type { CargaCriminal } from '../../services/envioCriminal';
 import { subscribeCriminalQueue, updateQueueReview, isQueueAvailable } from '../../services/criminalQueueService';
 import {
   FileSpreadsheet, Search, Filter, ChevronRight, ShieldAlert, AlertCircle,
@@ -24,9 +26,12 @@ interface CriminalAppProps {
   onBack: () => void;
   darkMode: boolean;
   onToggleDarkMode: () => void;
+  /** El resultado de un masivo que llega con «Enviar al Criminal Profile». */
+  initialCarga?: CargaCriminal | null;
+  onConsumeInitialCarga?: () => void;
 }
 
-export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onToggleDarkMode }) => {
+export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onToggleDarkMode, initialCarga, onConsumeInitialCarga }) => {
   const [state, setState] = useState<CriminalAppState>({
     profiles: [], catalog: null, loading: false,
     error: null, selectedRut: null, view: 'dashboard'
@@ -41,7 +46,11 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
   const [sortConfig, setSortConfig] = useState<{ key: SortKey; order: SortOrder }>({ key: 'rut', order: null });
   const [flowType, setFlowType] = useState<'emergency' | 'masivo'>('emergency');
   const [pepTab, setPepTab] = useState<'sanciones' | 'peps' | 'sin-antecedentes'>('sanciones');
-  const [country, setCountry] = useState<'CL' | 'CO' | null>(null);
+  const [country, setCountry] = useState<'CL' | 'CO' | 'PE' | null>(null);
+  // El archivo que llega desde el masivo de Colombia o de Perú: lo carga su
+  // sección con el mismo parser que una subida manual.
+  const [archivoPais, setArchivoPais] = useState<File | null>(null);
+  const cargaConsumida = useRef<File | null>(null);
   const [queueMode, setQueueMode] = useState(false);   // cola de trabajo en vivo (Firestore)
   const queueUnsubRef = useRef<null | (() => void)>(null);
   const [sfMsg, setSfMsg] = useState<string | null>(null);   // mensaje del helper de Salesforce
@@ -93,9 +102,12 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
       const detected = await detectCriminalFileFormat(file);
       const resolvedFlow = detected === 'regcheq' ? 'masivo' : hintFlow;
       if (resolvedFlow !== hintFlow) setFlowType(resolvedFlow);
+      // El catálogo maestro, aunque el efecto que lo fija todavía no haya
+      // corrido: pasa cuando el archivo llega directo desde un masivo.
+      const catalogo = state.catalog ?? DEFAULT_CATALOG;
       const data = resolvedFlow === 'masivo'
-        ? await processRegcheqFile(file, state.catalog)
-        : await processExcelFile(file, state.catalog);
+        ? await processRegcheqFile(file, catalogo)
+        : await processExcelFile(file, catalogo);
       setState(prev => ({ ...prev, profiles: data, loading: false }));
       setSelectedRuts(new Set());
     } catch (err: any) {
@@ -188,6 +200,19 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
 
   useEffect(() => () => { queueUnsubRef.current?.(); }, []);
 
+  // «Enviar al Criminal Profile»: fija el país y carga el archivo por la MISMA
+  // ruta que una subida manual. Se consume una sola vez.
+  useEffect(() => {
+    if (!initialCarga || cargaConsumida.current === initialCarga.archivo) return;
+    cargaConsumida.current = initialCarga.archivo;
+    const { pais, archivo } = initialCarga;
+    onConsumeInitialCarga?.();
+    setCountry(pais);
+    if (pais === 'CL') { setFlowType('masivo'); handleProfileLoad(archivo, 'masivo'); }
+    else setArchivoPais(archivo);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialCarga]);
+
   const handleBulkAction = (action: AnalysisAction | 'Pendiente') => {
     if (selectedRuts.size === 0) return;
     setState(prev => {
@@ -278,7 +303,7 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
         <main className="flex-grow flex flex-col items-center justify-center px-6 py-16">
           <h2 className="text-2xl font-black text-slate-900 dark:text-white mb-2 uppercase tracking-tight">Selecciona el País</h2>
           <p className="text-slate-500 dark:text-slate-400 max-w-lg mb-10 text-center font-medium">Cada país tiene su propio flujo de análisis de perfiles.</p>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 w-full max-w-2xl">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 w-full max-w-4xl">
             <button onClick={() => setCountry('CL')} className="bg-white dark:bg-slate-900 rounded-[2rem] border-2 border-slate-200 dark:border-slate-700 hover:border-indigo-400 dark:hover:border-indigo-500 hover:shadow-xl transition-all group p-10 flex flex-col items-center gap-4">
               <span className="text-5xl">🇨🇱</span>
               <div className="text-center">
@@ -293,6 +318,13 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
                 <p className="text-xs text-slate-500 dark:text-slate-400 font-medium">Carga el resultado del masivo Inspektor. Revisión y decisión manual (sin catálogo).</p>
               </div>
             </button>
+            <button onClick={() => setCountry('PE')} className="bg-white dark:bg-slate-900 rounded-[2rem] border-2 border-slate-200 dark:border-slate-700 hover:border-red-400 dark:hover:border-red-500 hover:shadow-xl transition-all group p-10 flex flex-col items-center gap-4">
+              <span className="text-5xl">🇵🇪</span>
+              <div className="text-center">
+                <h4 className="font-black text-slate-900 dark:text-white uppercase text-sm mb-2">Perú</h4>
+                <p className="text-xs text-slate-500 dark:text-slate-400 font-medium">Solo PEP. Carga el resultado del masivo de Perú de Regcheq. Revisión y decisión manual (sin catálogo).</p>
+              </div>
+            </button>
           </div>
         </main>
       </div>
@@ -301,7 +333,12 @@ export const CriminalApp: React.FC<CriminalAppProps> = ({ onBack, darkMode, onTo
 
   // ── Flujo Colombia (componente aparte; Chile queda intacto abajo) ─────────────
   if (country === 'CO') {
-    return <ColombiaCriminalApp onBack={() => setCountry(null)} darkMode={darkMode} onToggleDarkMode={onToggleDarkMode} />;
+    return <ColombiaCriminalApp onBack={() => { setCountry(null); setArchivoPais(null); }} darkMode={darkMode} onToggleDarkMode={onToggleDarkMode} archivoInicial={archivoPais} />;
+  }
+
+  // ── Flujo Perú (componente aparte; solo PEP) ──────────────────────────────────
+  if (country === 'PE') {
+    return <PeruCriminalApp onBack={() => { setCountry(null); setArchivoPais(null); }} darkMode={darkMode} onToggleDarkMode={onToggleDarkMode} archivoInicial={archivoPais} />;
   }
 
   // ── Flujo Chile (el actual, sin cambios) ──────────────────────────────────────

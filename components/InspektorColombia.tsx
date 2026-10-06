@@ -1,5 +1,6 @@
 import React, { useState, useRef, useCallback } from 'react';
 import * as XLSX from 'xlsx';
+import { archivoDesdeWorkbook, confirmarEnvio, type CargaCriminal } from '../services/envioCriminal';
 import {
   normalizeName, normalizeDni, mapTipoDoc, maskPii, dedupe, dedupeKey,
   classify, retry, cacheGet, cachePut, cacheClear, buildMasivoWorkbook,
@@ -327,6 +328,8 @@ function ProcRecord({ rec, idx, dark }: { rec: InspektorProcRecord; idx: number;
 interface InspektorColombiaProps {
   onBack: () => void;
   dark: boolean;
+  /** Lleva el resultado del masivo al Criminal Profile (sección Colombia). */
+  onEnviarACriminal?: (carga: CargaCriminal) => void;
 }
 
 type TabMode = 'individual' | 'masivo';
@@ -348,7 +351,7 @@ interface MasivoRow {
 }
 interface LogLine { type: 'ok' | 'err' | 'info'; text: string; }
 
-export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, dark }) => {
+export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, dark, onEnviarACriminal }) => {
   // ── Individual state ─────────────────────────────────────────────────────────
   const [tab, setTab]             = useState<TabMode>('individual');
   const [nombre, setNombre]       = useState('');
@@ -633,6 +636,23 @@ export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, da
   // ── Masivo: export Excel (extracción completa, 5 hojas) ───────────────────────
   function exportarExcelMasivo() {
     if (masivoRows.length === 0) return;
+    const { wb, nombre } = armarWorkbookMasivo();
+    XLSX.writeFile(wb, nombre);
+  }
+
+  /** Manda el resultado al Criminal Profile: el MISMO workbook del export, que
+   *  allá se carga con el mismo parser que una subida manual. */
+  function enviarACriminal() {
+    if (!onEnviarACriminal || masivoRows.length === 0 || masivoRunning) return;
+    const { wb, nombre } = armarWorkbookMasivo();
+    const archivo = archivoDesdeWorkbook(wb, nombre);
+    if (!confirmarEnvio(() => XLSX.writeFile(wb, nombre))) return;
+    onEnviarACriminal({ pais: 'CO', archivo });
+  }
+
+  /** El workbook del masivo. Lo usan «Exportar Excel» y «Enviar al Criminal
+   *  Profile»: un solo armado para los dos. */
+  function armarWorkbookMasivo(): { wb: XLSX.WorkBook; nombre: string } {
 
     const now = new Date();
     const pad = (n: number) => String(n).padStart(2, '0');
@@ -782,7 +802,7 @@ export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, da
       { name: 'JEPMS', rows: jepms },
       { name: 'Perfil_Criminal', rows: perfilCriminal },
     ]);
-    XLSX.writeFile(wb, `inspektor_masivo_${ts}.xlsx`);
+    return { wb, nombre: `inspektor_masivo_${ts}.xlsx` };
   }
 
   // ── Masivo: reiniciar (empezar de cero) ──────────────────────────────────────
@@ -933,6 +953,12 @@ export const InspektorColombia: React.FC<InspektorColombiaProps> = ({ onBack, da
                   <button onClick={exportarExcelMasivo}
                     className={`flex items-center gap-2 border font-bold px-5 py-2.5 rounded-xl text-sm transition-all ${dark ? 'border-emerald-600/50 text-emerald-400 hover:bg-emerald-950/40' : 'border-emerald-500 text-emerald-700 hover:bg-emerald-50'}`}>
                     📥 Exportar Excel
+                  </button>
+                )}
+                {masivoRows.length > 0 && !masivoRunning && onEnviarACriminal && (
+                  <button onClick={enviarACriminal} title="Abre el Criminal Profile con este resultado, igual que descargarlo y subirlo"
+                    className={`flex items-center gap-2 border font-bold px-5 py-2.5 rounded-xl text-sm transition-all ${dark ? 'border-indigo-500/60 text-indigo-300 hover:bg-indigo-950/40' : 'border-indigo-500 text-indigo-700 hover:bg-indigo-50'}`}>
+                    🛡 Enviar al Criminal Profile
                   </button>
                 )}
                 {(masivoRows.length > 0 || masivoFile) && !masivoRunning && (

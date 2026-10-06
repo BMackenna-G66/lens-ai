@@ -12,7 +12,7 @@
 //
 // Correr:
 //   npx esbuild services/regcheqPeru.ts --bundle --format=esm --platform=node \
-//     --outfile=test/regcheqPeru.bundle.mjs --log-level=warning
+//     --packages=external --outfile=test/regcheqPeru.bundle.mjs --log-level=warning
 //   node test/regcheqPeru.mjs
 
 import {

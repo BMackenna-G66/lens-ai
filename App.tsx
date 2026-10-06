@@ -17,6 +17,7 @@ import { CasosInbox } from './components/CasosInbox';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { IconFiles, IconAlertTriangle, IconWallet, IconScale } from './components/IconComponents';
 import { trackModuleVisit, ModuleKey } from './services/analyticsService';
+import type { CargaCriminal } from './services/envioCriminal';
 
 type TabKey = 'dashboard' | 'analyzer' | 'batch' | 'tools' | 'crypto' | 'compliance';
 type Suite = 'compliance' | 'criminal' | 'admin' | 'general-dashboard' | 'regcheq' | 'lens360' | 'casos' | 'kyb' | null;
@@ -27,6 +28,10 @@ const AppContent: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabKey>('dashboard');
   const [darkMode, setDarkMode] = useState<boolean>(() => localStorage.getItem('darkMode') === 'true');
   const [pending360Rut, setPending360Rut] = useState<string | null>(null);
+  // El resultado de un masivo que va al Criminal Profile con «Enviar al
+  // Criminal Profile». Solo en memoria: nada sale del navegador.
+  const [pendingCriminal, setPendingCriminal] = useState<CargaCriminal | null>(null);
+  const enviarACriminal = (carga: CargaCriminal) => { setPendingCriminal(carga); setActiveSuite('criminal'); };
 
   // Abre la Vista 360° con un RUT precargado (desde el Analizador / Batch).
   const openLens360 = (rut: string) => { setPending360Rut(rut); setActiveSuite('lens360'); };
@@ -89,6 +94,7 @@ const AppContent: React.FC = () => {
   } else if (activeSuite === 'regcheq') {
     mainContent = <RegcheqTool
       onBack={() => setActiveSuite(null)}
+      onEnviarACriminal={enviarACriminal}
       darkMode={darkMode}
       onToggleDarkMode={() => setDarkMode(d => !d)}
     />;
@@ -106,7 +112,8 @@ const AppContent: React.FC = () => {
 
   } else if (activeSuite === 'criminal') {
     mainContent = (userProfile?.modules?.criminal ?? true)
-      ? <CriminalApp onBack={() => setActiveSuite(null)} darkMode={darkMode} onToggleDarkMode={() => setDarkMode(d => !d)} />
+      ? <CriminalApp onBack={() => setActiveSuite(null)} darkMode={darkMode} onToggleDarkMode={() => setDarkMode(d => !d)}
+          initialCarga={pendingCriminal} onConsumeInitialCarga={() => setPendingCriminal(null)} />
       : <AccessDenied msg="Módulo desactivado por tu administrador" />;
 
   } else if (activeSuite === 'kyb') {
