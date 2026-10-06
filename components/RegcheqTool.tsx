@@ -9,9 +9,10 @@ import { evaluateValidationRules, ValidationAlert, SEVERITY_META } from '../serv
 import { Lens360Tributaria } from '../types/lens360';
 import {
   listasPeru, derivarNivelPepPeru, resumenPepPeru, normalizaDniPeru, esDniPeruValido,
-  consultarPeru, procesarFilaPeru, filaMasivoPeru, columnaDniPeru, FichaNoExiste,
+  consultarPeru, procesarFilaPeru, filaMasivoPeru, columnaDniPeru, FichaNoExiste, armarWorkbookPeru,
   type ResumenPepPeru, type DepsRegcheq,
 } from '../services/regcheqPeru';
+import { archivoDesdeWorkbook, confirmarEnvio, type CargaCriminal } from '../services/envioCriminal';
 
 type CountryMode = null | 'chile' | 'colombia' | 'global' | 'peru';
 
@@ -1467,11 +1468,13 @@ function ResultCard({ result, dark }: { result: PerfilResult; dark: boolean }) {
 
 interface RegcheqToolProps {
   onBack: () => void;
+  /** Lleva el resultado de un masivo (Chile, Perú o Colombia) al Criminal Profile. */
+  onEnviarACriminal?: (carga: CargaCriminal) => void;
   darkMode?: boolean;
   onToggleDarkMode?: () => void;
 }
 
-export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) => {
+export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode, onEnviarACriminal }) => {
   // Use global darkMode if provided, otherwise fallback to localStorage
   const [localDark] = useState<boolean>(() => localStorage.getItem('regcheq-theme') !== 'light');
   const dark = darkMode !== undefined ? darkMode : localDark;
@@ -1840,72 +1843,46 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) =>
     setCarouselIdx(0);
   }
 
-  /** El Excel de Perú: las listas que vinieron —incluidas las cuatro de Perú—,
-   *  las columnas PEP, y una hoja con el detalle de cada coincidencia PEP. */
-  function exportarExcelPeru() {
-    const now = new Date();
-    const pad = (n: number) => String(n).padStart(2, '0');
-    const ts  = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
-    const fileName = `resultado_regcheq_peru_${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.xlsx`;
-    const siNo = (b?: boolean) => (b ? 'Sí' : 'No');
-    const etiquetas = [...new Set(masivoResults.flatMap(r => Object.keys(r.listas)))];
+  /** El Excel de Perú lo arma `armarWorkbookPeru` (services/regcheqPeru): la
+   *  MISMA función para «Exportar Excel» y para «Enviar al Criminal Profile». */
+  function armarWorkbookDePeru() {
+    return armarWorkbookPeru(masivoResults.map(r => ({
+      dni: r.dni,
+      nombre: r.nombre,
+      nombres: r.ficha['Nombre'] || '',
+      apellidoPaterno: r.ficha['Apellido paterno'] || '',
+      apellidoMaterno: r.ficha['Apellido materno'] || '',
+      riesgoFinal: r.riesgo_final,
+      nivelPep: String(r.pep_level || ''),
+      pep: r.pepPeru,
+      listas: r.listas,
+      alertasTexto: (r.alerts ?? []).map(a => `[${SEVERITY_META[a.severity].label}] ${a.title}`).join(' · '),
+    })));
+  }
 
-    const resultadosRows = masivoResults.map(r => {
-      const fila: Record<string, string | number> = {
-        'DNI':                 r.dni,
-        'Nombre completo':     r.nombre,
-        'Nombres':             r.ficha['Nombre'] || '',
-        'Apellido paterno':    r.ficha['Apellido paterno'] || '',
-        'Apellido materno':    r.ficha['Apellido materno'] || '',
-        'Riesgo final Ficha':  r.riesgo_final,
-        'Es PEP':              siNo(r.pepPeru?.esPep),
-        'Familiar de PEP':     siNo(r.pepPeru?.familiarDePep),
-        'Nivel PEP':           r.pep_level || '',
-        'Funcionario público': siNo(r.pepPeru?.funcionarioPublico),
-        'listas_total_coincidencias': Object.values(r.listas).filter(e => e.coincidence).length,
-      };
-      for (const e of etiquetas) fila[`Coincidencia_${e}`] = r.listas[e]?.coincidence ? 'True' : 'False';
-      fila['Alertas validación'] = (r.alerts ?? []).map(a => `[${SEVERITY_META[a.severity].label}] ${a.title}`).join(' · ');
-      return fila;
-    });
-
-    const pepRows: Record<string, string>[] = [];
-    for (const r of masivoResults) {
-      const p = r.pepPeru;
-      if (!p) continue;
-      for (const [tipoPep, lista] of [['PEP', p.coincidencias], ['Funcionario público', p.funcionario]] as const) {
-        for (const c of lista) pepRows.push({
-          'DNI': r.dni, 'Nombre': r.nombre, 'Tipo': tipoPep, 'Lista': c.lista, 'Origen': c.origen,
-          'Conclusión': c.conclusion, '% coincidencia': c.porcentaje,
-          'Res. nombramiento': c.resolucionNombramiento, 'Res. retiro': c.resolucionRetiro, 'Actualizado': c.fechaUpdate,
-        });
-      }
-      for (const f of p.familiares) pepRows.push({
-        'DNI': r.dni, 'Nombre': r.nombre, 'Tipo': 'Familiar de PEP', 'Relación': f.relacion,
-        'PEP vinculado': f.pepVinculado, 'DNI PEP': f.dniPep, 'Nivel': f.nivel,
-        'Base regulatoria': f.baseRegulatoria, 'Veracidad': f.veracidad, 'Riesgo': f.riesgo,
-      });
-    }
-
-    const resumenRows = [
-      { 'Generado': 'Total personas',      [ts]: masivoResults.length },
-      { 'Generado': 'High Risk',           [ts]: masivoResults.filter(r => (r.riesgo_final || '').toLowerCase().includes('high')).length },
-      { 'Generado': 'PEP',                 [ts]: masivoResults.filter(r => r.pepPeru?.esPep).length },
-      { 'Generado': 'Familiar de PEP',     [ts]: masivoResults.filter(r => r.pepPeru?.familiarDePep).length },
-      { 'Generado': 'Funcionario público', [ts]: masivoResults.filter(r => r.pepPeru?.funcionarioPublico).length },
-    ];
-
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(resultadosRows), 'Resultados Regcheq Perú');
-    if (pepRows.length > 0) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(pepRows), 'PEP Perú');
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(resumenRows), 'Resumen');
-    XLSX.writeFile(wb, fileName);
+  /** El workbook del masivo, del país que corresponda. Lo usan «Exportar
+   *  Excel» y «Enviar al Criminal Profile»: un solo armado para los dos. */
+  function armarWorkbookMasivo(): { wb: XLSX.WorkBook; nombre: string } {
+    return countryMode === 'peru' ? armarWorkbookDePeru() : armarWorkbookChile();
   }
 
   function exportarExcel() {
     if (masivoResults.length === 0) return;
-    if (countryMode === 'peru') return exportarExcelPeru();
+    const { wb, nombre } = armarWorkbookMasivo();
+    XLSX.writeFile(wb, nombre);
+  }
 
+  /** Manda el resultado del masivo al Criminal Profile (Chile o Perú): el MISMO
+   *  workbook del export, como archivo, por la misma ruta que una subida manual. */
+  function enviarACriminal() {
+    if (!onEnviarACriminal || masivoResults.length === 0 || masivoRunning) return;
+    const { wb, nombre } = armarWorkbookMasivo();
+    const archivo = archivoDesdeWorkbook(wb, nombre);
+    if (!confirmarEnvio(() => XLSX.writeFile(wb, nombre))) return;
+    onEnviarACriminal({ pais: countryMode === 'peru' ? 'PE' : 'CL', archivo });
+  }
+
+  function armarWorkbookChile(): { wb: XLSX.WorkBook; nombre: string } {
     const now = new Date();
     const pad = (n: number) => String(n).padStart(2, '0');
     const ts  = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
@@ -2024,7 +2001,7 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) =>
     if (causasRows.length > 0)
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(causasRows), 'Causas Penales Chile');
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(resumenRows),       'Resumen');
-    XLSX.writeFile(wb, fileName);
+    return { wb, nombre: fileName };
   }
 
   function exportarPDFAll() {
@@ -2065,7 +2042,7 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) =>
 
   // ── Colombia mode ──────────────────────────────────────────────────────────
   if (countryMode === 'colombia') {
-    return <InspektorColombia onBack={() => setCountryMode(null)} dark={dark} />;
+    return <InspektorColombia onBack={() => setCountryMode(null)} dark={dark} onEnviarACriminal={onEnviarACriminal} />;
   }
 
   // ── Country selector landing ────────────────────────────────────────────────
@@ -2426,6 +2403,12 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode }) =>
                       className={`flex items-center gap-2 border font-bold px-5 py-2.5 rounded-xl text-sm transition-all ${dark ? 'border-emerald-600/50 text-emerald-400 hover:bg-emerald-950/40' : 'border-emerald-500 text-emerald-700 hover:bg-emerald-50'}`}>
                       📥 Exportar Excel
                     </button>
+                    {onEnviarACriminal && (countryMode === 'chile' || countryMode === 'peru') && (
+                      <button onClick={enviarACriminal} title="Abre el Criminal Profile con este resultado, igual que descargarlo y subirlo"
+                        className={`flex items-center gap-2 border font-bold px-5 py-2.5 rounded-xl text-sm transition-all ${dark ? 'border-indigo-500/60 text-indigo-300 hover:bg-indigo-950/40' : 'border-indigo-500 text-indigo-700 hover:bg-indigo-50'}`}>
+                        🛡 Enviar al Criminal Profile
+                      </button>
+                    )}
                     <button onClick={exportarPDFAll}
                       className={`flex items-center gap-2 border font-bold px-5 py-2.5 rounded-xl text-sm transition-all ${dark ? 'border-indigo-600/50 text-indigo-400 hover:bg-indigo-950/40' : 'border-violet-500 text-violet-700 hover:bg-violet-50'}`}>
                       📋 PDF todas las fichas

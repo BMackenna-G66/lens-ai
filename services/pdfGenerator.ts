@@ -4,6 +4,7 @@ import autoTable from 'jspdf-autotable';
 import { ExtractedField, CryptoWalletProfile, ComplianceAnalysisResult, FinancialDocumentProcess, FinancialDocumentType } from '../types';
 import { Lens360Result, RegcheqEnrichment } from '../types/lens360';
 import { ColombiaProfile, buildTimeline } from './colombiaCriminalParser';
+import type { PeruProfile } from './peruCriminalParser';
 import { ValidationAlert, SEVERITY_META } from './validationRules';
 import { esPrecedente, esNoPrecedente } from './precedentes';
 
@@ -2533,4 +2534,110 @@ export const generateCasoPdf = async (data: CasoPdfData): Promise<void> => {
   const totalPages = (doc as any).internal.getNumberOfPages();
   for (let i = 1; i <= totalPages; i++) { doc.setPage(i); addPageFooter(doc, i, totalPages, generationDate); }
   doc.save(`caso_${(data.numeroCaso || 'sin_numero').replace(/[^a-z0-9_-]/gi, '_')}.pdf`);
+};
+
+
+// ─── PERÚ — ficha del Criminal Profile (solo PEP) ────────────────────────────
+// Mismo patrón que la de Colombia: identidad, decisión manual del analista y
+// las tablas de detalle. Las columnas vacías no se imprimen.
+export const generatePeruProfilePdf = async (p: PeruProfile): Promise<void> => {
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const margin = 14;
+  const date = new Date().toLocaleString('es-CL');
+
+  doc.setFillColor(...NAVY); doc.rect(0, 0, pageWidth, 38, 'F');
+  doc.setFillColor(...INDIGO); doc.rect(0, 38, pageWidth, 2, 'F');
+  const logo = await loadLogoBase64();
+  if (logo) { try { doc.addImage(logo, 'JPEG', pageWidth - 58, 8, 44, 13); } catch { /* sin logo */ } }
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(16); doc.setTextColor(...WHITE);
+  doc.text('INFORME DE PERFIL — PERÚ (PEP)', margin, 16);
+  doc.setFontSize(9); doc.setFont('helvetica', 'normal'); doc.setTextColor(196, 210, 230);
+  doc.text('CriminalProfile AI · Compliance Team Global66', margin, 24);
+  doc.text(date, pageWidth - margin, 24, { align: 'right' });
+
+  let y = 48;
+  const siNo = (b: boolean) => (b ? 'Sí' : 'No');
+  doc.setFillColor(...LIGHT_GRAY); doc.setDrawColor(220, 228, 240);
+  doc.roundedRect(margin, y, pageWidth - margin * 2, 24, 2, 2, 'FD');
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(12); doc.setTextColor(...DARK_TEXT);
+  doc.text((p.nombre || p.dni).toUpperCase(), margin + 4, y + 9);
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...MID_GRAY);
+  doc.text(`DNI: ${p.dni} · Riesgo final: ${p.riesgoFinal || '—'} · Nivel PEP: ${p.nivelPep || '—'}`, margin + 4, y + 16);
+  doc.text(`PEP: ${siNo(p.esPep)} · Familiar de PEP: ${siNo(p.familiarDePep)} · Funcionario público: ${siNo(p.funcionarioPublico)}`, margin + 4, y + 21);
+  y += 32;
+
+  const hitsSancion = p.otras.filter(o => o.sancion).length;
+  const listasSancion = p.listasConCoincidencia.filter(l => /ofac|sanci/i.test(l));
+  if (hitsSancion || listasSancion.length) {
+    doc.setFillColor(185, 28, 28); doc.roundedRect(margin, y, pageWidth - margin * 2, 9, 1.5, 1.5, 'F');
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(...WHITE);
+    doc.text(hitsSancion ? `SANCIÓN — ${hitsSancion} hit(s) del tipo «sanction» en otras listas`
+      : `SANCIÓN — coincidió una lista de sanciones: ${listasSancion.join(', ')}`, margin + 4, y + 6);
+    y += 14;
+  }
+
+  const acc = (p.accion || 'PENDIENTE').toLowerCase();
+  const isLib = acc.includes('liber'); const isBlock = acc.includes('block');
+  const fill: [number, number, number] = isLib ? [240, 253, 244] : isBlock ? [254, 242, 242] : [255, 251, 235];
+  const border: [number, number, number] = isLib ? [134, 239, 172] : isBlock ? [252, 165, 165] : [252, 211, 77];
+  const txt: [number, number, number] = isLib ? [21, 128, 61] : isBlock ? [185, 28, 28] : [146, 64, 14];
+  const notasLines = p.notas ? doc.splitTextToSize(`Notas: ${p.notas}`, pageWidth - margin * 2 - 8) : [];
+  const boxH = 16 + notasLines.length * 4;
+  doc.setFillColor(...fill); doc.setDrawColor(...border);
+  doc.roundedRect(margin, y, pageWidth - margin * 2, boxH, 2, 2, 'FD');
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(8); doc.setTextColor(...MID_GRAY);
+  doc.text('DECISIÓN MANUAL DEL ANALISTA', margin + 4, y + 6);
+  doc.setFontSize(12); doc.setTextColor(...txt);
+  doc.text((p.accion || 'PENDIENTE').toUpperCase(), margin + 4, y + 13);
+  if (notasLines.length) { doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...DARK_TEXT); doc.text(notasLines, margin + 4, y + 18); }
+  y += boxH + 8;
+
+  const sectionTitle = (t: string) => {
+    if (y > 250) { doc.addPage(); y = 20; }
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.setTextColor(...NAVY);
+    doc.text(t, margin, y); y += 2;
+  };
+  const afterTable = () => { y = (doc as any).lastAutoTable.finalY + 8; };
+  const tableOpts = {
+    theme: 'grid' as const, headStyles: { fillColor: NAVY, textColor: WHITE, fontSize: 7, fontStyle: 'bold' as const },
+    bodyStyles: { fontSize: 7, textColor: DARK_TEXT }, margin: { left: margin, right: margin },
+    didDrawPage: (d: { pageNumber: number }) => addPageFooter(doc, d.pageNumber, 0, date),
+  };
+  /** Solo las columnas con algún dato. */
+  const tabla = <T,>(titulo: string, filas: T[], cols: [string, (f: T) => string][]) => {
+    if (!filas.length) return;
+    const conDato = cols.filter(([, get]) => filas.some(f => get(f).trim() !== ''));
+    sectionTitle(`${titulo} (${filas.length})`);
+    autoTable(doc, { startY: y + 3, head: [conDato.map(c => c[0])], body: filas.map(f => conDato.map(([, get]) => get(f).slice(0, 400))), ...tableOpts });
+    afterTable();
+  };
+
+  if (p.alertasValidacion) {
+    sectionTitle('Alertas de validación');
+    const l = doc.splitTextToSize(p.alertasValidacion, pageWidth - margin * 2);
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...DARK_TEXT);
+    doc.text(l, margin, y + 4); y += l.length * 4 + 8;
+  }
+  const pct = (v: number | null) => (v === null ? '' : `${v}%${v < 90 ? ' (posible homónimo)' : ''}`);
+  tabla('Coincidencias PEP', p.pep, [
+    ['Lista', f => f.lista], ['Origen', f => f.origen], ['Conclusión', f => f.conclusion], ['% coinc.', f => pct(f.porcentaje)],
+    ['Cargo', f => f.cargo], ['Entidad', f => f.entidad], ['Inicio', f => f.fechaInicio], ['Fin', f => f.fechaFin],
+    ['Fuente', f => f.fuente], ['Res. nombr.', f => f.resolucionNombramiento], ['Res. retiro', f => f.resolucionRetiro], ['Actualizado', f => f.actualizado],
+  ]);
+  tabla('Familiares de PEP', p.familiares, [
+    ['Relación', f => f.relacion], ['PEP vinculado', f => f.pepVinculado], ['DNI PEP', f => f.dniPep],
+    ['Cargo del PEP', f => f.pepCargo], ['Organismo', f => f.pepOrganismo], ['Estado', f => f.pepEstado], ['Nivel', f => f.nivel],
+    ['Base regulatoria', f => f.baseRegulatoria], ['Veracidad', f => f.veracidad], ['Confianza vínculo', f => f.confianzaVinculo], ['Riesgo', f => f.riesgo],
+  ]);
+  tabla('Funcionario público', p.funcionario, [
+    ['Cargo', f => f.cargo], ['Dependencia', f => f.entidad], ['% coinc.', f => pct(f.porcentaje)], ['Fecha registro', f => f.actualizado],
+  ]);
+  tabla('Otras coincidencias', [...p.otras].sort((a, b) => Number(b.sancion) - Number(a.sancion)), [
+    ['Tipo', f => (f.sancion ? 'SANCIÓN' : 'otra')], ['Lista', f => f.lista], ['Nombre del hit', f => f.nombre], ['Tipos', f => f.tipos],
+    ['Score', f => f.score], ['Estado', f => f.estadoMatch], ['Fuentes', f => f.fuentes], ['Países', f => f.paises],
+  ]);
+
+  const fecha = new Date().toISOString().slice(0, 10);
+  doc.save(`perfil_peru_${p.dni}_${fecha}.pdf`);
 };

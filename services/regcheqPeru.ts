@@ -18,6 +18,8 @@
 
 export const DNI_TYPE_PERU = { country: 'Peru', person: 'natural', document: 'DNI' } as const;
 
+import * as XLSX from 'xlsx';
+
 export const NOMBRE_LISTA_PERU: Record<string, string> = {
   pepPeru: 'PEP Perú',
   pepPeruConsanguineos: 'PEP Perú — familiares',
@@ -124,11 +126,29 @@ export interface CoincidenciaPepPeru {
   lista: string; origen: string; conclusion: string; porcentaje: string;
   resolucionNombramiento: string; resolucionRetiro: string; fechaUpdate: string;
   tipoDocumento: string; documento: string;
+  /** El cargo que hace PEP a la persona: en pepPeru viene en `record`
+   *  (cargoRelacionado, dependencia, fechas, fuente); en funcPeru, como
+   *  cargoPersonal y dependencia. Es lo más útil para juzgar un PEP. */
+  cargo: string; entidad: string; fechaInicio: string; fechaFin: string; fuente: string;
+  /** TODOS los campos de la fila, aplanados. Lo que el mapeo no conoce no se
+   *  pierde: funcPeru no trae las claves de pepPeru, y así se vio en el
+   *  export (68 funcionarios con solo el % de coincidencia). */
+  detalle: string;
 }
 
 export interface FamiliarPepPeru {
   relacion: string; pepVinculado: string; dniPep: string; nivel: string; baseRegulatoria: string;
-  vinculo: string; lugarTrabajo: string; veracidad: string; riesgo: string;
+  lugarTrabajo: string;
+  /** «confianza · tipo de evidencia · método de match», de `veracity`. */
+  veracidad: string;
+  /** `veracity.note`, aparte. */
+  notaVeracidad: string;
+  riesgo: string;
+  /** De qué es PEP el vinculado (`linkedPep`): sin esto, «PEP vinculado» no
+   *  decía de qué. */
+  pepCargo: string; pepOrganismo: string; pepEstado: string;
+  /** `provenance.linkConfidence`: qué tan seguro es el vínculo. */
+  confianzaVinculo: string;
 }
 
 export interface ResumenPepPeru {
@@ -173,18 +193,121 @@ export function derivarNivelPepPeru(listasRaw: Crudo): string {
   return '';
 }
 
-const aCoincidencia = (f: Crudo): CoincidenciaPepPeru => ({
-  lista: txt(f.nombreLista), origen: txt(f.origenLista), conclusion: txt(f.conclusion),
-  porcentaje: txt(f.porcentajeCoincidencia), resolucionNombramiento: txt(f.nroresolucionnombramiento),
-  resolucionRetiro: txt(f.nroresolucionretirocargo), fechaUpdate: txt(f.fechaUpdate),
-  tipoDocumento: txt(f.tipoDocumento), documento: txt(f.nroIdentificacion),
+// ── Lectura de campos ────────────────────────────────────────────────────────
+//
+// Las claves se comparan SIN mayúsculas ni separadores: `nroResolucionNombramiento`,
+// `nro_resolucion_nombramiento` y `nroresolucionnombramiento` son la misma. Es
+// una defensa ante variantes del proveedor. OJO: las resoluciones que salían
+// vacías en el export NO eran un nombre mal puesto —la clave real es
+// `nroresolucionnombramiento` y viene vacía en el dato—; lo que se perdía era
+// `record` (ver aCoincidencia).
+
+const normalClave = (k: string) => String(k).toLowerCase().replace(/[^a-z0-9]/g, '');
+
+/** El primer campo que exista entre los candidatos, en forma legible. */
+export function campo(f: Crudo | null | undefined, ...candidatos: string[]): string {
+  if (!f || typeof f !== 'object') return '';
+  const buscadas = candidatos.map(normalClave);
+  for (const b of buscadas) {
+    const k = Object.keys(f).find(x => normalClave(x) === b);
+    if (k !== undefined) {
+      const v = legible(f[k]);
+      if (v) return v;
+    }
+  }
+  return '';
+}
+
+/** Claves que no aportan nada a quien lee. */
+const CLAVES_RUIDO = new Set(['_id', '__v', 'id', 'createdat', 'updatedat']);
+
+/**
+ * Cualquier valor como texto legible. Un objeto sale «clave: valor · clave:
+ * valor» y una lista «a · b». La veracidad de los familiares es un objeto, y
+ * salía «[object Object]» en las 485 filas del export.
+ */
+export function legible(v: unknown, profundidad = 0): string {
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'boolean') return v ? 'Sí' : 'No';
+  if (typeof v !== 'object') return String(v).trim();
+  if (profundidad > 3) return '';
+  if (Array.isArray(v)) return v.map(x => legible(x, profundidad + 1)).filter(Boolean).join(' · ');
+  return Object.entries(v as Crudo)
+    .filter(([k]) => !CLAVES_RUIDO.has(normalClave(k)))
+    .map(([k, x]) => {
+      const t = legible(x, profundidad + 1);
+      return t ? `${k}: ${typeof x === 'object' && x !== null ? `(${t})` : t}` : '';
+    })
+    .filter(Boolean)
+    .join(' · ');
+}
+
+/** Todos los campos de una fila, aplanados en una línea. */
+export const aplanar = (f: Crudo | null | undefined): string => legible(f ?? {});
+
+/** pepPeru. Claves reales (en minúsculas las de las resoluciones, que vienen
+ *  vacías en el dato: no es un nombre mal puesto). El cargo, la dependencia y
+ *  las fechas viven en `record`. */
+const aCoincidencia = (f: Crudo): CoincidenciaPepPeru => {
+  const rec = (f?.record && typeof f.record === 'object') ? f.record as Crudo : {};
+  return {
+    lista: campo(f, 'nombreLista'),
+    origen: campo(f, 'origenLista'),
+    conclusion: campo(f, 'conclusion'),
+    porcentaje: campo(f, 'porcentajeCoincidencia'),
+    resolucionNombramiento: campo(f, 'nroresolucionnombramiento'),
+    resolucionRetiro: campo(f, 'nroresolucionretirocargo'),
+    fechaUpdate: campo(f, 'fechaUpdate'),
+    tipoDocumento: campo(f, 'tipoDocumento'),
+    documento: campo(f, 'nroIdentificacion'),
+    cargo: campo(rec, 'cargoRelacionado', 'cargo'),
+    entidad: campo(rec, 'dependencia', 'entidad'),
+    fechaInicio: campo(rec, 'fechaInicio'),
+    fechaFin: campo(rec, 'fechaFin'),
+    fuente: campo(rec, 'fuente'),
+    detalle: aplanar(f),
+  };
+};
+
+/** funcPeru: no trae nombreLista, origenLista ni conclusion —por eso salían
+ *  vacías—; trae cargoPersonal, dependencia y fechaRegistro. */
+const aFuncionario = (f: Crudo): CoincidenciaPepPeru => ({
+  lista: '', origen: '', conclusion: campo(f, 'coincidencia'),
+  porcentaje: campo(f, 'porcentajeCoincidencia'),
+  resolucionNombramiento: '', resolucionRetiro: '',
+  fechaUpdate: campo(f, 'fechaRegistro'),
+  tipoDocumento: campo(f, 'vinculadoIdTipoIdentificacion'),
+  documento: campo(f, 'vinculadoNroIdentificacion'),
+  cargo: campo(f, 'cargoPersonal', 'cargo'),
+  entidad: campo(f, 'dependencia', 'entidad'),
+  fechaInicio: '', fechaFin: '', fuente: '',
+  detalle: aplanar(f),
 });
 
-const aFamiliar = (f: Crudo): FamiliarPepPeru => ({
-  relacion: txt(f.relation), pepVinculado: txt(f.namePep), dniPep: txt(f.dniPep), nivel: txt(f.level),
-  baseRegulatoria: txt(f.regulatoryBasis), vinculo: txt(f.linkedPep), lugarTrabajo: txt(f.relativeWorkplace),
-  veracidad: txt(f.veracity), riesgo: txt(f.risk),
-});
+/** Familiares. La veracidad es { evidenceType, confidence, matchMethod, note }:
+ *  sale «confianza · evidencia · método» y la nota aparte, no «[object Object]». */
+const aFamiliar = (f: Crudo): FamiliarPepPeru => {
+  const ver = (f?.veracity && typeof f.veracity === 'object') ? f.veracity as Crudo : {};
+  const pep = (f?.linkedPep && typeof f.linkedPep === 'object') ? f.linkedPep as Crudo : {};
+  const prov = (f?.provenance && typeof f.provenance === 'object') ? f.provenance as Crudo : {};
+  const veracidad = [campo(ver, 'confidence'), campo(ver, 'evidenceType'), campo(ver, 'matchMethod')].filter(Boolean).join(' · ')
+    || (typeof f?.veracity === 'string' ? f.veracity : '');
+  return {
+    relacion: campo(f, 'relation'),
+    pepVinculado: campo(f, 'namePep') || campo(pep, 'name'),
+    dniPep: campo(f, 'dniPep') || campo(pep, 'dni'),
+    nivel: campo(f, 'level') || campo(pep, 'level'),
+    baseRegulatoria: campo(f, 'regulatoryBasis') || campo(pep, 'regulatoryBasis'),
+    lugarTrabajo: campo(f, 'relativeWorkplace'),
+    veracidad,
+    notaVeracidad: campo(ver, 'note'),
+    riesgo: campo(f, 'risk'),
+    pepCargo: campo(pep, 'position'),
+    pepOrganismo: campo(pep, 'organism'),
+    pepEstado: campo(pep, 'pepStatus'),
+    confianzaVinculo: campo(prov, 'linkConfidence'),
+  };
+};
 
 export function resumenPepPeru(listasRaw: Crudo): ResumenPepPeru {
   const raw = listasRaw || {};
@@ -198,7 +321,7 @@ export function resumenPepPeru(listasRaw: Crudo): ResumenPepPeru {
     funcionarioPublico: func,
     nivel: derivarNivelPepPeru(raw),
     coincidencias: pep ? filasDe(raw.pepPeru).map(aCoincidencia) : [],
-    funcionario: func ? filasDe(raw.funcPeru).map(aCoincidencia) : [],
+    funcionario: func ? filasDe(raw.funcPeru).map(aFuncionario) : [],
     familiares: familiar ? filasDe(raw.pepPeruConsanguineos).map(aFamiliar) : [],
   };
 }
@@ -343,4 +466,199 @@ export async function procesarFilaPeru(fila: FilaPeru, crear: boolean, deps: Dep
   }
   if (g.status !== 200) throw new Error(`API ${g.status} al consultar la ficha ${fila.dni}`);
   return refrescar(fila.dni, deps);
+}
+
+// ── Las coincidencias que no son PEP ────────────────────────────────────────
+//
+// El export decía «Screening Global: True» en 107 personas sin decir QUÉ
+// gatilló. Sin el detalle, el Criminal Profile no puede mostrarlo.
+
+export const ETIQUETAS_PEP_PERU = new Set(Object.values(NOMBRE_LISTA_PERU));
+
+export interface OtraCoincidencia {
+  lista: string;
+  riesgo: string;
+  /** Del hit: a quién encontró y qué tipo de registro es (pep, sanction…). */
+  nombre: string;
+  tipos: string;
+  tipoEntidad: string;
+  score: string;
+  estadoMatch: string;
+  /** El hit es una SANCIÓN: se muestra en rojo y aparte de PEP. */
+  sancion: boolean;
+  /** Las fuentes, con su URL, y si la fuente dejó de listar a la persona
+   *  (eso cambia la lectura del hit). */
+  fuentes: string;
+  paises: string;
+  /** Todos los campos aplanados: la red para claves nuevas. */
+  detalle: string;
+}
+
+const esSancion = (tipos: string) => /sanction|sanci[oó]n/i.test(tipos);
+
+/** Un hit del screening global: `additionalData` es la BÚSQUEDA (un objeto
+ *  con `hits`), no una lista. `source_notes` tiene claves dinámicas —una por
+ *  fuente— y se recorre con Object.values. `match_types_details` está indexado
+ *  por el nombre de la persona: no se exporta. */
+function deHit(lista: string, riesgo: string, busqueda: Crudo, hit: Crudo): OtraCoincidencia {
+  const doc = (hit?.doc && typeof hit.doc === 'object') ? hit.doc as Crudo : {};
+  const notas = (doc.source_notes && typeof doc.source_notes === 'object') ? Object.values(doc.source_notes as Crudo) as Crudo[] : [];
+  const fuentes = notas.map(n => [
+    txt(n?.name),
+    n?.listing_ended_utc ? `dejó de listar: ${txt(n.listing_ended_utc).slice(0, 10)}` : '',
+    txt(n?.url),
+  ].filter(Boolean).join(' · ')).filter(Boolean);
+  if (!fuentes.length && Array.isArray(doc.sources)) fuentes.push(...doc.sources.map(txt).filter(Boolean));
+  const paises = [...new Set(notas.flatMap(n => (Array.isArray(n?.country_codes) ? n.country_codes : []).map(txt)))].filter(Boolean);
+  const tipos = Array.isArray(doc.types) ? doc.types.map(txt).filter(Boolean).join(', ') : txt(doc.types);
+  const score = typeof hit?.score === 'number' ? hit.score.toFixed(2) : txt(hit?.score);
+  return {
+    lista, riesgo, nombre: txt(doc.name), tipos, tipoEntidad: txt(doc.entity_type), score,
+    estadoMatch: txt(busqueda?.match_status), sancion: esSancion(tipos),
+    fuentes: fuentes.join(' | '), paises: paises.join(', '),
+    detalle: aplanar(doc).slice(0, 4000),
+  };
+}
+
+/** Cualquier otra lista: lo que se pueda leer de cada registro, y el detalle. */
+function deRegistro(lista: string, riesgo: string, it: Crudo): OtraCoincidencia {
+  const tipos = campo(it, 'types', 'type', 'program', 'programa', 'list', 'lista');
+  return {
+    lista, riesgo, nombre: campo(it, 'name', 'nombre', 'nombreCompleto', 'fullName'), tipos,
+    tipoEntidad: campo(it, 'entity_type', 'entityType'), score: campo(it, 'score'), estadoMatch: campo(it, 'match_status', 'status'),
+    sancion: esSancion(tipos) || /ofac|sanci/i.test(lista), fuentes: campo(it, 'source', 'fuente', 'sources'), paises: campo(it, 'country', 'pais', 'country_codes'),
+    detalle: aplanar(it).slice(0, 4000),
+  };
+}
+
+/** Una fila por hit de cada lista NO PEP con coincidencia. */
+export function otrasCoincidencias(listas: Record<string, EntradaLista>): OtraCoincidencia[] {
+  const out: OtraCoincidencia[] = [];
+  for (const [lista, e] of Object.entries(listas || {})) {
+    if (!e?.coincidence || ETIQUETAS_PEP_PERU.has(lista)) continue;
+    const d = (e.data && typeof e.data === 'object' && !Array.isArray(e.data)) ? e.data as Crudo : null;
+    const ad = d?.additionalData;
+    if (ad && typeof ad === 'object' && !Array.isArray(ad) && Array.isArray((ad as Crudo).hits)) {
+      for (const h of (ad as Crudo).hits as Crudo[]) out.push(deHit(lista, e.risk, ad as Crudo, h));
+      continue;
+    }
+    const items = Array.isArray(ad) ? ad as Crudo[]
+      : Array.isArray(e.data) ? (e.data as unknown[]).map(x => (x && typeof x === 'object' ? x as Crudo : { valor: x }))
+      : d ? [d] : [];
+    if (!items.length) out.push({ ...deRegistro(lista, e.risk, {}), detalle: '(la respuesta no trae detalle)' });
+    for (const it of items) out.push(deRegistro(lista, e.risk, it));
+  }
+  return out;
+}
+
+// ── El Excel del masivo de Perú ──────────────────────────────────────────────
+//
+// Lo arma UNA función, y la usan los dos caminos: «Exportar Excel» y «Enviar al
+// Criminal Profile». El Criminal Profile lo lee con el mismo parser que una
+// subida manual: lo que llega directo es idéntico a descargar y subir, sin un
+// segundo contrato de datos que se desincronice.
+
+export const HOJAS_PERU = {
+  resultados: 'Resultados Regcheq Perú',
+  pep: 'PEP Perú',
+  otras: 'Otras coincidencias',
+  resumen: 'Resumen',
+} as const;
+
+export const COLUMNAS_PEP_PERU = [
+  'DNI', 'Nombre', 'Tipo', 'Lista', 'Origen', 'Conclusión', '% coincidencia', 'Cargo', 'Entidad',
+  'Inicio cargo', 'Fin cargo', 'Fuente', 'Res. nombramiento', 'Res. retiro', 'Actualizado',
+  'Relación', 'PEP vinculado', 'DNI PEP', 'Cargo del PEP', 'Organismo del PEP', 'Estado PEP', 'Nivel',
+  'Base regulatoria', 'Veracidad', 'Nota veracidad', 'Confianza del vínculo', 'Riesgo', 'Detalle',
+] as const;
+
+export const COLUMNAS_OTRAS_PERU = [
+  'DNI', 'Nombre', 'Lista', 'Riesgo', 'Sanción', 'Nombre del hit', 'Tipos', 'Tipo entidad', 'Score',
+  'Estado match', 'Fuentes', 'Países', 'Detalle',
+] as const;
+
+/** Lo que el export necesita de cada resultado del masivo. */
+export interface FilaExportPeru {
+  dni: string;
+  nombre: string;
+  nombres: string;
+  apellidoPaterno: string;
+  apellidoMaterno: string;
+  riesgoFinal: string;
+  nivelPep: string;
+  pep?: ResumenPepPeru;
+  listas: Record<string, EntradaLista>;
+  alertasTexto: string;
+}
+
+export function armarWorkbookPeru(filas: FilaExportPeru[], ahora = new Date()): { wb: XLSX.WorkBook; nombre: string } {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const ts = `${ahora.getFullYear()}-${pad(ahora.getMonth() + 1)}-${pad(ahora.getDate())} ${pad(ahora.getHours())}:${pad(ahora.getMinutes())}`;
+  const nombre = `resultado_regcheq_peru_${ahora.getFullYear()}${pad(ahora.getMonth() + 1)}${pad(ahora.getDate())}_${pad(ahora.getHours())}${pad(ahora.getMinutes())}${pad(ahora.getSeconds())}.xlsx`;
+  const siNo = (b?: boolean) => (b ? 'Sí' : 'No');
+  const etiquetas = [...new Set(filas.flatMap(r => Object.keys(r.listas)))];
+
+  const resultados = filas.map(r => {
+    const fila: Record<string, string | number> = {
+      'DNI': r.dni,
+      'Nombre completo': r.nombre,
+      'Nombres': r.nombres,
+      'Apellido paterno': r.apellidoPaterno,
+      'Apellido materno': r.apellidoMaterno,
+      'Riesgo final Ficha': r.riesgoFinal,
+      'Es PEP': siNo(r.pep?.esPep),
+      'Familiar de PEP': siNo(r.pep?.familiarDePep),
+      'Nivel PEP': r.nivelPep,
+      'Funcionario público': siNo(r.pep?.funcionarioPublico),
+      'listas_total_coincidencias': Object.values(r.listas).filter(e => e.coincidence).length,
+    };
+    for (const e of etiquetas) fila[`Coincidencia_${e}`] = r.listas[e]?.coincidence ? 'True' : 'False';
+    fila['Alertas validación'] = r.alertasTexto;
+    return fila;
+  });
+
+  const pep: Record<string, string>[] = [];
+  for (const r of filas) {
+    const p = r.pep;
+    if (!p) continue;
+    for (const [tipo, lista] of [['PEP', p.coincidencias], ['Funcionario público', p.funcionario]] as const) {
+      for (const c of lista) pep.push({
+        'DNI': r.dni, 'Nombre': r.nombre, 'Tipo': tipo, 'Lista': c.lista, 'Origen': c.origen,
+        'Conclusión': c.conclusion, '% coincidencia': c.porcentaje,
+        'Cargo': c.cargo, 'Entidad': c.entidad, 'Inicio cargo': c.fechaInicio, 'Fin cargo': c.fechaFin,
+        'Fuente': c.fuente, 'Res. nombramiento': c.resolucionNombramiento, 'Res. retiro': c.resolucionRetiro,
+        'Actualizado': c.fechaUpdate, 'Detalle': c.detalle,
+      });
+    }
+    for (const f of p.familiares) pep.push({
+      'DNI': r.dni, 'Nombre': r.nombre, 'Tipo': 'Familiar de PEP', 'Relación': f.relacion,
+      'PEP vinculado': f.pepVinculado, 'DNI PEP': f.dniPep, 'Cargo del PEP': f.pepCargo,
+      'Organismo del PEP': f.pepOrganismo, 'Estado PEP': f.pepEstado, 'Nivel': f.nivel,
+      'Base regulatoria': f.baseRegulatoria, 'Veracidad': f.veracidad, 'Nota veracidad': f.notaVeracidad,
+      'Confianza del vínculo': f.confianzaVinculo, 'Riesgo': f.riesgo,
+    });
+  }
+
+  const otras = filas.flatMap(r => otrasCoincidencias(r.listas).map(o => ({
+    'DNI': r.dni, 'Nombre': r.nombre, 'Lista': o.lista, 'Riesgo': o.riesgo, 'Sanción': o.sancion ? 'Sí' : 'No',
+    'Nombre del hit': o.nombre, 'Tipos': o.tipos, 'Tipo entidad': o.tipoEntidad, 'Score': o.score,
+    'Estado match': o.estadoMatch, 'Fuentes': o.fuentes, 'Países': o.paises, 'Detalle': o.detalle,
+  })));
+
+  const resumen = [
+    { 'Generado': 'Total personas', [ts]: filas.length },
+    { 'Generado': 'High Risk', [ts]: filas.filter(r => (r.riesgoFinal || '').toLowerCase().includes('high')).length },
+    { 'Generado': 'PEP', [ts]: filas.filter(r => r.pep?.esPep).length },
+    { 'Generado': 'Familiar de PEP', [ts]: filas.filter(r => r.pep?.familiarDePep).length },
+    { 'Generado': 'Funcionario público', [ts]: filas.filter(r => r.pep?.funcionarioPublico).length },
+  ];
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(resultados), HOJAS_PERU.resultados);
+  // Columnas fijas: si la primera fila es de un familiar, json_to_sheet
+  // ordenaría las columnas por esa fila.
+  if (pep.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(pep, { header: [...COLUMNAS_PEP_PERU] }), HOJAS_PERU.pep);
+  if (otras.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(otras, { header: [...COLUMNAS_OTRAS_PERU] }), HOJAS_PERU.otras);
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(resumen), HOJAS_PERU.resumen);
+  return { wb, nombre };
 }

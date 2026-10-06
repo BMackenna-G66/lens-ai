@@ -52,4 +52,5 @@ test/wl.mjs
 test/decision.mjs
 test/rw/
 test/regcheqPeru.bundle.mjs
+test/pc/
 cloudflare/empresadocs-proxy/test/tipos.mjs
