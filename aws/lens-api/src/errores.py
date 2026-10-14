@@ -122,8 +122,31 @@ FALLO: dict[str, Reason] = {
                "Faltan datos sin los cuales el análisis no sirve: la razón social o el RUT "
                "de la sociedad.",
                pendiente=True),
+
+        # ── El mismo del canal 1, a propósito ──
+        #
+        # Cuando el modelo no responde (caído, sobrecargado o sin tiempo), la
+        # corrida no sirve y la culpa no es del documento. Antes seguía con lo
+        # que tuviera y terminaba INCOMPLETE con «faltan datos del documento»:
+        # una caída nuestra le pedía al usuario revisar su escritura. §8 separa
+        # «FAILED por el documento» de «FAILED por el servicio», y este es el
+        # segundo. Es la entrada del Anexo B con su código y su HTTP —que son
+        # SU dato—, no una nueva. Como fallo de corrida viaja en EP-2 con 200.
+        Reason("SERVICE_UNAVAILABLE", 503, "000503",
+               "Un servicio del que LENS depende no respondió (el modelo, caído, "
+               "sobrecargado o sin tiempo). El documento puede estar bien: se puede reintentar."),
     )
 }
+
+
+class ServicioNoDisponible(Exception):
+    """Un servicio del que LENS depende no respondió.
+
+    La lanza quien llama al servicio y la ataja la corrida, que termina en
+    `FAILED` con `SERVICE_UNAVAILABLE` en vez de seguir con datos a medias. Vive
+    acá y no en `gemini` para que `companies` la reconozca sin importar el
+    cliente del modelo.
+    """
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -166,6 +189,9 @@ AVISO: dict[str, Reason] = {
         Reason("NAME_SPLIT_INFERRED", None, None,
                "El nombre vino sin partir y se separó por cantidad de palabras: es una "
                "conjetura, y el orden de apellidos no se puede deducir sin el documento."),
+        Reason("DOCUMENT_ENTITY_MISMATCH", None, None,
+               "Un documento complementario es de otra empresa que el principal (no coincide "
+               "el identificador tributario o la razón social): no se usaron sus datos."),
     )
 }
 

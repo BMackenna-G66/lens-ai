@@ -452,3 +452,77 @@ def test_tope_de_documentos_se_respeta_y_se_avisa(monkeypatch):
     cuerpo = json.loads(r["body"])
     assert len(cuerpo["documentos"]) == 2
     assert any("tope es 2" in a for a in cuerpo["avisos"])
+
+
+# ── AJ-04 · La caída de Gemini, según quién llama ───────────────────────────
+# La corrida de Onboarding termina FAILED por el servicio; `/v1/analisis` y
+# `/v1/analyses` siguen exactamente como estaban.
+
+import errores  # noqa: E402
+
+
+def _caida(*_, **__):
+    raise gemini.GeminiNoDisponible("No se pudo conectar con Gemini tras 3 intento(s) (HTTP 503).")
+
+
+def test_la_ruta_vieja_sigue_devolviendo_ok_false_si_gemini_cae(monkeypatch):
+    monkeypatch.setattr(gemini, "extraer_campos", _caida)
+    r = app.analizar([("e.txt", b"TEXTO")], False, "chile")
+    assert r["ok"] is False and "Gemini" in r["error"]
+
+
+def test_la_corrida_de_onboarding_recibe_la_caida(monkeypatch):
+    monkeypatch.setattr(gemini, "extraer_campos", _caida)
+    with pytest.raises(errores.ServicioNoDisponible):
+        app._analizar_para_companies([("e.txt", b"TEXTO")], False, "chile")
+
+
+def test_con_inicio_los_campos_se_piden_con_el_presupuesto_de_la_corrida(monkeypatch):
+    visto = {}
+
+    def campos(texto, ctx, limite=None):
+        visto["limite"] = limite
+        return [{"field": f, "value": "x"} for f in P.CAMPOS_PREDEFINIDOS]
+
+    monkeypatch.setattr(gemini, "extraer_campos", campos)
+    import time as _t
+    t0 = _t.monotonic() - 100
+    app._analizar_para_companies([("e.txt", b"TEXTO")], False, "chile", inicio=t0)
+    assert visto["limite"] == pytest.approx(t0 + app.PRESUPUESTO_S)
+
+
+def test_lo_ya_leido_no_se_vuelve_a_leer(monkeypatch):
+    """La corrida lee antes el complementario (AJ-05); `analizar` lo reusa."""
+    monkeypatch.setattr(gemini, "extraer_campos",
+                        lambda t, c, limite=None: [{"field": f, "value": "x"} for f in P.CAMPOS_PREDEFINIDOS])
+    previo = extraccion.extraer_texto("e.txt", b"TEXTO PREVIO", extraccion.Presupuesto(limite_s=10))
+
+    def no_leer(*_, **__):
+        raise AssertionError("se volvió a leer un documento ya leído")
+
+    monkeypatch.setattr(app, "extraer_texto", no_leer)
+    r = app.analizar([("e.txt", b"otro")], False, "chile", ya_leidos={"e.txt": previo})
+    assert r["ok"] is True
+
+
+def test_los_socios_de_la_ruta_vieja_no_lanzan_si_gemini_cae(monkeypatch):
+    monkeypatch.setattr(gemini, "extraer_shareholders", _caida)
+    doc = type("D", (), {"nombre": "e.pdf", "contenido": b"%PDF-1.4"})()
+    socios, avisos = app._extraer_socios([doc], __import__("time").monotonic())
+    assert socios["legalRepresentatives"] == [] and avisos
+
+
+def test_los_socios_de_onboarding_lanzan_si_gemini_cae(monkeypatch):
+    monkeypatch.setattr(gemini, "extraer_shareholders", _caida)
+    doc = type("D", (), {"nombre": "e.pdf", "contenido": b"%PDF-1.4"})()
+    with pytest.raises(errores.ServicioNoDisponible):
+        app._socios_para_companies([doc], __import__("time").monotonic())
+
+
+def test_sin_tiempo_para_los_socios_onboarding_lo_dice_como_servicio():
+    doc = type("D", (), {"nombre": "e.pdf", "contenido": b"%PDF-1.4"})()
+    viejo = __import__("time").monotonic() - app.PRESUPUESTO_S
+    with pytest.raises(errores.ServicioNoDisponible, match="No quedó tiempo"):
+        app._socios_para_companies([doc], viejo)
+    with pytest.raises(errores.ServicioNoDisponible, match="No quedó tiempo"):
+        app._administracion_para_companies([doc], viejo)

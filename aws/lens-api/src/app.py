@@ -201,14 +201,30 @@ def _documentos_del_evento(evento: dict) -> tuple[list[tuple[str, bytes]], bool]
 
 
 # ── El análisis ─────────────────────────────────────────────────────────────
-def analizar(documentos: list[tuple[str, bytes]], incluir_texto: bool, pais_forzado: str = "") -> dict:
+def analizar(documentos: list[tuple[str, bytes]], incluir_texto: bool, pais_forzado: str = "",
+             *, inicio: float | None = None, ya_leidos: dict | None = None,
+             propagar_caida: bool = False) -> dict:
     """El pipeline completo: documentos → texto → país → 18 campos.
 
     Mismo orden que la herramienta. La diferencia está adentro del primer paso:
     acá la capa de texto va antes que el OCR.
+
+    Los tres argumentos con nombre los usa solo la corrida de Onboarding; sin
+    ellos, `/v1/analisis` y `/v1/analyses` quedan exactamente como estaban:
+
+      · `inicio`: el arranque de LA CORRIDA. El presupuesto se cuenta desde ahí
+        y no desde este paso, y acota los reintentos de Gemini.
+      · `ya_leidos`: textos ya extraídos, por nombre de archivo. La corrida lee
+        antes los complementarios para saber de qué empresa son (AJ-05), y no
+        se vuelven a pasar por el OCR.
+      · `propagar_caida`: si Gemini no responde, se lanza la excepción en vez de
+        devolver `ok: false`, para que la corrida termine con la razón del
+        servicio y no con la de una extracción fallida.
     """
     t0 = time.monotonic()
-    presupuesto = Presupuesto(limite_s=PRESUPUESTO_S)
+    presupuesto = (Presupuesto(limite_s=PRESUPUESTO_S, inicio=inicio) if inicio is not None
+                   else Presupuesto(limite_s=PRESUPUESTO_S))
+    limite = (presupuesto.inicio + presupuesto.limite_s) if inicio is not None else None
     avisos: list[str] = []
 
     if len(documentos) > MAX_DOCUMENTOS:
@@ -216,7 +232,9 @@ def analizar(documentos: list[tuple[str, bytes]], incluir_texto: bool, pais_forz
         documentos = documentos[:MAX_DOCUMENTOS]
 
     # ── 1. Texto ──
-    leidos = [extraer_texto(nombre, contenido, presupuesto) for nombre, contenido in documentos]
+    previos = ya_leidos or {}
+    leidos = [previos.get(nombre) or extraer_texto(nombre, contenido, presupuesto)
+              for nombre, contenido in documentos]
     for r in leidos:
         avisos.extend(f"{r.nombre}: {a}" for a in r.avisos)
 
@@ -241,15 +259,19 @@ def analizar(documentos: list[tuple[str, bytes]], incluir_texto: bool, pais_forz
         avisos.append("No quedó tiempo para detectar el país: se analizó sin contexto de jurisdicción.")
     else:
         try:
-            pais = gemini.detectar_pais(texto)
+            pais = (gemini.detectar_pais(texto, limite=limite) if limite is not None
+                    else gemini.detectar_pais(texto))
         except gemini.ErrorGemini as e:
             pais = "unknown"
             avisos.append(f"No se pudo detectar el país ({e}): se analizó sin contexto de jurisdicción.")
 
     # ── 3. Los 18 campos ──
     try:
-        campos = gemini.extraer_campos(texto, gemini.contexto_de(pais))
+        campos = (gemini.extraer_campos(texto, gemini.contexto_de(pais), limite=limite)
+                  if limite is not None else gemini.extraer_campos(texto, gemini.contexto_de(pais)))
     except gemini.ErrorGemini as e:
+        if propagar_caida and isinstance(e, errores.ServicioNoDisponible):
+            raise
         return {
             "ok": False,
             "estado": "ERROR",
@@ -499,13 +521,19 @@ def avisos_del_contraste(c: dict) -> list[str]:
     return []
 
 
-def _extraer_socios(archivos, t0: float) -> tuple[dict, list[str]]:
+def _extraer_socios(archivos, t0: float, propagar_caida: bool = False) -> tuple[dict, list[str]]:
     """La composición societaria de los documentos NATIVOS, no de su texto: las
     tablas de propiedad se leen mucho mejor con el PDF a la vista.
 
     Nunca lanza. Si algo falla, las tres claves quedan vacías y el motivo va en
     los avisos: la ficha de 18 campos ya está lista y perderla por esto sería
     peor que devolverla sin socios.
+
+    Salvo con `propagar_caida`, que usa la corrida de Onboarding: si el modelo no
+    respondió —o no queda tiempo para preguntarle—, lanza
+    `errores.ServicioNoDisponible`. Ahí devolver la lista vacía terminaba en
+    «falta un representante», que le pide al usuario otro documento por una
+    caída nuestra.
     """
     vacio = {"legalRepresentatives": [], "directOwnership": [], "indirectShareholders": []}
 
@@ -517,11 +545,17 @@ def _extraer_socios(archivos, t0: float) -> tuple[dict, list[str]]:
         return (time.monotonic() - t0) < (PRESUPUESTO_S - MARGEN_SOCIOS_S)
 
     if not queda_tiempo():
+        if propagar_caida:
+            raise errores.ServicioNoDisponible(
+                "No quedó tiempo en el presupuesto de la corrida para leer a los representantes.")
         return vacio, ["No quedó tiempo para extraer la composición societaria."]
 
     try:
-        socios, senales = gemini.extraer_shareholders(docs, queda_tiempo)
+        socios, senales = (gemini.extraer_shareholders(docs, queda_tiempo, limite=t0 + PRESUPUESTO_S)
+                           if propagar_caida else gemini.extraer_shareholders(docs, queda_tiempo))
     except gemini.ErrorGemini as e:
+        if propagar_caida and isinstance(e, errores.ServicioNoDisponible):
+            raise
         return vacio, [f"No se pudo extraer la composición societaria ({e})."]
     except Exception as e:  # noqa: BLE001
         log.exception("fallo inesperado extrayendo la composición societaria")
@@ -650,40 +684,61 @@ def _socios_para_companies(descargados, t0: float) -> tuple[dict, list[str]]:
     —cuando la corrida ya gastó tiempo resolviendo documentos y analizando—.
     El guardia quedaría siempre en verde, que es lo mismo que no tenerlo.
     """
-    return _extraer_socios(descargados, t0)
+    return _extraer_socios(descargados, t0, propagar_caida=True)
 
 
 def _administracion_para_companies(descargados, t0: float) -> dict | None:
     """El régimen de administración (§11), acotado por el mismo presupuesto.
 
     Cuesta una llamada al modelo y corre al final de la corrida, así que puede
-    no alcanzar el tiempo. Cuando no alcanza devuelve `None` —que el contrato
-    representa como `jointAdministration: null`— en vez de una conjetura: de este
-    dato depende cuántas aprobaciones necesita una empresa para operar.
+    no alcanzar el tiempo. Hasta el 13-10-2026 devolvía `None` —que el contrato
+    representa como `jointAdministration: null`— y la corrida seguía; ahora es
+    un servicio que no respondió, igual que si Gemini se hubiera caído: lanza
+    `errores.ServicioNoDisponible` y la corrida termina FAILED. De este dato
+    depende cuántas aprobaciones necesita una empresa para operar.
     """
     if (time.monotonic() - t0) >= (PRESUPUESTO_S - MARGEN_SOCIOS_S):
         log.warning("no quedó tiempo para leer el régimen de administración")
-        return None
+        raise errores.ServicioNoDisponible(
+            "No quedó tiempo en el presupuesto de la corrida para leer el régimen de administración.")
     docs = elegir_documentos(descargados)
     if not docs:
         return None
-    resultado, _uso = gemini.extraer_administracion(docs)
+    resultado, _uso = gemini.extraer_administracion(docs, limite=t0 + PRESUPUESTO_S)
     return resultado
 
 
 def _identidad_para_companies(descargado, t0: float) -> dict | None:
-    """¿El principal es el documento esperado? Y su actividad y forma legal.
+    """¿El principal es el documento esperado? Y su actividad, su forma legal,
+    su razón social y su identificador tributario.
 
-    Corre ANTES de la extracción de los 18 campos, así que no puede comerse el
-    presupuesto: `gemini.leer_identidad` usa una sola llamada con tope corto. Si
-    el archivo no es PDF ni imagen, no se puede mirar y devuelve `None` —que la
-    corrida trata como «no se pudo verificar», no como «es otra cosa»—.
+    Corre ANTES de la extracción de los 18 campos. Cada intento tiene un tope
+    corto (`gemini.TIMEOUT_IDENTIDAD_S`) y los reintentos se cortan con el
+    presupuesto de la corrida. Si el archivo no es PDF ni imagen, no se puede
+    mirar y devuelve `None` —que la corrida trata como «no se pudo verificar»,
+    no como «es otra cosa»—.
     """
     docs = elegir_documentos([descargado])
     if not docs:
         return None
-    resultado, _uso = gemini.leer_identidad(docs)
+    resultado, _uso = gemini.leer_identidad(docs, limite=t0 + PRESUPUESTO_S)
     return resultado
+
+
+def _texto_para_companies(descargado, t0: float):
+    """El texto de un documento, con el presupuesto de la corrida.
+
+    Lo usa la corrida para leer los complementarios ANTES de analizar y saber
+    de qué empresa son (AJ-05). El resultado se le pasa a `analizar` en
+    `ya_leidos`, así que el documento no se lee dos veces.
+    """
+    return extraer_texto(descargado.nombre, descargado.contenido,
+                         Presupuesto(limite_s=PRESUPUESTO_S, inicio=t0))
+
+
+def _analizar_para_companies(documentos, incluir_texto, pais_forzado="", **opciones) -> dict:
+    """`analizar` para la corrida de Onboarding: si Gemini no responde, lanza."""
+    return analizar(documentos, incluir_texto, pais_forzado, propagar_caida=True, **opciones)
 
 
 def _companies(evento: dict, ruta: str, metodo: str) -> dict | None:
@@ -699,10 +754,11 @@ def _companies(evento: dict, ruta: str, metodo: str) -> dict | None:
             "UNAUTHORIZED", "Falta o no coincide el header x-api-secret.")
         return _resp(codigo, cuerpo)
     return companies.manejar(
-        evento, ruta, metodo, analizar=analizar,
+        evento, ruta, metodo, analizar=_analizar_para_companies,
         extraer_socios=_socios_para_companies,
         extraer_administracion=_administracion_para_companies,
-        leer_identidad=_identidad_para_companies)
+        leer_identidad=_identidad_para_companies,
+        leer_texto=_texto_para_companies)
 
 
 def lambda_handler(evento: dict, contexto=None) -> dict:
@@ -713,9 +769,10 @@ def lambda_handler(evento: dict, contexto=None) -> dict:
     carga = disparador.es_trabajo_de_fondo(evento)
     if carga is not None:
         return companies.procesar(
-            carga, analizar=analizar, extraer_socios=_socios_para_companies,
+            carga, analizar=_analizar_para_companies, extraer_socios=_socios_para_companies,
             extraer_administracion=_administracion_para_companies,
-            leer_identidad=_identidad_para_companies)
+            leer_identidad=_identidad_para_companies,
+            leer_texto=_texto_para_companies)
 
     ctx = (evento.get("requestContext") or {}).get("http") or {}
     metodo = (ctx.get("method") or evento.get("httpMethod") or "GET").upper()

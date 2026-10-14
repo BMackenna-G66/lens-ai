@@ -25,14 +25,21 @@ import onboarding as ob  # noqa: E402
 
 def test_ningun_reason_esta_en_dos_canales():
     """Un mismo nombre en dos canales haría que el integrador no sepa si el
-    análisis sirve o no, que es la única pregunta que los separa."""
-    assert set(er.HTTP) & set(er.FALLO) == set()
+    análisis sirve o no, que es la única pregunta que los separa.
+
+    La excepción es `SERVICE_UNAVAILABLE`, en el canal 1 y en el 2 (AJ-04,
+    13-10-2026): en los dos el análisis NO sirve, así que la pregunta no se
+    confunde, y es la misma entrada del Anexo B con el mismo código. Lo que
+    nunca puede pasar es que un aviso —el análisis sirve— comparta nombre con
+    cualquiera de los otros dos."""
+    assert set(er.HTTP) & set(er.FALLO) == {"SERVICE_UNAVAILABLE"}
+    assert er.HTTP["SERVICE_UNAVAILABLE"].code == er.FALLO["SERVICE_UNAVAILABLE"].code
     assert set(er.HTTP) & set(er.AVISO) == set()
     assert set(er.FALLO) & set(er.AVISO) == set()
 
 
 def test_el_indice_junta_los_tres_sin_perder_ninguno():
-    assert len(er.TODOS) == len(er.HTTP) + len(er.FALLO) + len(er.AVISO)
+    assert set(er.TODOS) == set(er.HTTP) | set(er.FALLO) | set(er.AVISO)
 
 
 def test_la_clave_del_diccionario_es_el_nombre():

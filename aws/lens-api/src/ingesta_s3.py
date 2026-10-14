@@ -42,9 +42,12 @@ aviso, no como caída.
 from __future__ import annotations
 
 import concurrent.futures
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any, Iterable
+
+log = logging.getLogger(__name__)
 
 # ── Los tres filtros del bot, en este orden ─────────────────────────────────
 #
@@ -129,6 +132,38 @@ class DocumentoPedido:
     tipo: str = ""
 
 
+def describir_error(e: Exception, bucket: str = "") -> str:
+    """Qué respondió S3, dicho para quien lo tiene que arreglar.
+
+    Antes el mensaje era `type(e).__name__`, que para todo lo de S3 dice
+    «ClientError»: el 09-10-2026 la lectura falló porque la bucket policy
+    autorizaba al rol del flujo autónomo y no al de la API, y desde afuera no
+    había forma de saberlo.
+
+    Se lee el `Code` y el `HTTPStatusCode` del `ClientError` de botocore. Lo que
+    no es un `ClientError` —un error de red, o el fake de un test— sigue
+    diciendo su tipo, como antes. KMS va primero: es un 403 más específico, y lo
+    que se arregla es otro permiso. Un `head_object` no trae cuerpo, así que KMS
+    solo aparece en la descarga.
+    """
+    resp = getattr(e, "response", None)
+    if not isinstance(resp, dict):
+        return type(e).__name__
+    err = resp.get("Error") or {}
+    codigo = str(err.get("Code") or "")
+    texto = str(err.get("Message") or "")
+    http = (resp.get("ResponseMetadata") or {}).get("HTTPStatusCode")
+
+    if "kms" in texto.lower() or codigo.lower().startswith("kms"):
+        return "sin permiso para descifrar (KMS)"
+    if http == 404 or codigo in ("404", "NoSuchKey", "NotFound"):
+        return "no existe en S3 (404)"
+    if http == 403 or codigo in ("403", "AccessDenied", "Forbidden"):
+        return (f"sin permiso de lectura (403): revisar la bucket policy de "
+                f"{bucket or BUCKET} para el rol de LENS")
+    return f"S3 respondió {codigo or type(e).__name__}" + (f" ({http})" if http else "")
+
+
 def parsear_s3_uri(uri: str) -> tuple[str, str] | None:
     """`s3://bucket/una/clave.pdf` → `("bucket", "una/clave.pdf")`.
 
@@ -175,7 +210,9 @@ def resolver_documentos(
                 bucket=bucket, tipo=d.tipo,
             ))
         except Exception as e:  # noqa: BLE001
-            avisos.append(f"{clave}: no se pudo leer ({type(e).__name__})")
+            motivo = describir_error(e, bucket)
+            log.warning("head_object de s3://%s/%s: %s", bucket, clave, motivo)
+            avisos.append(f"{clave}: no se pudo leer: {motivo}")
     return objetos, avisos
 
 
@@ -290,7 +327,9 @@ def resolver_lista(cliente: Any, bucket: str, claves: list[str]) -> tuple[list[O
             h = cliente.head_object(Bucket=bucket, Key=k)
             objetos.append(ObjetoS3(clave=k, tamano=int(h.get("ContentLength", 0))))
         except Exception as e:  # noqa: BLE001
-            avisos.append(f"{k}: no se pudo leer ({type(e).__name__})")
+            motivo = describir_error(e, bucket)
+            log.warning("head_object de s3://%s/%s: %s", bucket, k, motivo)
+            avisos.append(f"{k}: no se pudo leer: {motivo}")
     return objetos, avisos
 
 
@@ -308,7 +347,9 @@ def descargar(cliente: Any, bucket: str, objetos: list[ObjetoS3]) -> tuple[list[
             r = cliente.get_object(Bucket=(o.bucket or bucket), Key=o.clave)
             return o, r["Body"].read(), None
         except Exception as e:  # noqa: BLE001
-            return o, None, f"{o.nombre}: no se pudo descargar ({type(e).__name__})"
+            motivo = describir_error(e, o.bucket or bucket)
+            log.warning("get_object de s3://%s/%s: %s", o.bucket or bucket, o.clave, motivo)
+            return o, None, f"{o.nombre}: no se pudo descargar: {motivo}"
 
     hilos = min(HILOS_DESCARGA, len(objetos))
     with concurrent.futures.ThreadPoolExecutor(max_workers=hilos) as pool:
@@ -359,7 +400,9 @@ def ingerir(
             objetos += listar_prefijo(cliente, bucket, folder_path)
         except Exception as e:  # noqa: BLE001
             # AccessDenied entra por acá mientras el rol no tenga permisos.
-            res.avisos.append(f"no se pudo listar «{folder_path}» ({type(e).__name__})")
+            motivo = describir_error(e, bucket)
+            log.warning("list_objects_v2 de s3://%s/%s: %s", bucket, folder_path, motivo)
+            res.avisos.append(f"no se pudo listar «{folder_path}»: {motivo}")
     if archivos:
         objs, avs = resolver_lista(cliente, bucket, archivos)
         objetos += objs

@@ -220,6 +220,7 @@ análisis sirve:
 | `LENS_DOCUMENT_NOT_READABLE` | **pendiente de alta** | El documento se descargó pero no se pudo leer: archivo corrupto, cifrado, o un escaneo sin texto recuperable. |
 | `LENS_EXTRACTION_FAILED` | **pendiente de alta** | El documento se leyó pero la extracción no produjo un resultado utilizable. |
 | `LENS_REQUIRED_DATA_MISSING` | **pendiente de alta** | Faltan datos sin los cuales el análisis no sirve: la razón social o el RUT de la sociedad. |
+| `SERVICE_UNAVAILABLE` | `000503` | Un servicio del que LENS depende no respondió (el modelo, caído, sobrecargado o sin tiempo). El documento puede estar bien: se puede reintentar. |
 
 > Los marcados como pendientes (4) están solicitados a
 > Arquitectura y todavía no tienen código asignado. Son propios de LENS: ningún
@@ -240,6 +241,7 @@ Catálogo propio de LENS. Viajan en `warnings[]` con `reason`, `objectKey` y `me
 | `VALUE_TRUNCATED` | El valor estaba completo y se recortó al máximo que admite el contrato. |
 | `TAX_ID_COUNTRY_MISMATCH` | El identificador tributario tiene forma de otro país que el declarado; se usó el del país declarado y queda dicho por si el país vino mal. |
 | `NAME_SPLIT_INFERRED` | El nombre vino sin partir y se separó por cantidad de palabras: es una conjetura, y el orden de apellidos no se puede deducir sin el documento. |
+| `DOCUMENT_ENTITY_MISMATCH` | Un documento complementario es de otra empresa que el principal (no coincide el identificador tributario o la razón social): no se usaron sus datos. |
 
 ---
 

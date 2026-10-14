@@ -258,6 +258,31 @@ def id_accionista(valor: Any) -> str | None:
     return digitos or None
 
 
+def porcentaje(valor: Any) -> int | float | None:
+    """El porcentaje con UNA sola forma por valor: `51`, nunca a veces `51.0`.
+
+    El modelo devuelve el mismo número como `51` en una corrida y `51.0` en la
+    otra, y el JSON los escribe distinto. Onboarding comparó dos lecturas del
+    mismo documento y vio el formato cambiar (AJ-04). Un valor entero sale
+    entero y uno con decimales sale con decimales, hasta cuatro.
+
+    No estima: lo que no es un número sale `None`. Un `True` no es un 1.
+    """
+    if valor is None or isinstance(valor, bool):
+        return None
+    if isinstance(valor, (int, float)):
+        n = float(valor)
+    else:
+        try:
+            n = float(str(valor).strip().rstrip("%").strip().replace(",", "."))
+        except ValueError:
+            return None
+    if n != n or n in (float("inf"), float("-inf")):
+        return None
+    n = round(n, 4)
+    return int(n) if n.is_integer() else n
+
+
 def id_tal_cual(valor: Any) -> str | None:
     """El identificador de la empresa o del representante, sin tocar."""
     return str(valor or "").strip() or None
@@ -799,7 +824,7 @@ def persona(p: dict, avisos: Avisos | None = None) -> dict | None:
             p.get("identificationType"), endpoint="EP-6", pais=pais_crudo, tipo_persona_=tipo),
         "lastName": last_name,
         "name": name,
-        "ownershipPercentage": p.get("ownershipPercentage"),
+        "ownershipPercentage": porcentaje(p.get("ownershipPercentage")),
         # La clave va SIEMPRE, aunque quede vacía: el consumidor no tiene que
         # defenderse de campos ausentes. Y `[]` significa «el documento no las
         # revela», que no es lo mismo que «no se sabe». No se inventan personas.
