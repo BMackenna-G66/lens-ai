@@ -49,6 +49,7 @@ from typing import Any
 
 from paises_anexo_a import NOMBRES as PAISES_ANEXO_A
 from paises_anexo_a import POR_ISO as PAIS_POR_ISO
+from paises_variantes import AMBIGUAS as PAISES_AMBIGUOS
 from paises_variantes import VARIANTES as VARIANTES_PAIS
 
 # ── Avisos que produce esta capa ────────────────────────────────────────────
@@ -370,10 +371,17 @@ def clave_pais(valor: Any) -> str:
 
 def resolver_pais(valor: Any) -> tuple[str, str] | None:
     """`(código ISO-2, nombre del Anexo A)` de cualquier forma de escribir un
-    país —en español, inglés o portugués, con su ISO-2 o su ISO-3, con o sin
-    tildes—, o `None` si no es un país del catálogo (AJ-08)."""
+    país —en español, inglés o portugués, con su ISO-2 o su ISO-3, o su
+    gentilicio («Mexicana», «chilenos»)—, o `None` si no es un país del
+    catálogo o si es ambiguo (AJ-08)."""
     iso = VARIANTES_PAIS.get(clave_pais(valor))
     return (iso, PAIS_POR_ISO[iso]) if iso else None
+
+
+def paises_posibles(valor: Any) -> tuple[str, ...]:
+    """Los nombres del catálogo entre los que se duda, si la forma es ambigua
+    («Corea» → Corea del Sur o Corea del Norte); vacío si no lo es."""
+    return tuple(PAIS_POR_ISO[i] for i in PAISES_AMBIGUOS.get(clave_pais(valor), ()))
 
 
 def pais_normalizado(valor: Any) -> str:
@@ -404,9 +412,14 @@ def pais_anexo_a(valor: Any, avisos: Avisos | None = None, *, field: str | None 
         return None
     r = resolver_pais(crudo)
     if r is None and avisos is not None:
+        # Ambiguo no es lo mismo que desconocido: «Corea» puede ser Corea del
+        # Norte, que está sancionada. Adivinar una nacionalidad sancionable es
+        # peor que preguntar, así que se dice entre cuáles se duda.
+        posibles = paises_posibles(crudo)
         avisos.agregar(
             AVISO_PAIS,
-            f"El país «{crudo}» no está en el catálogo de Onboarding; se envía vacío.",
+            (f"El país «{crudo}» es ambiguo ({' o '.join(posibles)}); se envía vacío." if posibles
+             else f"El país «{crudo}» no está en el catálogo de Onboarding; se envía vacío."),
             field=field, subject=subject, valor=crudo,
         )
     return r[1] if r else None
@@ -870,6 +883,9 @@ TOPE_APTO = 10
 #: Cómo se abrevia la parte «oficina» de una dirección para que entre en 10 sin
 #: cortar palabras.
 _ABREVIATURAS_APTO = (
+    (re.compile(r"\boficinas\b\.?", re.IGNORECASE), "Ofs."),
+    (re.compile(r"\bbodegas\b\.?", re.IGNORECASE), "Bods."),
+    (re.compile(r"\blocales\b\.?", re.IGNORECASE), "Locs."),
     (re.compile(r"\boficina\b\.?", re.IGNORECASE), "Of."),
     (re.compile(r"\bapartamento\b\.?", re.IGNORECASE), "Apto."),
     (re.compile(r"\bdepartamento\b\.?", re.IGNORECASE), "Depto."),
@@ -878,6 +894,9 @@ _ABREVIATURAS_APTO = (
     (re.compile(r"\btorre\b\.?", re.IGNORECASE), "T."),
     (re.compile(r"\blocal\b\.?", re.IGNORECASE), "Loc."),
     (re.compile(r"\bbloque\b\.?", re.IGNORECASE), "Bl."),
+    (re.compile(r"\bbodega\b\.?", re.IGNORECASE), "Bod."),
+    # «12 y 13» → «12-13»: dos oficinas siguen siendo dos, en menos lugar.
+    (re.compile(r"(\d+)\s+(?:y|e|&)\s+(\d+)", re.IGNORECASE), r"\1-\2"),
 )
 
 

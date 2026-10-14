@@ -1280,10 +1280,22 @@ def test_ep6_conserva_la_cadena_de_indirectos(s3_falso):
 # ── Correcciones de lo ya mergeado ──────────────────────────────────────────
 
 def test_el_schema_version_es_el_del_esquema_no_el_del_documento():
-    """La especificación lo fija en `1.0.0` en los seis endpoints. Decir `1.2`
-    —la versión del documento— le haría creer al consumidor que el formato
-    cambió cuando no cambió."""
-    assert co.SCHEMA_VERSION == "1.0.0"
+    """Es la versión de la FORMA de las respuestas, no la del documento: decir
+    `1.2` —la versión de la especificación— le haría creer al consumidor que el
+    formato cambió cuando no cambió. Sí cambió con el contrato v3 (14-10-2026):
+    `field` y `subject`, `countryOfOriginCode`, `countryCode`, `personType` null."""
+    assert co.SCHEMA_VERSION == "1.1.0"
+
+
+def test_una_corrida_de_antes_del_v3_se_sirve_con_la_version_de_hoy(s3_falso):
+    """Se guardó con `1.0.0`, pero se sirve con la forma de hoy: declarar la
+    versión guardada mentiría sobre los campos que trae."""
+    corridas.registrar_inicio("prod", "ACME-1", "a1", documentos=[PRINCIPAL], schema_version="1.0.0")
+    co.procesar({"ambiente": "prod", "companyId": "ACME-1", "analysisId": "a1",
+                 "country": "chile", "documents": [PRINCIPAL]},
+                analizar=analizar_falso, extraer_socios=socios_falsos, leer_identidad=identidad_falsa)
+    assert pedir_resultado()[1]["schemaVersion"] == "1.1.0"
+    assert consultar()[1]["schemaVersion"] == "1.1.0"
 
 
 def test_ep3_trae_el_country_de_la_corrida(s3_falso):
@@ -2331,3 +2343,28 @@ def test_s3_las_paginas_ilegibles_llegan_juntas_con_su_documento(s3_falso):
     reg = correr([PRINCIPAL], s3_falso, analizar=con_paginas)
     a = next(a for a in reg["warnings"] if a["reason"] == "PARTIALLY_ILLEGIBLE")
     assert "7, 12 y 19" in a["message"] and a["objectKey"] == "b2b/escritura.pdf" and a["field"] == "document"
+
+
+
+# ── Auditoría de #203 · gentilicios y países ambiguos ───────────────────────
+
+def test_un_accionista_mexicana_no_bloquea_la_lectura(s3_falso):
+    """En las corridas guardadas, el modelo devolvió «Mexicana» seis veces. Sin
+    los gentilicios, con los avisos de accionistas llegando a `warnings[]`, eso
+    dejaba la corrida INCOMPLETE y Onboarding la bloqueaba."""
+    def socios(vivos, t0):
+        dueno = {"personType": "NATURAL", "name": "ANA", "lastName": "FICTICIA",
+                 "shareholderName": "ANA FICTICIA", "countryOfOrigin": "Mexicana"}
+        return {"legalRepresentatives": [dict(REPRESENTANTE)], "directOwnership": [dueno],
+                "indirectShareholders": []}, []
+
+    reg = correr([PRINCIPAL], s3_falso, socios=socios)
+    p = pedir_seccion("shareholders")[1]["businessShareholders"]["directOwnership"][0]
+    assert (p["countryOfOrigin"], p["countryOfOriginCode"]) == ("México", "MX")
+    assert not any(a["reason"] == "COUNTRY_NOT_IN_CATALOG" for a in reg["warnings"])
+
+
+def test_ep1_con_un_pais_ambiguo_es_400_y_lo_dice(s3_falso):
+    codigo, r = llamar({**CUERPO_OK, "country": "Corea"})
+    assert codigo == 400
+    assert "ambiguo" in r["error"]["message"] and "Corea del Norte" in r["error"]["message"]

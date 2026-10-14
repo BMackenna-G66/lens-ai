@@ -67,10 +67,15 @@ RUTA_ANALYSIS = re.compile(r"^/v1/companies/([^/]+)/analysis$")
 RUTA_SECCION = re.compile(r"^/v1/companies/([^/]+)/analysis/(legal-representatives|company|shareholders)$")
 
 #: La versión del ESQUEMA de respuesta, que no es la del documento de
-#: especificación. La v1.1 la fija en `1.0.0` en los seis endpoints; decir `1.2`
+#: especificación. La v1.1 la fijó en `1.0.0` en los seis endpoints; decir `1.2`
 #: —que es la versión del documento— le haría creer al consumidor que el formato
 #: cambió cuando no cambió.
-SCHEMA_VERSION = os.environ.get("SCHEMA_VERSION", "1.0.0")
+#:
+#: `1.1.0` desde el contrato v3 (14-10-2026), que sí cambia la forma: los avisos
+#: traen `field` y `subject`, EP-6 trae `countryOfOriginCode` y `personType`
+#: puede ir en `null`, y EP-3 trae `countryCode`. §15 del contrato: cambia
+#: cuando cambia la forma de las respuestas.
+SCHEMA_VERSION = os.environ.get("SCHEMA_VERSION", "1.1.0")
 
 #: Tope de documentos por petición. La v1.2 bajó el lote a 2; es su propio tope
 #: y no el de `/v1/analisis` (12), que sigue como estaba.
@@ -301,8 +306,11 @@ def manejar(evento: dict, ruta: str, metodo: str, *, analizar: Callable,
     # dejaba sin aplicar las reglas por país, en silencio. Se guarda el nombre
     # normalizado del catálogo, que es contra lo que comparan las reglas.
     if onboarding.resolver_pais(pais_pedido) is None:
-        return _error("BAD_REQUEST",
-                      f"`country` no está en el catálogo de países (Anexo A): «{pais_pedido}».")
+        posibles = onboarding.paises_posibles(pais_pedido)
+        return _error("BAD_REQUEST", (
+            f"`country` es ambiguo: «{pais_pedido}» puede ser {' o '.join(posibles)}. "
+            "Mandar el código ISO." if posibles else
+            f"`country` no está en el catálogo de países (Anexo A): «{pais_pedido}»."))
     pais = _pais(pais_pedido)
 
     # Un lote sin documento principal es un error de la PETICIÓN, no de la
@@ -480,7 +488,9 @@ def estado_de(company_id: str, u: dict | None) -> dict:
             "LENS_EXTRACTION_FAILED", "La corrida terminó sin un resultado utilizable.")
         ) if estado == corridas.FAILED else None,
         "warnings": normalizar_avisos(u.get("warnings") or []),
-        "schemaVersion": u.get("schemaVersion") or SCHEMA_VERSION,
+        # La forma con la que se SIRVE, no con la que se guardó: una corrida
+        # de antes del v3 sale con los campos nuevos.
+        "schemaVersion": SCHEMA_VERSION,
     }
 
 
@@ -1237,7 +1247,9 @@ def _serializar(company_id: str, u: dict) -> tuple[dict, list[dict]]:
         "country": _pais(u.get("country") or ficha.get("detectedCountry") or ""),
         # AJ-08: el ISO-2 del catálogo, al lado. `null` si el país no es de él.
         "countryCode": onboarding.codigo_pais(u.get("country") or ficha.get("detectedCountry") or ""),
-        "schemaVersion": u.get("schemaVersion") or SCHEMA_VERSION,
+        # La forma con la que se SIRVE, no con la que se guardó: una corrida
+        # de antes del v3 sale con los campos nuevos.
+        "schemaVersion": SCHEMA_VERSION,
         "company": empresa,
         "legalRepresentatives": representantes,
         "fields": ficha.get("fields") or [],

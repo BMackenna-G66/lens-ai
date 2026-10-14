@@ -294,3 +294,56 @@ def test_la_actividad_del_objeto_social(objeto, actividad):
 ])
 def test_las_paginas_se_dicen_como_las_lee_una_persona(indices, texto):
     assert extraccion.paginas_legibles(indices) == texto
+
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Auditoría de #203 · gentilicios y países ambiguos
+# ════════════════════════════════════════════════════════════════════════════
+
+@pytest.mark.parametrize("entrada,iso", [
+    ("Mexicana", "MX"), ("mexicano", "MX"), ("chilena", "CL"), ("colombianos", "CO"),
+    ("peruana", "PE"), ("argentino", "AR"), ("estadounidense", "US"), ("española", "ES"),
+    ("brasileño", "BR"), ("brasileira", "BR"), ("Mexican", "MX"), ("American", "US"),
+    ("Brazilian", "BR"), ("francesa", "FR"), ("alemanes", "DE"), ("costarricense", "CR"),
+    ("venezolanas", "VE"), ("salvadoreño", "SV"), ("israelí", "IL"), ("británica", "GB"),
+    ("neerlandés", "NL"), ("holandesa", "NL"), ("norcoreano", "KP"), ("surcoreana", "KR"),
+])
+def test_el_gentilicio_se_reconoce(entrada, iso):
+    assert ob.codigo_pais(entrada) == iso
+
+
+@pytest.mark.parametrize("entrada,posibles", [
+    ("Corea", ("Corea del Sur", "Corea del Norte")),
+    ("coreano", ("Corea del Sur", "Corea del Norte")),
+    ("Korean", ("Corea del Sur", "Corea del Norte")),
+    ("congoleña", ("Congo", "República Democrática del Congo")),
+    ("guineano", ("Guinea", "Guinea Bissau")),
+])
+def test_lo_ambiguo_no_se_adivina(entrada, posibles):
+    """«Corea» es Corea del Sur o Corea del Norte, que está sancionada: en
+    compliance, adivinar una nacionalidad sancionable es peor que preguntar."""
+    av = _av()
+    assert ob.resolver_pais(entrada) is None
+    assert ob.pais_anexo_a(entrada, av) is None
+    msg = av.items[0]["message"]
+    assert "ambiguo" in msg and all(n in msg for n in posibles)
+
+
+def test_el_nombre_completo_de_cada_corea_si_se_reconoce():
+    assert ob.codigo_pais("Corea del Sur") == "KR" and ob.codigo_pais("Corea del Norte") == "KP"
+    assert ob.codigo_pais("South Korea") == "KR" and ob.codigo_pais("North Korea") == "KP"
+
+
+def test_ningun_nombre_del_catalogo_queda_ambiguo():
+    import paises_variantes as pv
+    for iso, nombre in PAISES:
+        assert ob.clave_pais(nombre) not in pv.AMBIGUAS, nombre
+
+
+@pytest.mark.parametrize("entrada,salida", [
+    ("Bodega 12 y 13", "Bod. 12-13"), ("Bodegas 1 y 2", "Bods. 1-2"), ("Oficinas 21 y 22", "Ofs. 21-22"),
+])
+def test_dos_oficinas_siguen_siendo_dos(entrada, salida):
+    av = _av()
+    assert ob.apto_corto(entrada, av) == salida and not av.items
