@@ -1451,12 +1451,13 @@ def test_1_ep2_y_ep3_muestran_los_mismos_avisos(s3_falso):
     assert consultar()[1]["warnings"] == pedir_resultado()[1]["warnings"]
 
 
-def test_1_todo_aviso_tiene_exactamente_las_tres_claves(s3_falso):
+def test_1_todo_aviso_tiene_exactamente_las_cinco_claves(s3_falso):
     """§6.6. Los avisos de forma traían claves de más —alguno el objeto social
-    entero—, y otros no traían `objectKey`."""
+    entero—, y otros no traían `objectKey`. Desde el v3 (AJ-07) son cinco:
+    `field` y `subject` se sumaron, y viajan siempre."""
     correr([PRINCIPAL], s3_falso, analizar=analizar_con(**{"Fecha de Constitución": "cuando sea"}))
     for a in consultar()[1]["warnings"]:
-        assert set(a) == {"reason", "objectKey", "message"}
+        assert set(a) == {"reason", "objectKey", "message", "field", "subject"}
 
 
 # ── #3 · PDF cifrado ────────────────────────────────────────────────────────
@@ -1607,7 +1608,20 @@ def test_6_si_el_resumen_no_cabe_va_null_con_aviso_nunca_cortado(s3_falso):
         return {**identidad_falsa(descargado, t0),
                 "activity": "Compra, venta, importación y exportación de toda clase de bienes"}
 
-    reg = correr([PRINCIPAL], s3_falso, identidad=largo)
+    # Desde el PR-C (AJ-07), antes de avisar que falta se resume del objeto
+    # social de los 18 campos: «Inversiones y rentas…» → «Inversiones». Lo que
+    # este test protege sigue igual: nunca un fragmento con la coma colgando.
+    correr([PRINCIPAL], s3_falso, identidad=largo)
+    assert pedir_seccion("company")[1]["company"]["activity"] == "Inversiones"
+
+
+def test_6_sin_objeto_social_la_actividad_va_null_con_aviso(s3_falso):
+    def largo(descargado, t0):
+        return {**identidad_falsa(descargado, t0),
+                "activity": "Compra, venta, importación y exportación de toda clase de bienes"}
+
+    reg = correr([PRINCIPAL], s3_falso, identidad=largo,
+                 analizar=analizar_con(**{"Objeto Social": "No especificado"}))
     assert pedir_seccion("company")[1]["company"]["activity"] is None
     assert reg["status"] == corridas.INCOMPLETE
 
@@ -2152,8 +2166,10 @@ def test_aj01_la_direccion_del_certificado_llega_a_ep5(s3_falso):
         return r
 
     correr([PRINCIPAL], s3_falso, analizar=con_texto)
+    # «Oficina 999» tiene 11 caracteres y la base de Onboarding admite 10: con
+    # AJ-09 se abrevia, sin cortar palabras.
     assert pedir_seccion("company")[1]["company"]["address"] == {
-        "street": "Calle 99 No. 99-99", "apt": "Oficina 999", "city": "Medellín", "state": "Antioquia"}
+        "street": "Calle 99 No. 99-99", "apt": "Of. 999", "city": "Medellín", "state": "Antioquia"}
     ficha = corridas.buscar("prod", "ACME-1", "a1")["result"]
     assert "_textos" not in ficha, "el texto de los documentos no se guarda"
 
@@ -2173,3 +2189,145 @@ def test_aj02_los_identificadores_alfanumericos_llegan_completos(s3_falso):
     correr([PRINCIPAL], s3_falso, socios=socios)
     ids = [p["shareholderId"] for p in pedir_seccion("shareholders")[1]["businessShareholders"]["directOwnership"]]
     assert ids == ["X9876543", "EFU010101AB1", "99000001", "77000111K"]
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Ajustes pedidos por Onboarding (14-10-2026) · PR-C, contrato v3
+# ════════════════════════════════════════════════════════════════════════════
+
+import gemini  # noqa: E402
+
+
+# ── AJ-07 · Cada aviso dice qué dato y de quién ─────────────────────────────
+
+def test_aj07_cada_aviso_trae_su_campo_y_la_persona(s3_falso):
+    def sin_documento(vivos, t0):
+        rep = {**REPRESENTANTE, "shareholderId": ""}
+        return {"legalRepresentatives": [rep], "directOwnership": [], "indirectShareholders": []}, []
+
+    s3_falso.falla_get.add("b2b/anexo.pdf")
+    correr([PRINCIPAL, ANEXO], s3_falso, socios=sin_documento,
+           analizar=analizar_con(**{"Fecha de Constitución": "cuando sea"}))
+    avisos = consultar()[1]["warnings"]
+    assert avisos and all(a["field"] for a in avisos), avisos
+    doc = next(a for a in avisos if a["field"] == "legalRepresentative.identificationNumber")
+    assert doc["subject"] == "MARTINEZ SOTO CLAUDIA ANDREA"
+    assert next(a for a in avisos if a["objectKey"] == "b2b/anexo.pdf")["field"] == "document"
+    assert any(a["field"] == "constitutionDate" for a in avisos)
+
+
+def test_aj07_en_mexico_no_se_espera_el_identificador_tributario(s3_falso):
+    """§10: el identificador tributario solo es esperado en Chile y Colombia."""
+    correr([PRINCIPAL], s3_falso, pais="mexico", analizar=analizar_con(**{"RUT de la sociedad": None}))
+    assert not any(a["field"] == "taxId" for a in consultar()[1]["warnings"])
+    corridas._reiniciar_memoria()
+    correr([PRINCIPAL], s3_falso, pais="chile", analizar=analizar_con(**{"RUT de la sociedad": None}))
+    assert any(a["field"] == "taxId" for a in consultar()[1]["warnings"])
+
+
+def _inutilizable(*_, **__):
+    raise gemini.RespuestaInvalida("La respuesta de identidad no es JSON válido: Expecting value")
+
+
+@pytest.mark.parametrize("etapa", ["identidad", "socios", "admin"])
+def test_aj07_dos_respuestas_inutilizables_son_falla_de_lens_no_del_documento(s3_falso, etapa):
+    """Antes salía «faltan datos» y Onboarding le descontaba un intento al
+    usuario por algo que, leído de nuevo, salía bien."""
+    reg = correr([PRINCIPAL], s3_falso, **{etapa: _inutilizable})
+    assert reg["status"] == corridas.FAILED
+    assert reg["error"]["reason"] == "LENS_EXTRACTION_FAILED"
+    assert "dos veces" in reg["error"]["message"]
+
+
+def test_aj07_una_respuesta_inutilizable_se_pide_de_nuevo(s3_falso):
+    llamadas = []
+
+    def una_vez_mal(d, t0):
+        llamadas.append(1)
+        if len(llamadas) == 1:
+            _inutilizable()
+        return identidad_falsa(d, t0)
+
+    reg = correr([PRINCIPAL], s3_falso, identidad=una_vez_mal)
+    assert reg["status"] == corridas.COMPLETED and len(llamadas) == 2
+
+
+def test_aj07_la_forma_legal_sale_del_texto_antes_de_avisar(s3_falso):
+    def sin_forma(d, t0):
+        return {**identidad_falsa(d, t0), "legalForm": None}
+
+    def con_texto(docs, inc, pais="", **_):
+        r = analizar_con(**{"Razón Social": "COMERCIAL TRIFOLIO"})(docs, inc, pais)
+        r["_textos"] = {"escritura.pdf": "comparecen y constituyen una sociedad por acciones denominada"}
+        return r
+
+    reg = correr([PRINCIPAL], s3_falso, identidad=sin_forma, analizar=con_texto)
+    assert pedir_seccion("company")[1]["company"]["legalForm"] == "Sociedad por Acciones"
+    assert not any(a["field"] == "legalForm" for a in reg["warnings"])
+
+
+def test_aj07_la_actividad_que_falto_se_pide_una_vez_mas(s3_falso):
+    llamadas = []
+
+    def actividad_a_la_segunda(d, t0):
+        llamadas.append(1)
+        return {**identidad_falsa(d, t0), "activity": None if len(llamadas) == 1 else "Inversiones"}
+
+    reg = correr([PRINCIPAL], s3_falso, identidad=actividad_a_la_segunda)
+    assert len(llamadas) == 2
+    assert pedir_seccion("company")[1]["company"]["activity"] == "Inversiones"
+    assert reg["status"] == corridas.COMPLETED
+
+
+# ── AJ-08 · El país de EP-1, del catálogo ───────────────────────────────────
+
+def test_aj08_ep1_acepta_el_codigo_iso_igual_que_el_nombre(s3_falso):
+    codigo, _ = llamar({**CUERPO_OK, "country": "CL"})
+    assert codigo == 202
+    assert corridas.ultima("prod", "ACME-1")["country"] == "chile"
+    r = pedir_resultado()[1]
+    assert (r["country"], r["countryCode"]) == ("chile", "CL")
+
+
+@pytest.mark.parametrize("pais", ["XX", "Wakanda", "Narnia"])
+def test_aj08_un_pais_fuera_del_catalogo_es_400(s3_falso, pais):
+    codigo, r = llamar({**CUERPO_OK, "country": pais})
+    assert codigo == 400 and pais in r["error"]["message"]
+    assert corridas.ultima("prod", "ACME-1") is None
+
+
+def test_aj08_colombia_por_codigo_aplica_las_reglas_de_colombia(s3_falso):
+    """El certificado de cámara de comercio es principal solo en Colombia."""
+    cuerpo = {**CUERPO_OK, "country": "CO", "documents": [
+        {"s3Uri": "s3://g66-company/prod/ACME-1/escritura.pdf",
+         "documentType": "company_trade_chamber_sedpe_document"}]}
+    assert llamar(cuerpo)[0] == 202
+
+
+# ── Sección 3 · La persona sin tipo, y la sociedad sin tipo ─────────────────
+
+def test_s3_la_persona_sin_tipo_va_en_ep6_y_la_sociedad_a_su_lugar(s3_falso):
+    def socios(vivos, t0):
+        return {"legalRepresentatives": [dict(REPRESENTANTE)], "directOwnership": [
+            {"shareholderName": "ANA FICTICIA", "name": "ANA", "lastName": "FICTICIA"},
+            {"shareholderName": "EMPRESA INVENTADA S.A.S."},
+        ], "indirectShareholders": []}, []
+
+    reg = correr([PRINCIPAL], s3_falso, socios=socios)
+    ep6 = pedir_seccion("shareholders")[1]["businessShareholders"]
+    assert [(p["shareholderName"], p["personType"]) for p in ep6["directOwnership"]] == [("ANA FICTICIA", None)]
+    assert [(p["shareholderName"], p["personType"]) for p in ep6["indirectShareholders"]] == \
+        [("EMPRESA INVENTADA S.A.S.", "LEGAL")]
+    aviso = next(a for a in reg["warnings"] if a["reason"] == "PERSON_TYPE_UNDETERMINED")
+    assert aviso["subject"] == "ANA FICTICIA" and aviso["field"] == "shareholder.personType"
+
+
+def test_s3_las_paginas_ilegibles_llegan_juntas_con_su_documento(s3_falso):
+    def con_paginas(docs, inc, pais="", **_):
+        r = analizar_falso(docs, inc, pais)
+        r["avisos"] = ["escritura.pdf: Páginas 7, 12 y 19 sin texto recuperable."]
+        return r
+
+    reg = correr([PRINCIPAL], s3_falso, analizar=con_paginas)
+    a = next(a for a in reg["warnings"] if a["reason"] == "PARTIALLY_ILLEGIBLE")
+    assert "7, 12 y 19" in a["message"] and a["objectKey"] == "b2b/escritura.pdf" and a["field"] == "document"

@@ -149,6 +149,17 @@ class ServicioNoDisponible(Exception):
     """
 
 
+class ExtraccionFallida(Exception):
+    """El modelo respondió, pero algo que no se puede usar: JSON inválido, una
+    respuesta cortada.
+
+    No es del documento —leído de nuevo, suele salir bien— ni es una caída. La
+    corrida reintenta una vez la pasada y, si vuelve a pasar, termina en
+    `FAILED` con `LENS_EXTRACTION_FAILED` (AJ-07). Antes terminaba como «faltan
+    datos del documento» y Onboarding le descontaba un intento al usuario.
+    """
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # CANAL 3 · Avisos — la corrida siguió, pero algo no salió bien
 # ══════════════════════════════════════════════════════════════════════════
@@ -226,7 +237,8 @@ def fallo(nombre: str, mensaje: str = "", **extra: Any) -> dict:
     return {"reason": r.nombre, "message": mensaje or r.descripcion, **extra}
 
 
-def aviso(nombre: str, mensaje: str = "", object_key: str | None = None, **extra: Any) -> dict:
+def aviso(nombre: str, mensaje: str = "", object_key: str | None = None,
+          field: str | None = None, subject: str | None = None, **extra: Any) -> dict:
     """Una entrada de `warnings[]` (canal 3).
 
     `objectKey` viaja SIEMPRE —el contrato lo define y un consumidor no tiene que
@@ -234,12 +246,19 @@ def aviso(nombre: str, mensaje: str = "", object_key: str | None = None, **extra
     archivo en particular. §6.6: «`string | null` … `null` si no corresponde a un
     archivo». Hasta el 01-10-2026 iba como `""`: para ms-company, que es Java,
     un texto vacío y un nulo no son lo mismo.
+
+    `field` y `subject` también viajan siempre (AJ-07, 14-10-2026): la ruta del
+    dato —`taxId`, `legalRepresentative.identificationNumber`, `document`…— y la
+    persona de la que es, por su nombre. Onboarding le dice al usuario qué falta
+    y de quién, y no puede sacarlo de un `message` en texto libre.
     """
     r = AVISO.get(nombre) or AVISO["EXPECTED_DATA_MISSING"]
     return {
         "reason": r.nombre,
         "objectKey": object_key or None,
         "message": mensaje or r.descripcion,
+        "field": field or None,
+        "subject": subject or None,
         **extra,
     }
 

@@ -204,3 +204,24 @@ def test_la_identidad_ahora_se_reintenta(gemini_falso):
     r, _ = gemini.leer_identidad([("a.pdf", b"%PDF-1.4")])
     assert r["legalName"] == "EMPRESA FICTICIA UNO S.A.S." and r["taxId"] == "999.999.001-7"
     assert gemini_falso["llamadas"][0]["timeout"] == gemini.TIMEOUT_IDENTIDAD_S
+
+
+# ── AJ-07 · Inutilizable no es lo mismo que bloqueado ───────────────────────
+
+def test_una_respuesta_vacia_es_inutilizable_y_no_del_documento(gemini_falso):
+    gemini_falso["cola"] = [Resp(200, cuerpo={"candidates": [{"content": {"parts": [{"text": ""}]}}]})]
+    with pytest.raises(gemini.RespuestaInvalida):
+        gemini._llamar("x", {})
+
+
+def test_una_respuesta_bloqueada_sigue_siendo_del_documento(gemini_falso):
+    gemini_falso["cola"] = [Resp(200, cuerpo={"promptFeedback": {"blockReason": "SAFETY"}})]
+    with pytest.raises(gemini.ErrorGemini) as e:
+        gemini._llamar("x", {})
+    assert not isinstance(e.value, errores.ExtraccionFallida)
+
+
+def test_un_json_que_no_parsea_es_inutilizable(monkeypatch):
+    monkeypatch.setattr(gemini, "_llamar", lambda *a, **k: "esto no es json")
+    with pytest.raises(gemini.RespuestaInvalida):
+        gemini.extraer_campos("texto", "ctx")

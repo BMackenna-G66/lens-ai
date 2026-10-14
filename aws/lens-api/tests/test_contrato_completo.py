@@ -54,6 +54,7 @@ CAMPOS_EP6 = (
     "shareholderName",
     "shareholderId",
     "countryOfOrigin",
+    "countryOfOriginCode",      # v3 (AJ-08): el ISO-2, al lado del nombre
     "identificationType",
     "lastName",
     "name",
@@ -524,7 +525,7 @@ def test_el_error_de_ep2_trae_reason_y_message_cuando_falla():
 CAMPOS_EP1 = ("companyId", "analysisId", "status", "startedAt", "schemaVersion")
 
 #: §6.7 — EP-3, el resultado completo.
-CAMPOS_EP3 = ("companyId", "analysisId", "status", "country", "fields", "company",
+CAMPOS_EP3 = ("companyId", "analysisId", "status", "country", "countryCode", "fields", "company",
               "legalRepresentatives", "documents", "warnings", "schemaVersion")
 
 #: §6.8 a §6.10 — las tres vistas. Mismo sobre, distinto bloque.

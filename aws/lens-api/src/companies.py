@@ -210,12 +210,10 @@ TIPOS_PRINCIPALES_POR_PAIS: dict[str, tuple[str, ...]] = {
     "colombia": ("COMPANY_TRADE_CHAMBER_SEDPE_DOCUMENT",),
 }
 
-_ALIAS_PAIS = {"co": "colombia", "cl": "chile", "pe": "peru", "mx": "mexico", "ar": "argentina"}
-
-
 def _pais(v: Any) -> str:
-    p = onboarding._sin_tildes(str(v or ""))
-    return _ALIAS_PAIS.get(p, p)
+    """El país como lo comparan las reglas: el nombre del catálogo en minúsculas
+    y sin tildes, venga como código ISO o como nombre (AJ-08)."""
+    return onboarding.pais_normalizado(v)
 
 
 def tipos_principales(pais: Any = "") -> tuple[str, ...]:
@@ -293,11 +291,19 @@ def manejar(evento: dict, ruta: str, metodo: str, *, analizar: Callable,
     if motivo:
         return _error("BAD_REQUEST", motivo)
 
-    pais = str(cuerpo.get("country") or "").strip()
-    if not pais:
+    pais_pedido = str(cuerpo.get("country") or "").strip()
+    if not pais_pedido:
         # §6.5 lo declara obligatorio, y acá además decide qué documento es el
         # principal: sin país, un lote colombiano no tiene escritura.
         return _error("BAD_REQUEST", "`country` es obligatorio.")
+    # AJ-08: el código ISO —que es lo que manda ms-company— o el nombre, siempre
+    # del catálogo del Anexo A. Lo que no está, 400: un país que no se reconoce
+    # dejaba sin aplicar las reglas por país, en silencio. Se guarda el nombre
+    # normalizado del catálogo, que es contra lo que comparan las reglas.
+    if onboarding.resolver_pais(pais_pedido) is None:
+        return _error("BAD_REQUEST",
+                      f"`country` no está en el catálogo de países (Anexo A): «{pais_pedido}».")
+    pais = _pais(pais_pedido)
 
     # Un lote sin documento principal es un error de la PETICIÓN, no de la
     # corrida: se sabe antes de leer nada, así que es un 400 sincrónico y no un
@@ -578,6 +584,24 @@ def procesar(carga: dict, *, analizar: Callable, extraer_socios: Callable | None
         log.warning("corrida %s cortada: no se pudo %s (%s)", analysis_id, que, e)
         return fallar("SERVICE_UNAVAILABLE", f"No se pudo {que}: {e}")
 
+    def inservible(que: str, e: Exception) -> dict:
+        """AJ-07: el modelo respondió dos veces algo que no se pudo usar. Es una
+        falla de LENS, no un dato que el documento no traiga."""
+        log.warning("corrida %s cortada: no se pudo %s, dos respuestas inutilizables (%s)",
+                    analysis_id, que, e)
+        return fallar("LENS_EXTRACTION_FAILED",
+                      f"No se pudo {que}: el modelo respondió dos veces algo que no se pudo usar ({e}).")
+
+    def con_reintento(que: str, llamada: Callable[[], Any]) -> Any:
+        """Una vez más si la respuesta fue inutilizable (JSON inválido, cortada):
+        leída de nuevo, casi siempre sale bien."""
+        try:
+            return llamada()
+        except errores.ExtraccionFallida as e:
+            log.warning("corrida %s: %s respondió algo inutilizable (%s); se reintenta una vez",
+                        analysis_id, que, e)
+            return llamada()
+
     principales = [i for i, d in enumerate(pedidos) if es_principal(d, pais)]
 
     def principales_vivos() -> list[int]:
@@ -645,9 +669,12 @@ def procesar(carga: dict, *, analizar: Callable, extraer_socios: Callable | None
     if leer_identidad is not None:
         for i in principales_vivos():
             try:
-                r = leer_identidad(bajados[claves[i]], t0)
+                r = con_reintento("verificar el documento principal",
+                                  lambda: leer_identidad(bajados[claves[i]], t0))
             except errores.ServicioNoDisponible as e:
                 return caido("verificar el documento principal", e)
+            except errores.ExtraccionFallida as e:
+                return inservible("verificar el documento principal", e)
             except Exception as e:  # noqa: BLE001
                 log.warning("no se pudo verificar el tipo de %s: %s", claves[i], e)
                 r = None
@@ -655,7 +682,7 @@ def procesar(carga: dict, *, analizar: Callable, extraer_socios: Callable | None
                 avisos.append(errores.aviso(
                     "EXPECTED_DATA_MISSING",
                     "No se pudo verificar el tipo de documento ni resumir su actividad.",
-                    object_key=claves[i]))
+                    object_key=claves[i], field="document"))
                 continue
             identidad[i] = r
             if r.get("esConstitutivo") == "NO":
@@ -742,8 +769,24 @@ def procesar(carga: dict, *, analizar: Callable, extraer_socios: Callable | None
         clave = por_nombre.get(nombre, "") if sep else ""
         if clave and clave in ilegibles:
             continue
-        razon = "OCR_PAGE_LIMIT_REACHED" if "tope de OCR" in a else "PARTIALLY_ILLEGIBLE"
-        avisos.append(errores.aviso(razon, a, object_key=clave))
+        razon = ("OCR_PAGE_LIMIT_REACHED" if ("tope de OCR" in a or "tope de lectura" in a)
+                 else "PARTIALLY_ILLEGIBLE")
+        avisos.append(errores.aviso(razon, a, object_key=clave, field="document"))
+
+    # AJ-07: la forma legal y la actividad, si la pasada de identidad respondió
+    # sin ellas. Antes de avisar que faltan: primero lo que dice el propio
+    # documento, después una pasada más. Solo si siguen faltando, el aviso.
+    i_ident = next((i for i in principales_vivos() if i in identidad), None)
+    if i_ident is not None:
+        try:
+            _conciliar_identidad(identidad[i_ident], resultado, bajados[claves[i_ident]].nombre,
+                                 lambda: con_reintento("releer el documento principal",
+                                                       lambda: leer_identidad(bajados[claves[i_ident]], t0)),
+                                 analysis_id)
+        except errores.ServicioNoDisponible as e:
+            return caido("releer el documento principal", e)
+        except errores.ExtraccionFallida as e:
+            return inservible("releer el documento principal", e)
 
     # ── 6 · Personas y administración, sobre los PDF nativos ───────────────
     # Nunca lanzan: si fallan, la ficha de 18 campos ya está lista y perderla
@@ -752,13 +795,18 @@ def procesar(carga: dict, *, analizar: Callable, extraer_socios: Callable | None
     personas, avisos_personas = ({}, [])
     if extraer_socios is not None:
         try:
-            personas, avisos_personas = extraer_socios(vivos, t0)
+            personas, avisos_personas = con_reintento("leer a los representantes",
+                                                      lambda: extraer_socios(vivos, t0))
         except errores.ServicioNoDisponible as e:
             return caido("leer a los representantes", e)
+        except errores.ExtraccionFallida as e:
+            return inservible("leer a los representantes", e)
         except Exception as e:  # noqa: BLE001
             log.warning("no se pudo extraer la composición societaria de %s: %s", analysis_id, e)
             avisos_personas = [f"No se pudo extraer la composición societaria ({e})."]
-    avisos += [errores.aviso("EXPECTED_DATA_MISSING", a) for a in avisos_personas]
+    avisos += [errores.aviso("EXPECTED_DATA_MISSING", a, field=_campo_aviso_socios(a))
+               for a in avisos_personas]
+    _clasificar_personas(personas)
     _sin_codigo_dian(personas, [textos_complementarios[i] for i in textos_complementarios
                                 if etapa[i] is None and _es_id_fiscal(pedidos[i])], pais)
     medir("personas")
@@ -769,14 +817,18 @@ def procesar(carga: dict, *, analizar: Callable, extraer_socios: Callable | None
     administracion = None
     if extraer_administracion is not None:
         try:
-            administracion = extraer_administracion(vivos, t0)
+            administracion = con_reintento("leer el régimen de administración",
+                                           lambda: extraer_administracion(vivos, t0))
         except errores.ServicioNoDisponible as e:
             return caido("leer el régimen de administración", e)
+        except errores.ExtraccionFallida as e:
+            return inservible("leer el régimen de administración", e)
         except Exception as e:  # noqa: BLE001
             log.warning("no se pudo leer el régimen de administración de %s: %s", analysis_id, e)
             avisos.append(errores.aviso(
                 "EXPECTED_DATA_MISSING",
-                f"No se pudo determinar el régimen de administración ({e})."))
+                f"No se pudo determinar el régimen de administración ({e}).",
+                field="jointAdministration"))
     medir("administracion")
 
     # ── 7 · Los documentos que se perdieron en el camino ───────────────────
@@ -785,7 +837,8 @@ def procesar(carga: dict, *, analizar: Callable, extraer_socios: Callable | None
             continue
         razon, texto = AVISO_POR_ETAPA[e]
         nombre = pedidos[i].get("fileName") or claves[i].rsplit("/", 1)[-1]
-        avisos.append(errores.aviso(razon, f"{texto} «{nombre}»: {detalle[i]}.", object_key=claves[i]))
+        avisos.append(errores.aviso(razon, f"{texto} «{nombre}»: {detalle[i]}.", object_key=claves[i],
+                                    field="document"))
 
     # ── 8 · Cerrar: el estado sale de §8.1 y §10, no de si se perdió algo ──
     i_ident = next((i for i in principales_vivos() if i in identidad), None)
@@ -800,7 +853,7 @@ def procesar(carga: dict, *, analizar: Callable, extraer_socios: Callable | None
             "DOCUMENT_COUNTRY_MISMATCH",
             f"El documento principal es de {ident.get('country')} y el país declarado es «{pais}»: "
             "se leyó con las reglas del país declarado.",
-            object_key=claves[i_ident]))
+            object_key=claves[i_ident], field="document"))
 
     # CO-06: los campos fijos de personas que vinieron vacíos se completan
     # desde el bloque estructurado, que es el que manda.
@@ -817,6 +870,7 @@ def procesar(carga: dict, *, analizar: Callable, extraer_socios: Callable | None
     ficha["timingsMs"] = tiempos
     log.info("corrida %s · tiempos por etapa (ms): %s", analysis_id, json.dumps(tiempos))
     cuerpo, avisos_forma = _serializar(company_id, {"result": ficha, "country": pais})
+    avisos_forma = avisos_forma + _accionistas({"result": ficha})[2]
     avisos += avisos_forma
 
     faltan_requeridos, faltan_esperados = evaluar(cuerpo, pais)
@@ -824,10 +878,12 @@ def procesar(carga: dict, *, analizar: Callable, extraer_socios: Callable | None
         return fallar("LENS_REQUIRED_DATA_MISSING",
                       "Faltan datos requeridos: " + "; ".join(faltan_requeridos) + ".")
 
-    ya_avisados = {a.get("campo") for a in avisos_forma if a.get("campo")}
-    for campo, mensaje in faltan_esperados:
-        if campo not in ya_avisados:
-            avisos.append(errores.aviso("EXPECTED_DATA_MISSING", mensaje))
+    # Lo que la serialización ya avisó —una fecha ilegible, la forma legal— no
+    # se avisa dos veces.
+    ya_avisados = {(a.get("field"), a.get("subject")) for a in avisos_forma if a.get("field")}
+    for campo, mensaje, quien in faltan_esperados:
+        if (campo, quien) not in ya_avisados:
+            avisos.append(errores.aviso("EXPECTED_DATA_MISSING", mensaje, field=campo, subject=quien))
 
     # §8.1: COMPLETED es «están todos los datos requeridos y esperados y no hay
     # avisos». Antes se miraba solo si se había perdido un documento, y las seis
@@ -835,6 +891,81 @@ def procesar(carga: dict, *, analizar: Callable, extraer_socios: Callable | None
     # mostraba al usuario lo que faltaba.
     estado = corridas.INCOMPLETE if normalizar_avisos(avisos) else corridas.COMPLETED
     return cerrar(estado, resultado=ficha)
+
+
+def _conciliar_identidad(ident: dict, resultado: dict, nombre_principal: str,
+                         releer: Callable[[], dict | None], analysis_id: str) -> None:
+    """AJ-07: la forma legal y la actividad, antes de avisar que faltan.
+
+    La pasada de identidad a veces responde sin ellas teniéndolas el documento:
+    la misma escritura, leída de nuevo, las daba. Avisar «faltan datos» por eso
+    le descontaba al usuario un intento por una falla de LENS. Antes de avisar:
+
+      1. la forma legal, de lo que dice el texto del documento —una sola forma
+         societaria nombrada con todas sus letras—, si la razón social no la da;
+      2. una pasada más, si todavía falta alguna de las dos;
+      3. la actividad, resumida del «Objeto Social» de los 18 campos.
+
+    Modifica `ident` en el lugar. Lo que siga faltando lo avisa la
+    serialización, como siempre.
+    """
+    campos = {c.get("field"): c.get("value") for c in (resultado.get("campos") or [])}
+    razon, objeto = _dato(campos.get("Razón Social")), _dato(campos.get("Objeto Social"))
+    texto = (resultado.get("_textos") or {}).get(nombre_principal, "")
+
+    def falta_forma() -> bool:
+        return onboarding.forma_legal(razon, ident.get("legalForm")) is None
+
+    def falta_actividad() -> bool:
+        return bool(objeto) and not onboarding.actividad(ident.get("activity"), objeto)
+
+    if not (falta_forma() or falta_actividad()):
+        return
+    if falta_forma():
+        ident["legalForm"] = onboarding.forma_legal_desde_texto(texto) or ident.get("legalForm")
+    if falta_forma() or falta_actividad():
+        otra = releer() or {}
+        for k in ("legalForm", "activity"):
+            if not ident.get(k) and otra.get(k):
+                ident[k] = otra[k]
+    if falta_actividad():
+        ident["activity"] = onboarding.actividad_desde_objeto(objeto)
+    log.info("AJ-07 corrida %s: identidad conciliada · forma legal %s · actividad %s", analysis_id,
+             "ok" if not falta_forma() else "falta", "ok" if not falta_actividad() else "falta")
+
+
+def _campo_aviso_socios(texto: str) -> str | None:
+    """El `field` de un aviso de la lectura de personas (AJ-07)."""
+    t = texto.lower()
+    if "participación" in t or "suma" in t:
+        return "shareholder.ownershipPercentage"
+    if "cadena" in t or "segundo nivel" in t:
+        return "shareholder.indirectShareholders"
+    return "legalRepresentatives"
+
+
+def _clasificar_personas(personas: dict) -> None:
+    """El tipo de las personas que vinieron sin él, y cada una en su lugar.
+
+    `onboarding.inferir_tipo_persona` decide lo decidible —el RFC de 12 o 13,
+    la sigla societaria, el tipo de documento—. Una sociedad que el modelo dejó
+    sin tipo estaba en `directOwnership`, que es de personas naturales: pasa a
+    la raíz de `indirectShareholders`, que es donde el contrato pone a las
+    jurídicas. Lo que no se puede decidir se queda donde está, sin tipo, y la
+    serialización lo avisa. Modifica `personas` en el lugar.
+    """
+    for r in personas.get("legalRepresentatives") or []:
+        if not onboarding.tipo_persona(r.get("personType")):
+            r["personType"] = onboarding.inferir_tipo_persona(r) or r.get("personType")
+    directos, juridicas = [], []
+    for d in personas.get("directOwnership") or []:
+        if not onboarding.tipo_persona(d.get("personType")):
+            d["personType"] = onboarding.inferir_tipo_persona(d) or d.get("personType")
+        (juridicas if d.get("personType") == "JURIDICA" else directos).append(d)
+    if juridicas:
+        personas["directOwnership"] = directos
+        personas["indirectShareholders"] = (personas.get("indirectShareholders") or []) + [
+            {**j, "indirectShareholders": j.get("indirectShareholders") or []} for j in juridicas]
 
 
 def _mismo_pais(a: str, b: str) -> bool:
@@ -1104,6 +1235,8 @@ def _serializar(company_id: str, u: dict) -> tuple[dict, list[dict]]:
         # reglas se leyó el documento. Normalizada como pide el contrato
         # —minúsculas, sin tildes—: «Colombia» y «perú» volvían tal cual (CO-04).
         "country": _pais(u.get("country") or ficha.get("detectedCountry") or ""),
+        # AJ-08: el ISO-2 del catálogo, al lado. `null` si el país no es de él.
+        "countryCode": onboarding.codigo_pais(u.get("country") or ficha.get("detectedCountry") or ""),
         "schemaVersion": u.get("schemaVersion") or SCHEMA_VERSION,
         "company": empresa,
         "legalRepresentatives": representantes,
@@ -1123,13 +1256,16 @@ def resultado_de(company_id: str, u: dict) -> dict:
 
 
 def normalizar_avisos(avisos: list[dict]) -> list[dict]:
-    """Cada aviso con EXACTAMENTE las tres claves del contrato, sin repetidos.
+    """Cada aviso con EXACTAMENTE las cinco claves del contrato, sin repetidos.
 
-    §6.6: `warnings[]` lleva `reason`, `objectKey` y `message`. Los avisos que
-    nacen al darle forma a los datos traían claves de más —`campo`, `original`—,
-    y alguno el objeto social entero; y los de la serialización no traían
-    `objectKey`. Un aviso sin `objectKey` obliga a quien integra a adivinar de
-    qué documento habla.
+    §6.6: `warnings[]` lleva `reason`, `objectKey` y `message`, y desde el v3
+    `field` y `subject` (AJ-07). Los avisos que nacen al darle forma a los datos
+    traían claves de más —`original`, `valor`—, y alguno el objeto social
+    entero; y los de la serialización no traían `objectKey`. Un aviso sin
+    `objectKey` obliga a quien integra a adivinar de qué documento habla.
+
+    Los avisos guardados antes del v3 no tienen `field` ni `subject`: salen en
+    `null`, igual que cuando no aplican.
     """
     fuera: list[dict] = []
     vistos: set[tuple] = set()
@@ -1139,8 +1275,11 @@ def normalizar_avisos(avisos: list[dict]) -> list[dict]:
             # `null` cuando no es de un archivo (§6.6), nunca `""`.
             "objectKey": str(a.get("objectKey")) if a.get("objectKey") else None,
             "message": str(a.get("message") or ""),
+            "field": str(a.get("field")) if a.get("field") else None,
+            "subject": str(a.get("subject")) if a.get("subject") else None,
         }
-        firma = (limpio["reason"], limpio["objectKey"], limpio["message"])
+        firma = (limpio["reason"], limpio["objectKey"], limpio["message"],
+                 limpio["field"], limpio["subject"])
         if firma not in vistos:
             vistos.add(firma)
             fuera.append(limpio)
@@ -1188,30 +1327,29 @@ def evaluar(cuerpo: dict, pais: Any) -> tuple[list[str], list[tuple[str, str]]]:
     if not any((r.get("fullName") or r.get("name")) and r.get("personType") for r in reps):
         requeridos.append("al menos un representante con nombre y tipo de persona")
 
-    esperados: list[tuple[str, str]] = []
+    # `(field, message, subject)`. Uno por persona, no uno con todos los
+    # nombres: Onboarding le dice al usuario qué dato falta y de quién (AJ-07).
+    esperados: list[tuple[str, str, str | None]] = []
     if p in ("chile", "colombia"):
         if not empresa.get("taxId"):
-            esperados.append(("taxId", "El documento no trae el identificador tributario de la sociedad."))
+            esperados.append(("taxId", "El documento no trae el identificador tributario de la sociedad.", None))
         elif p == "colombia" and not _nit_con_dv(empresa.get("taxId")):
-            esperados.append(("taxId", "El NIT de la sociedad viene sin dígito verificador."))
+            esperados.append(("taxId", "El NIT de la sociedad viene sin dígito verificador.", None))
     if not empresa.get("legalForm"):
-        esperados.append(("legalForm", "No se pudo determinar la forma legal de la sociedad."))
+        esperados.append(("legalForm", "No se pudo determinar la forma legal de la sociedad.", None))
     if not empresa.get("constitutionDate"):
-        esperados.append(("constitutionDate", "El documento no trae la fecha de constitución."))
+        esperados.append(("constitutionDate", "El documento no trae la fecha de constitución.", None))
     domicilio = empresa.get("address") or {}
     if not (domicilio.get("street") or domicilio.get("city")):
-        esperados.append(("address", "El documento no declara un domicilio legal."))
+        esperados.append(("address", "El documento no declara un domicilio legal.", None))
 
-    def nombres(faltan: list[dict]) -> str:
-        return ", ".join(str(r.get("fullName") or r.get("name") or "?") for r in faltan)
-
-    sin_documento = [r for r in reps if not r.get("identificationNumber")]
-    if sin_documento:
-        esperados.append(("identificationNumber",
-                          f"Falta el documento de identidad de: {nombres(sin_documento)}."))
-    sin_cargo = [r for r in reps if not r.get("role")]
-    if sin_cargo:
-        esperados.append(("role", f"Falta el cargo de: {nombres(sin_cargo)}."))
+    for r in reps:
+        quien = str(r.get("fullName") or r.get("name") or "").strip() or None
+        if not r.get("identificationNumber"):
+            esperados.append(("legalRepresentative.identificationNumber",
+                              f"Falta el documento de identidad de: {quien or '?'}.", quien))
+        if not r.get("role"):
+            esperados.append(("legalRepresentative.role", f"Falta el cargo de: {quien or '?'}.", quien))
 
     return requeridos, esperados
 
@@ -1267,21 +1405,31 @@ def accionistas_de(company_id: str, u: dict) -> dict:
     """
     ficha = u.get("result") or {}
     campos = {c.get("field"): c.get("value") for c in (ficha.get("fields") or [])}
-    avisos = onboarding.Avisos()
     empresa = onboarding.empresa({
         "legalName": _dato(campos.get("Razón Social")),
         "taxId": _dato(campos.get("RUT de la sociedad")),
-    }, avisos)
-
-    def serie(personas: list) -> list:
-        return [p for p in (onboarding.persona(x, avisos) for x in (personas or [])) if p]
-
+    }, onboarding.Avisos())
+    directos, indirectos, _ = _accionistas(u)
     return {
         "businessName": empresa["legalName"],
         "businessId": empresa["taxId"],
-        "directOwnership": serie(ficha.get("directOwnership")),
-        "indirectShareholders": serie(ficha.get("indirectShareholders")),
+        "directOwnership": directos,
+        "indirectShareholders": indirectos,
     }
+
+
+def _accionistas(u: dict) -> tuple[list, list, list[dict]]:
+    """`(directOwnership, indirectShareholders, avisos)` de EP-6.
+
+    Los avisos importan: hasta el 14-10-2026 la corrida no serializaba a los
+    accionistas al cerrarse, así que lo que se avisaba de ellos —un país fuera
+    del catálogo, una persona sin tipo— no llegaba nunca a `warnings[]`.
+    """
+    ficha = u.get("result") or {}
+    avisos = onboarding.Avisos()
+    directos = [onboarding.persona(x, avisos) for x in (ficha.get("directOwnership") or [])]
+    indirectos = [onboarding.persona(x, avisos) for x in (ficha.get("indirectShareholders") or [])]
+    return directos, indirectos, avisos.items
 
 
 def _dato(v: Any) -> str:
