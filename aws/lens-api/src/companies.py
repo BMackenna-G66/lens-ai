@@ -687,9 +687,13 @@ def procesar(carga: dict, *, analizar: Callable, extraer_socios: Callable | None
             textos_complementarios[i] = str(getattr(lectura, "texto", "") or "")
             propia = complementarios.identidad_desde_texto(textos_complementarios[i])
             veredicto, motivo = complementarios.misma_empresa(ref, propia)
-            log.info("identidad de %s: principal %s / %s · documento %s / %s → %s",
-                     claves[i], ref.get("taxId"), ref.get("legalName"),
-                     propia.get("taxId"), propia.get("legalName"), veredicto)
+            # Enmascarado: en Colombia el NIT de una persona natural es su cédula.
+            # El veredicto es lo que permite validar el lector contra el RUT real.
+            log.info("AJ-05 %s: id principal %s · id documento %s · razón social %s · → %s%s",
+                     claves[i], complementarios.enmascarar(ref.get("taxId")),
+                     complementarios.enmascarar(propia.get("taxId")),
+                     "leída" if propia.get("legalName") else "no leída", veredicto,
+                     f" ({motivo})" if veredicto is True and motivo else "")
             if veredicto is False:
                 etapa[i], detalle[i] = "entidad", f"es de otra empresa, porque {motivo}"
     medir("identidad_complementarios")

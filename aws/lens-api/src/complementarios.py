@@ -43,17 +43,35 @@ def _sin_tildes(s: str) -> str:
 # ══════════════════════════════════════════════════════════════════════════
 
 #: Las etiquetas detrás de las que un documento pone el identificador de la
-#: EMPRESA. En el RUT de la DIAN es la casilla 5, «Número de Identificación
-#: Tributaria (NIT)».
-_ETIQUETA_ID = re.compile(
+#: EMPRESA, en DOS NIVELES. Primero las completas —en el RUT de la DIAN, la
+#: casilla 5, «Número de Identificación Tributaria (NIT)»—; las siglas sueltas
+#: solo si no hay ninguna completa con un número cerca.
+#:
+#: El orden importa: el encabezado del formulario puede decir «RUT» antes del
+#: «4. Número de formulario 14…», y con las siglas en el mismo nivel el número
+#: de formulario se leía como NIT. Eso excluía el RUT de la MISMA empresa, que
+#: es justo el que completa el NIT que el certificado no trae.
+_ETIQUETAS_COMPLETAS = re.compile(
     r"n[uú]mero\s+de\s+identificaci[oó]n\s+tributaria"
-    r"|\bn\.?\s?i\.?\s?t\b\.?"
-    r"|\br\.?\s?u\.?\s?t\b\.?"
     r"|rol\s+[uú]nico\s+tributario"
+    r"|registro\s+federal\s+de\s+contribuyentes",
+    re.IGNORECASE,
+)
+_ETIQUETAS_SIGLA = re.compile(
+    r"\bn\.?\s?i\.?\s?t\b\.?"
+    r"|\br\.?\s?u\.?\s?t\b\.?"
     r"|\br\.?\s?f\.?\s?c\b\.?"
     r"|\br\.?\s?u\.?\s?c\b\.?",
     re.IGNORECASE,
 )
+
+#: Un número que es de OTRA casilla y no puede ser el identificador: el número
+#: de formulario de la DIAN, que va arriba y tiene 11 dígitos.
+_OTRA_CASILLA = re.compile(r"n[uú]mero\s+de\s+formulario[\s:.]*[\d ]+", re.IGNORECASE)
+
+#: Un NIT con su verificador tiene 10 dígitos; un RUT chileno, 9. Más dígitos
+#: sin separador no es un identificador tributario de la región.
+_MAX_DIGITOS_ID = 10
 
 #: Un identificador numérico: dígitos con puntos o UN espacio entre medio —el
 #: RUT de la DIAN imprime cada dígito en su casilla— y el verificador al final,
@@ -71,20 +89,25 @@ _VENTANA = 240
 def tax_id_desde_texto(texto: str) -> str | None:
     """El identificador tributario de la empresa, tal como figura, o `None`.
 
-    Se toma el PRIMER identificador que sigue a la PRIMERA etiqueta que tiene
-    uno cerca. En un formulario tributario el de la empresa va arriba; los de
-    las personas (la casilla 101 del representante) van después.
+    Se toma el primer identificador que sigue a la primera etiqueta COMPLETA
+    que tiene uno cerca; las siglas sueltas, solo si ninguna completa lo tiene.
+    En un formulario tributario el de la empresa va arriba; los de las personas
+    (la casilla 101 del representante) van después. El número de formulario no
+    cuenta, y un número de más de diez dígitos sin separador tampoco.
     """
-    t = str(texto or "")
-    for m in _ETIQUETA_ID.finditer(t):
-        tramo = t[m.end():m.end() + _VENTANA]
-        rfc = _RFC.search(tramo.upper())
-        if rfc and "rfc" in m.group(0).lower().replace(".", "").replace(" ", ""):
-            return rfc.group(0)
-        num = _NUMERO_ID.search(tramo)
-        if num:
-            # Las casillas de a un dígito se juntan: «9 0 1 …» → «901…».
-            return re.sub(r"(?<=\d) (?=\d)", "", num.group(0).strip())
+    t = _OTRA_CASILLA.sub(lambda m: " " * len(m.group(0)), str(texto or ""))
+    for etiquetas in (_ETIQUETAS_COMPLETAS, _ETIQUETAS_SIGLA):
+        for m in etiquetas.finditer(t):
+            tramo = t[m.end():m.end() + _VENTANA]
+            rfc = _RFC.search(tramo.upper())
+            if rfc and re.search(r"r\.?\s?f\.?\s?c|contribuyentes", m.group(0), re.IGNORECASE):
+                return rfc.group(0)
+            for num in _NUMERO_ID.finditer(tramo):
+                valor = num.group(0).strip()
+                if not re.search(r"[.\-]", valor) and len(re.sub(r"\D", "", valor)) > _MAX_DIGITOS_ID:
+                    continue
+                # Las casillas de a un dígito se juntan: «9 0 1 …» → «901…».
+                return re.sub(r"(?<=\d) (?=\d)", "", valor)
     return None
 
 
@@ -212,21 +235,38 @@ def misma_empresa(principal: dict, complementario: dict) -> tuple[bool | None, s
 
     Manda el identificador tributario: dos empresas pueden llamarse parecido, y
     el NIT no. Si alguno de los dos no lo trae, se compara la razón social.
+
+    Se excluye solo con evidencia CONSISTENTE. Si el NIT discrepa pero las dos
+    razones sociales se leyeron y son la misma, gana «misma empresa»: lo más
+    probable es que el lector haya tomado otro número de la página, y excluir
+    el RUT de la misma empresa pierde justo el NIT que se buscaba. La
+    discrepancia va en el motivo, para el log.
     """
     p, c = principal or {}, complementario or {}
     np_, nc = nucleo(p.get("taxId")), nucleo(c.get("taxId"))
+    rp, rc = razon_normalizada(p.get("legalName")), razon_normalizada(c.get("legalName"))
     if np_ and nc:
         if coinciden(np_, nc):
             return True, ""
+        if rp and rc and rp == rc:
+            return True, "el identificador tributario discrepa pero la razón social es la misma"
         return False, (f"su identificador tributario ({c.get('taxId')}) no coincide con el del "
                        f"documento principal ({p.get('taxId')})")
-    rp, rc = razon_normalizada(p.get("legalName")), razon_normalizada(c.get("legalName"))
     if rp and rc:
         if rp == rc:
             return True, ""
         return False, (f"su razón social («{c.get('legalName')}») no coincide con la del "
                        f"documento principal («{p.get('legalName')}»)")
     return None, ""
+
+
+def enmascarar(valor: Any) -> str:
+    """Para el log: los dos primeros y los dos últimos caracteres. En Colombia
+    el NIT de una persona natural es su cédula."""
+    s = re.sub(r"[\s.\-]", "", str(valor or ""))
+    if not s:
+        return "—"
+    return s[:2] + "…" + s[-2:] if len(s) > 4 else "…"
 
 
 # ══════════════════════════════════════════════════════════════════════════

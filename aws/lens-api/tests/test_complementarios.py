@@ -134,11 +134,6 @@ def test_prueba_c_rut_de_la_misma_empresa_no_se_excluye():
     assert c.misma_empresa(PRINCIPAL_CON_NIT, c.identidad_desde_texto(MISMA)) == (True, "")
 
 
-def test_manda_el_nit_aunque_la_razon_social_coincida():
-    otra_mismo_nombre = rut_dian("9 9 9 9 9 9 0 0 2 5", "EMPRESA FICTICIA UNO S.A.S.")
-    assert c.misma_empresa(PRINCIPAL_CON_NIT, c.identidad_desde_texto(otra_mismo_nombre))[0] is False
-
-
 def test_si_no_hay_con_que_comparar_no_se_decide():
     assert c.misma_empresa({}, c.identidad_desde_texto(OTRA)) == (None, "")
     assert c.misma_empresa(PRINCIPAL_CON_NIT, {"taxId": None, "legalName": None}) == (None, "")
@@ -167,3 +162,60 @@ def test_si_el_texto_no_lo_confirma_no_se_toca():
 def test_un_numero_que_no_empieza_con_un_codigo_dian_no_se_toca():
     assert c.sin_codigo_dian("10203040", [MISMA]) is None
     assert c.sin_codigo_dian("9910203040", [MISMA]) is None
+
+
+# ── El encabezado del formulario no puede decidir (auditoría de #201) ───────
+# Con «RUT» y «NIT» sueltos al mismo nivel que la casilla 5, un encabezado que
+# dijera «RUT» antes del número de formulario hacía leer ese número como NIT, y
+# se excluía el RUT de la MISMA empresa.
+
+def _con_encabezado(texto: str) -> str:
+    return texto.replace("Formulario del Registro Único Tributario Hoja Principal 001\n",
+                         "Formulario del RUT Hoja Principal 001\n"
+                         "DIAN RUT 4. Número de formulario 14000000001\n")
+
+
+@pytest.mark.parametrize("texto", [MISMA, _con_encabezado(MISMA)], ids=["sin RUT", "con RUT"])
+def test_el_encabezado_no_cambia_el_nit_leido(texto):
+    assert c.tax_id_desde_texto(texto) == "9999990017"
+    assert c.misma_empresa(PRINCIPAL_CON_NIT, c.identidad_desde_texto(texto)) == (True, "")
+
+
+def test_el_numero_de_formulario_nunca_es_el_nit():
+    assert c.tax_id_desde_texto("RUT\n4. Número de formulario 14000000001\nsin más") is None
+
+
+def test_un_numero_de_mas_de_diez_digitos_sin_separador_no_es_un_nit():
+    assert c.tax_id_desde_texto("NIT 14000000001 · NIT 999.999.001-7") == "999.999.001-7"
+
+
+def test_la_sigla_suelta_sirve_si_no_hay_etiqueta_completa():
+    assert c.tax_id_desde_texto("Certificado. NIT: 999.999.001-7") == "999.999.001-7"
+
+
+def test_la_etiqueta_completa_le_gana_a_la_sigla_que_va_antes():
+    texto = "RUT 77.000.111-5 del notario\nRol Único Tributario: 77.000.222-3"
+    assert c.tax_id_desde_texto(texto) == "77.000.222-3"
+
+
+# ── Excluir solo con evidencia consistente ──────────────────────────────────
+
+def test_nit_distinto_y_misma_razon_social_no_se_excluye():
+    """Lo más probable es que el lector haya tomado otro número de la página."""
+    leido = {"taxId": "9999990025", "legalName": "EMPRESA FICTICIA UNO SAS"}
+    veredicto, motivo = c.misma_empresa(PRINCIPAL_CON_NIT, leido)
+    assert veredicto is True and "discrepa" in motivo
+
+
+def test_nit_distinto_y_razon_ilegible_se_excluye():
+    leido = {"taxId": "9999990025", "legalName": None}
+    assert c.misma_empresa(PRINCIPAL_CON_NIT, leido)[0] is False
+
+
+def test_nit_distinto_y_razon_distinta_se_excluye():
+    assert c.misma_empresa(PRINCIPAL_CON_NIT, c.identidad_desde_texto(OTRA))[0] is False
+
+
+def test_el_log_no_lleva_el_identificador_entero():
+    assert c.enmascarar("999.999.001-7") == "99…17"
+    assert c.enmascarar(None) == "—"
