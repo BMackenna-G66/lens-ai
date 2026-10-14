@@ -54,6 +54,7 @@ def _sin_tildes(s: str) -> str:
 _ETIQUETAS_COMPLETAS = re.compile(
     r"n[uú]mero\s+de\s+identificaci[oó]n\s+tributaria"
     r"|rol\s+[uú]nico\s+tributario"
+    r"|registro\s+[uú]nico\s+de\s+contribuyentes"
     r"|registro\s+federal\s+de\s+contribuyentes",
     re.IGNORECASE,
 )
@@ -61,7 +62,8 @@ _ETIQUETAS_SIGLA = re.compile(
     r"\bn\.?\s?i\.?\s?t\b\.?"
     r"|\br\.?\s?u\.?\s?t\b\.?"
     r"|\br\.?\s?f\.?\s?c\b\.?"
-    r"|\br\.?\s?u\.?\s?c\b\.?",
+    r"|\br\.?\s?u\.?\s?c\b\.?"
+    r"|\bc\.?\s?u\.?\s?i\.?\s?t\b\.?",
     re.IGNORECASE,
 )
 
@@ -70,8 +72,16 @@ _ETIQUETAS_SIGLA = re.compile(
 _OTRA_CASILLA = re.compile(r"n[uú]mero\s+de\s+formulario[\s:.]*[\d ]+", re.IGNORECASE)
 
 #: Un NIT con su verificador tiene 10 dígitos; un RUT chileno, 9. Más dígitos
-#: sin separador no es un identificador tributario de la región.
+#: sin separador no es un identificador tributario de la región — salvo detrás
+#: de una etiqueta de RUC (Perú) o CUIT (Argentina), que tienen 11.
 _MAX_DIGITOS_ID = 10
+_MAX_DIGITOS_RUC = 11
+
+
+def _max_digitos(etiqueta: str) -> int:
+    e = re.sub(r"[\s.]", "", etiqueta).lower()
+    return _MAX_DIGITOS_RUC if e in ("ruc", "cuit") or "unicodecontribuyentes" in _sin_tildes(e) \
+        else _MAX_DIGITOS_ID
 
 #: Un identificador numérico: dígitos con puntos o UN espacio entre medio —el
 #: RUT de la DIAN imprime cada dígito en su casilla— y el verificador al final,
@@ -102,9 +112,10 @@ def tax_id_desde_texto(texto: str) -> str | None:
             rfc = _RFC.search(tramo.upper())
             if rfc and re.search(r"r\.?\s?f\.?\s?c|contribuyentes", m.group(0), re.IGNORECASE):
                 return rfc.group(0)
+            tope = _max_digitos(m.group(0))
             for num in _NUMERO_ID.finditer(tramo):
                 valor = num.group(0).strip()
-                if not re.search(r"[.\-]", valor) and len(re.sub(r"\D", "", valor)) > _MAX_DIGITOS_ID:
+                if not re.search(r"[.\-]", valor) and len(re.sub(r"\D", "", valor)) > tope:
                     continue
                 # Las casillas de a un dígito se juntan: «9 0 1 …» → «901…».
                 return re.sub(r"(?<=\d) (?=\d)", "", valor)

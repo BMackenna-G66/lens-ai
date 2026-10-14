@@ -192,6 +192,9 @@ AVISO: dict[str, Reason] = {
         Reason("DOCUMENT_ENTITY_MISMATCH", None, None,
                "Un documento complementario es de otra empresa que el principal (no coincide "
                "el identificador tributario o la razón social): no se usaron sus datos."),
+        Reason("DOCUMENT_COUNTRY_MISMATCH", None, None,
+               "El documento principal es de otro país que el declarado: se leyó con las reglas "
+               "del país declarado y queda dicho por si el país vino mal."),
     )
 }
 

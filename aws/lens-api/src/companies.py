@@ -141,11 +141,16 @@ def _documentos_pedidos(cuerpo: dict) -> tuple[list[dict], str | None]:
         # minutos por una consulta de estado.
         if uri and ingesta_s3.parsear_s3_uri(uri) is None:
             return [], f"El documento {i} trae un `s3Uri` inválido: se espera `s3://bucket/clave`."
+        # §5.1 lo declara obligatorio en CADA documento (CO-03). Un
+        # complementario sin tipo se aceptaba, y se leía sin saber qué era.
+        tipo = str(d.get("documentType") or d.get("document_type") or "").strip()
+        if not tipo:
+            return [], f"El documento {i} no trae `documentType`."
         salida.append({
             "s3Uri": uri,
             "objectKey": clave,
             "fileName": str(d.get("fileName") or d.get("file_name") or ""),
-            "documentType": str(d.get("documentType") or d.get("document_type") or ""),
+            "documentType": tipo,
         })
     return salida, None
 
@@ -783,8 +788,32 @@ def procesar(carga: dict, *, analizar: Callable, extraer_socios: Callable | None
         avisos.append(errores.aviso(razon, f"{texto} «{nombre}»: {detalle[i]}.", object_key=claves[i]))
 
     # ── 8 · Cerrar: el estado sale de §8.1 y §10, no de si se perdió algo ──
-    ident = next((identidad[i] for i in principales_vivos() if i in identidad), {})
+    i_ident = next((i for i in principales_vivos() if i in identidad), None)
+    ident = identidad[i_ident] if i_ident is not None else {}
+
+    # CO-07: el documento es de otro país que el declarado. El país de
+    # `analizar` no sirve para esto —en esta corrida es el declarado, forzado—;
+    # el del documento sale de la pasada de identidad. Solo si lo dijo.
+    pais_doc = _pais(ident.get("country"))
+    if pais_doc and not _mismo_pais(pais_doc, _pais(pais)):
+        avisos.append(errores.aviso(
+            "DOCUMENT_COUNTRY_MISMATCH",
+            f"El documento principal es de {ident.get('country')} y el país declarado es «{pais}»: "
+            "se leyó con las reglas del país declarado.",
+            object_key=claves[i_ident]))
+
+    # CO-06: los campos fijos de personas que vinieron vacíos se completan
+    # desde el bloque estructurado, que es el que manda.
+    _completar_campos_de_personas(resultado.get("campos") or [], personas, analysis_id)
+
     ficha = _ficha(resultado, pedidos, claves, etapa, personas, administracion, ident)
+    # AJ-01: la línea de dirección, del principal primero. Se guarda la línea
+    # y no el texto: una escritura entera no entra en la fila.
+    textos = resultado.get("_textos") or {}
+    orden = sorted((i for i in range(len(pedidos)) if etapa[i] is None),
+                   key=lambda i: (i not in principales, i))
+    ficha["addressLine"] = onboarding.linea_de_direccion(
+        [textos.get(bajados[claves[i]].nombre, "") for i in orden])
     ficha["timingsMs"] = tiempos
     log.info("corrida %s · tiempos por etapa (ms): %s", analysis_id, json.dumps(tiempos))
     cuerpo, avisos_forma = _serializar(company_id, {"result": ficha, "country": pais})
@@ -806,6 +835,59 @@ def procesar(carga: dict, *, analizar: Callable, extraer_socios: Callable | None
     # mostraba al usuario lo que faltaba.
     estado = corridas.INCOMPLETE if normalizar_avisos(avisos) else corridas.COMPLETED
     return cerrar(estado, resultado=ficha)
+
+
+def _mismo_pais(a: str, b: str) -> bool:
+    """«colombia» y «republica de colombia» son el mismo país."""
+    return a == b or f" {a} " in f" {b} " or f" {b} " in f" {a} "
+
+
+#: Lo que en los campos de personas dice «no hay nadie».
+_RELLENO_PERSONAS = re.compile(r"no especificado|sin documento|sin porcentaje|sin cargo", re.IGNORECASE)
+
+
+def _sin_personas(valor: Any) -> bool:
+    """¿El campo fijo no nombra a nadie? «No especificado», o solo relleno:
+    Onboarding vio «sin documento · sin porcentaje» con los porcentajes en EP-6."""
+    resto = _RELLENO_PERSONAS.sub(" ", str(valor or ""))
+    return sum(c.isalpha() for c in resto) < 2
+
+
+def _linea_persona(p: dict, dato: str) -> str:
+    nombre = str(p.get("shareholderName") or p.get("name") or "").strip()
+    doc = str(p.get("shareholderId") or p.get("identificationNumber") or "").strip()
+    return f"{nombre} | {doc or 'sin documento'} | {dato}"
+
+
+def _completar_campos_de_personas(campos: list[dict], personas: dict, analysis_id: str) -> None:
+    """CO-06: si «Representante Legal» o «Accionistas y aportes» vinieron sin
+    nadie y el bloque estructurado sí trae personas, el campo se completa desde
+    el bloque, con el formato de siempre (`NOMBRE | DOCUMENTO | DATO`).
+
+    Son dos llamadas al modelo que respondieron distinto sobre las mismas
+    páginas —no un efecto del tope de OCR—, y la regla es explícita: manda el
+    bloque estructurado. La discrepancia queda en el log, sin datos de personas.
+    Modifica `campos` en el lugar.
+    """
+    p = personas or {}
+    reps = p.get("legalRepresentatives") or []
+    duenos = (p.get("directOwnership") or []) + (p.get("indirectShareholders") or [])
+
+    def pct(x: dict) -> str:
+        n = onboarding.porcentaje(x.get("ownershipPercentage"))
+        return f"{n}%".replace(".", ",") if n is not None else "sin porcentaje"
+
+    desde_bloque = {
+        "Representante Legal": [_linea_persona(r, onboarding.cargo_legible(r.get("position")) or "sin cargo")
+                                for r in reps],
+        "Accionistas y aportes": [_linea_persona(d, pct(d)) for d in duenos],
+    }
+    for c in campos:
+        lineas = desde_bloque.get(c.get("field"))
+        if lineas and _sin_personas(c.get("value")):
+            log.warning("CO-06 corrida %s: «%s» vino sin personas y el bloque estructurado trae %d; "
+                        "se completa desde el bloque", analysis_id, c.get("field"), len(lineas))
+            c["value"] = "\n".join(lineas)
 
 
 def _es_id_fiscal(documento: dict) -> bool:
@@ -889,6 +971,7 @@ def _ficha(resultado: dict, pedidos: list[dict], claves: list[str], etapa: list,
             "activity": (identidad or {}).get("activity"),
             "legalForm": (identidad or {}).get("legalForm"),
             "documentKind": (identidad or {}).get("tipoDetectado"),
+            "country": (identidad or {}).get("country"),
         },
     }
 
@@ -1001,6 +1084,8 @@ def _serializar(company_id: str, u: dict) -> tuple[dict, list[dict]]:
         # Contra qué se verifica que el resumen no traiga una palabra cortada.
         "objetoSocial": _dato(campos.get("Objeto Social")),
         "address": _dato(campos.get("Domicilio Legal")),
+        # La calle y la oficina, de la línea de dirección del documento (AJ-01).
+        "addressLine": ficha.get("addressLine"),
         "jointAdministration": (ficha.get("administration") or {}).get("jointAdministration"),
     }, avisos)
 
@@ -1016,8 +1101,9 @@ def _serializar(company_id: str, u: dict) -> tuple[dict, list[dict]]:
         "analysisId": u.get("analysisId"),
         "status": u.get("status"),
         # La jurisdicción con la que se corrió: le dice al consumidor bajo qué
-        # reglas se leyó el documento.
-        "country": u.get("country") or ficha.get("detectedCountry") or "",
+        # reglas se leyó el documento. Normalizada como pide el contrato
+        # —minúsculas, sin tildes—: «Colombia» y «perú» volvían tal cual (CO-04).
+        "country": _pais(u.get("country") or ficha.get("detectedCountry") or ""),
         "schemaVersion": u.get("schemaVersion") or SCHEMA_VERSION,
         "company": empresa,
         "legalRepresentatives": representantes,

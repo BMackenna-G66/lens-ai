@@ -787,7 +787,7 @@ def extraer_administracion(docs, limite: float | None = None) -> tuple[dict, dic
 
 TIMEOUT_IDENTIDAD_S = int(os.environ.get("GEMINI_TIMEOUT_IDENTIDAD_S", "25"))
 
-PROMPT_IDENTIDAD = """Leé el documento adjunto y respondé seis cosas.
+PROMPT_IDENTIDAD = """Leé el documento adjunto y respondé siete cosas.
 
 1. `esConstitutivo`: ¿es un documento constitutivo o societario de una empresa?
    SÍ cuentan: escritura pública de constitución o de modificación de sociedad,
@@ -825,6 +825,10 @@ PROMPT_IDENTIDAD = """Leé el documento adjunto y respondé seis cosas.
    socio, un representante, un notario o una cámara de comercio. null si el
    documento no lo trae.
 
+7. `country`: el país de la sociedad según el documento —donde se constituye o
+   tiene su domicilio—, solo el nombre común en español ("Chile", "Colombia",
+   "México", "Perú"). null si el documento no permite saberlo.
+
 No inventes nada que el documento no diga."""
 
 ESQUEMA_IDENTIDAD = {
@@ -837,6 +841,7 @@ ESQUEMA_IDENTIDAD = {
                       "enum": ["SPA", "SA", "LIMITADA", "SAS", "EIRL", "OTRA"]},
         "legalName": {"type": "STRING", "nullable": True},
         "taxId": {"type": "STRING", "nullable": True},
+        "country": {"type": "STRING", "nullable": True},
     },
     "required": ["esConstitutivo"],
 }
@@ -852,6 +857,10 @@ def leer_identidad(docs, limite: float | None = None) -> tuple[dict, dict]:
 
     `legalName` y `taxId` son la referencia contra la que se compara cada
     documento complementario: si es de otra empresa, no se mezcla (AJ-05).
+
+    `country` es el país que dice el documento. Hace falta acá porque el país
+    que devuelve `analizar` en la corrida de Onboarding es el DECLARADO —se le
+    fuerza—, así que no sirve para avisar que no coinciden (CO-07).
     """
     pares = [(d.nombre, d.contenido) if hasattr(d, "nombre") else d for d in docs]
     # 25 s por intento. Hasta el 13-10-2026 iba sin reintentos, porque si fallaba
@@ -876,4 +885,5 @@ def leer_identidad(docs, limite: float | None = None) -> tuple[dict, dict]:
         "legalForm": forma if forma in ("SPA", "SA", "LIMITADA", "SAS", "EIRL") else None,
         "legalName": texto_o_none(datos.get("legalName")),
         "taxId": texto_o_none(datos.get("taxId")),
+        "country": texto_o_none(datos.get("country")),
     }, uso

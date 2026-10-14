@@ -2067,3 +2067,109 @@ def test_s3_el_403_del_principal_llega_a_ep2(s3_falso):
     reg = correr([PRINCIPAL], s3_falso)
     assert reg["error"]["reason"] == "LENS_DOCUMENT_DOWNLOAD_FAILED"
     assert "sin permiso de lectura (403)" in consultar()[1]["error"]["message"]
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Ajustes pedidos por Onboarding (13-10-2026) · PR-B
+# ════════════════════════════════════════════════════════════════════════════
+
+# ── CO-03 · `documentType` obligatorio en todos los documentos ──────────────
+
+def test_co03_un_complementario_sin_tipo_es_400(s3_falso):
+    cuerpo = {**CUERPO_OK, "documents": CUERPO_OK["documents"] + [
+        {"s3Uri": "s3://g66-company/prod/ACME-1/anexo.pdf"}]}
+    codigo, r = llamar(cuerpo)
+    assert codigo == 400 and "documentType" in r["error"]["message"]
+    assert corridas.ultima("prod", "ACME-1") is None, "un 400 no registra corrida"
+
+
+# ── CO-04 · El país de EP-3, normalizado ────────────────────────────────────
+
+@pytest.mark.parametrize("declarado,esperado", [("Colombia", "colombia"), ("perú", "peru"), ("CO", "colombia")])
+def test_co04_ep3_devuelve_el_pais_normalizado(s3_falso, declarado, esperado):
+    # Registrada como lo hace EP-1: con el país tal como vino.
+    corridas.registrar_inicio("prod", "ACME-1", "a1", country=declarado, documentos=[PRINCIPAL])
+    co.procesar({"ambiente": "prod", "companyId": "ACME-1", "analysisId": "a1",
+                 "country": declarado, "documents": [PRINCIPAL]},
+                analizar=analizar_falso, extraer_socios=socios_falsos, leer_identidad=identidad_falsa)
+    assert pedir_resultado()[1]["country"] == esperado
+
+
+# ── CO-06 · El campo fijo vacío se completa desde el bloque ─────────────────
+
+def test_co06_representante_y_accionistas_vacios_se_completan(s3_falso):
+    """Onboarding vio «Representante Legal: No especificado» con un
+    representante en `legalRepresentatives`, y los porcentajes en EP-6."""
+    def socios(vivos, t0):
+        dueno = {**REPRESENTANTE, "ownershipPercentage": 51.0}
+        return {"legalRepresentatives": [dict(REPRESENTANTE)],
+                "directOwnership": [dueno], "indirectShareholders": []}, []
+
+    correr([PRINCIPAL], s3_falso, socios=socios, analizar=analizar_con(**{
+        "Representante Legal": "No especificado",
+        "Accionistas y aportes": "sin documento · sin porcentaje"}))
+    campos = {c["field"]: c["value"] for c in pedir_resultado()[1]["fields"]}
+    assert campos["Representante Legal"] == "MARTINEZ SOTO CLAUDIA ANDREA | 10.203.040-5 | Gerente General"
+    assert campos["Accionistas y aportes"] == "MARTINEZ SOTO CLAUDIA ANDREA | 10.203.040-5 | 51%"
+
+
+def test_co06_un_campo_con_personas_no_se_toca(s3_falso):
+    propio = "OTRA PERSONA FICTICIA | 11.111.111-1 | Gerente"
+    correr([PRINCIPAL], s3_falso, analizar=analizar_con(**{"Representante Legal": propio}))
+    campos = {c["field"]: c["value"] for c in pedir_resultado()[1]["fields"]}
+    assert campos["Representante Legal"] == propio
+
+
+# ── CO-07 · El documento es de otro país ────────────────────────────────────
+
+def _identidad_de(pais_doc):
+    return lambda d, t0: {**identidad_falsa(d, t0), "country": pais_doc}
+
+
+def test_co07_una_escritura_mexicana_declarada_colombiana_se_avisa(s3_falso):
+    reg = correr([PRINCIPAL], s3_falso, pais="colombia", identidad=_identidad_de("México"))
+    aviso = [a for a in reg["warnings"] if a["reason"] == "DOCUMENT_COUNTRY_MISMATCH"]
+    assert aviso and aviso[0]["objectKey"] == "b2b/escritura.pdf"
+    assert "México" in aviso[0]["message"]
+
+
+@pytest.mark.parametrize("pais_doc", ["Chile", "chile", "República de Chile", None])
+def test_co07_sin_discrepancia_no_hay_aviso(s3_falso, pais_doc):
+    reg = correr([PRINCIPAL], s3_falso, pais="chile", identidad=_identidad_de(pais_doc))
+    assert not any(a["reason"] == "DOCUMENT_COUNTRY_MISMATCH" for a in reg["warnings"])
+    assert reg["status"] == corridas.COMPLETED
+
+
+# ── AJ-01 · La calle y la oficina, de punta a punta ─────────────────────────
+
+def test_aj01_la_direccion_del_certificado_llega_a_ep5(s3_falso):
+    def con_texto(docs, inc, pais="", **_):
+        r = analizar_falso(docs, inc, pais, campos=[
+            c for c in CAMPOS_COMPLETOS if c["field"] != "Domicilio Legal"] + [
+            {"field": "Domicilio Legal", "value": "Medellín, Antioquia, Colombia"}])
+        r["_textos"] = {"escritura.pdf": "Dirección del domicilio principal: Calle 99 No. 99-99, Oficina 999\n"
+                                         "Dirección para notificación judicial: Carrera 1 No. 1-11\n"}
+        return r
+
+    correr([PRINCIPAL], s3_falso, analizar=con_texto)
+    assert pedir_seccion("company")[1]["company"]["address"] == {
+        "street": "Calle 99 No. 99-99", "apt": "Oficina 999", "city": "Medellín", "state": "Antioquia"}
+    ficha = corridas.buscar("prod", "ACME-1", "a1")["result"]
+    assert "_textos" not in ficha, "el texto de los documentos no se guarda"
+
+
+# ── AJ-02 · El pasaporte y el RFC llegan completos a EP-6 ───────────────────
+
+def test_aj02_los_identificadores_alfanumericos_llegan_completos(s3_falso):
+    def socios(vivos, t0):
+        base = {"personType": "NATURAL", "name": "ANA", "lastName": "FICTICIA", "shareholderName": "ANA FICTICIA"}
+        return {"legalRepresentatives": [dict(REPRESENTANTE)], "directOwnership": [
+            {**base, "shareholderId": "X9876543", "identificationType": "PASAPORTE"},
+            {**base, "shareholderId": "EFU-010101-AB1", "identificationType": "RFC"},
+            {**base, "shareholderId": "99.000.001", "identificationType": "CC"},
+            {**base, "shareholderId": "77.000.111-K", "identificationType": "RUT"},
+        ], "indirectShareholders": []}, []
+
+    correr([PRINCIPAL], s3_falso, socios=socios)
+    ids = [p["shareholderId"] for p in pedir_seccion("shareholders")[1]["businessShareholders"]["directOwnership"]]
+    assert ids == ["X9876543", "EFU010101AB1", "99000001", "77000111K"]
