@@ -89,7 +89,7 @@ una regla; la regla está en la columna de origen.
 
 | Campo | Tipo | Oblig. | Origen | Ejemplo |
 |---|---|---|---|---|
-| `address.street` | string \| null | Sí | Derivado de *Domicilio Legal* | `"Av. Providencia 1234"` |
+| `address.street` | string \| null | Sí | De la línea de dirección del documento, o de *Domicilio Legal* | `"Av. Providencia 1234"` |
 | `address.apt` | string \| null | Sí | Derivado; `null` si la dirección no lo trae | `"Of 302"` |
 | `address.city` | string \| null | Sí | Derivado | `"Santiago"` |
 | `address.state` | string \| null | Sí | Derivado | `"Región Metropolitana"` |
@@ -99,6 +99,11 @@ cada parte se reconoce por lo que ES, no por dónde está: una **calle** tiene u
 número o una palabra de calle (`Av.`, `Calle`, `Pasaje`…), una **región** dice
 `Región` o `Departamento`, y el **país** se descarta — el contrato no tiene campo
 país. Lo que queda es la comuna o ciudad, sin el «Comuna de» adelante.
+
+Si el documento trae una línea de dirección aparte —«Dirección del domicilio
+principal», «Dirección comercial» o «Dirección principal», nunca la de
+notificación judicial—, `street` y `apt` salen de esa línea y `city` y `state`
+de *Domicilio Legal*.
 
 Si el documento da solo la ciudad, `street` va en `null`. Lo que no se puede
 clasificar **no se inventa**: una calle adivinada es peor que ninguna, porque
@@ -152,7 +157,7 @@ Un límite de monto por sobre el cual se exigen dos firmas, **sí**.
 | `personType` | string | Sí | `NATURAL` o `LEGAL` | `"NATURAL"` |
 | `identificationType` | string \| null | Sí | Declarado, o derivado del país y del tipo de persona | `"CC"` |
 | `identificationNumber` | string \| null | Sí | **Tal como figura**, no solo dígitos | `"1.020.304-5"` |
-| `role` | string \| null | Sí | *Representante Legal* (cargo), hasta 60 caracteres | `"Gerente General"` |
+| `role` | string \| null | Sí | *Representante Legal* (cargo), hasta 60 caracteres; las abreviaturas del RUT de la DIAN se escriben enteras | `"Gerente General"` |
 
 ### 2.3 `shareholders[]` — EP-3 y EP-6
 
@@ -160,7 +165,7 @@ Un límite de monto por sobre el cual se exigen dos firmas, **sí**.
 |---|---|---|---|---|
 | `personType` | string | Sí | `NATURAL` o `LEGAL` | `"LEGAL"` |
 | `shareholderName` | string \| null | Sí | **Texto original sin reordenar** | `"INVERSIONES AURORA LIMITADA"` |
-| `shareholderId` | string \| null | Sí | **Solo dígitos** | `"771112221"` |
+| `shareholderId` | string \| null | Sí | **Solo dígitos**; en RUT, RFC, CURP, INE, Pasaporte, VAT Number y Tax ID, letras y dígitos sin puntos, guiones ni espacios (el RUT conserva la K) | `"771112221"` |
 | `countryOfOrigin` | string \| null | Sí | Uno de los 238 nombres del Anexo A, con su grafía | `"Colombia"` |
 | `identificationType` | string \| null | Sí | Declarado, o derivado del país y del tipo de persona | `"NIT"` |
 | `lastName` | string \| null | Sí | Partición; `null` en personas jurídicas | `null` |
@@ -242,6 +247,7 @@ Catálogo propio de LENS. Viajan en `warnings[]` con `reason`, `objectKey` y `me
 | `TAX_ID_COUNTRY_MISMATCH` | El identificador tributario tiene forma de otro país que el declarado; se usó el del país declarado y queda dicho por si el país vino mal. |
 | `NAME_SPLIT_INFERRED` | El nombre vino sin partir y se separó por cantidad de palabras: es una conjetura, y el orden de apellidos no se puede deducir sin el documento. |
 | `DOCUMENT_ENTITY_MISMATCH` | Un documento complementario es de otra empresa que el principal (no coincide el identificador tributario o la razón social): no se usaron sus datos. |
+| `DOCUMENT_COUNTRY_MISMATCH` | El documento principal es de otro país que el declarado: se leyó con las reglas del país declarado y queda dicho por si el país vino mal. |
 
 ---
 

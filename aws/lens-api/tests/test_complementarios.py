@@ -219,3 +219,24 @@ def test_nit_distinto_y_razon_distinta_se_excluye():
 def test_el_log_no_lleva_el_identificador_entero():
     assert c.enmascarar("999.999.001-7") == "99…17"
     assert c.enmascarar(None) == "—"
+
+
+# ── RUC y CUIT: 11 dígitos detrás de su etiqueta (PR-B) ─────────────────────
+
+@pytest.mark.parametrize("texto,esperado", [
+    ("Número de RUC: 20999999991 - EMPRESA FICTICIA SAC", "20999999991"),
+    ("Registro Único de Contribuyentes 20999999991", "20999999991"),
+    ("CUIT 30999999991", "30999999991"),
+])
+def test_el_ruc_y_el_cuit_de_11_digitos_se_leen(texto, esperado):
+    """Con el tope de 10, en Perú AJ-05 comparaba solo por razón social."""
+    assert c.tax_id_desde_texto(texto) == esperado
+
+
+def test_detras_de_un_nit_11_digitos_siguen_sin_ser_un_nit():
+    assert c.tax_id_desde_texto("NIT 14000000001") is None
+
+
+def test_dos_ruc_distintos_no_coinciden_y_el_mismo_si():
+    assert c.coinciden(c.nucleo("20999999991"), c.nucleo("20999999991"))
+    assert not c.coinciden(c.nucleo("20999999991"), c.nucleo("20999999992"))

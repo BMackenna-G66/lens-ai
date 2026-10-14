@@ -82,7 +82,8 @@ CAMPOS_EMPRESA = (
 )
 
 #: §7.5 — vocabularios, que NO son el mismo por endpoint.
-VOCAB_EP4 = {"RUT", "CC", "DNI", "CE", "PASS", "PPT", "CV", "CP", "DRIVERS"}
+#: RFC y CURP en EP-4 desde el 13-10-2026 (CO-05), pedido por Onboarding.
+VOCAB_EP4 = {"RUT", "CC", "DNI", "CE", "PASS", "PPT", "CV", "CP", "DRIVERS", "RFC", "CURP"}
 VOCAB_EP6 = {"RUT", "RUC", "DNI", "CC", "CE", "NIT", "RFC", "CURP", "INE",
              "CUIT", "CUIL", "CPF", "CNPJ", "Pasaporte", "Tax ID", "EIN", "VAT Number"}
 

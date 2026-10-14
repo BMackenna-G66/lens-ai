@@ -203,7 +203,7 @@ def _documentos_del_evento(evento: dict) -> tuple[list[tuple[str, bytes]], bool]
 # ── El análisis ─────────────────────────────────────────────────────────────
 def analizar(documentos: list[tuple[str, bytes]], incluir_texto: bool, pais_forzado: str = "",
              *, inicio: float | None = None, ya_leidos: dict | None = None,
-             propagar_caida: bool = False) -> dict:
+             propagar_caida: bool = False, devolver_textos: bool = False) -> dict:
     """El pipeline completo: documentos → texto → país → 18 campos.
 
     Mismo orden que la herramienta. La diferencia está adentro del primer paso:
@@ -220,6 +220,9 @@ def analizar(documentos: list[tuple[str, bytes]], incluir_texto: bool, pais_forz
       · `propagar_caida`: si Gemini no responde, se lanza la excepción en vez de
         devolver `ok: false`, para que la corrida termine con la razón del
         servicio y no con la de una extracción fallida.
+      · `devolver_textos`: el texto de cada documento en `_textos`, para buscar
+        ahí lo que los 18 campos no traen —la línea de dirección (AJ-01)—. No
+        se guarda: la corrida guarda solo lo que saca de él.
     """
     t0 = time.monotonic()
     presupuesto = (Presupuesto(limite_s=PRESUPUESTO_S, inicio=inicio) if inicio is not None
@@ -299,6 +302,8 @@ def analizar(documentos: list[tuple[str, bytes]], incluir_texto: bool, pais_forz
     }
     if incluir_texto:
         salida["texto_crudo"] = texto
+    if devolver_textos:
+        salida["_textos"] = {r.nombre: r.texto for r in leidos if r.ok and r.texto}
     return salida
 
 
@@ -737,8 +742,10 @@ def _texto_para_companies(descargado, t0: float):
 
 
 def _analizar_para_companies(documentos, incluir_texto, pais_forzado="", **opciones) -> dict:
-    """`analizar` para la corrida de Onboarding: si Gemini no responde, lanza."""
-    return analizar(documentos, incluir_texto, pais_forzado, propagar_caida=True, **opciones)
+    """`analizar` para la corrida de Onboarding: si Gemini no responde, lanza, y
+    devuelve los textos para lo que se busca en ellos después."""
+    return analizar(documentos, incluir_texto, pais_forzado, propagar_caida=True,
+                    devolver_textos=True, **opciones)
 
 
 def _companies(evento: dict, ruta: str, metodo: str) -> dict | None:

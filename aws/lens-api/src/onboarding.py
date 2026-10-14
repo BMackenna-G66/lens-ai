@@ -239,21 +239,40 @@ def es_pep(valor: Any, tipo: str | None) -> bool | None:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# D · shareholderId:  solo dígitos
+# D · shareholderId:  solo dígitos, salvo los documentos alfanuméricos
 # ══════════════════════════════════════════════════════════════════════════
 
-def id_accionista(valor: Any) -> str | None:
-    """El identificador del accionista **solo con dígitos**.
+#: Los tipos de EP-6 cuyo identificador lleva LETRAS por naturaleza. Quitarles
+#: las letras deja un número que no identifica a nadie: un RFC de 13
+#: caracteres salía con 8 dígitos, y los pasaportes `X9876543` y `Y9876543`
+#: quedaban iguales (AJ-02, 13-10-2026).
+#:
+#: El RUT chileno va en este grupo por decisión de Compliance (13-10-2026): su
+#: dígito verificador se CONSERVA, también cuando es `K`. Para un RUT numérico
+#: el resultado es el mismo de siempre (`12.345.678-5` → `123456785`); lo que
+#: cambia es que `12.345.678-K` ya no pierde la K.
+TIPOS_ALFANUMERICOS: frozenset[str] = frozenset(
+    {"RFC", "CURP", "INE", "Pasaporte", "VAT Number", "Tax ID", "RUT"})
+
+
+def id_accionista(valor: Any, tipo: str | None = None) -> str | None:
+    """El identificador del accionista, según su `identificationType` de EP-6.
 
     Del contrato: el de la empresa y el del representante van *tal como figuran
-    en el documento*; el del accionista, *solo con dígitos*. Son reglas
-    distintas para el mismo tipo de dato, así que hay dos funciones y no una
-    con un booleano — un parámetro se pasa mal, dos nombres no.
+    en el documento*; el del accionista va normalizado. Son reglas distintas
+    para el mismo tipo de dato, así que hay dos funciones y no una con un
+    booleano — un parámetro se pasa mal, dos nombres no.
 
-    El dígito verificador `K` de un RUT chileno **se pierde** en esta
-    conversión. Es lo que pide el contrato, y también dice que *«LENS no
-    recalcula dígitos»*: no se toca lo que no se entiende.
+      · tipos alfanuméricos (`TIPOS_ALFANUMERICOS`): letras y dígitos, sin
+        puntos, guiones ni espacios, en mayúsculas;
+      · los demás —CC, NIT, DNI, CUIT…— y el tipo desconocido: solo dígitos.
+
+    *«LENS no recalcula dígitos»*: no se toca lo que no se entiende.
     """
+    if tipo in TIPOS_ALFANUMERICOS:
+        # SOLO puntos, guiones y espacios: un RFC puede traer «Ñ» o «&».
+        limpio = re.sub(r"[.\-\s]", "", str(valor or "")).upper()
+        return limpio or None
     digitos = re.sub(r"\D", "", str(valor or ""))
     return digitos or None
 
@@ -688,8 +707,10 @@ def recortar(valor: Any, tope: int, campo: str, avisos: Avisos | None = None) ->
 # vocabulario del endpoint. Lo que no se puede mapear sale `null`, que es un
 # valor válido del contrato; inventar uno no lo es.
 
+#: RFC y CURP entraron el 13-10-2026 (CO-05): el representante mexicano llegaba
+#: con su RFC en `identificationNumber` y `identificationType: null`.
 VOCAB_EP4: frozenset[str] = frozenset(
-    {"RUT", "CC", "DNI", "CE", "PASS", "PPT", "CV", "CP", "DRIVERS"})
+    {"RUT", "CC", "DNI", "CE", "PASS", "PPT", "CV", "CP", "DRIVERS", "RFC", "CURP"})
 VOCAB_EP6: frozenset[str] = frozenset(
     {"RUT", "RUC", "DNI", "CC", "CE", "NIT", "RFC", "CURP", "INE", "CUIT",
      "CUIL", "CPF", "CNPJ", "Pasaporte", "Tax ID", "EIN", "VAT Number"})
@@ -709,8 +730,8 @@ _EQUIVALENCIAS: dict[str, tuple[str | None, str | None]] = {
     "ppt":              ("PPT",        None),
     "nit":              (None,         "NIT"),
     "ruc":              (None,         "RUC"),
-    "rfc":              (None,         "RFC"),
-    "curp":             (None,         "CURP"),
+    "rfc":              ("RFC",        "RFC"),
+    "curp":             ("CURP",       "CURP"),
     "ine":              (None,         "INE"),
     "cuit":             (None,         "CUIT"),
     "cuil":             (None,         "CUIL"),
@@ -815,13 +836,14 @@ def persona(p: dict, avisos: Avisos | None = None) -> dict | None:
 
     pais_crudo = str(p.get("countryOfOrigin") or "")
     name, last_name = nombre_y_apellido(p, tipo, pais_crudo, avisos)
+    tipo_id = tipo_identificacion(
+        p.get("identificationType"), endpoint="EP-6", pais=pais_crudo, tipo_persona_=tipo)
     return {
         "personType": tipo,
         "shareholderName": str(p.get("shareholderName") or "").strip() or None,
-        "shareholderId": id_accionista(p.get("shareholderId")),
+        "shareholderId": id_accionista(p.get("shareholderId"), tipo_id),
         "countryOfOrigin": pais_anexo_a(pais_crudo, avisos),
-        "identificationType": tipo_identificacion(
-            p.get("identificationType"), endpoint="EP-6", pais=pais_crudo, tipo_persona_=tipo),
+        "identificationType": tipo_id,
         "lastName": last_name,
         "name": name,
         "ownershipPercentage": porcentaje(p.get("ownershipPercentage")),
@@ -834,6 +856,30 @@ def persona(p: dict, avisos: Avisos | None = None) -> dict | None:
         ],
         "isPEP": es_pep(p.get("isPEP"), tipo),
     }
+
+
+#: Las abreviaturas con que la casilla 98 del RUT de la DIAN escribe el tipo de
+#: representación. Onboarding le muestra el cargo al usuario y «REPRS LEGAL
+#: PRIN» no se entiende (CO-09). Solo estas se expanden: son propias de ese
+#: formulario, así que no hace falta saber de qué documento vino la persona. El
+#: resto del cargo va tal como figura.
+_CARGOS_DIAN = (
+    (re.compile(r"^REPRS?\.?\s+LEGAL\s+PRIN(?:CIPAL)?\.?(?:\s+(\d+))?$", re.I),
+     "Representante legal principal"),
+    (re.compile(r"^REPRS?\.?\s+LEGAL\s+SUPL(?:ENTE)?\.?(?:\s+(\d+))?$", re.I),
+     "Representante legal suplente"),
+    (re.compile(r"^REPRS?\.?\s+LEGAL\.?(?:\s+(\d+))?$", re.I), "Representante legal"),
+)
+
+
+def cargo_legible(cargo: Any) -> str | None:
+    """El cargo con las abreviaturas de la DIAN escritas enteras."""
+    txt = " ".join(str(cargo or "").split())
+    for rx, legible in _CARGOS_DIAN:
+        m = rx.match(txt)
+        if m:
+            return legible + (f" {m.group(1)}" if m.group(1) else "")
+    return txt or None
 
 
 def representante(p: dict, avisos: Avisos | None = None) -> dict | None:
@@ -859,7 +905,7 @@ def representante(p: dict, avisos: Avisos | None = None) -> dict | None:
         "identificationType": tipo_identificacion(
             p.get("identificationType"), endpoint="EP-4", pais=pais_crudo, tipo_persona_=tipo),
         "identificationNumber": id_tal_cual(p.get("shareholderId") or p.get("identificationNumber")),
-        "role": recortar(p.get("position") or p.get("role"), TOPE_CARGO, "role", avisos),
+        "role": recortar(cargo_legible(p.get("position") or p.get("role")), TOPE_CARGO, "role", avisos),
     }
 
 
@@ -951,7 +997,7 @@ def empresa(datos: dict, avisos: Avisos | None = None) -> dict:
         "taxIdType": tipo_tax_id(tax_id, datos.get("country") or datos.get("pais"), avisos),
         "constitutionDate": fecha_iso(datos.get("constitutionDate"), avisos),
         "legalForm": forma_legal(datos.get("legalName"), datos.get("legalFormDoc"), avisos),
-        "address": domicilio(datos.get("address"), avisos),
+        "address": domicilio(datos.get("address"), avisos, datos.get("addressLine")),
         "activity": actividad(datos.get("activity"), datos.get("objetoSocial"), avisos),
         # §11. `boolean | null`: `null` cuando el documento no permite
         # determinarlo. Solo pasa un booleano de verdad — un `"true"` de texto o
@@ -1041,7 +1087,66 @@ def _limpiar_parte(parte: str) -> str:
     return p
 
 
-def domicilio(texto: Any, avisos: Avisos | None = None) -> dict:
+#: Las etiquetas de la línea de DIRECCIÓN, en orden de preferencia (AJ-01).
+#: En el certificado colombiano, «Domicilio principal» es la ciudad y la
+#: dirección viene en otra línea: con solo «Domicilio Legal», `street` y `apt`
+#: salían siempre en `null`. La de «notificación judicial» NUNCA: es una
+#: dirección para recibir notificaciones, no la de la empresa.
+_ETIQUETAS_DIRECCION = (
+    re.compile(r"direcci[oó]n\s+del\s+domicilio\s+principal[ \t]*:?", re.IGNORECASE),
+    re.compile(r"direcci[oó]n\s+comercial[ \t]*:?", re.IGNORECASE),
+    re.compile(r"direcci[oó]n\s+principal[ \t]*:?", re.IGNORECASE),
+)
+
+#: Lo que, en la misma línea, ya es otra casilla del certificado.
+_FIN_DIRECCION = re.compile(
+    r"\s{2,}|\s(?:municipio|ciudad|departamento|pa[ií]s|correo|e-?mail|tel[eé]fono"
+    r"|c[oó]digo\s+postal)\b", re.IGNORECASE)
+
+#: Una marca de oficina o departamento DENTRO de la calle, sin coma antes:
+#: «Carrera 7 # 71-21 Torre B Piso 3».
+_APTO_EN_LINEA = re.compile(
+    r"\s(?=(?:of|ofic|oficina|apto|apartamento|piso|torre|interior|int|depto|dpto)\b\.?\s*\w)",
+    re.IGNORECASE)
+
+
+def linea_de_direccion(textos: list[str]) -> str | None:
+    """La dirección que el documento pone detrás de su etiqueta, o `None`.
+
+    Se busca cada etiqueta en todos los textos —el del principal primero— antes
+    de pasar a la siguiente: la preferencia es por etiqueta, no por documento.
+    Una línea sin número ni palabra de calle no es una dirección.
+    """
+    for etiqueta in _ETIQUETAS_DIRECCION:
+        for texto in textos:
+            t = str(texto or "")
+            for m in etiqueta.finditer(t):
+                for linea in t[m.end():].split("\n")[:2]:
+                    linea = linea.strip()
+                    corte = _FIN_DIRECCION.search(linea)
+                    valor = (linea[:corte.start()] if corte else linea).strip(" ,;:")
+                    if valor and _es_calle(valor.split(",")[0]):
+                        return valor
+    return None
+
+
+def calle_y_apto(linea: Any) -> tuple[str | None, str | None]:
+    """`(street, apt)` de una línea de dirección. Lo demás —ciudad, país— se
+    ignora: sale de *Domicilio Legal*."""
+    partes = [_limpiar_parte(p) for p in str(linea or "").split(",")]
+    partes = [p for p in partes if p and not _es_pais(p)]
+    if not partes or not _es_calle(partes[0]):
+        return None, None
+    street = partes[0]
+    apt = next((p for p in partes[1:] if _es_apto(p)), None)
+    if apt is None:
+        dentro = _APTO_EN_LINEA.search(street)
+        if dentro:
+            street, apt = street[:dentro.start()].strip(), street[dentro.end():].strip()
+    return street or None, apt or None
+
+
+def domicilio(texto: Any, avisos: Avisos | None = None, linea: Any = None) -> dict:
     """Parte *Domicilio Legal* en `street` / `apt` / `city` / `state`.
 
     ── Se clasifica cada parte, no se reparte por posición ─────────────────
@@ -1079,7 +1184,19 @@ def domicilio(texto: Any, avisos: Avisos | None = None) -> dict:
     El aviso por domicilio faltante NO se emite acá: lo emite la evaluación de
     datos esperados de `companies`, que es la que decide el estado de la corrida
     y la única que sabe qué faltó en total. Emitirlo en los dos lados lo duplicaba.
+
+    `linea` es la línea de dirección del documento (`linea_de_direccion`).
+    Cuando trae una calle, `street` y `apt` salen de ahí; `city` y `state`
+    siguen saliendo de *Domicilio Legal* (AJ-01).
     """
+    base = _domicilio_legal(texto)
+    calle, apto = calle_y_apto(linea)
+    if calle:
+        base["street"], base["apt"] = calle, apto or base["apt"]
+    return base
+
+
+def _domicilio_legal(texto: Any) -> dict:
     vacio = {"street": None, "apt": None, "city": None, "state": None}
     crudo = str(texto or "").strip()
     if not crudo or crudo.lower() in ("no especificado", "sin documento"):

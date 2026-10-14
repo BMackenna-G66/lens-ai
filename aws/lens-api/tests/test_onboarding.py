@@ -130,10 +130,33 @@ def test_el_accionista_va_solo_con_digitos(crudo, esperado):
     assert ob.id_accionista(crudo) == esperado
 
 
-def test_el_digito_verificador_k_se_pierde_y_esta_bien():
-    """Lo pide el contrato. Y también dice que LENS no recalcula dígitos: no se
-    toca lo que no se entiende."""
+def test_el_rut_conserva_el_verificador_tambien_la_k():
+    """Decisión de Compliance del 13-10-2026 (AJ-02): un RUT puede terminar en K,
+    y sin ella el identificador queda incompleto. Para un RUT numérico el
+    resultado es el de siempre."""
+    assert ob.id_accionista("76.123.456-K", "RUT") == "76123456K"
+    assert ob.id_accionista("76.123.456-k", "RUT") == "76123456K"
+    assert ob.id_accionista("76.123.456-9", "RUT") == "761234569"
+
+
+def test_sin_tipo_sigue_siendo_solo_digitos():
+    """Sin saber qué documento es, no se decide conservar letras."""
     assert ob.id_accionista("76.123.456-K") == "76123456"
+
+
+@pytest.mark.parametrize("crudo,tipo,esperado", [
+    ("X9876543", "Pasaporte", "X9876543"),
+    ("x-987 654.3", "Pasaporte", "X9876543"),
+    ("EFU-010101-AB1", "RFC", "EFU010101AB1"),
+    ("ÑEFU010101AB1", "RFC", "ÑEFU010101AB1"),
+    ("PEGA800101HDFRRN09", "CURP", "PEGA800101HDFRRN09"),
+    ("99.000.001", "CC", "99000001"),
+    ("9999990035", "NIT", "9999990035"),
+])
+def test_los_documentos_alfanumericos_conservan_las_letras(crudo, tipo, esperado):
+    """AJ-02: un RFC salía con 8 dígitos, y `X9876543` y `Y9876543` quedaban
+    iguales. Los numéricos no cambian."""
+    assert ob.id_accionista(crudo, tipo) == esperado
 
 
 def test_el_de_la_empresa_y_el_representante_van_tal_cual():
@@ -486,3 +509,80 @@ def test_el_accionista_sale_con_el_porcentaje_normalizado():
     p = ob.persona({"personType": "NATURAL", "shareholderName": "PEREZ ANA",
                     "name": "ANA", "lastName": "PEREZ", "ownershipPercentage": 51.0})
     assert p["ownershipPercentage"] == 51 and isinstance(p["ownershipPercentage"], int)
+
+
+# ── CO-05 · RFC y CURP en EP-4 ──────────────────────────────────────────────
+
+@pytest.mark.parametrize("declarado,esperado", [("RFC", "RFC"), ("curp", "CURP"), ("R.F.C.", "RFC")])
+def test_el_representante_mexicano_tiene_tipo_en_ep4(declarado, esperado):
+    assert ob.tipo_identificacion(declarado, endpoint="EP-4") == esperado
+
+
+def test_el_representante_mexicano_sin_tipo_se_deriva_a_curp():
+    assert ob.tipo_identificacion("", endpoint="EP-4", pais="México", tipo_persona_="NATURAL") == "CURP"
+
+
+# ── CO-09 · El cargo del RUT de la DIAN, legible ────────────────────────────
+
+@pytest.mark.parametrize("crudo,legible", [
+    ("REPRS LEGAL PRIN", "Representante legal principal"),
+    ("REPRS LEGAL SUPL", "Representante legal suplente"),
+    ("REPR. LEGAL SUPL 2", "Representante legal suplente 2"),
+    ("REPRS LEGAL", "Representante legal"),
+    ("Gerente General", "Gerente General"),
+    ("ADMINISTRADOR GENERAL UNICO", "ADMINISTRADOR GENERAL UNICO"),
+    (None, None),
+])
+def test_solo_las_abreviaturas_de_la_dian_se_expanden(crudo, legible):
+    assert ob.cargo_legible(crudo) == legible
+
+
+# ── AJ-01 · La calle y la oficina, de la línea de dirección ─────────────────
+
+CERTIFICADO = (
+    "Razón social: EMPRESA FICTICIA UNO S.A.S.\n"
+    "Domicilio principal: Medellín, Antioquia, Colombia\n"
+    "Dirección del domicilio principal: Calle 99 No. 99-99, Oficina 999\n"
+    "Municipio: Medellín - Antioquia\n"
+    "Dirección para notificación judicial: Carrera 1 No. 1-11\n"
+)
+
+
+def test_la_direccion_del_certificado_da_calle_y_oficina():
+    """El criterio de aceptación de Onboarding, con su documento de prueba."""
+    linea = ob.linea_de_direccion([CERTIFICADO])
+    assert ob.domicilio("Medellín, Antioquia, Colombia", linea=linea) == {
+        "street": "Calle 99 No. 99-99", "apt": "Oficina 999",
+        "city": "Medellín", "state": "Antioquia"}
+
+
+def test_la_de_notificacion_judicial_nunca():
+    solo_judicial = "Dirección para notificación judicial: Carrera 1 No. 1-11\n"
+    assert ob.linea_de_direccion([solo_judicial]) is None
+
+
+@pytest.mark.parametrize("etiqueta", ["Dirección comercial", "DIRECCIÓN PRINCIPAL", "Direccion principal"])
+def test_las_otras_dos_etiquetas(etiqueta):
+    assert ob.linea_de_direccion([f"{etiqueta}: Calle 99 No. 99-99, Oficina 999\n"]) == \
+        "Calle 99 No. 99-99, Oficina 999"
+
+
+def test_la_preferencia_es_por_etiqueta_no_por_documento():
+    principal = "Dirección comercial: Calle 1 No. 1-11\n"
+    otro = "Dirección del domicilio principal: Calle 99 No. 99-99\n"
+    assert ob.linea_de_direccion([principal, otro]) == "Calle 99 No. 99-99"
+
+
+def test_la_oficina_sin_coma_tambien_se_separa():
+    assert ob.calle_y_apto("Carrera 7 # 71-21 Torre B Piso 3") == ("Carrera 7 # 71-21", "Torre B Piso 3")
+
+
+def test_sin_linea_de_direccion_el_domicilio_sale_como_siempre():
+    """La escritura chilena trae la calle en el propio Domicilio Legal."""
+    assert ob.domicilio("Av. Providencia 1234, Of 302, Santiago, Región Metropolitana") == {
+        "street": "Av. Providencia 1234", "apt": "Of 302",
+        "city": "Santiago", "state": "Región Metropolitana"}
+
+
+def test_una_linea_que_no_es_una_direccion_no_se_usa():
+    assert ob.linea_de_direccion(["Dirección comercial: la misma del domicilio\n"]) is None
