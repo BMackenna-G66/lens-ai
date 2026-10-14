@@ -285,3 +285,69 @@ def test_la_clave_suelta_usa_el_bucket_por_defecto():
     s3 = S3Falso([("x/doc.pdf", 100)])
     r = ing.ingerir(s3, documentos=[ing.DocumentoPedido(clave="x/doc.pdf")], bucket="mi-bucket")
     assert r.archivos[0].bucket == "mi-bucket"
+
+
+# ── S3-ERR · Qué respondió S3, no «ClientError» ─────────────────────────────
+# El 09-10-2026 la lectura falló porque la bucket policy autorizaba al rol del
+# flujo autónomo y no al de la API, y el mensaje decía solo «ClientError».
+
+from botocore.exceptions import ClientError  # noqa: E402
+
+
+def _client_error(codigo, http, mensaje="", operacion="GetObject"):
+    return ClientError({"Error": {"Code": codigo, "Message": mensaje},
+                        "ResponseMetadata": {"HTTPStatusCode": http}}, operacion)
+
+
+@pytest.mark.parametrize("error,esperado", [
+    (_client_error("404", 404, "Not Found", "HeadObject"), "no existe en S3 (404)"),
+    (_client_error("NoSuchKey", 404, "The specified key does not exist."), "no existe en S3 (404)"),
+    (_client_error("403", 403, "Forbidden", "HeadObject"), "sin permiso de lectura (403)"),
+    (_client_error("AccessDenied", 403, "Access Denied"), "sin permiso de lectura (403)"),
+    (_client_error("AccessDenied", 403, "User is not authorized to perform: kms:Decrypt"),
+     "sin permiso para descifrar (KMS)"),
+    (_client_error("SlowDown", 503, "Please reduce your request rate."), "S3 respondió SlowDown (503)"),
+])
+def test_el_error_de_s3_dice_que_respondio(error, esperado):
+    assert esperado in ing.describir_error(error, "bucket-de-prueba")
+
+
+def test_el_403_dice_que_revisar_y_en_que_bucket():
+    m = ing.describir_error(_client_error("403", 403, "", "HeadObject"), "bucket-de-prueba")
+    assert "bucket policy de bucket-de-prueba" in m and "rol de LENS" in m
+
+
+def test_lo_que_no_es_de_s3_sigue_diciendo_su_tipo():
+    assert ing.describir_error(RuntimeError("x")) == "RuntimeError"
+
+
+class S3QueResponde:
+    """Un S3 que contesta lo que contestaría AWS de verdad."""
+
+    def __init__(self, head=None, get=None):
+        self.head, self.get = head, get
+
+    def head_object(self, Bucket, Key):
+        if self.head:
+            raise self.head
+        return {"ContentLength": 10}
+
+    def get_object(self, Bucket, Key):
+        if self.get:
+            raise self.get
+        return {"Body": _Cuerpo(b"x")}
+
+
+def test_el_aviso_de_head_object_trae_el_motivo(caplog):
+    s3 = S3QueResponde(head=_client_error("403", 403, "", "HeadObject"))
+    with caplog.at_level("WARNING"):
+        _, avisos = ing.resolver_documentos(s3, [ing.DocumentoPedido(s3_uri="s3://b/k/doc.pdf")])
+    assert avisos == ["k/doc.pdf: no se pudo leer: sin permiso de lectura (403): "
+                      "revisar la bucket policy de b para el rol de LENS"]
+    assert "sin permiso de lectura (403)" in caplog.text
+
+
+def test_el_aviso_de_la_descarga_trae_el_motivo():
+    s3 = S3QueResponde(get=_client_error("AccessDenied", 403, "not authorized to perform: kms:Decrypt"))
+    _, avisos = ing.descargar(s3, "b", [ing.ObjetoS3(clave="k/doc.pdf", tamano=10)])
+    assert avisos == ["doc.pdf: no se pudo descargar: sin permiso para descifrar (KMS)"]

@@ -83,7 +83,7 @@ CAMPOS_COMPLETOS = [
 ]
 
 
-def analizar_falso(documentos, incluir_texto, pais="", campos=None):
+def analizar_falso(documentos, incluir_texto, pais="", campos=None, **_):
     return {
         "ok": True,
         "campos": campos if campos is not None else CAMPOS_COMPLETOS,
@@ -97,7 +97,7 @@ def analizar_con(**cambios):
     """`analizar_falso` con algunos campos cambiados. `None` = el campo falta."""
     campos = [c for c in CAMPOS_COMPLETOS if c["field"] not in cambios]
     campos += [{"field": k, "value": v} for k, v in cambios.items() if v is not None]
-    return lambda docs, inc, pais="": analizar_falso(docs, inc, pais, campos=campos)
+    return lambda docs, inc, pais="", **_: analizar_falso(docs, inc, pais, campos=campos)
 
 
 REPRESENTANTE = {
@@ -1423,7 +1423,7 @@ def test_1_cualquier_aviso_deja_la_corrida_incompleta(s3_falso):
     """Las seis empresas del lote de prueba tenían avisos y salieron COMPLETED:
     Onboarding muestra INCOMPLETE como «qué no se pudo leer», así que con
     COMPLETED el usuario nunca se enteraba."""
-    def con_aviso(docs, inc, pais=""):
+    def con_aviso(docs, inc, pais="", **_):
         r = analizar_falso(docs, inc, pais)
         r["avisos"] = ["escritura.pdf: OCR falló en la página 7: timeout"]
         return r
@@ -1434,7 +1434,7 @@ def test_1_cualquier_aviso_deja_la_corrida_incompleta(s3_falso):
 
 
 def test_1_el_tope_de_ocr_tiene_su_propio_motivo(s3_falso):
-    def con_tope(docs, inc, pais=""):
+    def con_tope(docs, inc, pais="", **_):
         r = analizar_falso(docs, inc, pais)
         r["avisos"] = ["escritura.pdf: 40 páginas sin capa de texto y el tope de OCR es 15: "
                        "se leyeron las primeras 15."]
@@ -1516,7 +1516,7 @@ def test_4_si_falla_la_descarga_tambien_es_download_failed(s3_falso):
 
 def test_4_un_principal_sin_texto_recuperable_es_not_readable(s3_falso):
     """Este SÍ es del documento: se bajó y no hay nada que leer."""
-    def ilegible(docs, inc, pais=""):
+    def ilegible(docs, inc, pais="", **_):
         r = analizar_falso(docs, inc, pais)
         r["documentos"] = [{**d, "ok": False} for d in r["documentos"]]
         return r
@@ -1529,7 +1529,7 @@ def test_4_si_la_escritura_es_ilegible_no_se_analiza_el_anexo_solo(s3_falso):
     """El mismo caso peor que el de la descarga, un paso más adelante: la
     escritura se baja pero no tiene texto, el anexo sí, y la corrida no puede
     terminar extrayendo la empresa del anexo."""
-    def escritura_ilegible(docs, inc, pais=""):
+    def escritura_ilegible(docs, inc, pais="", **_):
         r = analizar_falso(docs, inc, pais)
         r["documentos"] = [{**d, "ok": d["nombre"] != "escritura.pdf"} for d in r["documentos"]]
         return r
@@ -1702,7 +1702,7 @@ def test_11_el_aviso_de_un_documento_que_no_se_pudo_obtener_trae_su_object_key(s
 
 
 def test_11_los_avisos_de_lectura_traen_el_object_key_de_su_documento(s3_falso):
-    def con_aviso(docs, inc, pais=""):
+    def con_aviso(docs, inc, pais="", **_):
         r = analizar_falso(docs, inc, pais)
         r["avisos"] = ["anexo.pdf: OCR falló en la página 2: timeout"]
         return r
@@ -1835,3 +1835,235 @@ def test_la_corrida_guarda_cuanto_tardo_cada_etapa(s3_falso):
     tiempos = corridas.buscar("prod", "ACME-1", "a1")["result"]["timingsMs"]
     assert {"s3", "identidad", "lectura_y_18_campos", "personas", "administracion"} <= set(tiempos)
     assert "timingsMs" not in pedir_resultado()[1]
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Ajustes pedidos por Onboarding (13-10-2026) · PR-A
+# ════════════════════════════════════════════════════════════════════════════
+# Las empresas, los NIT y las cédulas son INVENTADOS. Los textos imitan el RUT
+# de la DIAN con sus etiquetas reales.
+
+from types import SimpleNamespace  # noqa: E402
+
+import errores  # noqa: E402
+
+CERT = {"s3Uri": "s3://b/b2b/certificado.pdf", "documentType": "company_trade_chamber_sedpe_document"}
+RUT_DIAN = {"s3Uri": "s3://b/b2b/rut.pdf", "documentType": "company_id_document"}
+
+
+def texto_rut(nit_casillas: str, razon: str, cedula: str = "10203040") -> str:
+    return (
+        "Formulario del Registro Único Tributario Hoja Principal 001\n"
+        "5. Número de Identificación Tributaria (NIT) 6. DV 12. Dirección seccional\n"
+        f"{nit_casillas} Impuestos de Medellín 11\n"
+        "35. Razón social\n"
+        f"{razon}\n"
+        "36. Nombre comercial 37. Sigla\n"
+        f"98. Representación REPRS LEGAL PRIN 100. Tipo de documento 13 101. Número de identificación {cedula}\n"
+    )
+
+
+RUT_DE_OTRA = texto_rut("9 9 9 9 9 9 0 0 2 5", "EMPRESA FICTICIA DOS S.A.S.")
+RUT_DE_LA_MISMA = texto_rut("9 9 9 9 9 9 0 0 1 7", "EMPRESA FICTICIA UNO SAS")
+
+
+def identidad_co(tax_id):
+    def leer(descargado, t0):
+        return {"esConstitutivo": "SI", "tipoDetectado": "certificado de existencia",
+                "activity": "Comercio", "legalForm": "SAS",
+                "legalName": "EMPRESA FICTICIA UNO S.A.S.", "taxId": tax_id}
+    return leer
+
+
+class Espia:
+    """`analizar` y `extraer_socios` que recuerdan con qué los llamaron."""
+
+    def __init__(self, socios=None):
+        self.leidos, self.opciones, self.para_socios = [], {}, []
+        self._socios = socios or socios_falsos
+
+    def analizar(self, docs, inc, pais="", **opciones):
+        self.leidos = [n for n, _ in docs]
+        self.opciones = opciones
+        return analizar_falso(docs, inc, pais)
+
+    def socios(self, vivos, t0):
+        self.para_socios = [d.nombre for d in vivos]
+        return self._socios(vivos, t0)
+
+
+def correr_co(s3, *, texto_del_rut, tax_id_principal, espia=None, pais="colombia", docs=None):
+    s3.claves.update({"b2b/certificado.pdf", "b2b/rut.pdf"})
+    espia = espia or Espia()
+    textos = {"rut.pdf": texto_del_rut}
+    documentos = docs or [CERT, RUT_DIAN]
+    corridas.registrar_inicio("prod", "ACME-1", "a1", documentos=documentos)
+    co.procesar({"ambiente": "prod", "companyId": "ACME-1", "analysisId": "a1",
+                 "country": pais, "documents": documentos},
+                analizar=espia.analizar, extraer_socios=espia.socios,
+                leer_identidad=identidad_co(tax_id_principal),
+                leer_texto=lambda d, t0: SimpleNamespace(texto=textos.get(d.nombre, "")))
+    return corridas.buscar("prod", "ACME-1", "a1"), espia
+
+
+# ── AJ-05 · No se mezclan documentos de empresas distintas ──────────────────
+
+def test_aj05_a_el_rut_de_otra_empresa_no_se_lee_y_se_avisa(s3_falso):
+    """Prueba A de Onboarding: el certificado trae NIT y el RUT es de otra. Antes
+    entraba el representante del RUT a la lista (3 en vez de 2)."""
+    reg, espia = correr_co(s3_falso, texto_del_rut=RUT_DE_OTRA, tax_id_principal="999.999.001-7")
+    assert espia.leidos == ["certificado.pdf"]
+    assert espia.para_socios == ["certificado.pdf"]
+    aviso = [a for a in reg["warnings"] if a["reason"] == "DOCUMENT_ENTITY_MISMATCH"]
+    assert aviso and aviso[0]["objectKey"] == "b2b/rut.pdf"
+    assert "otra empresa" in aviso[0]["message"]
+    docs = {d["objectKey"]: d for d in pedir_resultado()[1]["documents"]}
+    assert docs["b2b/rut.pdf"]["ok"] is False and docs["b2b/certificado.pdf"]["ok"] is True
+    assert reg["status"] == corridas.INCOMPLETE
+
+
+def test_aj05_b_sin_nit_en_el_certificado_decide_la_razon_social(s3_falso):
+    """Prueba B: sin NIT en el certificado se tomaba el NIT del RUT de la otra."""
+    reg, espia = correr_co(s3_falso, texto_del_rut=RUT_DE_OTRA, tax_id_principal=None)
+    assert espia.leidos == ["certificado.pdf"]
+    assert any(a["reason"] == "DOCUMENT_ENTITY_MISMATCH" for a in reg["warnings"])
+
+
+def test_aj05_c_el_rut_de_la_misma_empresa_se_sigue_usando(s3_falso):
+    """Prueba C, el control, que no puede cambiar: el RUT de la MISMA empresa
+    completa el NIT. Y su texto no se lee dos veces."""
+    reg, espia = correr_co(s3_falso, texto_del_rut=RUT_DE_LA_MISMA, tax_id_principal=None)
+    assert espia.leidos == ["certificado.pdf", "rut.pdf"]
+    assert not any(a["reason"] == "DOCUMENT_ENTITY_MISMATCH" for a in reg["warnings"])
+    assert set(espia.opciones["ya_leidos"]) == {"rut.pdf"}
+
+
+def test_aj05_si_no_se_puede_leer_la_identidad_no_se_excluye_a_ciegas(s3_falso):
+    reg, espia = correr_co(s3_falso, texto_del_rut="un texto sin etiquetas", tax_id_principal=None)
+    assert espia.leidos == ["certificado.pdf", "rut.pdf"]
+    assert not any(a["reason"] == "DOCUMENT_ENTITY_MISMATCH" for a in reg["warnings"])
+
+
+def test_aj05_el_aviso_esta_en_el_catalogo():
+    assert "DOCUMENT_ENTITY_MISMATCH" in errores.AVISO
+
+
+# ── AJ-04 · Si el modelo no responde, FAILED por el servicio ────────────────
+
+def _caido(*_, **__):
+    raise errores.ServicioNoDisponible("No se pudo conectar con Gemini tras 3 intento(s) (HTTP 503).")
+
+
+@pytest.mark.parametrize("etapa", ["identidad", "analizar", "socios", "admin"])
+def test_aj04_si_gemini_no_responde_la_corrida_es_failed_por_el_servicio(s3_falso, etapa):
+    """Antes: la identidad sin leer seguía, y la corrida salía INCOMPLETE con
+    tres «faltan datos» que culpaban al documento."""
+    kw = {"identidad": _caido} if etapa == "identidad" else \
+         {"analizar": _caido} if etapa == "analizar" else \
+         {"socios": _caido} if etapa == "socios" else {"admin": _caido}
+    reg = correr([PRINCIPAL], s3_falso, **kw)
+    assert reg["status"] == corridas.FAILED
+    assert reg["error"]["reason"] == "SERVICE_UNAVAILABLE"
+    assert "HTTP 503" in reg["error"]["message"]
+    estado = consultar()[1]
+    assert estado["status"] == "FAILED" and estado["error"]["reason"] == "SERVICE_UNAVAILABLE"
+
+
+def test_aj04_la_caida_real_de_gemini_llega_como_servicio(s3_falso):
+    """Con la excepción que lanza `gemini`, no con una de prueba."""
+    import gemini
+
+    def socios(*_, **__):
+        raise gemini.GeminiNoDisponible("No se pudo conectar con Gemini (HTTP 503).", status=503)
+
+    reg = correr([PRINCIPAL], s3_falso, socios=socios)
+    assert reg["error"]["reason"] == "SERVICE_UNAVAILABLE"
+
+
+def test_aj04_un_error_que_no_es_del_servicio_sigue_como_antes(s3_falso):
+    """Una respuesta rara de la identidad no es una caída: la corrida sigue con
+    el aviso de siempre."""
+    def rara(*_, **__):
+        raise ValueError("respuesta que no es JSON")
+
+    reg = correr([PRINCIPAL], s3_falso, identidad=rara)
+    assert reg["status"] == corridas.INCOMPLETE
+    assert any("No se pudo verificar el tipo" in a["message"] for a in reg["warnings"])
+
+
+def test_aj04_analizar_recibe_el_arranque_de_la_corrida(s3_falso):
+    """El presupuesto de los reintentos se cuenta desde que arrancó la corrida,
+    no desde que empezó la lectura."""
+    espia = Espia()
+    correr([PRINCIPAL], s3_falso, analizar=espia.analizar)
+    assert isinstance(espia.opciones.get("inicio"), float)
+
+
+def test_aj04_dos_corridas_sobre_lo_mismo_dan_los_mismos_bloques(s3_falso):
+    """El criterio de Onboarding: dos lecturas del mismo documento devuelven lo
+    mismo en `company` y `legalRepresentatives`. Y el porcentaje con el mismo
+    formato aunque el modelo lo devuelva como `51` en una y `51.0` en la otra."""
+    def socios_con(pct):
+        def f(vivos, t0):
+            dueno = {**REPRESENTANTE, "ownershipPercentage": pct}
+            return {"legalRepresentatives": [dict(REPRESENTANTE)],
+                    "directOwnership": [dueno], "indirectShareholders": []}, []
+        return f
+
+    salidas = []
+    for pct in (51.0, 51):
+        corridas._reiniciar_memoria()
+        correr([PRINCIPAL], s3_falso, socios=socios_con(pct))
+        r = pedir_resultado()[1]
+        s = pedir_seccion("shareholders")[1]["businessShareholders"]
+        salidas.append((r["company"], r["legalRepresentatives"], json.dumps(s)))
+    assert salidas[0] == salidas[1]
+    assert '"ownershipPercentage": 51,' in salidas[0][2]
+
+
+# ── AJ-06 · La cédula sin el código DIAN pegado ─────────────────────────────
+
+def _rep_con(numero):
+    def f(vivos, t0):
+        rep = {**REPRESENTANTE, "shareholderId": numero, "identificationType": "CC",
+               "countryOfOrigin": "Colombia"}
+        return {"legalRepresentatives": [rep], "directOwnership": [], "indirectShareholders": []}, []
+    return f
+
+
+def test_aj06_la_cedula_sale_sin_el_13_y_sigue_siendo_cc(s3_falso):
+    correr_co(s3_falso, texto_del_rut=RUT_DE_LA_MISMA, tax_id_principal=None,
+              espia=Espia(socios=_rep_con("1310203040")))
+    rep = pedir_seccion("legal-representatives")[1]["legalRepresentatives"][0]
+    assert rep["identificationNumber"] == "10203040"
+    assert rep["identificationType"] == "CC"
+
+
+def test_aj06_si_el_texto_no_lo_confirma_no_se_toca(s3_falso):
+    correr_co(s3_falso, texto_del_rut=texto_rut("9 9 9 9 9 9 0 0 1 7", "EMPRESA FICTICIA UNO SAS",
+                                                 cedula="no figura"),
+              tax_id_principal=None, espia=Espia(socios=_rep_con("1310203040")))
+    rep = pedir_seccion("legal-representatives")[1]["legalRepresentatives"][0]
+    assert rep["identificationNumber"] == "1310203040"
+
+
+def test_aj06_solo_en_colombia(s3_falso):
+    correr_co(s3_falso, texto_del_rut=RUT_DE_LA_MISMA, tax_id_principal=None, pais="chile",
+              docs=[PRINCIPAL, RUT_DIAN], espia=Espia(socios=_rep_con("1310203040")))
+    rep = pedir_seccion("legal-representatives")[1]["legalRepresentatives"][0]
+    assert rep["identificationNumber"] == "1310203040"
+
+
+# ── S3-ERR · El motivo de S3 llega al error de la corrida ───────────────────
+
+def test_s3_el_403_del_principal_llega_a_ep2(s3_falso):
+    from botocore.exceptions import ClientError
+
+    def head_403(Bucket, Key):
+        raise ClientError({"Error": {"Code": "403", "Message": "Forbidden"},
+                           "ResponseMetadata": {"HTTPStatusCode": 403}}, "HeadObject")
+
+    s3_falso.head_object = head_403
+    reg = correr([PRINCIPAL], s3_falso)
+    assert reg["error"]["reason"] == "LENS_DOCUMENT_DOWNLOAD_FAILED"
+    assert "sin permiso de lectura (403)" in consultar()[1]["error"]["message"]

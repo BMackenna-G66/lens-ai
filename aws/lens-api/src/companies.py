@@ -40,6 +40,7 @@ import time
 import uuid
 from typing import Any, Callable
 
+import complementarios
 import corridas
 import disparador
 import errores
@@ -235,7 +236,8 @@ def es_principal(documento: dict, pais: Any = "") -> bool:
 def manejar(evento: dict, ruta: str, metodo: str, *, analizar: Callable,
             extraer_socios: Callable | None = None,
             extraer_administracion: Callable | None = None,
-            leer_identidad: Callable | None = None) -> dict | None:
+            leer_identidad: Callable | None = None,
+            leer_texto: Callable | None = None) -> dict | None:
     """La respuesta si la ruta es de esta familia, `None` si no lo es.
 
     Devolver `None` —y no un `404`— es lo que deja que el handler siga probando
@@ -342,7 +344,8 @@ def manejar(evento: dict, ruta: str, metodo: str, *, analizar: Callable,
         # lo use. Es información de operación y vive en `/salud`.
         disparador.disparar(carga, lambda c: procesar(
             c, analizar=analizar, extraer_socios=extraer_socios,
-            extraer_administracion=extraer_administracion, leer_identidad=leer_identidad))
+            extraer_administracion=extraer_administracion, leer_identidad=leer_identidad,
+            leer_texto=leer_texto))
 
         return _resp(202, {
             # Como número, igual que EP-2 a EP-6: §6.2 lo declara numérico, y
@@ -494,6 +497,8 @@ AVISO_POR_ETAPA = {
     "filtro": ("PARTIALLY_ILLEGIBLE", "No se pudo usar el documento"),
     "lectura": ("PARTIALLY_ILLEGIBLE", "No se pudo leer el documento"),
     "tipo": ("EXPECTED_DATA_MISSING", "El documento no es del tipo declarado"),
+    # Solo complementarios: el principal es la referencia, no se compara.
+    "entidad": ("DOCUMENT_ENTITY_MISMATCH", "No se usaron los datos del documento"),
 }
 
 
@@ -508,12 +513,21 @@ def _motivo(avisos: list[str], *claves: str) -> str:
 
 def procesar(carga: dict, *, analizar: Callable, extraer_socios: Callable | None = None,
              extraer_administracion: Callable | None = None,
-             leer_identidad: Callable | None = None) -> dict:
+             leer_identidad: Callable | None = None,
+             leer_texto: Callable | None = None) -> dict:
     """Resuelve los documentos, analiza y cierra la corrida.
 
     Nunca levanta: lo que sale mal termina la corrida en `FAILED` con su motivo.
     Una excepción que escapara dejaría la corrida colgada en `IN_PROGRESS` hasta
     que la libere el tope de caducidad, y el consumidor esperando.
+
+    ── Si el modelo no responde, la corrida no sigue ──────────────────────────
+    La identidad, los 18 campos, las personas y la administración alimentan
+    `company` y `legalRepresentatives`. Si alguna no responde —el callable lanza
+    `errores.ServicioNoDisponible`—, la corrida termina `FAILED` con
+    `SERVICE_UNAVAILABLE`. Antes seguía con lo que tuviera: una corrida con
+    Gemini caído salió INCOMPLETE con la razón social corta, sin forma legal ni
+    actividad, y tres «faltan datos» que culpaban al documento (AJ-04).
 
     ── Cada documento lleva su propio seguimiento ─────────────────────────────
     Un documento se puede caer en cinco lugares —al resolverlo, al filtrarlo, al
@@ -553,6 +567,11 @@ def procesar(carga: dict, *, analizar: Callable, extraer_socios: Callable | None
 
     def fallar(razon: str, mensaje: str) -> dict:
         return cerrar(corridas.FAILED, error=errores.fallo(razon, mensaje))
+
+    def caido(que: str, e: Exception) -> dict:
+        """§8, «FAILED por el servicio»: el documento puede estar bien."""
+        log.warning("corrida %s cortada: no se pudo %s (%s)", analysis_id, que, e)
+        return fallar("SERVICE_UNAVAILABLE", f"No se pudo {que}: {e}")
 
     principales = [i for i, d in enumerate(pedidos) if es_principal(d, pais)]
 
@@ -622,6 +641,8 @@ def procesar(carga: dict, *, analizar: Callable, extraer_socios: Callable | None
         for i in principales_vivos():
             try:
                 r = leer_identidad(bajados[claves[i]], t0)
+            except errores.ServicioNoDisponible as e:
+                return caido("verificar el documento principal", e)
             except Exception as e:  # noqa: BLE001
                 log.warning("no se pudo verificar el tipo de %s: %s", claves[i], e)
                 r = None
@@ -640,14 +661,55 @@ def procesar(carga: dict, *, analizar: Callable, extraer_socios: Callable | None
             return fallar_por_principal()
     medir("identidad")
 
+    # ── 4b · ¿Los complementarios son de la misma empresa? (AJ-05) ─────────
+    # Un certificado con el RUT de OTRA empresa se leía entero: el representante
+    # de la otra entraba a la lista y, sin NIT en el certificado, se tomaba el de
+    # la otra. Se lee el texto de cada complementario —que `analizar` reusa, no
+    # se lee dos veces— y se compara su identidad con la del principal. Si es de
+    # otra empresa, queda fuera de todo lo que sigue y se avisa. Si no se puede
+    # saber, se usa como siempre: excluir a ciegas también es perder datos.
+    ya_leidos: dict[str, Any] = {}
+    textos_complementarios: dict[int, str] = {}
+    complementarios_vivos = [i for i in range(len(pedidos))
+                             if etapa[i] is None and i not in principales]
+    if leer_texto is not None and complementarios_vivos:
+        ref = next((identidad[i] for i in principales_vivos() if i in identidad), {})
+        for i in complementarios_vivos:
+            d = bajados[claves[i]]
+            try:
+                lectura = leer_texto(d, t0)
+            except Exception as e:  # noqa: BLE001
+                log.warning("no se pudo leer el texto de %s antes de analizar: %s", claves[i], e)
+                continue
+            if lectura is None:
+                continue
+            ya_leidos[d.nombre] = lectura
+            textos_complementarios[i] = str(getattr(lectura, "texto", "") or "")
+            propia = complementarios.identidad_desde_texto(textos_complementarios[i])
+            veredicto, motivo = complementarios.misma_empresa(ref, propia)
+            # Enmascarado: en Colombia el NIT de una persona natural es su cédula.
+            # El veredicto es lo que permite validar el lector contra el RUT real.
+            log.info("AJ-05 %s: id principal %s · id documento %s · razón social %s · → %s%s",
+                     claves[i], complementarios.enmascarar(ref.get("taxId")),
+                     complementarios.enmascarar(propia.get("taxId")),
+                     "leída" if propia.get("legalName") else "no leída", veredicto,
+                     f" ({motivo})" if veredicto is True and motivo else "")
+            if veredicto is False:
+                etapa[i], detalle[i] = "entidad", f"es de otra empresa, porque {motivo}"
+    medir("identidad_complementarios")
+
     # ── 5 · Leer y extraer los 18 campos ───────────────────────────────────
     # Se leen todos los que llegaron vivos, complementarios incluidos: la
     # identidad fiscal es fuente del RUT y la razón social cuando la escritura
     # no los trae. Lo que NO entra es un principal que resultó ser otra cosa —es
-    # lo que metía «USUARIO CEDULA» como cargo de un representante—.
+    # lo que metía «USUARIO CEDULA» como cargo de un representante—, ni un
+    # complementario de otra empresa.
     a_leer = [bajados[claves[i]] for i in range(len(pedidos)) if etapa[i] is None]
     try:
-        resultado = analizar([(d.nombre, d.contenido) for d in a_leer], False, str(pais or ""))
+        resultado = analizar([(d.nombre, d.contenido) for d in a_leer], False, str(pais or ""),
+                             inicio=t0, ya_leidos=ya_leidos or None)
+    except errores.ServicioNoDisponible as e:
+        return caido("extraer los campos del documento", e)
     except Exception as e:  # noqa: BLE001
         log.exception("fallo el análisis de la corrida %s", analysis_id)
         return fallar("LENS_EXTRACTION_FAILED", f"Error durante el análisis: {e}")
@@ -686,19 +748,25 @@ def procesar(carga: dict, *, analizar: Callable, extraer_socios: Callable | None
     if extraer_socios is not None:
         try:
             personas, avisos_personas = extraer_socios(vivos, t0)
+        except errores.ServicioNoDisponible as e:
+            return caido("leer a los representantes", e)
         except Exception as e:  # noqa: BLE001
             log.warning("no se pudo extraer la composición societaria de %s: %s", analysis_id, e)
             avisos_personas = [f"No se pudo extraer la composición societaria ({e})."]
     avisos += [errores.aviso("EXPECTED_DATA_MISSING", a) for a in avisos_personas]
+    _sin_codigo_dian(personas, [textos_complementarios[i] for i in textos_complementarios
+                                if etapa[i] is None and _es_id_fiscal(pedidos[i])], pais)
     medir("personas")
 
-    # El régimen de administración (§11). Si no queda presupuesto, `None` y
-    # aviso: nunca se adivina, porque decide cuántas aprobaciones necesita una
-    # empresa para operar.
+    # El régimen de administración (§11). Si el modelo no responde, la corrida
+    # no sigue (ver arriba); si responde y no lo dice, `None`: nunca se adivina,
+    # porque decide cuántas aprobaciones necesita una empresa para operar.
     administracion = None
     if extraer_administracion is not None:
         try:
             administracion = extraer_administracion(vivos, t0)
+        except errores.ServicioNoDisponible as e:
+            return caido("leer el régimen de administración", e)
         except Exception as e:  # noqa: BLE001
             log.warning("no se pudo leer el régimen de administración de %s: %s", analysis_id, e)
             avisos.append(errores.aviso(
@@ -738,6 +806,36 @@ def procesar(carga: dict, *, analizar: Callable, extraer_socios: Callable | None
     # mostraba al usuario lo que faltaba.
     estado = corridas.INCOMPLETE if normalizar_avisos(avisos) else corridas.COMPLETED
     return cerrar(estado, resultado=ficha)
+
+
+def _es_id_fiscal(documento: dict) -> bool:
+    return str(documento.get("documentType") or "").strip().upper() == "COMPANY_ID_DOCUMENT"
+
+
+def _sin_codigo_dian(personas: dict, textos_rut: list[str], pais: Any) -> None:
+    """AJ-06: el número del representante sin el código DIAN pegado adelante.
+
+    En el RUT de la DIAN la casilla 100 es el código del tipo de documento
+    (13 = cédula) y la 101 el número, y el modelo los junta: la cédula de 8
+    dígitos salía como `13` + la cédula. Se corrige SOLO si el texto del RUT lo
+    confirma —el número sin el código aparece suelto y el pegado no aparece—, y
+    el código solo sirve para el tipo cuando el modelo no lo dio. Solo en
+    Colombia, que es donde existe ese formulario. Modifica `personas` en el lugar.
+    """
+    if not textos_rut or _pais(pais) != "colombia":
+        return
+    for p in personas.get("legalRepresentatives") or []:
+        arreglo = complementarios.sin_codigo_dian(
+            p.get("shareholderId") or p.get("identificationNumber"), textos_rut)
+        if arreglo is None:
+            continue
+        numero, tipo = arreglo
+        clave = "shareholderId" if p.get("shareholderId") else "identificationNumber"
+        p[clave] = numero
+        if tipo and not str(p.get("identificationType") or "").strip():
+            p["identificationType"] = tipo
+        # Sin el número: es un dato personal y el log no lo necesita.
+        log.info("AJ-06: se quitó el código DIAN pegado al número de un representante")
 
 
 def _ficha(resultado: dict, pedidos: list[dict], claves: list[str], etapa: list,

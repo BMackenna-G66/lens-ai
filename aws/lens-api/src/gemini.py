@@ -41,11 +41,13 @@ import base64
 import json
 import logging
 import os
+import random
 import re
 import time
 
 import requests
 
+import errores
 import secretos
 
 from prompts_generado import (
@@ -81,10 +83,31 @@ class ErrorGemini(Exception):
     """Falla de la llamada al modelo, ya traducida a castellano."""
 
 
+class GeminiNoDisponible(ErrorGemini, errores.ServicioNoDisponible):
+    """El modelo no respondió: caído, sobrecargado, sin tiempo o mal configurado.
+
+    Es un `ErrorGemini`, así que los caminos que ya lo atajaban siguen igual. Y
+    es un `errores.ServicioNoDisponible`, que es lo que mira la corrida de
+    Onboarding para terminar en `FAILED` con `SERVICE_UNAVAILABLE` en vez de
+    seguir con datos a medias.
+
+    La diferencia con un `ErrorGemini` a secas es de quién es la culpa: acá el
+    documento puede estar bien. Una respuesta bloqueada, vacía o que no es JSON
+    sí habla del documento, y sigue siendo `ErrorGemini`.
+    """
+
+    def __init__(self, mensaje: str, *, status: int | None = None, por_tiempo: bool = False):
+        super().__init__(mensaje)
+        self.status = status
+        self.por_tiempo = por_tiempo
+
+
 # Misma clasificación que `executeWithRetry` en la SPA: reintentar la red y la
-# sobrecarga, nunca una key inválida ni la cuota agotada.
+# sobrecarga, nunca una key inválida. La cuota agotada SÍ se reintenta desde el
+# 13-10-2026: Gemini responde 429 «Resource has been exhausted (e.g. check
+# quota)» también cuando es un límite por minuto, que se libera en segundos.
 def _es_permanente(msg: str) -> bool:
-    return "api key not valid" in msg or "api_key_invalid" in msg or "quota" in msg
+    return "api key not valid" in msg or "api_key_invalid" in msg
 
 
 def _es_transitorio(msg: str) -> bool:
@@ -97,6 +120,29 @@ def _es_transitorio(msg: str) -> bool:
     )
 
 
+#: Los status de Gemini que dicen «el servicio», no «tu documento». 400 queda
+#: afuera salvo la key inválida: un 400 suele ser el pedido o el archivo.
+_STATUS_DEL_SERVICIO = {401, 403, 404, 408, 429}
+
+#: La espera entre intentos: exponencial y con jitter, para que dos corridas que
+#: chocaron contra la misma sobrecarga no reintenten en el mismo instante.
+ESPERA_BASE_S = float(os.environ.get("GEMINI_ESPERA_BASE_S", "1.5"))
+ESPERA_MAX_S = 10.0
+
+#: Menos que esto no alcanza para una llamada útil: mejor no empezarla.
+MIN_INTENTO_S = 5.0
+
+
+def _espera(intento: int) -> float:
+    return min(ESPERA_MAX_S, ESPERA_BASE_S * 2 ** (intento - 1)) * random.uniform(0.5, 1.0)
+
+
+def _sin_clave(texto: str) -> str:
+    """El texto sin la API key. La clave viaja en la URL (`?key=`), y `requests`
+    pone la URL entera en el mensaje de sus excepciones."""
+    return re.sub(r"(key=)[^&\s'\"]+", r"\1***", texto)
+
+
 def _clave() -> str:
     # Secrets Manager primero (Bloque 3b); la variable de entorno es el respaldo
     # mientras el secreto no tenga valor cargado.
@@ -107,16 +153,26 @@ def _clave() -> str:
 
 
 def _generar(partes: list[dict], config: dict, *, timeout_s: int | None = None,
-             intentos: int | None = None) -> tuple[str, dict]:
+             intentos: int | None = None, limite: float | None = None) -> tuple[str, dict]:
     """POST a generateContent con reintentos. Devuelve (texto, usageMetadata).
 
     `partes` es la lista de `parts` del contenido: un solo `{"text": ...}` para
     el camino de texto, o el archivo seguido del prompt para el multimodal.
 
-    `timeout_s` e `intentos` son para las pasadas que corren ANTES del
-    presupuesto de la corrida —hoy, la de identidad—: con los valores por
-    defecto (120 s × reintentos) una sola llamada podría comerse el presupuesto
-    entero. Sin pasarlos, el comportamiento es exactamente el de siempre.
+    `timeout_s` acota cada intento. `limite` es el fin del presupuesto de la
+    corrida, en `time.monotonic()`: ningún intento ni ninguna espera se pasa de
+    ahí, y si ya no queda tiempo para un intento útil no se empieza. Sin
+    `limite`, el reloj lo pone solo la cantidad de intentos, como siempre.
+
+    ── Qué se reintenta ─────────────────────────────────────────────────────
+    La red, el tiempo agotado, el 429 y los 5xx: con espera exponencial y
+    jitter. Lo que habla del pedido o del documento —un 400, una respuesta
+    bloqueada o vacía— no se reintenta, porque va a dar lo mismo.
+
+    Si al final el modelo no respondió, la excepción es `GeminiNoDisponible`.
+    El 10-10-2026 una corrida siguió con la identidad sin leer y terminó
+    INCOMPLETE con tres «faltan datos»: una caída nuestra presentada como un
+    problema del documento.
     """
     url = f"{BASE}/{MODELO}:generateContent"
     # La temperatura va acá y no en cada llamada: así ninguna se la olvida, que
@@ -127,16 +183,34 @@ def _generar(partes: list[dict], config: dict, *, timeout_s: int | None = None,
     tope_intentos = intentos or MAX_INTENTOS
 
     ultimo = ""
+    status: int | None = None
+    del_servicio = False      # ¿la última falla fue del servicio y no del pedido?
+    por_tiempo = False
+    hechos = 0
     for intento in range(1, tope_intentos + 1):
+        espera_t = TIMEOUT_S if timeout_s is None else timeout_s
+        if limite is not None:
+            restante = limite - time.monotonic()
+            if restante < MIN_INTENTO_S:
+                # Sin tiempo para un intento útil. Si nunca se intentó, eso
+                # también es «el servicio no respondió a tiempo».
+                del_servicio, por_tiempo = True, True
+                ultimo = ultimo or "no quedó tiempo en el presupuesto de la corrida"
+                break
+            espera_t = min(espera_t, restante)
+
+        hechos = intento
+        status, del_servicio, por_tiempo = None, False, False
         try:
             resp = requests.post(
                 url,
                 params={"key": _clave()},
                 json=cuerpo,
-                timeout=timeout_s or TIMEOUT_S,
+                timeout=espera_t,
                 headers={"Content-Type": "application/json"},
             )
             if resp.status_code >= 400:
+                status = resp.status_code
                 raise ErrorGemini(f"{resp.status_code} {resp.text[:400]}")
 
             datos = resp.json()
@@ -152,33 +226,68 @@ def _generar(partes: list[dict], config: dict, *, timeout_s: int | None = None,
             texto = "".join(p.get("text", "") for p in devueltas).strip()
             if not texto:
                 raise ErrorGemini("Respuesta vacía del modelo.")
+            if intento > 1:
+                log.info("gemini %s respondió en el intento %d de %d", MODELO, intento, tope_intentos)
             return texto, (datos.get("usageMetadata") or {})
 
         except ErrorGemini as e:
-            ultimo = str(e)
+            ultimo = _sin_clave(str(e))
             m = ultimo.lower()
-            if _es_permanente(m) or not _es_transitorio(m) or intento == tope_intentos:
-                break
-            time.sleep(intento * 1.2)                      # 1,2 s y 2,4 s, igual que la SPA
+            if status is not None:
+                del_servicio = status in _STATUS_DEL_SERVICIO or status >= 500 or _es_permanente(m)
+                reintentar = (status == 408 or status == 429 or status >= 500) and not _es_permanente(m)
+            else:
+                # Sin status: una respuesta 200 sin contenido, que es del pedido;
+                # o la key que no está, que es nuestra.
+                reintentar = _es_transitorio(m) and not _es_permanente(m)
+                del_servicio = reintentar or "api key" in m
         except requests.RequestException as e:
-            ultimo = str(e)
-            if intento == tope_intentos:
-                break
-            time.sleep(intento * 1.2)
+            ultimo = _sin_clave(str(e))
+            del_servicio, reintentar = True, True
+            por_tiempo = isinstance(e, requests.Timeout)
 
+        # El status queda en el log siempre: es lo que permite distinguir una
+        # sobrecarga de Gemini (503), un límite de cuota (429) y una red caída
+        # (sin status), que desde afuera se ven iguales.
+        log.warning("gemini %s intento %d/%d falló: %s", MODELO, intento, tope_intentos,
+                    f"HTTP {status}" if status is not None else
+                    ("tiempo agotado" if por_tiempo else ultimo[:200]))
+
+        if not reintentar or intento == tope_intentos:
+            break
+        pausa = _espera(intento)
+        if limite is not None and limite - time.monotonic() < pausa + MIN_INTENTO_S:
+            break
+        time.sleep(pausa)
+
+    if hechos == 0:
+        raise GeminiNoDisponible(
+            "No quedó tiempo en el presupuesto de la corrida para llamar a Gemini.", por_tiempo=True)
     bajo = ultimo.lower()
     if "api key not valid" in bajo or "api_key_invalid" in bajo:
-        raise ErrorGemini("La API Key de Gemini no es válida.")
-    if "quota" in bajo:
-        raise ErrorGemini("Se excedió la cuota de la API de Gemini.")
-    if _es_transitorio(bajo):
-        raise ErrorGemini("No se pudo conectar con Gemini tras varios intentos (red o sobrecarga).")
+        raise GeminiNoDisponible("La API Key de Gemini no es válida.", status=status)
+    if "no hay una api key" in bajo:
+        raise GeminiNoDisponible(ultimo)
+    if del_servicio:
+        if "quota" in bajo:
+            raise GeminiNoDisponible("Se excedió la cuota de la API de Gemini.", status=status)
+        detalle = (f"HTTP {status}" if status is not None
+                   else "tiempo de espera agotado" if por_tiempo else "error de red")
+        raise GeminiNoDisponible(
+            f"No se pudo conectar con Gemini tras {hechos or 0} intento(s) ({detalle}): red o sobrecarga.",
+            status=status, por_tiempo=por_tiempo)
     raise ErrorGemini(ultimo or "Error desconocido de la API de Gemini.")
 
 
-def _llamar(prompt: str, config: dict) -> str:
+def _opciones(limite: float | None) -> dict:
+    """`{"limite": …}` solo si hay uno: las llamadas sin presupuesto quedan
+    exactamente como eran, incluidos los espías de los tests."""
+    return {"limite": limite} if limite is not None else {}
+
+
+def _llamar(prompt: str, config: dict, limite: float | None = None) -> str:
     """El camino de texto: un solo `part` con el prompt. Devuelve el texto."""
-    return _generar([{"text": prompt}], config)[0]
+    return _generar([{"text": prompt}], config, **_opciones(limite))[0]
 
 
 # ── Camino multimodal ───────────────────────────────────────────────────────
@@ -297,13 +406,13 @@ def _json_de(texto: str):
 
 
 # ── 1. Detección de país ────────────────────────────────────────────────────
-def detectar_pais(texto: str) -> str:
+def detectar_pais(texto: str, limite: float | None = None) -> str:
     prompt = _rellenar(
         PROMPT_DETECCION_PAIS,
         lista_paises=", ".join(PAISES),
         texto_documento=texto[:MAX_CARACTERES],
     )
-    crudo = _llamar(prompt, {"thinkingConfig": {"thinkingBudget": 0}})
+    crudo = _llamar(prompt, {"thinkingConfig": {"thinkingBudget": 0}}, limite)
 
     # Misma normalización que la SPA: el modelo a veces devuelve una bandera o
     # un prefijo de código de país.
@@ -338,7 +447,7 @@ ESQUEMA_CAMPOS = {
 }
 
 
-def extraer_campos(texto: str, contexto_pais: str) -> list[dict]:
+def extraer_campos(texto: str, contexto_pais: str, limite: float | None = None) -> list[dict]:
     """Devuelve SIEMPRE los 18 campos, en el orden del catálogo."""
     prompt = _rellenar(
         PROMPT_EXTRACCION,
@@ -352,6 +461,7 @@ def extraer_campos(texto: str, contexto_pais: str) -> list[dict]:
             "responseSchema": ESQUEMA_CAMPOS,
             "thinkingConfig": {"thinkingBudget": 0},
         },
+        limite,
     )
 
     try:
@@ -443,7 +553,7 @@ def _personas(valor) -> list[dict]:
     return [p for p in (valor or []) if isinstance(p, dict)]
 
 
-def extraer_shareholders(docs, quedan_llamadas=None) -> tuple[dict, dict]:
+def extraer_shareholders(docs, quedan_llamadas=None, limite: float | None = None) -> tuple[dict, dict]:
     """La composición societaria en DOS PASADAS PLANAS sobre el archivo nativo.
 
       1. representantes + todos los dueños de la tabla (naturales y jurídicas)
@@ -470,7 +580,7 @@ def extraer_shareholders(docs, quedan_llamadas=None) -> tuple[dict, dict]:
     pares = [(d.nombre, d.contenido) if hasattr(d, "nombre") else d for d in docs]
 
     texto1, uso1 = _llamar_con_archivos(
-        pares, PROMPT_SHAREHOLDERS, _config_multimodal(ESQUEMA_SHAREHOLDERS)
+        pares, PROMPT_SHAREHOLDERS, _config_multimodal(ESQUEMA_SHAREHOLDERS), **_opciones(limite)
     )
     p1 = _objeto_de(texto1, "shareholders")
 
@@ -502,6 +612,7 @@ def extraer_shareholders(docs, quedan_llamadas=None) -> tuple[dict, dict]:
                 pares,
                 _rellenar(PROMPT_SHAREHOLDERS_CADENA, empresa=empresa),
                 _config_multimodal(ESQUEMA_CADENA),
+                **_opciones(limite),
             )
             llamadas += 1
             entrada += int(uso2.get("promptTokenCount") or 0)
@@ -625,7 +736,7 @@ ESQUEMA_ADMINISTRACION = {
 }
 
 
-def extraer_administracion(docs) -> tuple[dict, dict]:
+def extraer_administracion(docs, limite: float | None = None) -> tuple[dict, dict]:
     """`(resultado, uso)` con el régimen de administración del documento nativo.
 
     Una sola llamada. El esquema es PLANO por el mismo motivo medido que el de
@@ -637,7 +748,7 @@ def extraer_administracion(docs) -> tuple[dict, dict]:
     """
     pares = [(d.nombre, d.contenido) if hasattr(d, "nombre") else d for d in docs]
     texto, uso = _llamar_con_archivos(
-        pares, PROMPT_ADMINISTRACION, _config_multimodal(ESQUEMA_ADMINISTRACION)
+        pares, PROMPT_ADMINISTRACION, _config_multimodal(ESQUEMA_ADMINISTRACION), **_opciones(limite)
     )
     datos = _objeto_de(texto, "administración")
 
@@ -676,7 +787,7 @@ def extraer_administracion(docs) -> tuple[dict, dict]:
 
 TIMEOUT_IDENTIDAD_S = int(os.environ.get("GEMINI_TIMEOUT_IDENTIDAD_S", "25"))
 
-PROMPT_IDENTIDAD = """Leé el documento adjunto y respondé cuatro cosas.
+PROMPT_IDENTIDAD = """Leé el documento adjunto y respondé seis cosas.
 
 1. `esConstitutivo`: ¿es un documento constitutivo o societario de una empresa?
    SÍ cuentan: escritura pública de constitución o de modificación de sociedad,
@@ -706,6 +817,14 @@ PROMPT_IDENTIDAD = """Leé el documento adjunto y respondé cuatro cosas.
    "sociedad por acciones simplificada", es SAS aunque en otro lado diga "S.A.".
    null si el documento no lo dice.
 
+5. `legalName`: la razón social de la sociedad, completa y tal como figura,
+   con su sigla societaria. null si el documento no la dice.
+
+6. `taxId`: el identificador tributario de la SOCIEDAD (NIT, RUT, RFC, RUC…)
+   tal como figura, con puntos y guion. Solo el de la sociedad: nunca el de un
+   socio, un representante, un notario o una cámara de comercio. null si el
+   documento no lo trae.
+
 No inventes nada que el documento no diga."""
 
 ESQUEMA_IDENTIDAD = {
@@ -716,33 +835,45 @@ ESQUEMA_IDENTIDAD = {
         "activity": {"type": "STRING", "nullable": True},
         "legalForm": {"type": "STRING", "nullable": True,
                       "enum": ["SPA", "SA", "LIMITADA", "SAS", "EIRL", "OTRA"]},
+        "legalName": {"type": "STRING", "nullable": True},
+        "taxId": {"type": "STRING", "nullable": True},
     },
     "required": ["esConstitutivo"],
 }
 
 
-def leer_identidad(docs) -> tuple[dict, dict]:
+def leer_identidad(docs, limite: float | None = None) -> tuple[dict, dict]:
     """`(resultado, uso)` con la identidad del documento principal.
 
     `esConstitutivo` solo vuelve "NO" cuando el modelo lo dijo explícitamente.
     Cualquier otra cosa —una respuesta rara, un campo ausente— se trata como
     "DUDA", que NO falla la corrida: tirar una escritura buena le quema al
     usuario uno de sus tres intentos por un error de clasificación nuestro.
+
+    `legalName` y `taxId` son la referencia contra la que se compara cada
+    documento complementario: si es de otra empresa, no se mezcla (AJ-05).
     """
     pares = [(d.nombre, d.contenido) if hasattr(d, "nombre") else d for d in docs]
-    # Una llamada de 25 s como máximo, sin reintentos: corre antes del
-    # presupuesto de la corrida y no puede comérselo. Si no alcanza, la corrida
-    # sigue sin clasificar —que no es lo mismo que clasificar mal—.
+    # 25 s por intento. Hasta el 13-10-2026 iba sin reintentos, porque si fallaba
+    # la corrida seguía sin clasificar. Ahora una identidad sin leer termina la
+    # corrida en FAILED, así que se reintenta como las demás —dentro del
+    # presupuesto, que es lo que acota cuánto se puede esperar—.
     texto, uso = _llamar_con_archivos(
         pares, PROMPT_IDENTIDAD, _config_multimodal(ESQUEMA_IDENTIDAD),
-        timeout_s=TIMEOUT_IDENTIDAD_S, intentos=1,
+        timeout_s=TIMEOUT_IDENTIDAD_S, **_opciones(limite),
     )
     datos = _objeto_de(texto, "identidad")
     veredicto = datos.get("esConstitutivo")
     forma = datos.get("legalForm")
+
+    def texto_o_none(v):
+        return v.strip() or None if isinstance(v, str) else None
+
     return {
         "esConstitutivo": veredicto if veredicto in ("SI", "NO", "DUDA") else "DUDA",
         "tipoDetectado": str(datos.get("tipoDetectado") or "").strip(),
         "activity": datos.get("activity") if isinstance(datos.get("activity"), str) else None,
         "legalForm": forma if forma in ("SPA", "SA", "LIMITADA", "SAS", "EIRL") else None,
+        "legalName": texto_o_none(datos.get("legalName")),
+        "taxId": texto_o_none(datos.get("taxId")),
     }, uso

@@ -467,3 +467,22 @@ OBJETO = "Comercialización nacional e internacional, distribución, importació
 ])
 def test_el_resumen_de_actividad_queda_siempre_en_palabras_enteras(resumen, esperado):
     assert ob.actividad(resumen, OBJETO) == esperado
+
+
+# ── AJ-04 · El porcentaje con una sola forma por valor ──────────────────────
+
+@pytest.mark.parametrize("entra,sale", [
+    (51.0, 51), (51, 51), (33.333333, 33.3333), (12.5, 12.5),
+    ("51,5", 51.5), ("49%", 49), (None, None), (True, None), ("sin dato", None),
+])
+def test_el_porcentaje_sale_igual_venga_como_venga(entra, sale):
+    """El modelo devolvió `51.0` en una corrida y `51` en la otra, y Onboarding
+    vio el formato cambiar entre dos lecturas del mismo documento."""
+    r = ob.porcentaje(entra)
+    assert r == sale and type(r) is type(sale)
+
+
+def test_el_accionista_sale_con_el_porcentaje_normalizado():
+    p = ob.persona({"personType": "NATURAL", "shareholderName": "PEREZ ANA",
+                    "name": "ANA", "lastName": "PEREZ", "ownershipPercentage": 51.0})
+    assert p["ownershipPercentage"] == 51 and isinstance(p["ownershipPercentage"], int)
