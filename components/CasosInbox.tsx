@@ -45,7 +45,7 @@ import { guardarInvestigacion } from '../services/caseInvestigationService';
 import { enviarResolucion, conclusionAStatus } from '../services/caseResolutionService';
 import { TIPOS_CIERRE, camposDeCierre } from '../services/cierreTipos';
 import { TIPOS_CIERRE_ADMIN, OFAC_PROVIDERS, ADMIN_ASSIGNEE_DEFAULT, ADMIN_STATUS_OPTIONS, ADMIN_COMMENT_OPTIONS, RISK_LEVELS, PEP_PROVIDER_DEFAULT, ofacFlagDe } from '../services/cierreAdminTipos';
-import { enviarCierreAdmin, adminCierreDisponible, AdminCierreResult } from '../services/adminCierreService';
+import { enviarCierreAdmin, adminCierreDisponible, AdminCierreResult, resumenAdmin } from '../services/adminCierreService';
 import { registrarAuditoria, leerAuditoria } from '../services/caseAuditService';
 import { logCierre, logHistorial, logConfigFlujo, logScreening, sincronizarAnalistas, filasBackfillCaso, enviarLote, reintentarPendientes, pendientesEnBuffer, logLiberacionRemesa } from '../services/colasLogService';
 import { getAllUsers } from '../services/firestoreService';
@@ -897,10 +897,17 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     let ok = 0, err = 0;
     for (const [cc, ids] of porPais) {
       try {
+        // La cola de los casos, no la pestaña: un masivo junta casos de una
+        // sola cola, y la regla OFAC del Worker depende de ella.
+        const colas = new Set(ids.flatMap(id => (casosPorCustomer.get(id) ?? [])
+          .map(caseId => clasificarCola(seleccionados.find(x => x.id === caseId)?.asunto))));
         const r = await enviarCierreAdmin({
           customerIds: ids, status: tipo.status, comment: tipo.comment, observation: tipo.observation,
           agent: ADMIN_ASSIGNEE_DEFAULT, ofacFlag: ofacFlagDe(tipo), ofacProvider: 'REGCHECK',
           countryCode: cc, lastStep: tipo.lastStepDefault,
+          // Si se mezclaran colas, ninguna cuenta como OFAC: no se levanta un
+          // bloqueo OFAC por un caso que no es de esa cola.
+          cola: colas.size === 1 ? [...colas][0] : 'mixta',
           // Risk/PEP solo si la tipología los define explícitamente (hoy: ninguna) — el
           // masivo no cambia PEP/riesgo de clientes reales sin revisión por ficha.
           pepEnabled: tipo.pepValue !== undefined,
@@ -912,7 +919,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
             ok++;
             // Status del caso: canal Admin cerrado (sale de la cola si SF también).
             for (const caseId of casosPorCustomer.get(String(res.customerId)) ?? []) {
-              await registrarCierreCanal(caseId, 'admin', { ok: true, tipologia: tipo.id }, actor ?? undefined).catch(() => {});
+              await registrarCierreCanal(caseId, 'admin', { ok: true, tipologia: tipo.id, detalle: resumenAdmin({ ok: true, results: [res] }) }, actor ?? undefined).catch(() => {});
               const caso = seleccionados.find(x => x.id === caseId);
               if (caso) logCierre(caso, activeQueue, { canal: 'ADMIN', ok: true, tipologia: tipo.id, statusEnviado: tipo.status, ofacFlag: ofacFlagDe(tipo) }, actor ?? undefined);
             }
@@ -1317,6 +1324,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     setAdminSending(true); setAdminResult(null);
     try {
       const r = await enviarCierreAdmin({
+        cola: clasificarCola(sel.asunto),
         customerIds: ids, status: adminForm.status, comment: adminForm.comment,
         observation: adminForm.observation, agent: adminForm.agent,
         ofacFlag: adminForm.ofacFlag, ofacProvider: adminForm.ofacProvider,
@@ -1328,7 +1336,7 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
       setAdminResult(r);
       // Status del caso: marca el canal Admin. Si SF también quedó OK → CERRADO.
       if (r.ok) {
-        await registrarCierreCanal(sel.id, 'admin', { ok: true, tipologia: adminTipoSel || null }, actor ?? undefined).catch(() => {});
+        await registrarCierreCanal(sel.id, 'admin', { ok: true, tipologia: adminTipoSel || null, detalle: resumenAdmin(r) }, actor ?? undefined).catch(() => {});
       }
       logCierre(sel, activeQueue, {
         canal: 'ADMIN', ok: r.ok, tipologia: adminTipoSel || null, statusEnviado: adminForm.status,

@@ -141,6 +141,23 @@ const soloAlfanumerico = (v: unknown): string =>
 //                                 el cliente quedó como se pretendía.
 const contiene = (data: unknown, code: string) => JSON.stringify(data ?? '').includes(code);
 
+// El área de los bloqueos que pone Lens. La resuelve el gateway desde el token
+// del equipo de Compliance; acá solo se usa para RECONOCER los propios.
+const AREA_PROPIA = 'COMPLIANCE';
+
+// Los bloqueos por OFAC. SOLO un cierre de la cola OFAC los resuelve.
+//
+// El 14-10-2026 un «Liberar UCR» de otro caso del mismo cliente creó su UCR y,
+// en el mismo segundo, resolvió el bloqueo OFAC que la cola había decidido el
+// 07-10: el paso 3 resolvía todo lo vigente salvo el propio. Un cierre de otra
+// cola los deja vigentes —el estado efectivo sigue siendo el más restrictivo— y
+// lo deja escrito.
+//
+// `COMPLIANCE_OFFICER_REQUEST` es el comment de «Bloqueado» de la cola OFAC. Si
+// algún día otra cola lo usa para otra cosa, igual queda protegido: la regla
+// mira la cola que cierra, no quién puso el bloqueo.
+const COMMENTS_OFAC = new Set(['COMPLIANCE_OFFICER_REQUEST', 'OFAC_CONFIRMED', 'OFAC_SUSPECTED']);
+
 /**
  * El paso 2 contra ms-customer, carpeta BO. Devuelve la MISMA forma que
  * `doStep` para que el resto del handler, la app y el Lambda no noten nada.
@@ -157,7 +174,7 @@ const contiene = (data: unknown, code: string) => JSON.stringify(data ?? '').inc
  */
 async function paso2MsCustomer(
   env: Env, idToken: string, id: string, status: string,
-  body: { comment?: string; observation?: string; agent?: string },
+  body: { comment?: string; observation?: string; agent?: string; cola?: string },
 ): Promise<{ ok: boolean; status: number; data: unknown }> {
   const base = String(env.MS_CUSTOMER_BASE || G66_ADMIN_BASE).trim().replace(/\/$/, '');
 
@@ -204,6 +221,32 @@ async function paso2MsCustomer(
   let ok = true;
   let httpFinal = 200;
 
+  // NUESTRO bloqueo es el que tiene nuestro comment Y es del área COMPLIANCE.
+  // Solo el comment no alcanza, y no alcanzó: del 03-10 al 15-10-2026 el
+  // comment de «Bloqueado» era OFAC_SUSPECTED, el mismo que pone el bot. El
+  // Worker veía el del bot, lo tomaba como propio, no creaba nada y la
+  // verificación pasaba por ese mismo registro. Cuando el bot resolvía el suyo,
+  // el cliente quedaba libre: 27 de 28 cierres «Bloqueado» sin bloqueo propio.
+  const esNuestro = (r: Record<string, unknown>) =>
+    String(r.comment ?? '') === comentarioPropio
+    && String(r.areaName ?? '').trim().toUpperCase() === AREA_PROPIA;
+  const mismoCommentDeOtraArea = (fs: Array<Record<string, unknown>>) =>
+    fs.filter(r => String(r.comment ?? '') === comentarioPropio && !esNuestro(r));
+
+  // Lo que se guarda con el cierre del caso (`cierres.admin.detalle`). El
+  // detalle completo del paso es demasiado grande para el documento, y sin
+  // nada no se veía desde Lens qué había pasado.
+  const resumen: Record<string, unknown> = { accion };
+  sub.resumen = resumen;
+
+  // Sin `cola` —un cliente con la SPA vieja en caché— se trata como si NO fuera
+  // la cola OFAC: dejar un bloqueo OFAC vigente de más es corregible; levantar
+  // uno que no correspondía, no.
+  const cola = String(body.cola ?? '').trim().toLowerCase();
+  const colaOfac = cola === 'ofac';
+  sub.cola = cola || null;
+  const ofacMantenidos: Array<{ id: unknown; comment: string }> = [];
+
   // ── 1) Qué hay hoy ───────────────────────────────────────────────────────
   const rAntes = await llamar('GET', MS_HISTORIAL(id));
   sub.historialAntes = rAntes;
@@ -223,20 +266,33 @@ async function paso2MsCustomer(
     // en la respuesta, y ese mismo `reason` genérico cubre también
     // COMMENT_NOT_FOUND. Tratar el 422 como "ya estaba" se tragaría un comment
     // inválido —que es un error de verdad— y dejaría al cliente sin bloquear.
-    const existente = antes.find(r => String(r.comment ?? '') === comentarioPropio);
+    const existente = antes.find(esNuestro);
     if (existente) {
       idCreado = existente.id ?? existente.complianceId ?? null;
-      sub.crear = { omitido: 'ya existe un bloqueo vigente con este comment', id: idCreado };
+      sub.crear = { omitido: 'ya existe un bloqueo vigente de Compliance con este comment', id: idCreado };
+      resumen.crear = 'omitido';
+      resumen.motivo = 'ya había un bloqueo vigente de Compliance con este comment';
     } else {
       const r = await llamar('POST', MS_CREAR, { customerId: Number(id) || id, comment: comentarioPropio, observation });
       sub.crear = r;
       if (!r.ok) {
         // Sin el bloqueo nuevo NO se resuelve nada: el cliente queda como estaba.
         sub.resolver = { omitido: 'no se creó el bloqueo nuevo' };
+        // Si hay uno vigente con el mismo comment de OTRA área, BO no deja
+        // crear el nuestro, y ese no cuenta: lo resuelve quien lo puso, cuando
+        // quiera. Se dice explícito, nunca un OK silencioso.
+        const ajenos = mismoCommentDeOtraArea(antes);
+        resumen.crear = 'fallo';
+        resumen.motivo = ajenos.length
+          ? `BO no permite otro ${comentarioPropio}: ya hay uno vigente del área `
+            + `${String(ajenos[0].areaName ?? 'desconocida')}, que no es un bloqueo de Compliance`
+          : `el create respondió ${r.status}`;
+        sub.discrepancia = resumen.motivo;
         return { ok: false, status: r.status, data: sub };
       }
       idCreado = (r.data as { id?: unknown })?.id ?? null;
       httpFinal = r.status;
+      resumen.crear = 'creado';
     }
   }
 
@@ -252,7 +308,12 @@ async function paso2MsCustomer(
     // sin esto el bucle resolvería el bloqueo que ya estaba con NUESTRO comment,
     // deshaciendo exactamente lo que el cierre vino a hacer.
     if (String(cid) === String(idCreado)) continue;
-    if (comentarioPropio && cmt === comentarioPropio) { resueltos[`${cid}:${cmt}`] = { omitido: 'es el nuestro' }; continue; }
+    if (comentarioPropio && esNuestro(fila)) { resueltos[`${cid}:${cmt}`] = { omitido: 'es el nuestro' }; continue; }
+    if (!colaOfac && COMMENTS_OFAC.has(cmt)) {
+      resueltos[`${cid}:${cmt}`] = { omitido: 'bloqueo OFAC: solo lo resuelve la cola OFAC' };
+      ofacMantenidos.push({ id: cid, comment: cmt });
+      continue;
+    }
 
     const r = await llamar('PATCH', MS_RESOLVER(cid as string | number), {
       resolvedComment: observation || 'Resuelto por la cola de casos de compliance',
@@ -265,6 +326,10 @@ async function paso2MsCustomer(
     if (!r.ok && !noSeToca && !deOtraArea) { ok = false; httpFinal = r.status; }
   }
   sub.resolver = Object.keys(resueltos).length ? resueltos : { nadaQueResolver: true };
+  if (ofacMantenidos.length) {
+    sub.ofacMantenido = ofacMantenidos;
+    resumen.ofacMantenido = `se mantuvo el bloqueo OFAC (${[...new Set(ofacMantenidos.map(o => o.comment))].join(', ')})`;
+  }
 
   // ── 4) VERIFICAR que NUESTRA acción haya tomado efecto ───────────────────
   //
@@ -296,20 +361,33 @@ async function paso2MsCustomer(
     sub.estadoEfectivo = quedo;
 
     if (accion === 'crear_y_resolver') {
-      const nuestroVigente = restantes.some(r => String(r.comment ?? '') === comentarioPropio);
+      // Mismo criterio que al crear: el que creamos (por id) o uno de Compliance
+      // con nuestro comment. Uno de otra área con el mismo comment NO cuenta.
+      const nuestroVigente = restantes.some(r =>
+        (idCreado != null && String(r.id ?? r.complianceId) === String(idCreado)) || esNuestro(r));
       if (!nuestroVigente) {
         ok = false;
-        sub.discrepancia = `el bloqueo con comment ${comentarioPropio} no quedó vigente`;
+        sub.discrepancia = `el bloqueo de Compliance con comment ${comentarioPropio} no quedó vigente`;
       }
-    } else if (quedo !== 'NORMAL') {
-      ok = false;
-      sub.discrepancia = `se pidió liberar y el cliente sigue en ${quedo}`;
+    } else {
+      // Liberar: el cliente tiene que quedar libre de todo lo que este cierre
+      // podía levantar. Los bloqueos OFAC que se mantuvieron a propósito no
+      // cuentan: no los levanta esta cola, y queda escrito que siguen.
+      const mantenidos = new Set(ofacMantenidos.map(o => String(o.id)));
+      const resto = restantes.filter(r => !mantenidos.has(String(r.id ?? r.complianceId)));
+      const quedoResto = resto[0] ? String(resto[0].status ?? 'NORMAL') : 'NORMAL';
+      if (quedoResto !== 'NORMAL') {
+        ok = false;
+        sub.discrepancia = `se pidió liberar y el cliente sigue en ${quedoResto}`;
+      }
     }
 
     // Se informa igual cuando el estado no es el que se anticipó: no es falla,
     // pero quien audite tiene que poder verlo sin reconstruirlo.
     if (quedo !== status) sub.estadoDistintoDelPedido = `se anticipó ${status} y quedó ${quedo}`;
+    resumen.estadoEfectivo = quedo;
   }
+  if (sub.discrepancia) resumen.discrepancia = sub.discrepancia;
 
   return { ok, status: httpFinal, data: sub };
 }
@@ -726,6 +804,9 @@ export default {
         pepEnabled?: boolean; pepValue?: boolean; pepProvider?: string;
         pepCountryCode?: string; pepPosition?: string | null;
         riskEnabled?: boolean; riskLevel?: string;
+        // De qué cola es el caso que se cierra (`clasificarCola`): 'ofac',
+        // 'otros'… Decide si el cierre puede resolver bloqueos OFAC.
+        cola?: string;
       };
       try { body = await request.json(); } catch { return jsonError('Body JSON inválido', 400, cors); }
 

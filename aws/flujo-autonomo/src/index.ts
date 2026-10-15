@@ -30,7 +30,7 @@ import type { FlujoOfacConfig, ConfigNormalizada } from '../../../services/flujo
 import { TIPOS_CIERRE, camposDeCierre } from '../../../services/cierreTipos';
 import { TIPOS_CIERRE_ADMIN, ADMIN_ASSIGNEE_DEFAULT, PEP_PROVIDER_DEFAULT, ofacFlagDe } from '../../../services/cierreAdminTipos';
 import { sendCaseUpdate } from '../../../services/salesforceCaseService';
-import { enviarCierreAdmin } from '../../../services/adminCierreService';
+import { enviarCierreAdmin, resumenAdmin } from '../../../services/adminCierreService';
 import { evaluarRemesaAuto, extraerRemesa, clasificarCola } from '../../../services/flujoDecision';
 import type { FlujoRemesaConfig } from '../../../services/flujoDecision';
 import { TIPOS_CIERRE_REMESA, camposDeCierreRemesa } from '../../../services/cierreRemesaTipos';
@@ -575,6 +575,7 @@ async function procesar(caso: CasoSF, cfg: FlujoOfacConfig): Promise<ResultadoCa
         const cc = /colombia|^co$/i.test(caso.pais ?? '') ? 'CO' : 'CL';
         try {
           const r = await enviarCierreAdmin({
+            cola: clasificarCola(caso.asunto),
             customerIds: [customerId], status: tipo.status, comment: tipo.comment, observation: tipo.observation,
             agent: ADMIN_ASSIGNEE_DEFAULT, ofacFlag: ofacFlagDe(tipo), ofacProvider: 'REGCHECK',
             countryCode: cc, lastStep: tipo.lastStepDefault,
@@ -584,7 +585,10 @@ async function procesar(caso: CasoSF, cfg: FlujoOfacConfig): Promise<ResultadoCa
           } as never);
           out.admin = r.ok ? 'ok' : 'error';
           if (!r.ok) out.motivo = out.motivo ?? r.error ?? 'Admin rechazó el cierre';
-          await guardarCierre(caso.id, 'admin', !!r.ok, ev.tipologia, out.motivo);
+          // El resumen del paso 2 va al caso: sin él no se veía desde Lens si
+          // se había creado el bloqueo propio.
+          await guardarCierre(caso.id, 'admin', !!r.ok, ev.tipologia,
+            [resumenAdmin(r), r.ok ? null : out.motivo].filter(Boolean).join(' · ') || undefined);
         } catch (e) { out.admin = 'error'; out.motivo = out.motivo ?? (e as Error).message; }
       }
     }

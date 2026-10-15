@@ -25,8 +25,9 @@ let llamadas = [];
 let modo = {};
 let creado = false;
 let resueltos = [];
-// El comment de «Bloqueado» desde el 02-10-2026 (antes COMPLIANCE_OFFICER_REQUEST).
-let cmtCreado = 'OFAC_SUSPECTED';
+// El comment de «Bloqueado» desde el 15-10-2026. Del 03-10 al 15-10 fue
+// OFAC_SUSPECTED, el mismo del bot, y el Worker tomaba el del bot como propio.
+let cmtCreado = 'COMPLIANCE_OFFICER_REQUEST';
 // El estado que ms-customer DERIVA del comment del create. En el real sale del
 // catálogo; acá lo fija el caso de prueba.
 let statusCreado = 'BLOCKED';
@@ -65,7 +66,10 @@ globalThis.fetch = async (url, opt = {}) => {
     if (u.includes('/history')) {
       if (modo.listaFalla) return j({ error: 'boom' }, 500);
       // Siempre lo que queda vigente; el creado va primero, como el orden real.
-      return j(creado ? [{ id: 99, comment: cmtCreado, status: statusCreado, isTerminal: false, isResolved: false }, ...vigentes()] : vigentes());
+      // El que crea Lens viene del área COMPLIANCE: la pone el gateway con el
+      // token del equipo, como en producción.
+      return j(creado && !modo.creadoNoAparece ? [{ id: 99, comment: cmtCreado, status: statusCreado, areaName: 'COMPLIANCE',
+        isTerminal: false, isResolved: false }, ...vigentes()] : vigentes());
     }
     if (u.includes('/resolve')) {
       const cid = u.match(/compliance\/(\d+)\/resolve/)?.[1];
@@ -78,6 +82,8 @@ globalThis.fetch = async (url, opt = {}) => {
       return j(null, 200);                     // 200 SIN body, como el real
     }
     if (modo.crearDuplicado) return j({ code: 'DUPLICATE_UNRESOLVED_COMMENT' }, 409);
+    // Lo que responde BO de verdad ante un comment repetido sin resolver.
+    if (modo.crear422) return j({ code: '016402', reason: 'CUSTOMER_COMPLIANCE_INVALID' }, 422);
     if (modo.crearFalla) return j({ code: 'COMMENT_NOT_FOUND' }, 400);
     creado = true; return j({ id: 99 }, 201);
   }
@@ -90,9 +96,9 @@ const correr = async (env, status, extra = {}) => {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Origin': 'http://localhost:5173' },
     body: JSON.stringify({
-      customerIds: ['4535350'], status, comment: 'OFAC_SUSPECTED',
+      customerIds: ['4535350'], status, comment: 'COMPLIANCE_OFFICER_REQUEST',
       observation: 'Cliente revisado, sin hallazgos.', agent: 'ana@global66.com',
-      countryCode: 'CL', ofacFlag: true, ...extra,
+      countryCode: 'CL', ofacFlag: true, cola: 'ofac', ...extra,
     }),
   });
   const res = await worker.fetch(req, env, { waitUntil() {} });
@@ -149,7 +155,8 @@ console.log('\n── Duplicado en BO es error, para nosotros es "ya estaba" ─
 // NUESTRO comment ya está vigente. Sin la guarda por comment, el bucle lo
 // resolvería —no hay `idCreado` porque el create falló— y desharía el bloqueo.
 sinResolver = [
-  { id: 4225468, status: 'BLOCKED', comment: 'OFAC_SUSPECTED', isTerminal: false, isResolved: false },
+  { id: 4225468, status: 'BLOCKED', comment: 'COMPLIANCE_OFFICER_REQUEST', areaName: 'COMPLIANCE',
+    isTerminal: false, isResolved: false },
   { id: 4223019, status: 'NORMAL', comment: 'NORMAL', isTerminal: true, isResolved: false },
 ];
 modo = {}; r = await correr(ENV, 'BLOCKED');
@@ -194,7 +201,7 @@ ok('el bloqueo se crea', msc(r).some(l => l.met === 'POST'));
 ok('el cierre NO falla por eso', paso(r).ok === true, paso(r).data.discrepancia);
 ok('pero queda anotado que el estado no fue el anticipado',
    !!paso(r).data.estadoDistintoDelPedido, paso(r).data);
-cmtCreado = 'OFAC_SUSPECTED';   // de vuelta al comment de hoy
+cmtCreado = 'COMPLIANCE_OFFICER_REQUEST';   // de vuelta al comment de hoy
 
 console.log('\n── Y sigue fallando cuando NUESTRO bloqueo no quedó vigente ──');
 modo = { crearFalla: true }; r = await correr(ENV, 'BLOCKED');
@@ -232,7 +239,7 @@ ok('Liberar Normal → corre', hayLastStep(r), r.llamadas.map(l => l.u));
 modo = {}; cmtCreado = 'UCR_CRIMINAL_RISK'; statusCreado = 'UNDER_COMPLIANCE_REVIEW';
 r = await correr(ENV, 'UNDER_COMPLIANCE_REVIEW', { lastStep: true, comment: 'UCR_CRIMINAL_RISK' });
 ok('Liberar UCR → corre', hayLastStep(r), r.llamadas.map(l => l.u));
-cmtCreado = 'OFAC_SUSPECTED'; statusCreado = 'BLOCKED';
+cmtCreado = 'COMPLIANCE_OFFICER_REQUEST'; statusCreado = 'BLOCKED';
 modo = {}; r = await correr(ENV, 'BLOCKED', { lastStep: true });
 ok('Bloqueado → NO corre (no corresponde)', !hayLastStep(r), r.llamadas.map(l => l.u));
 ok('y queda escrito por qué', JSON.stringify(paso(r)).length > 0 && JSON.stringify(r.body.results[0].steps.lastStep || {}).includes('no requiere'), r.body.results[0].steps.lastStep);
@@ -245,6 +252,80 @@ modo = { resolverOtraArea: true }; r = await correr(ENV, 'NORMAL', { lastStep: t
 ok('el paso 2 quedó en error', paso(r).ok === false);
 ok('pero si quedó liberado, el last-step corre igual',
    paso(r).data.estadoEfectivo !== 'NORMAL' || hayLastStep(r), { efectivo: paso(r).data.estadoEfectivo, corrio: hayLastStep(r) });
+
+
+// ════════════════════════════════════════════════════════════════════════════
+// 15-10-2026 · El bloqueo de la cola OFAC que no quedaba en Admin
+// ════════════════════════════════════════════════════════════════════════════
+const BOT_OFAC = { id: 5550001, status: 'BLOCKED', comment: 'OFAC_SUSPECTED', areaName: 'SYSTEM_BOT',
+  channel: 'MOBILE', isTerminal: false, isResolved: false };
+const NORMAL_BOT = { id: 4223019, status: 'NORMAL', comment: 'NORMAL', areaName: 'SYSTEM_BOT', isTerminal: true, isResolved: false };
+const sinResolverOriginal = sinResolver;
+
+console.log('\n── El bot con OFAC_SUSPECTED vigente + «Bloqueado» → se crea el bloqueo PROPIO ──');
+sinResolver = [BOT_OFAC, NORMAL_BOT];
+modo = {}; r = await correr(ENV, 'BLOCKED');
+ok('crea el COMPLIANCE_OFFICER_REQUEST', msc(r).some(l => l.met === 'POST' && l.cuerpo.comment === 'COMPLIANCE_OFFICER_REQUEST'), msc(r).map(l => l.met + ' ' + l.u));
+ok('y el cierre queda OK', paso(r).ok === true, paso(r).data.discrepancia);
+ok('el resumen dice que se creó', paso(r).data.resumen?.crear === 'creado', paso(r).data.resumen);
+ok('y cómo quedó el cliente', paso(r).data.resumen?.estadoEfectivo === 'BLOCKED', paso(r).data.resumen);
+
+console.log('\n── LA REGRESIÓN DE PRODUCCIÓN (03-10 a 15-10): el del bot no es nuestro ──');
+// Con el comment viejo: el bot tiene OFAC_SUSPECTED y el cierre pide el mismo.
+// Antes el Worker veía el del bot, NO creaba nada y daba el cierre por bueno.
+sinResolver = [BOT_OFAC, NORMAL_BOT];
+modo = { crear422: true }; r = await correr(ENV, 'BLOCKED', { comment: 'OFAC_SUSPECTED' });
+ok('intenta crear el propio (no toma el del bot)', msc(r).some(l => l.met === 'POST'), msc(r).map(l => l.met + ' ' + l.u));
+ok('BO lo rechaza y el cierre FALLA: nunca un OK silencioso', paso(r).ok === false, paso(r).data);
+ok('y dice que el que hay es de otra área', /otra|SYSTEM_BOT/.test(String(paso(r).data.discrepancia)), paso(r).data.discrepancia);
+ok('el resumen lo registra', paso(r).data.resumen?.crear === 'fallo', paso(r).data.resumen);
+
+console.log('\n── El mismo comment de OTRA área + create que falla → ok=false ──');
+sinResolver = [{ ...BOT_OFAC, id: 5550002, comment: 'COMPLIANCE_OFFICER_REQUEST' }, NORMAL_BOT];
+modo = { crear422: true }; r = await correr(ENV, 'BLOCKED');
+ok('falla', paso(r).ok === false);
+ok('con el área en el mensaje', String(paso(r).data.discrepancia).includes('SYSTEM_BOT'), paso(r).data.discrepancia);
+ok('y no resuelve nada', !msc(r).some(l => l.met === 'PATCH'));
+
+console.log('\n── Uno de otra área con el mismo comment NO cuenta como vigente propio ──');
+// Si el create respondiera bien pero el propio no apareciera en el historial,
+// la verificación no puede apoyarse en el de otra área que quedó vigente.
+sinResolver = [{ ...BOT_OFAC, id: 5550003, comment: 'COMPLIANCE_OFFICER_REQUEST' }, NORMAL_BOT];
+modo = { creadoNoAparece: true, resolverOtraArea: true }; r = await correr(ENV, 'BLOCKED');
+ok('la verificación falla', paso(r).ok === false, paso(r).data);
+ok('y dice que el propio no quedó', String(paso(r).data.discrepancia).includes('de Compliance'), paso(r).data.discrepancia);
+
+console.log('\n── 2e · Un «Liberar UCR» de OTRA cola NO levanta el bloqueo OFAC ──');
+const OFAC_PROPIO = { id: 6660001, status: 'BLOCKED', comment: 'COMPLIANCE_OFFICER_REQUEST', areaName: 'COMPLIANCE',
+  isTerminal: false, isResolved: false };
+sinResolver = [OFAC_PROPIO, NORMAL_BOT];
+modo = {}; cmtCreado = 'UCR_CRIMINAL_RISK'; statusCreado = 'UNDER_COMPLIANCE_REVIEW';
+r = await correr(ENV, 'UNDER_COMPLIANCE_REVIEW', { comment: 'UCR_CRIMINAL_RISK', cola: 'otros' });
+ok('crea el UCR', msc(r).some(l => l.met === 'POST' && l.cuerpo.comment === 'UCR_CRIMINAL_RISK'));
+ok('NO resuelve el bloqueo OFAC', !msc(r).some(l => l.met === 'PATCH' && l.u.includes('/6660001/')), msc(r).filter(l => l.met === 'PATCH').map(l => l.u));
+ok('el cierre queda OK', paso(r).ok === true, paso(r).data.discrepancia);
+ok('y registra que se mantuvo', String(paso(r).data.resumen?.ofacMantenido).includes('se mantuvo el bloqueo OFAC'), paso(r).data.resumen);
+
+console.log('\n── 2e · El mismo «Liberar UCR» desde la cola OFAC SÍ lo resuelve ──');
+r = await correr(ENV, 'UNDER_COMPLIANCE_REVIEW', { comment: 'UCR_CRIMINAL_RISK', cola: 'ofac' });
+ok('resuelve el bloqueo OFAC', msc(r).some(l => l.met === 'PATCH' && l.u.includes('/6660001/')), msc(r).filter(l => l.met === 'PATCH').map(l => l.u));
+ok('y no anota nada mantenido', !paso(r).data.resumen?.ofacMantenido, paso(r).data.resumen);
+
+console.log('\n── 2e · Sin `cola` (una SPA vieja en caché) se trata como otra cola ──');
+r = await correr(ENV, 'UNDER_COMPLIANCE_REVIEW', { comment: 'UCR_CRIMINAL_RISK', cola: undefined });
+ok('NO resuelve el bloqueo OFAC', !msc(r).some(l => l.met === 'PATCH' && l.u.includes('/6660001/')));
+cmtCreado = 'COMPLIANCE_OFFICER_REQUEST'; statusCreado = 'BLOCKED';
+
+console.log('\n── 2e · «Liberar Normal» de otra cola: el OFAC queda y el cierre no miente ──');
+sinResolver = [OFAC_PROPIO, { ...BOT_OFAC }, NORMAL_BOT];
+// Un «Liberar Normal» real manda NO_COMMENTS.
+modo = {}; r = await correr(ENV, 'NORMAL', { cola: 'otros', lastStep: true, comment: 'NO_COMMENTS' });
+ok('no toca ni el propio ni el del bot', !msc(r).some(l => l.met === 'PATCH' && (l.u.includes('/6660001/') || l.u.includes('/5550001/'))));
+ok('el cierre queda OK: liberó lo que le tocaba', paso(r).ok === true, paso(r).data.discrepancia);
+ok('el cliente sigue BLOCKED', paso(r).data.estadoEfectivo === 'BLOCKED', paso(r).data.estadoEfectivo);
+ok('y el last-step NO corre (el cliente no quedó libre)', !hayLastStep(r), r.llamadas.map(l => l.u));
+
+sinResolver = sinResolverOriginal;
 
 console.log('\n── NINGUNA llamada manda Claim-Email ──');
 // El gateway lo inyecta desde el token. Mandarlo además lo CONCATENA en el

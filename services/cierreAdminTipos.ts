@@ -32,7 +32,7 @@ export interface TipoCierreAdmin {
   id: string;
   label: string;
   status: string;        // NORMAL | UNDER_COMPLIANCE_REVIEW | FULLY_BLOCKED
-  comment: string;       // NO_COMMENTS | UCR_CRIMINAL_RISK | OFAC_SUSPECTED | PEP_REQUEST
+  comment: string;       // NO_COMMENTS | UCR_CRIMINAL_RISK | COMPLIANCE_OFFICER_REQUEST | PEP_REQUEST
   observation: string;
   // Qué hacer en el modelo nuevo de ms-customer. El Worker lo usa solo cuando
   // está en modo `nuevo`; en modo `anterior` lo ignora por completo.
@@ -76,13 +76,24 @@ export const TIPOS_CIERRE_ADMIN: TipoCierreAdmin[] = [
     // Decisión del 17-09-2026: baja de FULLY_BLOCKED a BLOCKED "de momento",
     // hasta medir la gravedad real del bloqueo total.
     //
-    // Comment `OFAC_SUSPECTED` (id 44 del catálogo `compliance_status_comment`):
-    // produce **BLOCKED**, no es terminal y es del área COMPLIANCE. Decisión de
-    // Benjamín del 02-10-2026: el bloqueo de la cola OFAC dice que es por OFAC,
-    // y el cliente sigue quedando BLOCKED como hasta ahora. Antes era
-    // `COMPLIANCE_OFFICER_REQUEST` (id 40), que produce el mismo estado pero no
-    // decía el motivo. Se eligió frente a `OFAC_CONFIRMED` (id 46), que
-    // produciría FULLY_BLOCKED.
+    // Comment `COMPLIANCE_OFFICER_REQUEST` (id 40 del catálogo
+    // `compliance_status_comment`): produce **BLOCKED**, no es terminal y es del
+    // área COMPLIANCE.
+    //
+    // NO `OFAC_SUSPECTED`, aunque diga mejor el motivo. Del 03-10 al 15-10-2026
+    // fue `OFAC_SUSPECTED` (#196), y es EL MISMO comment que pone el bot al
+    // marcar al cliente —por eso el caso llega a la cola—. Dos efectos, los dos
+    // malos:
+    //   · BO no admite dos registros sin resolver con el mismo comment (422
+    //     CUSTOMER_COMPLIANCE_INVALID), así que Compliance no podía crear el
+    //     suyo;
+    //   · el Worker veía el del bot, lo tomaba como propio y daba el cierre por
+    //     bueno. Cuando el bot resolvía SU bloqueo, el cliente quedaba NORMAL
+    //     aunque Compliance lo había bloqueado. 27 de 28 clientes cerrados
+    //     «Bloqueado» en ese período quedaron sin bloqueo propio.
+    // Decisión de Benjamín del 15-10-2026: volver a `COMPLIANCE_OFFICER_REQUEST`
+    // y re-bloquear a los afectados. Se eligió frente a `OFAC_CONFIRMED` (id 46),
+    // que produciría FULLY_BLOCKED.
     //
     // En el modelo nuevo el estado se DERIVA del comment, no del status que se
     // manda. Para volver a bloqueo total hay que cambiar las DOS cosas: el
@@ -94,7 +105,7 @@ export const TIPOS_CIERRE_ADMIN: TipoCierreAdmin[] = [
     // lens-flujo-autonomo): la SPA y el Lambda se despliegan JUNTOS, o los
     // cierres manuales y los automáticos quedan con comments distintos.
     status: 'BLOCKED',
-    comment: 'OFAC_SUSPECTED',
+    comment: 'COMPLIANCE_OFFICER_REQUEST',
     // Se mantiene la marca de blacklist que tenía cuando era FULLY_BLOCKED: el
     // paso 1 no migra y esta decisión no era sobre él.
     ofacFlag: true,
