@@ -9,7 +9,7 @@
 import { TIPOS_CIERRE, camposDeCierre } from './cierreTipos';
 import { TIPOS_CIERRE_ADMIN, ADMIN_ASSIGNEE_DEFAULT, PEP_PROVIDER_DEFAULT, ofacFlagDe } from './cierreAdminTipos';
 import { enviarResolucion } from './caseResolutionService';
-import { enviarCierreAdmin, adminCierreDisponible } from './adminCierreService';
+import { enviarCierreAdmin, adminCierreDisponible, resumenAdmin } from './adminCierreService';
 import { sfUpdateDisponible } from './salesforceCaseService';
 import { registrarCierreCanal } from './caseStatusService';
 import { registrarAuditoria } from './caseAuditService';
@@ -40,7 +40,7 @@ export {
   evaluarCasoAuto, retenidoPorDelito, motivosRetencion,
 } from './flujoDecision';
 export type { MotivoNoAuto, EvaluacionAuto, ScreeningParaAuto } from './flujoDecision';
-import { evaluarCasoAuto } from './flujoDecision';
+import { evaluarCasoAuto, clasificarCola } from './flujoDecision';
 import type { ScreeningParaAuto } from './flujoDecision';
 export async function procesarCasoAuto(
   caso: CasoSF,
@@ -95,6 +95,7 @@ export async function procesarCasoAuto(
         const cc = paisCC(caso.pais);
         try {
           const r = await enviarCierreAdmin({
+            cola: clasificarCola(caso.asunto),
             customerIds: [customerId], status: tipo.status, comment: tipo.comment, observation: tipo.observation,
             agent: ADMIN_ASSIGNEE_DEFAULT, ofacFlag: ofacFlagDe(tipo), ofacProvider: 'REGCHECK',
             countryCode: cc, lastStep: tipo.lastStepDefault,
@@ -104,7 +105,7 @@ export async function procesarCasoAuto(
           });
           if (r.ok) {
             res.admin = 'ok';
-            await registrarCierreCanal(caso.id, 'admin', { ok: true, tipologia: tipoId }, actor).catch(() => {});
+            await registrarCierreCanal(caso.id, 'admin', { ok: true, tipologia: tipoId, detalle: resumenAdmin(r) }, actor).catch(() => {});
             logCierre(caso, 'ofac', {
               canal: 'ADMIN', ok: true, automatico: true, tipologia: tipoId,
               statusEnviado: tipo.status, ofacFlag: ofacFlagDe(tipo), lastStep: tipo.lastStepDefault,

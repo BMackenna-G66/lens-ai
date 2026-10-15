@@ -31,6 +31,9 @@ export interface AdminCierrePayload {
   // Paso Risk Level (PUT /customer) — opcional; se ejecuta solo si riskEnabled.
   riskEnabled?: boolean;
   riskLevel?: string;      // Bajo | Medio | Alto
+  // La cola del caso que se cierra (`clasificarCola`). Solo un cierre de la cola
+  // OFAC resuelve bloqueos OFAC: un «Liberar» de otra cola los deja vigentes.
+  cola?: string;
 }
 
 export interface AdminStepResult { ok: boolean; status: number; data: unknown; }
@@ -62,4 +65,26 @@ export async function enviarCierreAdmin(payload: AdminCierrePayload): Promise<Ad
     results: (data.results as AdminCustomerResult[]) || [],
     error: data.error as string | undefined,
   };
+}
+
+/**
+ * El paso 2 dicho en una línea, para `cierres.admin.detalle` del caso: qué se
+ * hizo, si se creó el bloqueo propio o por qué no, y cómo quedó el cliente.
+ *
+ * Hasta el 15-10-2026 ese campo iba en `null`, y por eso no se vio desde Lens
+ * que los cierres «Bloqueado» no estaban creando el bloqueo de Compliance. Sale
+ * del `resumen` que arma el Worker; con el modelo anterior no hay, y va `null`.
+ */
+export function resumenAdmin(r: AdminCierreResult | null | undefined): string | null {
+  const partes = (r?.results ?? []).map(c => {
+    const d = (c.steps?.compliance?.data ?? {}) as { resumen?: Record<string, unknown> };
+    const s = d.resumen;
+    if (!s) return null;
+    const crear = s.crear ? ` · crear ${String(s.crear)}${s.motivo ? ` (${String(s.motivo)})` : ''}` : '';
+    const quedo = s.estadoEfectivo ? ` · quedó ${String(s.estadoEfectivo)}` : '';
+    const disc = s.discrepancia && s.discrepancia !== s.motivo ? ` · ${String(s.discrepancia)}` : '';
+    const ofac = s.ofacMantenido ? ` · ${String(s.ofacMantenido)}` : '';
+    return `${c.customerId}: ${String(s.accion ?? '')}${crear}${quedo}${ofac}${disc}`;
+  }).filter(Boolean) as string[];
+  return partes.length ? partes.join(' | ').slice(0, 500) : null;
 }
