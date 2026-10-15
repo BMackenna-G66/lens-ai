@@ -48,6 +48,9 @@ import unicodedata
 from typing import Any
 
 from paises_anexo_a import NOMBRES as PAISES_ANEXO_A
+from paises_anexo_a import POR_ISO as PAIS_POR_ISO
+from paises_variantes import AMBIGUAS as PAISES_AMBIGUOS
+from paises_variantes import VARIANTES as VARIANTES_PAIS
 
 # ── Avisos que produce esta capa ────────────────────────────────────────────
 # Los nombres NO se escriben acá: salen del catálogo de `errores.py`, que es la
@@ -77,8 +80,14 @@ class Avisos:
     def __init__(self) -> None:
         self.items: list[dict[str, Any]] = []
 
-    def agregar(self, reason: str, message: str, **extra: Any) -> None:
-        self.items.append({"reason": reason, "message": message, **extra})
+    def agregar(self, reason: str, message: str, *, field: str | None = None,
+                subject: str | None = None, **extra: Any) -> None:
+        """`field` es la ruta del dato (`taxId`, `legalRepresentative.role`…) y
+        `subject` la persona de la que es, si es de una. AJ-07: Onboarding le
+        dice al usuario qué dato falta y de quién, y no puede sacarlo de un
+        `message` en texto libre."""
+        self.items.append({"reason": reason, "message": message,
+                           "field": field, "subject": subject or None, **extra})
 
     def __len__(self) -> int:
         return len(self.items)
@@ -115,13 +124,14 @@ def tipo_persona(valor: Any) -> str | None:
 # ══════════════════════════════════════════════════════════════════════════
 
 # Países cuyos registros escriben APELLIDOS PRIMERO. Es la señal que permite
-# que el respaldo no invierta el caso más común de este contrato.
-PAISES_ORDEN_REGISTRAL = {"colombia", "co"}
+# que el respaldo no invierta el caso más común de este contrato. Se compara
+# contra `pais_normalizado`, así que «CO», «COL» o «Colombia» dan lo mismo.
+PAISES_ORDEN_REGISTRAL = {"colombia"}
 
 
 def partir_nombre(
     completo: str, *, name: str = "", last_name: str = "",
-    pais: str = "", avisos: "Avisos | None" = None,
+    pais: str = "", avisos: "Avisos | None" = None, field: str | None = None,
 ) -> tuple[str | None, str | None]:
     """Separa nombre y apellidos siguiendo la precedencia del contrato.
 
@@ -164,14 +174,18 @@ def partir_nombre(
         apellidos, _, nombres = txt.partition(",")
         return (nombres.strip() or None), (apellidos.strip() or None)
 
-    partes = txt.split(" ")
+    # Se cuenta por GRUPOS y no por palabras: una partícula va con la palabra
+    # que sigue. «MARÍA DEL PILAR GÓMEZ DE LA TORRE» son cuatro grupos —María,
+    # del Pilar, Gómez, de la Torre—, no siete palabras; contadas sueltas, «LA»
+    # y «TORRE» salían como los dos apellidos.
+    partes = _grupos_de_nombre(txt)
     if len(partes) == 1:
         # Un solo token: es un nombre, no hay apellido que inventar.
         return partes[0], None
     if len(partes) == 2:
         return partes[0], partes[1]
 
-    registral = _sin_tildes(pais) in PAISES_ORDEN_REGISTRAL
+    registral = pais_normalizado(pais) in PAISES_ORDEN_REGISTRAL
     if len(partes) == 3:
         # Tres palabras: dos apellidos y un nombre, del lado que corresponda.
         nombre, apellido = ((partes[-1], " ".join(partes[:-1])) if registral
@@ -187,19 +201,47 @@ def partir_nombre(
             f"«{txt}» vino sin partir: se separó por cantidad de palabras asumiendo orden "
             + ("registral (apellidos primero)" if registral else "de nombres primero")
             + f"; el texto original va en el campo de nombre completo.",
-            valor=txt, pais=pais or "",
+            field=field, subject=txt, valor=txt, pais=pais or "",
         )
     return nombre, apellido
 
 
+#: Las partículas de un nombre: van pegadas a la palabra que les sigue.
+_PARTICULAS = {"de", "del", "la", "las", "los", "y", "da", "das", "do", "dos",
+               "di", "van", "von", "der", "den", "san", "mac", "mc"}
+
+
+def _grupos_de_nombre(txt: str) -> list[str]:
+    """«MARÍA DEL PILAR GÓMEZ DE LA TORRE» → «MARÍA», «DEL PILAR», «GÓMEZ»,
+    «DE LA TORRE». Una partícula al final, sin palabra que la siga, queda sola."""
+    grupos: list[str] = []
+    pendiente: list[str] = []
+    for palabra in txt.split(" "):
+        if _sin_tildes(palabra) in _PARTICULAS:
+            pendiente.append(palabra)
+            continue
+        grupos.append(" ".join(pendiente + [palabra]))
+        pendiente = []
+    if pendiente:
+        if grupos:
+            grupos[-1] = grupos[-1] + " " + " ".join(pendiente)
+        else:
+            grupos.append(" ".join(pendiente))
+    return grupos
+
+
 def nombre_y_apellido(
     p: dict, tipo: str | None, pais: str = "", avisos: "Avisos | None" = None,
+    ruta: str = "",
 ) -> tuple[str | None, str | None]:
     """`(name, lastName)` según el tipo de persona.
 
     En personas jurídicas, `name` es la **razón social** y `lastName` va en
     `null`. No es cosmético: hoy LENS deja los dos vacíos y el contrato pide
     explícitamente que la razón social viaje en `name`.
+
+    `ruta` es de quién es el nombre (`legalRepresentative`, `shareholder`), para
+    el `field` del aviso.
     """
     if tipo == "LEGAL":
         razon = str(p.get("shareholderName") or p.get("name") or "").strip()
@@ -208,7 +250,7 @@ def nombre_y_apellido(
         str(p.get("shareholderName") or p.get("fullName") or ""),
         name=str(p.get("name") or ""),
         last_name=str(p.get("lastName") or ""),
-        pais=pais, avisos=avisos,
+        pais=pais, avisos=avisos, field=f"{ruta}.name" if ruta else None,
     )
 
 
@@ -321,14 +363,45 @@ def _sin_tildes(s: str) -> str:
 _INDICE_PAISES: dict[str, str] = {_sin_tildes(n): n for n in PAISES_ANEXO_A}
 
 
-def pais_anexo_a(valor: Any, avisos: Avisos | None = None) -> str | None:
+def clave_pais(valor: Any) -> str:
+    """La clave de `paises_variantes`: sin tildes, sin signos ni espacios, en
+    minúsculas. «EE. UU.», «EEUU» y «ee uu» son la misma."""
+    return re.sub(r"[^a-z0-9]", "", _sin_tildes(str(valor or "")))
+
+
+def resolver_pais(valor: Any) -> tuple[str, str] | None:
+    """`(código ISO-2, nombre del Anexo A)` de cualquier forma de escribir un
+    país —en español, inglés o portugués, con su ISO-2 o su ISO-3, o su
+    gentilicio («Mexicana», «chilenos»)—, o `None` si no es un país del
+    catálogo o si es ambiguo (AJ-08)."""
+    iso = VARIANTES_PAIS.get(clave_pais(valor))
+    return (iso, PAIS_POR_ISO[iso]) if iso else None
+
+
+def paises_posibles(valor: Any) -> tuple[str, ...]:
+    """Los nombres del catálogo entre los que se duda, si la forma es ambigua
+    («Corea» → Corea del Sur o Corea del Norte); vacío si no lo es."""
+    return tuple(PAIS_POR_ISO[i] for i in PAISES_AMBIGUOS.get(clave_pais(valor), ()))
+
+
+def pais_normalizado(valor: Any) -> str:
+    """El país como lo comparan las reglas por país: el nombre del catálogo en
+    minúsculas y sin tildes —«colombia», «mexico»—, venga como venga («CO»,
+    «COL», «Colombia»). Lo que no es del catálogo, igual en minúsculas y sin
+    tildes, como antes."""
+    r = resolver_pais(valor)
+    return _sin_tildes(r[1]) if r else _sin_tildes(str(valor or ""))
+
+
+def pais_anexo_a(valor: Any, avisos: Avisos | None = None, *, field: str | None = None,
+                 subject: str | None = None) -> str | None:
     """El nombre del país con la grafía exacta del Anexo A, o `None`.
 
     **Tolerante al leer, estricto al escribir.** Del otro lado se compara
     ignorando mayúsculas y espacios de los extremos pero **no la grafía**: si
     LENS manda `Mexico` sin tilde, Onboarding lo guarda como país desconocido y
-    no avisa. Así que acá se empareja sin tildes y sin distinguir mayúsculas, y
-    se emite la forma canónica de la tabla.
+    no avisa. Así que acá se reconoce cualquier forma (`resolver_pais`) y se
+    emite la forma canónica de la tabla.
 
     Lo que NO se hace es mandar el texto crudo cuando no matchea. Eso es
     exactamente el modo de fallo silencioso que el contrato advierte. Se emite
@@ -337,14 +410,25 @@ def pais_anexo_a(valor: Any, avisos: Avisos | None = None) -> str | None:
     crudo = str(valor or "").strip()
     if not crudo:
         return None
-    canonico = _INDICE_PAISES.get(_sin_tildes(crudo))
-    if canonico is None and avisos is not None:
+    r = resolver_pais(crudo)
+    if r is None and avisos is not None:
+        # Ambiguo no es lo mismo que desconocido: «Corea» puede ser Corea del
+        # Norte, que está sancionada. Adivinar una nacionalidad sancionable es
+        # peor que preguntar, así que se dice entre cuáles se duda.
+        posibles = paises_posibles(crudo)
         avisos.agregar(
             AVISO_PAIS,
-            f"El país «{crudo}» no está en el catálogo de Onboarding; se envía vacío.",
-            valor=crudo,
+            (f"El país «{crudo}» es ambiguo ({' o '.join(posibles)}); se envía vacío." if posibles
+             else f"El país «{crudo}» no está en el catálogo de Onboarding; se envía vacío."),
+            field=field, subject=subject, valor=crudo,
         )
-    return canonico
+    return r[1] if r else None
+
+
+def codigo_pais(valor: Any) -> str | None:
+    """El código ISO-2 del país (AJ-08), o `None` si no es del catálogo."""
+    r = resolver_pais(valor)
+    return r[0] if r else None
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -355,7 +439,19 @@ _MESES = {
     "enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
     "julio": 7, "agosto": 8, "septiembre": 9, "setiembre": 9, "octubre": 10,
     "noviembre": 11, "diciembre": 12,
+    # Abreviados, y en inglés y portugués (14-10-2026): «Feb 28, 2019»,
+    # «28 February 2019», «28 de fevereiro de 2019».
+    "ene": 1, "feb": 2, "mar": 3, "abr": 4, "jun": 6, "jul": 7, "ago": 8,
+    "sep": 9, "sept": 9, "set": 9, "oct": 10, "nov": 11, "dic": 12,
+    "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+    "july": 7, "august": 8, "september": 9, "october": 10, "november": 11,
+    "december": 12, "jan": 1, "apr": 4, "aug": 8, "dec": 12,
+    "janeiro": 1, "fevereiro": 2, "marco": 3, "maio": 5, "junho": 6, "julho": 7,
+    "setembro": 9, "outubro": 10, "novembro": 11, "dezembro": 12,
 }
+
+#: Dónde se escribe MES/DÍA/AÑO. En el resto del catálogo, DÍA/MES/AÑO.
+_PAISES_MES_PRIMERO = {"estados unidos", "filipinas", "micronesia", "belice"}
 
 # Los números en palabras, que es como las escrituras chilenas escriben la
 # fecha: «a doce de marzo de dos mil diecinueve». Si esto no se soporta, la
@@ -404,8 +500,9 @@ def _numero_en_palabras(texto: str) -> int | None:
     return (total + parcial) if hubo else None
 
 
-_RE_ISO = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
+_RE_ISO = re.compile(r"^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$")
 _RE_NUMERICA = re.compile(r"^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})$")
+_RE_ORDINAL = re.compile(r"^(\d{1,2})(?:st|nd|rd|th|ro|er|do|to|vo|no|mo)$")
 
 _PALABRAS_NUMERO = set(_UNIDADES) | set(_CIENTOS) | {"mil", "y"}
 
@@ -429,9 +526,12 @@ def _tomar_numero(tokens: list[str], *, desde_el_final: bool) -> int | None:
     if not seq:
         return None
     # En cifras: «15 de marzo». Se resuelve acá y no en el llamador para que la
-    # forma mixta —día en número, año en palabras— también funcione.
+    # forma mixta —día en número, año en palabras— también funcione. Con su
+    # ordinal pegado también: «28th», «1ro».
     if seq[0].isdigit():
         return int(seq[0])
+    if (o := _RE_ORDINAL.match(seq[0])):
+        return int(o.group(1))
     tomados: list[str] = []
     for t in seq:
         if t in _PALABRAS_NUMERO:
@@ -445,23 +545,28 @@ def _tomar_numero(tokens: list[str], *, desde_el_final: bool) -> int | None:
     return _numero_en_palabras(" ".join(tomados))
 
 
-def fecha_iso(valor: Any, avisos: Avisos | None = None) -> str | None:
+def fecha_iso(valor: Any, avisos: Avisos | None = None, pais: Any = "",
+              campo: str = "constitutionDate") -> str | None:
     """`YYYY-MM-DD`, o `None` con aviso si no se puede leer con certeza.
 
     Formatos que entiende:
 
-      1. Ya viene ISO            → `2019-03-15`
-      2. Numérica día/mes/año    → `15/03/2019`, `15-3-19`
-      3. Día y año en cifras     → `15 de marzo de 2019`
-      4. Día y año en palabras   → `doce de marzo de dos mil diecinueve`
+      1. ISO, con guion, barra o punto  → `2019-03-15`, `2019/03/15`
+      2. Numérica día/mes/año           → `15/03/2019`, `15-3-19`, `15.03.2019`
+      3. Día y año en cifras            → `15 de marzo de 2019`
+      4. Día y año en palabras          → `doce de marzo de dos mil diecinueve`
+      5. En inglés                      → `Feb 28, 2019`, `28 February 2019`
 
     El cuarto es el que importa: las escrituras chilenas escriben la fecha con
     letras, y el prompt de LENS **no pide ningún formato** — sale tal como está
     en el documento. Se ancla en el nombre del mes y se lee hacia los dos lados,
     así que también funciona dentro de una frase.
 
-    Nunca adivina. Un año de dos dígitos se expande con la regla habitual
-    (≤ 69 → 2000, si no 1900); cualquier cosa que no encaje sale `None` con aviso.
+    Nunca adivina. `02/03/2019` puede ser el 2 de marzo o el 3 de febrero: manda
+    la convención del país —mes primero solo en Estados Unidos y pocos más— y,
+    si no se sabe el país, sale `None` con aviso. Un año de dos dígitos se
+    expande con la regla habitual (≤ 69 → 2000, si no 1900). El aviso lleva el
+    texto original.
     """
     crudo = str(valor or "").strip()
     if not crudo:
@@ -476,14 +581,26 @@ def fecha_iso(valor: Any, avisos: Avisos | None = None) -> str | None:
         if (iso := _armar(int(g.group(3)), int(g.group(2)), int(g.group(1)))):
             return iso
 
+    ambigua = False
     if (g := _RE_NUMERICA.match(crudo)):
-        d, m, a = int(g.group(1)), int(g.group(2)), int(g.group(3))
+        x, y, a = int(g.group(1)), int(g.group(2)), int(g.group(3))
         if a < 100:
             a += 2000 if a <= 69 else 1900
-        if (iso := _armar(d, m, a)):
+        p = pais_normalizado(pais)
+        if x > 12 or y > 12 or x == y:
+            # Sin ambigüedad: el que pasa de 12 es el día.
+            d, m = (y, x) if y > 12 else (x, y)
+        elif p:
+            d, m = (y, x) if p in _PAISES_MES_PRIMERO else (x, y)
+        else:
+            d = m = 0
+            ambigua = True
+        if not ambigua and (iso := _armar(d, m, a)):
             return iso
 
-    # Ancla en el mes y lectura hacia los dos lados.
+    # Ancla en el mes y lectura hacia los dos lados. En inglés el día puede ir
+    # DESPUÉS del mes («February 28, 2019»): si no hay día antes, se lee el
+    # primero que sigue y el año a continuación.
     toks = _tokens(crudo)
     for i, t in enumerate(toks):
         mes = _MESES.get(t)
@@ -491,14 +608,19 @@ def fecha_iso(valor: Any, avisos: Avisos | None = None) -> str | None:
             continue
         dia = _tomar_numero(toks[:i], desde_el_final=True)
         anio = _tomar_numero(toks[i + 1:], desde_el_final=False)
+        if dia is None and len(toks) > i + 2:
+            dia = _tomar_numero(toks[i + 1:i + 2], desde_el_final=False)
+            anio = _tomar_numero(toks[i + 2:], desde_el_final=False)
         if dia is not None and anio is not None and (iso := _armar(dia, mes, anio)):
             return iso
 
     if avisos is not None:
         avisos.agregar(
             AVISO_FECHA,
-            f"No se pudo interpretar la fecha «{crudo}»; se envía vacía.",
-            campo="constitutionDate",
+            (f"La fecha «{crudo}» es ambigua —día y mes pueden ser cualquiera de los dos— y no "
+             "se sabe la convención del país; se envía vacía." if ambigua else
+             f"No se pudo interpretar la fecha «{crudo}»; se envía vacía."),
+            field=campo, valor=crudo,
         )
     return None
 
@@ -592,8 +714,57 @@ def forma_legal(razon_social: Any, del_documento: Any = None,
     if forma is None and avisos is not None:
         avisos.agregar(AVISO_DATO_FALTANTE,
                        "No se pudo determinar la forma legal de la sociedad.",
-                       campo="legalForm")
+                       field="legalForm")
     return FORMAS_LEGALES.get(forma) if forma else None
+
+
+#: La forma societaria escrita con todas sus letras. Solo frases completas:
+#: una sigla suelta («S.A.») aparece en cualquier escritura que nombre a un
+#: socio que es sociedad.
+_FORMAS_EN_TEXTO = (
+    (re.compile(r"sociedad\s+por\s+acciones\s+simplificada", re.IGNORECASE), "SAS"),
+    (re.compile(r"empresa\s+individual\s+de\s+responsabilidad\s+limitada", re.IGNORECASE), "EIRL"),
+    (re.compile(r"sociedad\s+de\s+responsabilidad\s+limitada", re.IGNORECASE), "LIMITADA"),
+    (re.compile(r"sociedad\s+por\s+acciones(?!\s+simplificada)", re.IGNORECASE), "SPA"),
+    (re.compile(r"sociedad\s+an[oó]nima", re.IGNORECASE), "SA"),
+)
+
+
+def forma_legal_desde_texto(texto: Any) -> str | None:
+    """La forma legal que el documento nombra con todas sus letras, o `None`.
+
+    Solo si nombra UNA: una escritura que constituye una SAS con una sociedad
+    anónima de socia nombra las dos, y ahí no se puede saber cuál es la de la
+    sociedad. Es el respaldo de AJ-07 cuando la pasada de identidad no la dio.
+    """
+    t = str(texto or "")
+    vistas = {forma for rx, forma in _FORMAS_EN_TEXTO if rx.search(t)}
+    return vistas.pop() if len(vistas) == 1 else None
+
+
+#: Lo que encabeza un objeto social y no es la actividad.
+_ENCABEZADO_OBJETO = re.compile(
+    r"^(?:la\s+sociedad\s+)?(?:tendr[aá]\s+(?:como|por)\s+objeto(?:\s+social)?|"
+    r"(?:su|el)\s+objeto(?:\s+social)?(?:\s+de\s+la\s+sociedad)?\s+(?:ser[aá]|es|consiste\s+en)|"
+    r"objeto(?:\s+social)?)\s*:?\s*", re.IGNORECASE)
+_ARRANQUE_OBJETO = re.compile(
+    r"^(?:(?:la|el|los|las)\s+)?(?:realizaci[oó]n\s+de\s+|realizar\s+|desarrollar\s+|"
+    r"ejercer\s+|efectuar\s+)?(?:(?:la|el|los|las|toda\s+clase\s+de)\s+)?", re.IGNORECASE)
+
+
+def actividad_desde_objeto(objeto: Any) -> str | None:
+    """Un resumen de la actividad sacado del objeto social, sin el modelo.
+
+    El respaldo de AJ-07 cuando la pasada de identidad no resumió: la primera
+    actividad que el objeto social nombra, hasta la primera coma o «y». La valida
+    después `actividad`, que la achica por palabras enteras hasta 30 o la
+    descarta si es una lista.
+    """
+    t = " ".join(str(objeto or "").split())
+    t = _ENCABEZADO_OBJETO.sub("", t)
+    t = re.split(r"[,;:.(]|\s+(?:y|e)\s+", t, maxsplit=1)[0]
+    t = _ARRANQUE_OBJETO.sub("", t).strip()
+    return (t[:1].upper() + t[1:]) if t else None
 
 
 #: Palabras que no pueden cerrar un resumen: dejan la frase colgando.
@@ -662,11 +833,12 @@ def actividad(resumen: Any, objeto_social: Any = "", avisos: Avisos | None = Non
     if avisos is not None:
         avisos.agregar(AVISO_DATO_FALTANTE,
                        "No se pudo obtener un resumen de la actividad principal.",
-                       campo="activity")
+                       field="activity")
     return None
 
 
-def recortar(valor: Any, tope: int, campo: str, avisos: Avisos | None = None) -> str | None:
+def recortar(valor: Any, tope: int, campo: str, avisos: Avisos | None = None,
+             subject: str | None = None) -> str | None:
     """Recorta a `tope` caracteres **avisando**, sin partir una palabra al medio.
 
     Se recorta acá y no se deja que lo haga Onboarding porque del otro lado el
@@ -682,16 +854,62 @@ def recortar(valor: Any, tope: int, campo: str, avisos: Avisos | None = None) ->
     if len(txt) <= tope:
         return txt
     corte = txt[:tope].rstrip()
-    if " " in corte:
+    # Si el corte cae justo entre dos palabras, la última está entera y se
+    # queda: «Apto. 1201 T. B» en 10 es «Apto. 1201», no «Apto.».
+    if " " in corte and txt[tope] != " ":
         corte = corte[:corte.rindex(" ")].rstrip()
-    corte = corte or txt[:tope]
+    # Y sin un conector colgando al final: «… bienes raíces y» no es un valor.
+    palabras = corte.split(" ")
+    while len(palabras) > 1 and _sin_tildes(palabras[-1].strip(" ,;:.-")) in _CONECTORES:
+        palabras.pop()
+    corte = " ".join(palabras).rstrip(" ,;:-") or txt[:tope]
     if avisos is not None:
         avisos.agregar(
             AVISO_TRUNCADO,
             f"«{campo}» tenía {len(txt)} caracteres y el contrato admite {tope}; se recortó.",
-            campo=campo, original=txt,
+            field=campo, subject=subject, original=txt,
         )
     return corte
+
+
+#: Lo que admite la base de Onboarding en los textos que no tienen un tope
+#: propio: calle, ciudad, región, razón social, identificadores, nombres y
+#: apellidos (AJ-09, consultado por Onboarding en su esquema).
+TOPE_TEXTO = 255
+
+#: `address_country.apt` es de 10 caracteres. «Oficina 999» tiene 11.
+TOPE_APTO = 10
+
+#: Cómo se abrevia la parte «oficina» de una dirección para que entre en 10 sin
+#: cortar palabras.
+_ABREVIATURAS_APTO = (
+    (re.compile(r"\boficinas\b\.?", re.IGNORECASE), "Ofs."),
+    (re.compile(r"\bbodegas\b\.?", re.IGNORECASE), "Bods."),
+    (re.compile(r"\blocales\b\.?", re.IGNORECASE), "Locs."),
+    (re.compile(r"\boficina\b\.?", re.IGNORECASE), "Of."),
+    (re.compile(r"\bapartamento\b\.?", re.IGNORECASE), "Apto."),
+    (re.compile(r"\bdepartamento\b\.?", re.IGNORECASE), "Depto."),
+    (re.compile(r"\binterior\b\.?", re.IGNORECASE), "Int."),
+    (re.compile(r"\bpiso\b\.?", re.IGNORECASE), "P."),
+    (re.compile(r"\btorre\b\.?", re.IGNORECASE), "T."),
+    (re.compile(r"\blocal\b\.?", re.IGNORECASE), "Loc."),
+    (re.compile(r"\bbloque\b\.?", re.IGNORECASE), "Bl."),
+    (re.compile(r"\bbodega\b\.?", re.IGNORECASE), "Bod."),
+    # «12 y 13» → «12-13»: dos oficinas siguen siendo dos, en menos lugar.
+    (re.compile(r"(\d+)\s+(?:y|e|&)\s+(\d+)", re.IGNORECASE), r"\1-\2"),
+)
+
+
+def apto_corto(valor: Any, avisos: Avisos | None = None) -> str | None:
+    """`apt` en 10 caracteres: primero se ABREVIA —«Oficina 999» → «Of. 999»—,
+    que no pierde nada; si igual no entra, se recorta por palabras con aviso."""
+    txt = " ".join(str(valor or "").split())
+    if not txt or len(txt) <= TOPE_APTO:
+        return txt or None
+    for rx, corta in _ABREVIATURAS_APTO:
+        txt = rx.sub(corta, txt)
+    txt = " ".join(txt.split())
+    return recortar(txt, TOPE_APTO, "address.apt", avisos)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -788,7 +1006,7 @@ def tipo_identificacion(
 
     if par is None and not clave:
         # No vino declarado: se deriva. Solo con el país; sin él no se adivina.
-        porpais = TIPO_POR_PAIS.get(_sin_tildes(str(pais or "")))
+        porpais = TIPO_POR_PAIS.get(pais_normalizado(pais))
         if porpais:
             derivado = porpais[1] if tipo_persona_ == "LEGAL" else porpais[0]
             par = _EQUIVALENCIAS.get(_sin_tildes(derivado).replace(" ", ""))
@@ -802,58 +1020,132 @@ def tipo_identificacion(
 # La persona completa, con los siete ajustes aplicados
 # ══════════════════════════════════════════════════════════════════════════
 
-def _tipo_o_aviso(p: dict, avisos: Avisos | None) -> str | None:
-    """El tipo de persona, o `None` dejando el aviso que pide el contrato.
+def _sujeto(p: dict) -> str | None:
+    """De quién es el dato, para el `subject` del aviso: el nombre como figura."""
+    return " ".join(str(p.get("shareholderName") or p.get("fullName") or p.get("name") or "").split()) or None
 
-    *«Si LENS no puede determinarlo, omite la entidad y lo informa como aviso»*
-    (§7.1). Omitir es más seguro que mandarla: del otro lado, todo lo que no sea
-    `NATURAL` se guarda como jurídica, así que una persona natural sin tipo
-    entraría al registro como empresa.
+
+#: Lo que en un nombre dice «esto es una sociedad», además de la sigla de la
+#: forma legal: siglas extranjeras y palabras que una persona no lleva.
+_RE_JURIDICA = re.compile(
+    r"\b(?:inc|llc|llp|ltd|limited|corp|corporation|gmbh|srl|s\s?r\s?l|sac|s\s?a\s?c|saa|sapi|"
+    r"plc|bv|nv|ag|s\s?de\s?r\s?l|sociedad|inversiones|holding|fundacion|corporacion|"
+    r"compania|asociacion|cooperativa|fideicomiso|banco|trust)\b", re.IGNORECASE)
+
+#: Tipos de documento que solo tiene una persona natural.
+_DOCS_NATURAL = {"cc", "cedula", "cedulaciudadania", "ce", "cedulaextranjeria", "dni",
+                 "pasaporte", "pass", "passport", "curp", "ine", "ppt", "ti"}
+
+
+def inferir_tipo_persona(p: dict) -> str | None:
+    """`NATURAL` o `JURIDICA` cuando el modelo no lo dijo, o `None`.
+
+    Por orden de certeza (14-10-2026, Onboarding bloquea la lectura con
+    PERSON_TYPE_UNDETERMINED, así que vale la pena decidir lo decidible):
+
+      1. el identificador: un RFC de 12 caracteres es persona moral y uno de
+         13, física; un RUC que empieza con 20 es empresa y con 10 persona; un
+         CUIT con 30, 33 o 34 es empresa y con 20, 23, 24 o 27 persona;
+      2. la sigla societaria o una palabra que una persona no lleva en el
+         nombre («S.A.S.», «LTDA», «Inc.», «Inversiones»…);
+      3. el tipo de documento: CC, CE, DNI, pasaporte, CURP o INE es de una
+         persona natural, y NIT de una jurídica.
+
+    Si nada de eso alcanza, `None`: no se adivina.
     """
-    tipo = tipo_persona(p.get("personType"))
+    declarado = str(p.get("personType") or "").strip().upper()
+    if declarado in ("NATURAL", "JURIDICA", "LEGAL"):
+        return "JURIDICA" if declarado == "LEGAL" else declarado
+
+    ident = re.sub(r"[\s.\-]", "", str(p.get("shareholderId") or p.get("identificationNumber") or "")).upper()
+    tipo_doc = _sin_tildes(str(p.get("identificationType") or "")).replace(" ", "").replace(".", "")
+    if tipo_doc == "rfc" or re.fullmatch(r"[A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3}", ident):
+        if len(ident) == 12:
+            return "JURIDICA"
+        if len(ident) == 13:
+            return "NATURAL"
+    # Solo con el tipo declarado: 11 dígitos que empiezan con 20 son un RUC de
+    # empresa en Perú y un CUIT de persona en Argentina.
+    if ident.isdigit() and len(ident) == 11:
+        if tipo_doc == "ruc":
+            return "JURIDICA" if ident.startswith("20") else (
+                "NATURAL" if ident[:2] in ("10", "15", "17") else None)
+        if tipo_doc == "cuit":
+            return "JURIDICA" if ident[:2] in ("30", "33", "34") else (
+                "NATURAL" if ident[:2] in ("20", "23", "24", "27") else None)
+
+    nombre = str(p.get("shareholderName") or p.get("fullName") or p.get("name") or "")
+    if _sufijo_societario(nombre)[0] or _RE_JURIDICA.search(_sin_tildes(nombre)):
+        return "JURIDICA"
+
+    if tipo_doc in _DOCS_NATURAL:
+        return "NATURAL"
+    if tipo_doc == "nit":
+        return "JURIDICA"
+    return None
+
+
+def _tipo_o_aviso(p: dict, avisos: Avisos | None, ruta: str, omite: bool) -> str | None:
+    """El tipo de persona —el declarado o el que se puede deducir—, o `None`
+    dejando el aviso con `subject`.
+
+    En EP-4 el representante sin tipo se omite (§7.1): del otro lado todo lo que
+    no sea `NATURAL` se guarda como jurídica. En EP-6 va con `personType: null`
+    desde el 14-10-2026: Onboarding prefiere ver a la persona y bloquear la
+    lectura con el aviso, a que desaparezca.
+    """
+    tipo = tipo_persona(p.get("personType")) or tipo_persona(inferir_tipo_persona(p))
     if tipo is None and avisos is not None:
         avisos.agregar(
             AVISO_TIPO_PERSONA,
-            "No se pudo determinar si es persona natural o jurídica; se omite la entidad.",
+            "No se pudo determinar si es persona natural o jurídica; "
+            + ("se omite la entidad." if omite else "va con el tipo de persona vacío."),
+            field=f"{ruta}.personType", subject=_sujeto(p),
             valor=str(p.get("personType") or ""),
-            nombre=str(p.get("shareholderName") or ""),
         )
     return tipo
 
 
-def persona(p: dict, avisos: Avisos | None = None) -> dict | None:
-    """Un accionista con los DIEZ campos de EP-6 (§6.10), o `None` si se omite.
+def persona(p: dict, avisos: Avisos | None = None) -> dict:
+    """Un accionista con los once campos de EP-6 (§6.10).
 
     `shareholderName` conserva el texto original y no es decorativo: la
     partición en `name` / `lastName` **no es reversible**. Con el orden registral
     colombiano, concatenarlos de vuelta da «ANGELA VIVIANA PEREZ GOMEZ», que no
     es lo que decía la escritura. Quien después cruce contra el registro necesita
     el nombre como está escrito.
+
+    Una persona cuyo tipo no se puede determinar va con `personType: null` y su
+    aviso. Hasta el 14-10-2026 se omitía.
     """
-    tipo = _tipo_o_aviso(p, avisos)
-    if tipo is None:
-        return None
+    ruta = "shareholder"
+    tipo = _tipo_o_aviso(p, avisos, ruta, omite=False)
+    quien = _sujeto(p)
+
+    def tope(valor: Any, campo: str) -> str | None:
+        return recortar(valor, TOPE_TEXTO, f"{ruta}.{campo}", avisos, quien)
 
     pais_crudo = str(p.get("countryOfOrigin") or "")
-    name, last_name = nombre_y_apellido(p, tipo, pais_crudo, avisos)
+    name, last_name = nombre_y_apellido(p, tipo, pais_crudo, avisos, ruta)
     tipo_id = tipo_identificacion(
         p.get("identificationType"), endpoint="EP-6", pais=pais_crudo, tipo_persona_=tipo)
     return {
         "personType": tipo,
-        "shareholderName": str(p.get("shareholderName") or "").strip() or None,
-        "shareholderId": id_accionista(p.get("shareholderId"), tipo_id),
-        "countryOfOrigin": pais_anexo_a(pais_crudo, avisos),
+        "shareholderName": tope(p.get("shareholderName"), "shareholderName"),
+        "shareholderId": tope(id_accionista(p.get("shareholderId"), tipo_id), "shareholderId"),
+        "countryOfOrigin": pais_anexo_a(pais_crudo, avisos, field=f"{ruta}.countryOfOrigin",
+                                        subject=quien),
+        # AJ-08: el ISO-2 al lado del nombre. Onboarding guarda la nacionalidad
+        # con 2 caracteres y hoy la traduce comparando nombres.
+        "countryOfOriginCode": codigo_pais(pais_crudo),
         "identificationType": tipo_id,
-        "lastName": last_name,
-        "name": name,
+        "lastName": tope(last_name, "lastName"),
+        "name": tope(name, "name"),
         "ownershipPercentage": porcentaje(p.get("ownershipPercentage")),
         # La clave va SIEMPRE, aunque quede vacía: el consumidor no tiene que
         # defenderse de campos ausentes. Y `[]` significa «el documento no las
         # revela», que no es lo mismo que «no se sabe». No se inventan personas.
-        "indirectShareholders": [
-            h for h in (persona(x, avisos) for x in (p.get("indirectShareholders") or []))
-            if h is not None
-        ],
+        "indirectShareholders": [persona(x, avisos) for x in (p.get("indirectShareholders") or [])],
         "isPEP": es_pep(p.get("isPEP"), tipo),
     }
 
@@ -891,21 +1183,27 @@ def representante(p: dict, avisos: Avisos | None = None) -> dict | None:
     `identificationType` es el otro. Reusar la forma de EP-6 acá emitiría las
     claves equivocadas con los valores equivocados.
     """
-    tipo = _tipo_o_aviso(p, avisos)
+    ruta = "legalRepresentative"
+    tipo = _tipo_o_aviso(p, avisos, ruta, omite=True)
     if tipo is None:
         return None
+    quien = _sujeto(p)
+
+    def tope(valor: Any, campo: str, maximo: int = TOPE_TEXTO) -> str | None:
+        return recortar(valor, maximo, f"{ruta}.{campo}", avisos, quien)
 
     pais_crudo = str(p.get("countryOfOrigin") or "")
-    name, last_name = nombre_y_apellido(p, tipo, pais_crudo, avisos)
+    name, last_name = nombre_y_apellido(p, tipo, pais_crudo, avisos, ruta)
     return {
-        "fullName": str(p.get("shareholderName") or p.get("fullName") or "").strip() or None,
-        "name": name,
-        "lastName": last_name,
+        "fullName": tope(p.get("shareholderName") or p.get("fullName"), "fullName"),
+        "name": tope(name, "name"),
+        "lastName": tope(last_name, "lastName"),
         "personType": tipo,
         "identificationType": tipo_identificacion(
             p.get("identificationType"), endpoint="EP-4", pais=pais_crudo, tipo_persona_=tipo),
-        "identificationNumber": id_tal_cual(p.get("shareholderId") or p.get("identificationNumber")),
-        "role": recortar(cargo_legible(p.get("position") or p.get("role")), TOPE_CARGO, "role", avisos),
+        "identificationNumber": tope(
+            id_tal_cual(p.get("shareholderId") or p.get("identificationNumber")), "identificationNumber"),
+        "role": tope(cargo_legible(p.get("position") or p.get("role")), "role", TOPE_CARGO),
     }
 
 
@@ -937,6 +1235,30 @@ TAX_ID_POR_PAIS: dict[str, str] = {
 # propósito — es idéntico a un NIT colombiano de ocho dígitos con verificador.
 _RE_RUT_INEQUIVOCO = re.compile(r"^\d{1,2}(\.\d{3}){2}-[\dkK]$|^\d{7,8}-[kK]$|^\d{7,8}[kK]$", re.I)
 
+#: Las formas INEQUÍVOCAS de un identificador tributario y de qué país son
+#: (14-10-2026: antes solo se reconocía el RUT chileno). Cada una se mira sobre
+#: el valor tal como figura, salvo el RFC, que se mira compacto.
+#:
+#: 11 dígitos que empiezan con 20 son un RUC peruano y también un CUIT
+#: argentino sin guiones: esa forma vale para los dos países y no avisa en
+#: ninguno.
+_FORMAS_TAX_ID: tuple[tuple[re.Pattern, frozenset[str], str, str], ...] = (
+    (re.compile(r"^[A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3}$"), frozenset({"mexico"}), "RFC mexicano", "RFC"),
+    (re.compile(r"^\d{3}\.\d{3}\.\d{3}-\d$"), frozenset({"colombia"}), "NIT colombiano", "NIT"),
+    (re.compile(r"^20\d{9}$"), frozenset({"peru", "argentina"}), "RUC peruano o CUIT argentino", "RUC"),
+    (re.compile(r"^(?:10|15|17)\d{9}$"), frozenset({"peru"}), "RUC peruano", "RUC"),
+    (re.compile(r"^\d{2}-\d{8}-\d$"), frozenset({"argentina"}), "CUIT argentino", "CUIT"),
+    (_RE_RUT_INEQUIVOCO, frozenset({"chile"}), "RUT chileno", "RUT"),
+)
+
+
+def _forma_tax_id(t: str) -> tuple[frozenset[str], str, str] | None:
+    compacto = re.sub(r"[\s.\-]", "", t).upper()
+    for rx, paises, nombre, tipo in _FORMAS_TAX_ID:
+        if rx.match(compacto if tipo == "RFC" else t):
+            return paises, nombre, tipo
+    return None
+
 
 def tipo_tax_id(tax_id: Any, pais: Any = "", avisos: Avisos | None = None) -> str | None:
     """El `taxIdType` de la empresa, derivado del país y del formato (§6.9).
@@ -958,7 +1280,9 @@ def tipo_tax_id(tax_id: Any, pais: Any = "", avisos: Avisos | None = None) -> st
     ── Cuando el formato contradice al país declarado ───────────────────────
     Gana el país igual, pero se avisa. Un `76.123.456-K` declarado como
     colombiano no es un NIT ni un RUT: es una señal de que algo vino mal más
-    arriba, y elegir en silencio cualquiera de los dos la tapa.
+    arriba, y elegir en silencio cualquiera de los dos la tapa. Vale para todas
+    las formas inequívocas de `_FORMAS_TAX_ID`: RFC, NIT con verificador, RUC,
+    CUIT y RUT.
 
     `None` si no alcanza para saberlo. Igual que con las personas: un valor
     inventado no falla, se guarda mal.
@@ -970,34 +1294,43 @@ def tipo_tax_id(tax_id: Any, pais: Any = "", avisos: Avisos | None = None) -> st
     if not t:
         return None
 
-    del_pais = TAX_ID_POR_PAIS.get(_sin_tildes(str(pais or "")))
-    # Inequívoco = trae la K del verificador o los puntos. Un `12345678-9` pelado
-    # NO es inequívoco y por eso no entra acá.
-    inequivoco_rut = bool(_RE_RUT_INEQUIVOCO.match(t))
+    p = pais_normalizado(pais)
+    del_pais = TAX_ID_POR_PAIS.get(p)
+    forma = _forma_tax_id(t)
 
     if del_pais:
-        if inequivoco_rut and del_pais != "RUT" and avisos is not None:
+        if forma and p not in forma[0] and avisos is not None:
             avisos.agregar(
                 AVISO_TAX_ID_DISCREPA,
-                f"el identificador «{t}» tiene forma de RUT chileno pero el país declarado "
+                f"el identificador «{t}» tiene forma de {forma[1]} pero el país declarado "
                 f"corresponde a {del_pais}; se usa el del país.",
-                valor=t, pais=str(pais or ""),
+                field="taxId", valor=t, pais=str(pais or ""),
             )
         return del_pais
 
-    return "RUT" if inequivoco_rut else None
+    return forma[2] if forma else None
 
 
 def empresa(datos: dict, avisos: Avisos | None = None) -> dict:
-    """El bloque `company` de EP-5 (§6.9)."""
+    """El bloque `company` de EP-5 (§6.9).
+
+    Con los largos de la base de Onboarding (AJ-09): `apt` en 10 —abreviando
+    antes de recortar— y 255 para la razón social, el identificador y las partes
+    del domicilio. Lo que se recorta, se avisa con su `field`.
+    """
     tax_id = datos.get("taxId")
+    pais = datos.get("country") or datos.get("pais")
+    dom = domicilio(datos.get("address"), avisos, datos.get("addressLine"))
+    for parte in ("street", "city", "state"):
+        dom[parte] = recortar(dom[parte], TOPE_TEXTO, f"address.{parte}", avisos)
+    dom["apt"] = apto_corto(dom["apt"], avisos)
     return {
-        "legalName": str(datos.get("legalName") or "").strip() or None,
-        "taxId": id_tal_cual(tax_id),
-        "taxIdType": tipo_tax_id(tax_id, datos.get("country") or datos.get("pais"), avisos),
-        "constitutionDate": fecha_iso(datos.get("constitutionDate"), avisos),
+        "legalName": recortar(datos.get("legalName"), TOPE_TEXTO, "legalName", avisos),
+        "taxId": recortar(id_tal_cual(tax_id), TOPE_TEXTO, "taxId", avisos),
+        "taxIdType": tipo_tax_id(tax_id, pais, avisos),
+        "constitutionDate": fecha_iso(datos.get("constitutionDate"), avisos, pais),
         "legalForm": forma_legal(datos.get("legalName"), datos.get("legalFormDoc"), avisos),
-        "address": domicilio(datos.get("address"), avisos, datos.get("addressLine")),
+        "address": dom,
         "activity": actividad(datos.get("activity"), datos.get("objetoSocial"), avisos),
         # §11. `boolean | null`: `null` cuando el documento no permite
         # determinarlo. Solo pasa un booleano de verdad — un `"true"` de texto o

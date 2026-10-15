@@ -102,6 +102,17 @@ class GeminiNoDisponible(ErrorGemini, errores.ServicioNoDisponible):
         self.por_tiempo = por_tiempo
 
 
+class RespuestaInvalida(ErrorGemini, errores.ExtraccionFallida):
+    """El modelo respondió, pero algo que no se puede usar: vacío, cortado o un
+    JSON que no parsea.
+
+    No es del documento —leído de nuevo suele salir bien— ni es una caída. La
+    corrida de Onboarding reintenta una vez la pasada y, si se repite, termina
+    con `LENS_EXTRACTION_FAILED` (AJ-07). Una respuesta BLOQUEADA por el filtro
+    de seguridad no es esto: habla del documento, y sigue siendo `ErrorGemini`.
+    """
+
+
 # Misma clasificación que `executeWithRetry` en la SPA: reintentar la red y la
 # sobrecarga, nunca una key inválida. La cuota agotada SÍ se reintenta desde el
 # 13-10-2026: Gemini responde 429 «Resource has been exhausted (e.g. check
@@ -183,6 +194,7 @@ def _generar(partes: list[dict], config: dict, *, timeout_s: int | None = None,
     tope_intentos = intentos or MAX_INTENTOS
 
     ultimo = ""
+    ultima_exc: Exception | None = None
     status: int | None = None
     del_servicio = False      # ¿la última falla fue del servicio y no del pedido?
     por_tiempo = False
@@ -220,17 +232,20 @@ def _generar(partes: list[dict], config: dict, *, timeout_s: int | None = None,
                 # seguridad bloqueó la entrada. Decirlo es mejor que "respuesta
                 # vacía": el que integra necesita saber que no es un bug suyo.
                 razon = (datos.get("promptFeedback") or {}).get("blockReason")
-                raise ErrorGemini(f"El modelo no devolvió contenido{f' (bloqueado: {razon})' if razon else ''}.")
+                if razon:
+                    raise ErrorGemini(f"El modelo no devolvió contenido (bloqueado: {razon}).")
+                raise RespuestaInvalida("El modelo no devolvió contenido.")
 
             devueltas = (candidatos[0].get("content") or {}).get("parts") or []
             texto = "".join(p.get("text", "") for p in devueltas).strip()
             if not texto:
-                raise ErrorGemini("Respuesta vacía del modelo.")
+                raise RespuestaInvalida("Respuesta vacía del modelo.")
             if intento > 1:
                 log.info("gemini %s respondió en el intento %d de %d", MODELO, intento, tope_intentos)
             return texto, (datos.get("usageMetadata") or {})
 
         except ErrorGemini as e:
+            ultima_exc = e
             ultimo = _sin_clave(str(e))
             m = ultimo.lower()
             if status is not None:
@@ -276,6 +291,8 @@ def _generar(partes: list[dict], config: dict, *, timeout_s: int | None = None,
         raise GeminiNoDisponible(
             f"No se pudo conectar con Gemini tras {hechos or 0} intento(s) ({detalle}): red o sobrecarga.",
             status=status, por_tiempo=por_tiempo)
+    if isinstance(ultima_exc, RespuestaInvalida):
+        raise RespuestaInvalida(ultimo)
     raise ErrorGemini(ultimo or "Error desconocido de la API de Gemini.")
 
 
@@ -467,10 +484,10 @@ def extraer_campos(texto: str, contexto_pais: str, limite: float | None = None) 
     try:
         datos = _json_de(crudo)
     except (json.JSONDecodeError, ValueError) as e:
-        raise ErrorGemini(f"El modelo devolvió algo que no es JSON válido: {e}") from e
+        raise RespuestaInvalida(f"El modelo devolvió algo que no es JSON válido: {e}") from e
 
     if not isinstance(datos, list):
-        raise ErrorGemini("El modelo no devolvió una lista de campos.")
+        raise RespuestaInvalida("El modelo no devolvió una lista de campos.")
 
     por_nombre = {
         str(d.get("field")): str(d.get("value", "")).strip()
@@ -543,9 +560,9 @@ def _objeto_de(texto: str, que: str) -> dict:
     try:
         datos = _json_de(texto)
     except (json.JSONDecodeError, ValueError) as e:
-        raise ErrorGemini(f"La respuesta de {que} no es JSON válido: {e}") from e
+        raise RespuestaInvalida(f"La respuesta de {que} no es JSON válido: {e}") from e
     if not isinstance(datos, dict):
-        raise ErrorGemini(f"La respuesta de {que} no es un objeto JSON.")
+        raise RespuestaInvalida(f"La respuesta de {que} no es un objeto JSON.")
     return datos
 
 

@@ -31,6 +31,30 @@ from dataclasses import dataclass, field
 
 log = logging.getLogger(__name__)
 
+
+def paginas_legibles(indices: list[int]) -> str:
+    """`[6, 11, 18]` → «páginas 7, 12 y 19»; `[15, …, 25]` → «páginas 16 a 26».
+
+    Los índices van desde 0 y se dicen desde 1, como los lee una persona. Los
+    tramos seguidos se juntan: 11 páginas cortadas no son 11 números.
+    """
+    nums = sorted({i + 1 for i in indices})
+    if not nums:
+        return ""
+    tramos: list[str] = []
+    ini = fin = nums[0]
+    for n in nums[1:] + [None]:
+        if n is not None and n == fin + 1:
+            fin = n
+            continue
+        tramos.append(str(ini) if ini == fin else (f"{ini} y {fin}" if fin == ini + 1 else f"{ini} a {fin}"))
+        if n is not None:
+            ini = fin = n
+    if len(nums) == 1:
+        return f"página {nums[0]}"
+    cuerpo = ", ".join(tramos[:-1]) + (" y " if len(tramos) > 1 else "") + tramos[-1]
+    return f"páginas {cuerpo}"
+
 # Caracteres mínimos para considerar que una página TIENE capa de texto. Una
 # página escaneada suele devolver 0; una con basura de encoding devuelve unos
 # pocos. 40 separa "tiene texto" de "tiene ruido" sin descartar portadas cortas.
@@ -192,7 +216,8 @@ def _leer_pdf(nombre: str, contenido: bytes, presupuesto: Presupuesto) -> Result
             # decide creyendo que se miró todo.
             r.avisos.append(
                 f"{len(sin_capa)} páginas sin capa de texto y el tope de OCR es "
-                f"{MAX_PAGINAS_OCR}: se leyeron las primeras {len(a_ocrear)}."
+                f"{MAX_PAGINAS_OCR}: se leyeron las primeras {len(a_ocrear)}; sin leer: "
+                f"{paginas_legibles(sin_capa[MAX_PAGINAS_OCR:])}."
             )
 
         def trabajo(i: int) -> tuple[int, str | None, str | None]:
@@ -203,19 +228,27 @@ def _leer_pdf(nombre: str, contenido: bytes, presupuesto: Presupuesto) -> Result
             except Exception as e:
                 return i, None, str(e)
 
-        cortadas = 0
+        # Las páginas se juntan en UN aviso por documento, con sus números
+        # (14-10-2026): Onboarding le pide al usuario cargar de nuevo y tiene
+        # que poder decirle qué parte no se leyó. El error de cada una va al log.
+        cortadas: list[int] = []
+        fallidas: list[int] = []
         with ThreadPoolExecutor(max_workers=OCR_CONCURRENCIA) as pool:
             for i, texto, err in pool.map(trabajo, a_ocrear):
                 if texto:
                     por_pagina[i] = texto
                     r.paginas_por_ocr += 1
                 elif err == "sin presupuesto":
-                    cortadas += 1
+                    cortadas.append(i)
                 elif err:
-                    r.avisos.append(f"OCR falló en la página {i + 1}: {err}")
+                    fallidas.append(i)
+                    log.warning("OCR falló en la página %d de %s: %s", i + 1, nombre, err)
 
+        if fallidas:
+            lista = paginas_legibles(fallidas)
+            r.avisos.append(f"{lista[:1].upper()}{lista[1:]} sin texto recuperable.")
         if cortadas:
-            r.avisos.append(f"Se agotó el tiempo: {cortadas} página(s) quedaron sin leer.")
+            r.avisos.append(f"Se agotó el tiempo; sin leer: {paginas_legibles(cortadas)}.")
 
     elif sin_capa and MOTOR_OCR != "textract":
         r.avisos.append(

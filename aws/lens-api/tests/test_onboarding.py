@@ -53,17 +53,21 @@ def test_lo_que_no_se_entiende_no_se_inventa(v):
     assert ob.tipo_persona(v) is None
 
 
-def test_persona_sin_tipo_se_omite_con_aviso():
+def test_el_accionista_sin_tipo_va_con_tipo_null_y_aviso():
+    """Desde el 14-10-2026 (PR-C) no se omite: Onboarding prefiere ver a la
+    persona y bloquear la lectura con el aviso, a que desaparezca."""
     av = _av()
-    assert ob.persona({"personType": "???", "shareholderName": "X"}, av) is None
+    r = ob.persona({"personType": "???", "shareholderName": "X"}, av)
+    assert r["personType"] is None and r["shareholderName"] == "X"
     assert av.items[0]["reason"] == ob.AVISO_TIPO_PERSONA
+    assert av.items[0]["subject"] == "X" and av.items[0]["field"] == "shareholder.personType"
 
 
-def test_una_natural_sin_tipo_no_entra_como_empresa():
-    """El daño concreto de omitir: del otro lado, todo lo que no es NATURAL se
-    guarda como persona jurídica. Una persona física sin tipo quedaría
-    registrada como empresa."""
-    assert ob.persona({"personType": "", "shareholderName": "JUAN PÉREZ SOTO"}, _av()) is None
+def test_el_representante_sin_tipo_se_sigue_omitiendo():
+    """En EP-4 sí: del otro lado, todo lo que no es NATURAL se guarda como
+    persona jurídica, y un representante físico quedaría registrado como
+    empresa."""
+    assert ob.representante({"personType": "", "shareholderName": "X"}, _av()) is None
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -205,8 +209,10 @@ def test_lo_que_no_esta_en_el_catalogo_sale_vacio_y_avisa():
     assert "Wakanda" in av.items[0]["message"]
 
 
-def test_un_codigo_iso_no_es_un_nombre():
-    assert ob.pais_anexo_a("MX") is None
+def test_el_codigo_iso_tambien_se_reconoce():
+    """AJ-08: ms-company manda el código, y el documento a veces también."""
+    assert ob.pais_anexo_a("MX") == "México"
+    assert ob.pais_anexo_a("MEX") == "México"
 
 
 def test_todos_los_nombres_del_anexo_se_emparejan_consigo_mismos():
@@ -228,7 +234,8 @@ def test_todos_los_nombres_del_anexo_se_emparejan_consigo_mismos():
     ("1 de enero de 2020", "2020-01-01"),
 ])
 def test_formatos_numericos_y_mixtos(entrada, esperado):
-    assert ob.fecha_iso(entrada) == esperado
+    # Con el país: «5.7.2021» es ambiguo, y en Chile se lee día/mes.
+    assert ob.fecha_iso(entrada, pais="chile") == esperado
 
 
 @pytest.mark.parametrize("entrada,esperado", [
@@ -333,6 +340,7 @@ def test_un_accionista_juridico_entero():
         "shareholderName": "MATRIZ HOLDING SpA",
         "shareholderId": "769998887",
         "countryOfOrigin": "México",
+        "countryOfOriginCode": "MX",       # AJ-08, al lado del nombre
         # No venía declarado: se deriva del país + tipo de persona (México + LEGAL).
         "identificationType": "RFC",
         "lastName": None,

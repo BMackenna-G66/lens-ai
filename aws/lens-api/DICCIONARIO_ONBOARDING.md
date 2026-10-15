@@ -90,7 +90,7 @@ una regla; la regla está en la columna de origen.
 | Campo | Tipo | Oblig. | Origen | Ejemplo |
 |---|---|---|---|---|
 | `address.street` | string \| null | Sí | De la línea de dirección del documento, o de *Domicilio Legal* | `"Av. Providencia 1234"` |
-| `address.apt` | string \| null | Sí | Derivado; `null` si la dirección no lo trae | `"Of 302"` |
+| `address.apt` | string \| null | Sí | Derivado; `null` si la dirección no lo trae. **Hasta 10 caracteres**: se abrevia («Oficina 999» → «Of. 999») y, si igual no entra, se recorta por palabras con `VALUE_TRUNCATED` | `"Of 302"` |
 | `address.city` | string \| null | Sí | Derivado | `"Santiago"` |
 | `address.state` | string \| null | Sí | Derivado | `"Región Metropolitana"` |
 
@@ -104,6 +104,10 @@ Si el documento trae una línea de dirección aparte —«Dirección del domicil
 principal», «Dirección comercial» o «Dirección principal», nunca la de
 notificación judicial—, `street` y `apt` salen de esa línea y `city` y `state`
 de *Domicilio Legal*.
+
+`street`, `city` y `state` van hasta 255 caracteres, igual que `legalName`, `taxId`,
+los nombres, apellidos e identificadores de las personas: es lo que admite la base
+de Onboarding. Lo que se recorta lleva `VALUE_TRUNCATED` con su `field`.
 
 Si el documento da solo la ciudad, `street` va en `null`. Lo que no se puede
 clasificar **no se inventa**: una calle adivinada es peor que ninguna, porque
@@ -163,10 +167,11 @@ Un límite de monto por sobre el cual se exigen dos firmas, **sí**.
 
 | Campo | Tipo | Oblig. | Origen | Ejemplo |
 |---|---|---|---|---|
-| `personType` | string | Sí | `NATURAL` o `LEGAL` | `"LEGAL"` |
+| `personType` | string \| null | Sí | `NATURAL` o `LEGAL`; `null` con `PERSON_TYPE_UNDETERMINED` si no se puede determinar (en EP-4, en cambio, el representante sin tipo se omite) | `"LEGAL"` |
 | `shareholderName` | string \| null | Sí | **Texto original sin reordenar** | `"INVERSIONES AURORA LIMITADA"` |
 | `shareholderId` | string \| null | Sí | **Solo dígitos**; en RUT, RFC, CURP, INE, Pasaporte, VAT Number y Tax ID, letras y dígitos sin puntos, guiones ni espacios (el RUT conserva la K) | `"771112221"` |
 | `countryOfOrigin` | string \| null | Sí | Uno de los 238 nombres del Anexo A, con su grafía | `"Colombia"` |
+| `countryOfOriginCode` | string \| null | Sí | El código ISO-2 del mismo país, del Anexo A. `null` si el país no se reconoce | `"CO"` |
 | `identificationType` | string \| null | Sí | Declarado, o derivado del país y del tipo de persona | `"NIT"` |
 | `lastName` | string \| null | Sí | Partición; `null` en personas jurídicas | `null` |
 | `name` | string \| null | Sí | Partición; razón social en personas jurídicas | `"INVERSIONES AURORA LIMITADA"` |
@@ -233,7 +238,7 @@ análisis sirve:
 
 ### 3.3 Avisos
 
-Catálogo propio de LENS. Viajan en `warnings[]` con `reason`, `objectKey` y `message`.
+Catálogo propio de LENS. Viajan en `warnings[]` con `reason`, `objectKey`, `message`, `field` —la ruta del dato: `taxId`, `legalRepresentative.identificationNumber`, `document`…— y `subject` —la persona de la que es, por su nombre—. `field` y `subject` van en `null` cuando no aplican.
 
 | `reason` | Qué pasó |
 |---|---|

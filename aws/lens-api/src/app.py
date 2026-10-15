@@ -60,6 +60,7 @@ import errores
 import secretos
 import ingesta_s3
 import gemini
+import onboarding
 from extraccion import Presupuesto, extraer_texto
 
 logging.basicConfig()
@@ -254,6 +255,21 @@ def analizar(documentos: list[tuple[str, bytes]], incluir_texto: bool, pais_forz
 
     texto = "\n\n".join(textos)
 
+    # El modelo lee hasta `gemini.MAX_CARACTERES` y lo que sigue se corta. Con
+    # el tope de OCR subido, una escritura larga puede llegar ahí, y cortar en
+    # silencio es leer a medias sin decirlo. En la corrida de Onboarding se
+    # avisa, con el documento donde cae el corte.
+    if devolver_textos and len(texto) > gemini.MAX_CARACTERES:
+        acumulado = 0
+        for r in leidos:
+            if not (r.ok and r.texto):
+                continue
+            acumulado += len(r.texto) + 2
+            if acumulado > gemini.MAX_CARACTERES:
+                avisos.append(f"{r.nombre}: el texto supera el tope de lectura del modelo "
+                              f"({gemini.MAX_CARACTERES} caracteres) y lo que sigue a ese punto no se leyó.")
+                break
+
     # ── 2. País ──
     if pais_forzado:
         pais = pais_forzado.strip().lower()
@@ -269,16 +285,33 @@ def analizar(documentos: list[tuple[str, bytes]], incluir_texto: bool, pais_forz
             avisos.append(f"No se pudo detectar el país ({e}): se analizó sin contexto de jurisdicción.")
 
     # ── 3. Los 18 campos ──
-    try:
-        campos = (gemini.extraer_campos(texto, gemini.contexto_de(pais), limite=limite)
-                  if limite is not None else gemini.extraer_campos(texto, gemini.contexto_de(pais)))
-    except gemini.ErrorGemini as e:
-        if propagar_caida and isinstance(e, errores.ServicioNoDisponible):
-            raise
+    def pedir_campos() -> list[dict]:
+        if limite is not None:
+            return gemini.extraer_campos(texto, gemini.contexto_de(pais), limite=limite)
+        return gemini.extraer_campos(texto, gemini.contexto_de(pais))
+
+    # En la corrida de Onboarding, una respuesta inutilizable se pide una vez
+    # más antes de dar la extracción por fallida (AJ-07): leída de nuevo, casi
+    # siempre sale. Las rutas viejas, como siempre, con un solo intento.
+    intentos = 2 if propagar_caida else 1
+    campos: list[dict] | None = None
+    error = ""
+    for intento in range(1, intentos + 1):
+        try:
+            campos = pedir_campos()
+            break
+        except gemini.ErrorGemini as e:
+            if propagar_caida and isinstance(e, errores.ServicioNoDisponible):
+                raise
+            error = str(e)
+            if not isinstance(e, errores.ExtraccionFallida):
+                break
+            log.warning("los 18 campos: respuesta inutilizable en el intento %d (%s)", intento, e)
+    if campos is None:
         return {
             "ok": False,
             "estado": "ERROR",
-            "error": str(e),
+            "error": error,
             "pais_detectado": pais,
             "documentos": [r.a_dict() for r in leidos],
             "avisos": avisos,
@@ -559,7 +592,9 @@ def _extraer_socios(archivos, t0: float, propagar_caida: bool = False) -> tuple[
         socios, senales = (gemini.extraer_shareholders(docs, queda_tiempo, limite=t0 + PRESUPUESTO_S)
                            if propagar_caida else gemini.extraer_shareholders(docs, queda_tiempo))
     except gemini.ErrorGemini as e:
-        if propagar_caida and isinstance(e, errores.ServicioNoDisponible):
+        # En Onboarding, ni la caída ni la respuesta inutilizable son «faltan
+        # datos»: la corrida las ataja con su propia razón (AJ-04, AJ-07).
+        if propagar_caida and isinstance(e, (errores.ServicioNoDisponible, errores.ExtraccionFallida)):
             raise
         return vacio, [f"No se pudo extraer la composición societaria ({e})."]
     except Exception as e:  # noqa: BLE001
@@ -741,10 +776,26 @@ def _texto_para_companies(descargado, t0: float):
                          Presupuesto(limite_s=PRESUPUESTO_S, inicio=t0))
 
 
+#: El país del catálogo → la clave de su contexto de jurisdicción en el prompt.
+#: Desde el v3, EP-1 guarda el país normalizado del catálogo —«costa rica»,
+#: «estados unidos»— y el prompt usa sus propias claves —«costa_rica», «usa»—:
+#: sin esta tabla, esos países se leían con el contexto general.
+_CONTEXTO_POR_ISO: dict[str, str] = {}
+for _clave in gemini.CONTEXTO_POR_PAIS:
+    _iso = onboarding.codigo_pais(_clave)
+    if _iso:
+        _CONTEXTO_POR_ISO.setdefault(_iso, _clave)
+
+
+def clave_de_contexto(pais: str) -> str:
+    """«estados unidos», «US» o «usa» → «usa». Lo que no tiene contexto, igual."""
+    return _CONTEXTO_POR_ISO.get(onboarding.codigo_pais(pais) or "", pais)
+
+
 def _analizar_para_companies(documentos, incluir_texto, pais_forzado="", **opciones) -> dict:
     """`analizar` para la corrida de Onboarding: si Gemini no responde, lanza, y
     devuelve los textos para lo que se busca en ellos después."""
-    return analizar(documentos, incluir_texto, pais_forzado, propagar_caida=True,
+    return analizar(documentos, incluir_texto, clave_de_contexto(pais_forzado), propagar_caida=True,
                     devolver_textos=True, **opciones)
 
 

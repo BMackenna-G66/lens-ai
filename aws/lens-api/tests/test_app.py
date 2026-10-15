@@ -526,3 +526,80 @@ def test_sin_tiempo_para_los_socios_onboarding_lo_dice_como_servicio():
         app._socios_para_companies([doc], viejo)
     with pytest.raises(errores.ServicioNoDisponible, match="No quedó tiempo"):
         app._administracion_para_companies([doc], viejo)
+
+
+# ── AJ-07 · La respuesta inutilizable, según quién llama ────────────────────
+
+def _campos_ok(t, c, limite=None):
+    return [{"field": f, "value": "x"} for f in P.CAMPOS_PREDEFINIDOS]
+
+
+def test_en_onboarding_los_campos_se_piden_otra_vez_si_la_respuesta_no_sirve(monkeypatch):
+    llamadas = []
+
+    def una_vez_mal(t, c, limite=None):
+        llamadas.append(1)
+        if len(llamadas) == 1:
+            raise gemini.RespuestaInvalida("El modelo devolvió algo que no es JSON válido")
+        return _campos_ok(t, c)
+
+    monkeypatch.setattr(gemini, "extraer_campos", una_vez_mal)
+    r = app._analizar_para_companies([("e.txt", b"TEXTO")], False, "chile")
+    assert r["ok"] is True and len(llamadas) == 2
+
+
+def test_la_ruta_vieja_sigue_con_un_solo_intento(monkeypatch):
+    llamadas = []
+
+    def mal(t, c):
+        llamadas.append(1)
+        raise gemini.RespuestaInvalida("El modelo devolvió algo que no es JSON válido")
+
+    monkeypatch.setattr(gemini, "extraer_campos", mal)
+    r = app.analizar([("e.txt", b"TEXTO")], False, "chile")
+    assert r["ok"] is False and len(llamadas) == 1
+
+
+def test_los_socios_de_onboarding_dejan_pasar_la_respuesta_inutilizable(monkeypatch):
+    def mal(*_, **__):
+        raise gemini.RespuestaInvalida("La respuesta de shareholders no es JSON válido")
+
+    monkeypatch.setattr(gemini, "extraer_shareholders", mal)
+    doc = type("D", (), {"nombre": "e.pdf", "contenido": b"%PDF-1.4"})()
+    with pytest.raises(errores.ExtraccionFallida):
+        app._socios_para_companies([doc], __import__("time").monotonic())
+
+
+def test_el_tope_de_lectura_del_modelo_se_avisa_en_onboarding(monkeypatch):
+    monkeypatch.setattr(gemini, "extraer_campos", _campos_ok)
+    monkeypatch.setattr(gemini, "MAX_CARACTERES", 10)
+    r = app._analizar_para_companies([("e.txt", b"UN TEXTO BASTANTE MAS LARGO QUE DIEZ")], False, "chile")
+    assert any(a.startswith("e.txt: ") and "tope de lectura" in a for a in r["avisos"])
+
+
+# ── v3 · El país del catálogo, al contexto de jurisdicción del prompt ───────
+
+@pytest.mark.parametrize("pais,clave", [
+    ("costa rica", "costa_rica"), ("CR", "costa_rica"),
+    ("reino unido", "reino_unido"), ("colombia", "colombia"), ("CO", "colombia"),
+    ("islas caiman", "islas_caiman"), ("alemania", "alemania"),
+])
+def test_el_pais_normalizado_encuentra_su_contexto(pais, clave):
+    """Desde el v3 EP-1 guarda «costa rica» y el prompt usa «costa_rica»: sin la
+    traducción, esos países se leían con el contexto general."""
+    assert app.clave_de_contexto(pais) == clave
+
+
+@pytest.mark.parametrize("pais", ["estados unidos", "US", "EE. UU."])
+def test_estados_unidos_tiene_dos_claves_y_cualquiera_sirve(pais):
+    assert app.clave_de_contexto(pais) in ("eeuu", "usa")
+
+
+def test_todo_pais_con_contexto_lo_encuentra_por_su_nombre_del_catalogo():
+    for clave in gemini.CONTEXTO_POR_PAIS:
+        r = onboarding.resolver_pais(clave)
+        if r:
+            assert app.clave_de_contexto(onboarding.pais_normalizado(r[1])) in gemini.CONTEXTO_POR_PAIS
+
+
+import onboarding  # noqa: E402
