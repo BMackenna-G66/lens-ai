@@ -311,9 +311,12 @@ r = await correr(ENV, 'UNDER_COMPLIANCE_REVIEW', { comment: 'UCR_CRIMINAL_RISK',
 ok('resuelve el bloqueo OFAC', msc(r).some(l => l.met === 'PATCH' && l.u.includes('/6660001/')), msc(r).filter(l => l.met === 'PATCH').map(l => l.u));
 ok('y no anota nada mantenido', !paso(r).data.resumen?.ofacMantenido, paso(r).data.resumen);
 
-console.log('\n── 2e · Sin `cola` (una SPA vieja en caché) se trata como otra cola ──');
+console.log('\n── 2e · Sin `cola` (una pestaña con la SPA vieja) se FRENA y pide recargar ──');
+// Con esa versión, un «Liberar» de la cola OFAC dejaría al cliente bloqueado y
+// el caso cerrado como bueno. Ni siquiera se pide el token de Admin.
 r = await correr(ENV, 'UNDER_COMPLIANCE_REVIEW', { comment: 'UCR_CRIMINAL_RISK', cola: undefined });
-ok('NO resuelve el bloqueo OFAC', !msc(r).some(l => l.met === 'PATCH' && l.u.includes('/6660001/')));
+ok('responde un error que pide recargar', String(r.body.error || '').includes('recargá la página'), r.body);
+ok('y no toca Admin', r.llamadas.length === 0, r.llamadas.map(l => l.u));
 cmtCreado = 'COMPLIANCE_OFFICER_REQUEST'; statusCreado = 'BLOCKED';
 
 console.log('\n── 2e · «Liberar Normal» de otra cola: el OFAC queda y el cierre no miente ──');

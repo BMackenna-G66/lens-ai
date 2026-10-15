@@ -810,6 +810,14 @@ export default {
       };
       try { body = await request.json(); } catch { return jsonError('Body JSON inválido', 400, cors); }
 
+      // Sin `cola` el Worker no sabe si el cierre puede resolver bloqueos OFAC.
+      // Solo pasa con una pestaña abierta antes del 15-10-2026: con esa versión,
+      // un «Liberar» de la cola OFAC dejaría al cliente bloqueado y el caso
+      // cerrado como bueno. Se frena con un mensaje que dice qué hacer.
+      if (!String(body.cola ?? '').trim()) {
+        return jsonError('Esta versión de Lens está desactualizada: recargá la página (Cmd+Shift+R) y volvé a cerrar el caso.', 400, cors);
+      }
+
       const ids = (body.customerIds || []).map(x => String(x).trim()).filter(Boolean);
       const status = String(body.status || '').trim();
       const countryCode = String(body.countryCode || '').trim().toUpperCase();
