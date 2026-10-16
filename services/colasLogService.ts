@@ -104,6 +104,10 @@ async function enviar(eventos: Fila[], bufferizarSiFalla = true): Promise<Result
 }
 
 const ahora = (): string => new Date().toISOString().replace('T', ' ').slice(0, 23);
+// ISO de Firestore → TIMESTAMP de Redshift. La misma conversión que `_ts` del
+// respaldo diario (aws/colas-sync): si divergen, las claves dejan de coincidir.
+const aTimestamp = (iso?: string | null): string | null =>
+  iso ? String(iso).replace('T', ' ').replace('Z', '').slice(0, 23) : null;
 const num = (v: unknown): number | null => {
   const n = Number(String(v ?? '').trim());
   return Number.isFinite(n) && String(v ?? '').trim() !== '' ? n : null;
@@ -157,11 +161,21 @@ export interface CierreLog {
   lastStep?: boolean | null;
   httpStatus?: number | null;
   detalleError?: string | null;
+  /**
+   * Cuándo se cerró (ISO), si el que llama ya lo escribió en Firestore. Sirve
+   * para que `cierre_id` sea el MISMO que arma el respaldo diario a partir de
+   * `cierres.<canal>.en`: así el respaldo pisa esta fila en vez de duplicarla.
+   * Sin esto se usa la hora del log, como siempre.
+   */
+  en?: string | null;
 }
 
-export function logCierre(caso: CasoSF, cola: string, cierre: CierreLog, actor?: ActorLog): void {
-  const en = ahora();
-  void enviar([
+// Devuelve la promesa del envío para el que necesite esperarla (el Lambda del
+// flujo autónomo: si no espera, la invocación puede congelarse antes de que el
+// POST salga). La app la sigue usando fire-and-forget.
+export function logCierre(caso: CasoSF, cola: string, cierre: CierreLog, actor?: ActorLog): Promise<ResultadoEnvio> {
+  const en = aTimestamp(cierre.en) ?? ahora();
+  return enviar([
     filaCaso(caso, cola),
     ...filaAnalista(actor),
     {
@@ -309,8 +323,8 @@ export interface EventoLog {
   cambios?: unknown; metadata?: unknown;
 }
 
-export function logEvento(ev: EventoLog): void {
-  void enviar([{
+export function logEvento(ev: EventoLog): Promise<ResultadoEnvio> {
+  return enviar([{
     tabla: 'evento_auditoria',
     datos: {
       event_id: ev.eventId,
@@ -335,9 +349,6 @@ export function logEvento(ev: EventoLog): void {
 //
 // Es idempotente: las claves naturales se derivan de los timestamps guardados,
 // así que reprocesar no duplica (el logger hace DELETE + INSERT por clave).
-
-const aTimestamp = (iso?: string | null): string | null =>
-  iso ? String(iso).replace('T', ' ').replace('Z', '').slice(0, 23) : null;
 
 export interface EventoAuditoriaLeido {
   eventId?: string; numeroCaso?: string; tipo?: string; actorId?: string;
@@ -471,7 +482,7 @@ export function logLiberacionRemesa(
   row?: RemesaRowLog,
   screening?: ScreeningRemesaLog,
   actor?: ActorLog,
-): void {
+): Promise<ResultadoEnvio> {
   const en = ahora();
   const tx = texto(lib.transaccionId);
   const benef = texto(row?.beneficiary_name)
@@ -479,7 +490,7 @@ export function logLiberacionRemesa(
   const cats = categoriasSensibles(screening?.coincidencias);
   const monto = Number(row?.amount_usd);
 
-  void enviar([
+  return enviar([
     filaCaso(caso, 'remesa'),
     ...filaAnalista(actor),
     {

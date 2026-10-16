@@ -3,8 +3,8 @@ Sincronización diaria Firestore → Redshift (schema `colas_trabajo`).
 
 Corre sola todos los días: lee los casos de la Bandeja y su auditoría desde
 Firestore y los escribe en Redshift. Existe porque el cluster se pausa de noche
-(22:30–08:00 UTC) y lo que la app manda en esa ventana se pierde: este job lo
-recupera sin que nadie tenga que apretar un botón.
+(22:30–08:00 UTC) y los fines de semana, y lo que se manda en esa ventana se
+pierde: este job lo recupera sin que nadie tenga que apretar un botón.
 
 Es INDEPENDIENTE de las otras dos Lambdas (casos-receptor y colas-logger): stack
 propio, función propia, rol propio y código propio. Está inspirado en el receptor
@@ -13,6 +13,38 @@ pero no comparte código con él.
 
 Idempotente: cada tabla se reescribe por clave natural (DELETE + INSERT), así que
 correrlo de más nunca duplica.
+
+── Por qué es INCREMENTAL (15-10-2026) ──────────────────────────────────────
+La primera versión leía TODO —cada caso y la subcolección `auditoria` de cada
+uno, en serie— a memoria, y recién después escribía. Con 1.491 casos entraba;
+con ~8.600 dejó de entrar: timeout de 600 s todos los días hábiles desde el
+06-09-2026 y, desde el 10-10, además sin memoria (512 MB). No escribió una fila
+en 39 días y nadie se enteró, porque no había alarma.
+
+Ahora:
+  · Marca de agua en Firestore (`config/colasSyncDiario`): solo se procesa lo
+    que cambió desde la última corrida buena —los casos por su `updateTime`,
+    los eventos por su `timestamp`—, con una hora de solape.
+  · Se escribe POR TANDAS mientras se lee, y la marca avanza tanda por tanda: si
+    la corrida se queda sin tiempo, la siguiente sigue desde ahí. Un atraso de
+    semanas se recupera solo en unas pocas corridas.
+  · La auditoría se lee de UNA consulta collection group, no caso por caso.
+  · Cluster no disponible (pausa de noche o de fin de semana) NO es un error:
+    se registra y la marca no se mueve. Sí lo es si dura más de
+    `DIAS_TOLERANCIA`: ahí la alarma tiene que sonar.
+  · Cualquier otra falla termina en excepción → métrica Errors → alarma
+    (`template.yaml`).
+
+── Cierres automáticos ──────────────────────────────────────────────────────
+Un cierre es automático si su canal dice `por: 'flujo-autonomo'` (lo escribe el
+Lambda lens-flujo-autonomo en cada cierre) o si el caso tiene un evento
+`CIERRE_AUTOMATICO` (lo escribe el motor del navegador). Antes se miraba solo el
+evento, y el Lambda no lo escribía: sus ~7.000 cierres habrían quedado con
+`automatico` en NULL.
+
+Y un cierre que YA está en Redshift por el camino en vivo con otra clave (la app
+usa la hora del log, no la del cierre) no se vuelve a insertar: ver
+`_sql_insertar_cierres`.
 """
 
 import base64
@@ -20,7 +52,10 @@ import json
 import logging
 import os
 import time
+import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -31,7 +66,29 @@ CLUSTER = os.environ.get("REDSHIFT_CLUSTER", "compliance-redshift-cluster")
 DATABASE = os.environ.get("REDSHIFT_DATABASE", "dev")
 DB_USER = os.environ.get("REDSHIFT_DB_USER", "awsuser")
 SCHEMA = os.environ.get("REDSHIFT_SCHEMA", "colas_trabajo")
-FILAS_POR_LOTE = int(os.environ.get("FILAS_POR_LOTE", "40"))
+
+# Documento de estado: la marca de agua y el resultado de la última corrida.
+# Lo escribe SOLO este job.
+ESTADO_DOC = os.environ.get("ESTADO_DOC", "config/colasSyncDiario")
+# Primera corrida sin marca: cuántos días hacia atrás.
+DIAS_SIN_MARCA = int(os.environ.get("DIAS_SIN_MARCA", "7"))
+# Solape con la corrida anterior. Reescribir de más es gratis (idempotente);
+# perder lo que cambió en el borde, no.
+SOLAPE = timedelta(minutes=int(os.environ.get("SOLAPE_MIN", "60")))
+# Cuántos días puede no haber cluster antes de que eso pase a ser un error. Un
+# fin de semana largo son 3: con 4 no suena por una pausa normal.
+DIAS_TOLERANCIA = int(os.environ.get("DIAS_TOLERANCIA", "4"))
+
+# La Data API acepta hasta 100 KB por statement: se arma por TAMAÑO, no por
+# cantidad de filas (un evento con metadata pesa diez veces lo que un caso).
+MAX_SQL_BYTES = int(os.environ.get("MAX_SQL_BYTES", "60000"))
+# Statements en paralelo. La cuota es de 500 ACTIVOS por cuenta y la comparten
+# el logger y quien consulte; cada hilo espera el suyo antes de lanzar otro.
+CONCURRENCIA = int(os.environ.get("CONCURRENCIA", "4"))
+CASOS_POR_TANDA = int(os.environ.get("CASOS_POR_TANDA", "400"))
+EVENTOS_POR_TANDA = int(os.environ.get("EVENTOS_POR_TANDA", "1500"))
+# Lo que se deja libre al final para guardar el estado y salir prolijo.
+RESERVA_S = int(os.environ.get("RESERVA_S", "60"))
 
 # Tablas destino: (clave natural, {columna: tipo}). Mismo contrato que el logger.
 TABLAS = {
@@ -52,8 +109,19 @@ TABLAS = {
         "cambios": "json", "metadata": "json"}),
 }
 
+POR_FLUJO = "flujo-autonomo"
+ACTOR_SISTEMA = ("system", "Flujo automático")
+
+
+class ClusterNoDisponible(Exception):
+    """El cluster está pausado o reanudándose. No es una falla del job."""
+
 
 # ── Firestore ────────────────────────────────────────────────────────────────
+_BASE = (f"https://firestore.googleapis.com/v1/projects/{FIRESTORE_PROJECT}"
+         f"/databases/(default)/documents")
+
+
 def _access_token() -> str:
     """Token de la service account (mismo mecanismo que el receptor)."""
     from google.oauth2 import service_account
@@ -70,6 +138,14 @@ def _access_token() -> str:
         info, scopes=["https://www.googleapis.com/auth/datastore"])
     creds.refresh(gtr.Request())
     return creds.token
+
+
+def _http(tok: str, metodo: str, url: str, cuerpo=None):
+    data = json.dumps(cuerpo).encode() if cuerpo is not None else None
+    req = urllib.request.Request(url, data=data, method=metodo, headers={
+        "Authorization": f"Bearer {tok}", "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return json.loads(r.read() or b"null")
 
 
 def _val(v):
@@ -90,25 +166,98 @@ def _val(v):
     return None
 
 
-def _listar(tok: str, path: str) -> list:
-    docs, nxt = [], None
+def _cabeceras_casos(tok: str) -> list:
+    """(nombre completo, updateTime) de TODOS los casos, sin traer los datos.
+
+    La máscara deja un solo campo: lo que interesa es el `updateTime` del
+    documento, que Firestore cambia con CUALQUIER escritura —screening, cierre,
+    estado—. Es la forma de saber qué cambió sin depender de que cada camino de
+    escritura se acuerde de tocar un campo `actualizadoEn`."""
+    out, nxt = [], None
     while True:
-        url = (f"https://firestore.googleapis.com/v1/projects/{FIRESTORE_PROJECT}"
-               f"/databases/(default)/documents/{path}?pageSize=300")
+        url = f"{_BASE}/{FIRESTORE_COLLECTION}?pageSize=500&mask.fieldPaths=numeroCaso"
         if nxt:
             url += f"&pageToken={nxt}"
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {tok}"})
-        with urllib.request.urlopen(req, timeout=60) as r:
-            d = json.loads(r.read())
-        docs.extend(d.get("documents", []))
+        d = _http(tok, "GET", url)
+        out.extend((doc["name"], doc.get("updateTime", "")) for doc in d.get("documents", []))
         nxt = d.get("nextPageToken")
         if not nxt:
-            return docs
+            return out
+
+
+def _traer_casos(tok: str, nombres: list) -> list:
+    """Documentos completos, de a 100 por pedido. Los borrados se saltean."""
+    docs = []
+    for i in range(0, len(nombres), 100):
+        r = _http(tok, "POST", f"{_BASE}:batchGet", {"documents": nombres[i:i + 100]})
+        docs.extend(x["found"] for x in (r or []) if x.get("found"))
+    return docs
+
+
+def _eventos(tok: str):
+    """TODA la auditoría, en una consulta collection group paginada por nombre.
+
+    Sin filtro a propósito: filtrar por `timestamp` en collection group exige un
+    índice que no existe (y que no vive en el repo). Ordenar por `__name__` no
+    necesita ninguno. Son ~12.500 documentos chicos: ~13 páginas."""
+    ultimo = None
+    while True:
+        q = {"from": [{"collectionId": "auditoria", "allDescendants": True}],
+             "orderBy": [{"field": {"fieldPath": "__name__"}, "direction": "ASCENDING"}],
+             "limit": 1000}
+        if ultimo:
+            q["startAt"] = {"values": [{"referenceValue": ultimo}], "before": False}
+        filas = [x["document"] for x in (_http(tok, "POST", f"{_BASE}:runQuery",
+                                              {"structuredQuery": q}) or []) if x.get("document")]
+        if not filas:
+            return
+        yield from filas
+        ultimo = filas[-1]["name"]
+        if len(filas) < 1000:
+            return
+
+
+def _leer_estado(tok: str) -> dict:
+    try:
+        d = _http(tok, "GET", f"{_BASE}/{ESTADO_DOC}")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return {}
+        raise
+    return {k: _val(v) for k, v in (d.get("fields") or {}).items()}
+
+
+def _guardar_estado(tok: str, estado: dict) -> None:
+    """Pisa el documento entero: es una foto, no un acumulado (como el latido
+    del flujo autónomo). Solo strings, enteros y booleanos."""
+    def a_valor(v):
+        if isinstance(v, bool):
+            return {"booleanValue": v}
+        if isinstance(v, int):
+            return {"integerValue": str(v)}
+        if v is None:
+            return {"nullValue": None}
+        return {"stringValue": str(v)[:1500]}
+    _http(tok, "PATCH", f"{_BASE}/{ESTADO_DOC}",
+          {"fields": {k: a_valor(v) for k, v in estado.items()}})
 
 
 # ── Armado de filas ──────────────────────────────────────────────────────────
 def _ts(v):
     return str(v).replace("T", " ").replace("Z", "").strip()[:23] if v else None
+
+
+def _iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:23] + "Z"
+
+
+def _parse_iso(s):
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        return None
 
 
 def _cola(asunto: str) -> str:
@@ -118,7 +267,14 @@ def _cola(asunto: str) -> str:
     return "remesa" if "DETIENE TX" in a.upper() else "otros"
 
 
-def _filas_de_caso(doc: dict, eventos: list) -> dict:
+def _caso_de_evento(nombre: str) -> str:
+    # .../documents/casos_sf/{caso}/auditoria/{evento}
+    partes = nombre.split("/")
+    return partes[-3] if len(partes) >= 3 else ""
+
+
+def _filas_de_caso(doc: dict, auto_por_evento: bool = False) -> dict:
+    """Filas de caso, screening y cierre de UN caso. Puro."""
     f = {k: _val(v) for k, v in (doc.get("fields") or {}).items()}
     cid = doc["name"].split("/")[-1]
     datos = f.get("datos") or {}
@@ -129,7 +285,12 @@ def _filas_de_caso(doc: dict, eventos: list) -> dict:
     asunto = str(f.get("asunto") or datos.get("Asunto") or "")
     idi = datos.get("Id interno del usuario")
 
-    out = {t: [] for t in TABLAS}
+    out = {t: [] for t in ("caso", "screening", "cierre")}
+    # Un documento sin datos del caso (p. ej. el que recreó un `set(merge)` sobre
+    # un caso ya borrado) no es un caso: no se espeja.
+    if not f.get("numeroCaso") and not f.get("asunto") and not datos:
+        return out
+
     out["caso"].append({
         "numero_caso": numero, "caso_id": cid, "cola": _cola(asunto), "asunto": asunto,
         "nombre_cuenta": f.get("nombreCuenta"), "pais": pais,
@@ -149,54 +310,140 @@ def _filas_de_caso(doc: dict, eventos: list) -> dict:
                 "decision": sc.get("decision"), "delitos_unicos": sc.get("delitosUnicos"),
                 "es_pep": sc.get("pep"), "screened_en": en})
 
-    # Auditoría completa del caso.
-    auto = False
-    for ev in eventos:
-        e = {k: _val(v) for k, v in (ev.get("fields") or {}).items()}
-        if e.get("tipo") == "CIERRE_AUTOMATICO":
-            auto = True
-        if not e.get("eventId"):
-            continue
-        out["evento_auditoria"].append({
-            "event_id": e["eventId"], "numero_caso": e.get("numeroCaso") or numero,
-            "tipo": e.get("tipo") or "DESCONOCIDO", "actor_id": e.get("actorId"),
-            "actor_tipo": e.get("actorTipo"), "ocurrido_en": _ts(e.get("timestamp")),
-            "correlation_id": e.get("correlationId"), "version_caso": e.get("versionCaso"),
-            "cambios": e.get("cambios"), "metadata": e.get("metadata")})
-
-    # Cierres por canal. Si hubo CIERRE_AUTOMATICO, el actor es el flujo; si no,
-    # se deja en NULL (no se inventa quién cerró).
+    # Cierres por canal. Automático = lo dice el canal (`por`) o un evento
+    # CIERRE_AUTOMATICO del caso. Si no, el actor queda en NULL: no se inventa
+    # quién cerró.
     for canal in ("sf", "admin"):
         c = (f.get("cierres") or {}).get(canal) or {}
-        if c.get("ok") is True:
-            en = _ts(c.get("en")) or _ts(f.get("recibidoEn")) or "1970-01-01 00:00:00"
-            out["cierre"].append({
-                "cierre_id": f"{numero}|{canal.upper()}|{en}", "numero_caso": numero,
-                "canal": canal.upper(), "resultado_ok": True,
-                "automatico": True if auto else None, "tipologia": c.get("tipologia"),
-                "actor_id": "system" if auto else None,
-                "actor_nombre": "Flujo automático" if auto else None,
-                "actor_tipo": "SYSTEM" if auto else None, "ocurrido_en": en})
+        if c.get("ok") is not True:
+            continue
+        auto = c.get("por") == POR_FLUJO or auto_por_evento
+        en = _ts(c.get("en")) or _ts(f.get("recibidoEn")) or "1970-01-01 00:00:00"
+        out["cierre"].append({
+            "cierre_id": f"{numero}|{canal.upper()}|{en}", "numero_caso": numero,
+            "canal": canal.upper(), "resultado_ok": True,
+            "automatico": True if auto else None, "tipologia": c.get("tipologia"),
+            "actor_id": ACTOR_SISTEMA[0] if auto else None,
+            "actor_nombre": ACTOR_SISTEMA[1] if auto else None,
+            "actor_tipo": "SYSTEM" if auto else None, "ocurrido_en": en})
     return out
 
 
+def _fila_evento(ev: dict) -> dict | None:
+    e = {k: _val(v) for k, v in (ev.get("fields") or {}).items()}
+    if not e.get("eventId"):
+        return None
+    return {
+        "event_id": e["eventId"], "numero_caso": e.get("numeroCaso") or _caso_de_evento(ev["name"]),
+        "tipo": e.get("tipo") or "DESCONOCIDO", "actor_id": e.get("actorId"),
+        "actor_tipo": e.get("actorTipo"), "ocurrido_en": _ts(e.get("timestamp")),
+        "correlation_id": e.get("correlationId"), "version_caso": e.get("versionCaso"),
+        "cambios": e.get("cambios"), "metadata": e.get("metadata")}
+
+
 # ── Redshift ─────────────────────────────────────────────────────────────────
-def _lit(v, tipo: str) -> str:
-    """Valor → literal SQL. Las comillas simples se duplican (escape estándar)."""
+_CAST = {"bool": "BOOLEAN", "int": "INTEGER", "ts": "TIMESTAMP", "json": "SUPER", "": "VARCHAR"}
+
+
+def _lit(v, tipo: str, tipado: bool = False) -> str:
+    """Valor → literal SQL. Las comillas simples se duplican (escape estándar).
+
+    `tipado` castea también los NULL: hace falta en un SELECT ... UNION ALL,
+    donde un NULL suelto no tiene tipo y Redshift lo resolvería como texto."""
     if v is None or v == "":
-        return "NULL"
+        return f"NULL::{_CAST[tipo]}" if tipado else "NULL"
     if tipo == "bool":
         return "TRUE" if v else "FALSE"
     if tipo == "int":
         try:
             return str(int(v))
         except (TypeError, ValueError):
-            return "NULL"
+            return f"NULL::{_CAST[tipo]}" if tipado else "NULL"
     if tipo == "json":
         txt = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
         return "JSON_PARSE('" + txt.replace("'", "''") + "')"
     s = str(v).replace("'", "''")
-    return f"'{s}'::TIMESTAMP" if tipo == "ts" else f"'{s}'"
+    if tipo == "ts":
+        return f"'{s}'::TIMESTAMP"
+    return f"'{s}'::VARCHAR" if tipado else f"'{s}'"
+
+
+def _sql_de(tabla: str, lote: list) -> str:
+    return _sql_insertar_cierres(lote) if tabla == "cierre" else _sql_insertar(tabla, lote)
+
+
+def _trozos(tabla: str, rows: list) -> list:
+    """Parte las filas en lotes cuyo SQL no pase de MAX_SQL_BYTES.
+
+    El peso de cada fila se mide con el MISMO armador que se va a usar: el de
+    cierres (SELECT … UNION ALL con casts y alias) pesa el doble por fila que un
+    VALUES, y estimarlo con el de VALUES dio statements de 118 KB contra un
+    límite de 100 KB. El primer renglón de cada lote paga el encabezado; los
+    siguientes, solo lo que suman (la diferencia exacta entre armar el lote con
+    la fila repetida y sin repetir)."""
+    lotes, actual, peso = [], [], 0
+    for r in rows:
+        p = len(_sql_de(tabla, [r]).encode())
+        if p > MAX_SQL_BYTES:
+            # Una fila sola que no entra (un evento con una metadata enorme): se
+            # recortan sus columnas JSON y se dice, en vez de que la Data API
+            # rechace el lote entero y la corrida falle todos los días.
+            _, cols = TABLAS[tabla]
+            r = {**r, **{c: {"truncado": True, "bytes": p} for c, t in cols.items() if t == "json" and r.get(c)}}
+            logger.warning("fila de %s recortada: %s bytes (%s)", tabla, p, r.get(TABLAS[tabla][0]))
+            p = len(_sql_de(tabla, [r]).encode())
+        extra = len(_sql_de(tabla, [r, r]).encode()) - p
+        if actual and peso + extra > MAX_SQL_BYTES:
+            lotes.append(actual)
+            actual, peso = [], 0
+        actual.append(r)
+        peso += p if len(actual) == 1 else extra
+    if actual:
+        lotes.append(actual)
+    return lotes
+
+
+def _sql_borrar(tabla: str, lote: list) -> str:
+    pk, _ = TABLAS[tabla]
+    claves = ", ".join(_lit(r.get(pk), "") for r in lote)
+    return f"DELETE FROM {SCHEMA}.{tabla} WHERE {pk} IN ({claves})"
+
+
+def _sql_insertar(tabla: str, lote: list) -> str:
+    _, cols = TABLAS[tabla]
+    tuplas = ", ".join(
+        "(" + ", ".join(_lit(r.get(c), t) for c, t in cols.items()) + ")" for r in lote)
+    return f"INSERT INTO {SCHEMA}.{tabla} ({', '.join(cols)}) VALUES {tuplas}"
+
+
+def _sql_insertar_cierres(lote: list) -> str:
+    """INSERT de cierres que NO duplica los que ya entraron en vivo.
+
+    El camino en vivo de la app arma `cierre_id` con la hora del LOG, y este job
+    con la hora del CIERRE (`cierres.<canal>.en`): son el mismo cierre con dos
+    claves. El DELETE por clave no los junta, así que el INSERT se saltea los
+    cierres que ya tienen una fila ok para el mismo caso y canal.
+
+    Los del flujo autónomo usan la MISMA clave en vivo y acá (ver
+    `logCierreAutonomo` en el Lambda): el DELETE previo los borra y entran de
+    nuevo, así que se pisan en vez de saltearse.
+
+    Límite conocido: un caso que se cerró, se reabrió y se volvió a cerrar por
+    el mismo canal conserva solo el primer cierre en Redshift."""
+    _, cols = TABLAS["cierre"]
+    nombres = ", ".join(cols)
+    selects = " UNION ALL ".join(
+        "SELECT " + ", ".join(f"{_lit(r.get(c), t, tipado=True)} AS {c}" for c, t in cols.items())
+        for r in lote)
+    return (f"INSERT INTO {SCHEMA}.cierre ({nombres}) SELECT {nombres} FROM ({selects}) v "
+            f"WHERE NOT EXISTS (SELECT 1 FROM {SCHEMA}.cierre c WHERE c.numero_caso = v.numero_caso "
+            f"AND c.canal = v.canal AND c.resultado_ok = TRUE)")
+
+
+def _es_cluster_no_disponible(e: Exception) -> bool:
+    m = str(e)
+    return ("is not available" in m or "ClusterNotFound" in m or "is resuming" in m
+            or "Connection refused" in m or "cluster is paused" in m.lower())
 
 
 def _ejecutar(client, sql: str, intentos: int = 6):
@@ -209,62 +456,172 @@ def _ejecutar(client, sql: str, intentos: int = 6):
                 ClusterIdentifier=CLUSTER, Database=DATABASE, DbUser=DB_USER, Sql=sql)["Id"]
             break
         except Exception as e:                                       # noqa: BLE001
+            if _es_cluster_no_disponible(e):
+                raise ClusterNoDisponible(str(e)[:200]) from e
             if ("ActiveStatementsExceeded" in str(e) or "Throttling" in str(e)) and n < intentos - 1:
                 time.sleep(min(2 ** n, 16) + random.random())
                 continue
             raise
-    for _ in range(120):
+    for _ in range(600):
         d = client.describe_statement(Id=sid)
         if d["Status"] in ("FINISHED", "FAILED", "ABORTED"):
             if d["Status"] != "FINISHED":
-                raise RuntimeError(f"{d['Status']}: {d.get('Error', '')[:300]}")
+                err = d.get("Error", "")
+                if _es_cluster_no_disponible(RuntimeError(err)):
+                    raise ClusterNoDisponible(err[:200])
+                raise RuntimeError(f"{d['Status']}: {err[:300]}")
             return
-        time.sleep(0.5)
+        time.sleep(0.3)
     raise RuntimeError("timeout esperando el statement")
 
 
-def _escribir(filas: dict) -> dict:
-    import boto3
+def _escribir(client, filas: dict) -> dict:
+    """DELETE + INSERT por lote, varios lotes en paralelo. Devuelve filas por tabla."""
+    tareas = []
+    for tabla in TABLAS:
+        for lote in _trozos(tabla, filas.get(tabla) or []):
+            tareas.append((tabla, len(lote), _sql_borrar(tabla, lote), _sql_de(tabla, lote)))
 
-    client = boto3.client("redshift-data")
+    def correr(t):
+        _ejecutar(client, t[2])
+        _ejecutar(client, t[3])
+        return t[0], t[1]
+
     resumen = {}
-    for tabla, (pk, cols) in TABLAS.items():
-        rows = filas.get(tabla) or []
-        if not rows:
-            continue
-        columnas = ", ".join(cols)
-        escritas = 0
-        for i in range(0, len(rows), FILAS_POR_LOTE):
-            lote = rows[i:i + FILAS_POR_LOTE]
-            claves = ", ".join(_lit(r.get(pk), "") for r in lote)
-            tuplas = ", ".join(
-                "(" + ", ".join(_lit(r.get(c), t) for c, t in cols.items()) + ")" for r in lote)
-            _ejecutar(client, f"DELETE FROM {SCHEMA}.{tabla} WHERE {pk} IN ({claves})")
-            _ejecutar(client, f"INSERT INTO {SCHEMA}.{tabla} ({columnas}) VALUES {tuplas}")
-            escritas += len(lote)
-        resumen[tabla] = escritas
-        logger.info("%s: %s filas", tabla, escritas)
+    with ThreadPoolExecutor(max_workers=CONCURRENCIA) as ex:
+        for tabla, n in ex.map(correr, tareas):
+            resumen[tabla] = resumen.get(tabla, 0) + n
     return resumen
 
 
-def lambda_handler(event, _context):
+# ── Corrida ──────────────────────────────────────────────────────────────────
+def _desde(estado: dict, clave: str, ahora: datetime) -> datetime:
+    """Desde cuándo procesar: la marca menos el solape; sin marca, los últimos
+    DIAS_SIN_MARCA días."""
+    marca = _parse_iso(estado.get(clave))
+    return (marca - SOLAPE) if marca else ahora - timedelta(days=DIAS_SIN_MARCA)
+
+
+def lambda_handler(event, context):
+    event = event if isinstance(event, dict) else {}
+    import boto3
+
     inicio = time.time()
+    ahora = datetime.now(timezone.utc)
+    restante = (lambda: context.get_remaining_time_in_millis() / 1000) if context else (lambda: 10 ** 9)
     tok = _access_token()
-    casos = _listar(tok, FIRESTORE_COLLECTION)
-    logger.info("casos en Firestore: %s", len(casos))
+    estado = _leer_estado(tok)
 
-    filas = {t: [] for t in TABLAS}
-    for doc in casos:
-        cid = doc["name"].split("/")[-1]
-        try:
-            eventos = _listar(tok, f"{FIRESTORE_COLLECTION}/{cid}/auditoria")
-        except Exception:                                            # noqa: BLE001
-            eventos = []
-        for tabla, rows in _filas_de_caso(doc, eventos).items():
-            filas[tabla].extend(rows)
+    # Backfill: NO se procesa en esta invocación, solo se mueve la marca hacia
+    # atrás. Las corridas siguientes recuperan desde ahí, tanda por tanda.
+    # Si la fecha viajara en cada invocación, un reintento automático volvería a
+    # arrancar desde el principio en vez de seguir desde donde quedó.
+    reinicio = _parse_iso(event.get("reiniciarMarca"))
+    if reinicio:
+        estado.update({"marcaCasos": _iso(reinicio), "marcaEventos": _iso(reinicio),
+                       "marcaReiniciadaEn": _iso(ahora)})
+        _guardar_estado(tok, estado)
+        logger.info("marca reiniciada a %s", _iso(reinicio))
+        return {"ok": True, "marcaReiniciada": _iso(reinicio)}
 
-    resumen = _escribir(filas)
-    salida = {"ok": True, "casos": len(casos), "escritas": resumen,
-              "segundos": round(time.time() - inicio, 1)}
+    client = boto3.client("redshift-data")
+
+    # Se toca el cluster ANTES de leer Firestore: si está pausado, no tiene
+    # sentido leer 20.000 documentos para nada.
+    try:
+        _ejecutar(client, "SELECT 1")
+    except ClusterNoDisponible as e:
+        ultima = _parse_iso(estado.get("ultimaOkEn"))
+        dias = (ahora - ultima).days if ultima else None
+        _guardar_estado(tok, {**estado, "ultimoIntentoEn": _iso(ahora), "ultimoResultado": "cluster_no_disponible",
+                              "ultimoError": str(e)[:300]})
+        if dias is not None and dias >= DIAS_TOLERANCIA:
+            # Una pausa normal dura una noche o un fin de semana. Más que eso ya
+            # no es una pausa: se lanza para que suene la alarma.
+            raise RuntimeError(f"cluster sin responder y respaldo atrasado {dias} días: {e}") from e
+        logger.warning("cluster no disponible: no es un error, se reintenta mañana (%s)", e)
+        return {"ok": True, "omitido": "cluster_no_disponible"}
+
+    desde_casos = _desde(estado, "marcaCasos", ahora)
+    desde_eventos = _desde(estado, "marcaEventos", ahora)
+    resumen = {"caso": 0, "cierre": 0, "screening": 0, "evento_auditoria": 0}
+    pendiente = None
+
+    def guardar(resultado: str, error: str | None = None):
+        if resultado == "ok":
+            # Todo lo que cambió hasta el ARRANQUE quedó escrito: la marca pasa a
+            # ser el arranque (lo que cambió durante la corrida entra por el solape).
+            estado.update({"marcaCasos": _iso(ahora), "marcaEventos": _iso(ahora), "ultimaOkEn": _iso(ahora)})
+        _guardar_estado(tok, {
+            **estado, "ultimoIntentoEn": _iso(ahora), "ultimoResultado": resultado,
+            "ultimoError": error, "resumen": json.dumps(resumen)})
+
+    try:
+        # 1) Eventos. Primero, porque de ellos sale qué casos tienen un
+        #    CIERRE_AUTOMATICO, que hace falta para marcar los cierres.
+        con_auto, nuevos = set(), []
+        for ev in _eventos(tok):
+            e = ev.get("fields") or {}
+            if _val(e.get("tipo")) == "CIERRE_AUTOMATICO":
+                con_auto.add(_caso_de_evento(ev["name"]))
+            ts = _parse_iso(_val(e.get("timestamp")))
+            if ts is None or ts >= desde_eventos:
+                nuevos.append((ts or ahora, ev))
+        nuevos.sort(key=lambda x: x[0])
+        logger.info("eventos a escribir: %s (desde %s)", len(nuevos), _iso(desde_eventos))
+
+        for i in range(0, len(nuevos), EVENTOS_POR_TANDA):
+            if restante() < RESERVA_S:
+                pendiente = f"eventos: faltan {len(nuevos) - i}"
+                break
+            tanda = nuevos[i:i + EVENTOS_POR_TANDA]
+            filas = [f for f in (_fila_evento(ev) for _, ev in tanda) if f]
+            r = _escribir(client, {"evento_auditoria": filas})
+            resumen["evento_auditoria"] += r.get("evento_auditoria", 0)
+            # La marca avanza tanda por tanda: si la corrida se corta, la que
+            # viene arranca desde acá y no desde el principio.
+            estado["marcaEventos"] = _iso(tanda[-1][0])
+            guardar("en_curso")
+
+        # 2) Casos que cambiaron, por `updateTime`, del más viejo al más nuevo.
+        if pendiente is None:
+            cab = [(n, _parse_iso(u)) for n, u in _cabeceras_casos(tok)]
+            cambiados = sorted(((u or ahora), n) for n, u in cab if u is None or u >= desde_casos)
+            logger.info("casos en Firestore: %s · cambiados desde %s: %s",
+                        len(cab), _iso(desde_casos), len(cambiados))
+            for i in range(0, len(cambiados), CASOS_POR_TANDA):
+                if restante() < RESERVA_S:
+                    pendiente = f"casos: faltan {len(cambiados) - i}"
+                    break
+                tanda = cambiados[i:i + CASOS_POR_TANDA]
+                filas = {"caso": [], "screening": [], "cierre": []}
+                for doc in _traer_casos(tok, [n for _, n in tanda]):
+                    cid = doc["name"].split("/")[-1]
+                    for t, rows in _filas_de_caso(doc, cid in con_auto).items():
+                        filas[t].extend(rows)
+                for t, n in _escribir(client, filas).items():
+                    resumen[t] += n
+                estado["marcaCasos"] = _iso(tanda[-1][0])
+                guardar("en_curso")
+    except ClusterNoDisponible as e:
+        # Se pausó a mitad de camino. Lo escrito queda; la marca quedó donde
+        # llegó. Mismo criterio que arriba: no es un error.
+        guardar("cluster_no_disponible", str(e)[:300])
+        logger.warning("el cluster se fue a mitad de la corrida: %s", e)
+        return {"ok": True, "omitido": "cluster_no_disponible", "escritas": resumen}
+    except Exception as e:                                           # noqa: BLE001
+        guardar("error", f"{type(e).__name__}: {str(e)[:280]}")
+        raise
+
+    if pendiente:
+        guardar("incompleta", pendiente)
+        # Se lanza a propósito: Lambda reintenta solo (invocación asíncrona) y
+        # cada reintento sigue desde la marca. Si igual no alcanza, suena la
+        # alarma, que es lo que tiene que pasar con un atraso que no se recupera.
+        raise RuntimeError(f"sin tiempo, la corrida siguiente continúa ({pendiente}): {json.dumps(resumen)}")
+
+    guardar("ok")
+    salida = {"ok": True, "escritas": resumen, "desdeCasos": _iso(desde_casos),
+              "desdeEventos": _iso(desde_eventos), "segundos": round(time.time() - inicio, 1)}
     logger.info("sincronización lista: %s", json.dumps(salida))
     return salida

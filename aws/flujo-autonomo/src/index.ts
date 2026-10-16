@@ -22,7 +22,7 @@
 import { EventBridgeClient, EnableRuleCommand, DisableRuleCommand, DescribeRuleCommand }
   from '@aws-sdk/client-eventbridge';
 import { initializeApp, cert, type App } from 'firebase-admin/app';
-import { getFirestore, type Firestore } from 'firebase-admin/firestore';
+import { getFirestore, FieldPath, type Firestore, type DocumentSnapshot } from 'firebase-admin/firestore';
 
 import { screenCaso, esScreenable } from '../../../services/casosCriminalService';
 import { evaluarCasoAuto, statusDeCaso, statusTrasCierre, normalizarFlujoConfig } from '../../../services/flujoDecision';
@@ -42,6 +42,8 @@ import { buscarEnWhitelist, normalizarWhitelist, motivoWhitelistLegible, WHITELI
   from '../../../services/whitelistClientes';
 import type { WhitelistClientes } from '../../../services/whitelistClientes';
 import type { CasoSF } from '../../../services/casosService';
+import { logCierre, logEvento, logLiberacionRemesa, ACTOR_SISTEMA } from '../../../services/colasLogService';
+import type { ResultadoEnvio } from '../../../services/colasLogService';
 
 // ── Configuración de la corrida ─────────────────────────────────────────────
 const COLECCION = process.env.FIRESTORE_COLLECTION || 'casos_sf';
@@ -307,7 +309,34 @@ const screeningVigente = (s: unknown): boolean => {
 // siguiente vuelve a ser barata.
 const ESTADOS = ['ABIERTO', 'GESTIONANDO', 'CERRADO'];
 
-async function leerCasosAbiertos(): Promise<{ casos: CasoSF[]; lecturas: number; modo: string }> {
+// ── Por qué la consulta acotada va SIEMPRE (15-10-2026) ────────────────────
+// Hasta hoy, si UN documento no tenía el campo, se abandonaba la consulta por
+// `statusCaso` y se leía «completo»… con tope de `TOPE_CASOS * 4` documentos en
+// orden de id. Con ~10.000 casos, los 2.000 primeros son todos viejos y estaban
+// cerrados: la cola salía VACÍA. Pasó de 16:20 a 19:45 UTC por un único
+// documento sin datos (ver `escribirEnCaso`), con 331 casos abiertos esperando.
+//
+// Ahora la consulta acotada se hace siempre, y lo que falta se busca APARTE:
+//   · los abiertos con el campo salen de la consulta, haya lo que haya;
+//   · si hay documentos sin el campo, un barrido COMPLETO y liviano (solo tres
+//     campos, de a 1.000, por id ascendente) los encuentra; los que son casos
+//     se traen enteros, se curan y se suman a la cola;
+//   · los que no tienen ni número ni asunto no se curan —no hay de qué derivar
+//     el estado— y se avisan en el resumen. Un faltante se ve; ya no vacía la
+//     cola.
+//
+// Por qué completo y no "los más nuevos": ordenar por id DESCENDENTE pide un
+// índice que no existe en el proyecto (y los índices no viven en el repo).
+// Ascendente no pide ninguno. Son ~10.400 lecturas y ~7 s, y solo mientras haya
+// un documento sin el campo: los casos se curan en la primera pasada, así que
+// lo que lo sostiene es un huérfano, y ese queda avisado en cada corrida.
+//
+// El receptor de Salesforce escribe `statusCaso: 'ABIERTO'` al crear el caso
+// (`aws/casos-receptor`, create-only); el barrido es la red para los demás
+// caminos de entrada, como el import desde la app.
+const esHuerfano = (d: Record<string, unknown>): boolean => !d.numeroCaso && !d.asunto;
+
+async function leerCasosAbiertos(): Promise<{ casos: CasoSF[]; lecturas: number; modo: string; aviso?: string }> {
   const col = db().collection(COLECCION);
   const [total, conCampo] = await Promise.all([
     col.count().get().then(r => r.data().count),
@@ -315,34 +344,51 @@ async function leerCasosAbiertos(): Promise<{ casos: CasoSF[]; lecturas: number;
   ]);
   const sinCampo = total - conCampo;
 
-  if (sinCampo === 0) {
-    const snap = await col.where('statusCaso', 'in', ['ABIERTO', 'GESTIONANDO']).limit(TOPE_CASOS).get();
-    // Se reconcilia también acá: un caso con los dos canales cerrados y el campo en
-    // ABIERTO tiene que salir de la cola, y esta consulta lo trae igual.
-    const arreglos = await reconciliar(snap.docs);
-    const casos = snap.docs.map(d => ({ ...(d.data() as object), id: d.id } as CasoSF))
-      .filter(c => statusTrasCierre(c.cierres, c.statusCaso, !!c.asignacion?.analistaId) !== 'CERRADO');
-    return {
-      casos,
-      lecturas: snap.size + 2,          // + los dos count
-      modo: arreglos.desfasados
-        ? `consulta acotada · ${arreglos.desfasados} desfasado(s) corregido(s)`
-        : 'consulta acotada',
-    };
+  const snap = await col.where('statusCaso', 'in', ['ABIERTO', 'GESTIONANDO']).limit(TOPE_CASOS).get();
+  // Se reconcilia también acá: un caso con los dos canales cerrados y el campo en
+  // ABIERTO tiene que salir de la cola, y esta consulta lo trae igual.
+  const arreglos = await reconciliar(snap.docs);
+  const porId = new Map<string, CasoSF>(snap.docs.map(d => [d.id, { ...(d.data() as object), id: d.id } as CasoSF]));
+  let lecturas = snap.size + 2;          // + los dos count
+  const partes = [arreglos.desfasados ? `${arreglos.desfasados} desfasado(s) corregido(s)` : ''];
+  let aviso: string | undefined;
+
+  if (sinCampo > 0) {
+    const sin: DocumentSnapshot[] = [];
+    let ultimo: DocumentSnapshot | undefined;
+    for (;;) {
+      let q = col.orderBy(FieldPath.documentId()).select('statusCaso', 'numeroCaso', 'asunto').limit(1000);
+      if (ultimo) q = q.startAfter(ultimo);
+      const pag = await q.get();
+      lecturas += pag.size;
+      sin.push(...pag.docs.filter(d => typeof d.data().statusCaso !== 'string'));
+      if (pag.size < 1000) break;
+      ultimo = pag.docs[pag.docs.length - 1];
+    }
+    const huerfanos = sin.filter(d => esHuerfano(d.data() ?? {}));
+    const aCurar = sin.filter(d => !esHuerfano(d.data() ?? {}));
+    // El barrido trajo tres campos: para curar y procesar hace falta el caso entero.
+    const enteros = aCurar.length ? (await db().getAll(...aCurar.map(d => d.ref))).filter(d => d.exists) : [];
+    lecturas += enteros.length;
+    const curados = await reconciliar(enteros);
+    for (const d of enteros) {
+      if (!porId.has(d.id)) porId.set(d.id, { ...(d.data() as object), id: d.id } as CasoSF);
+    }
+    partes.push(`barrido: ${curados.sinCampo} sin statusCaso curado(s)`);
+    if (huerfanos.length) {
+      aviso = `${huerfanos.length} documento(s) en ${COLECCION} sin statusCaso NI datos del caso `
+        + '(no se curan: no hay de qué derivar el estado). La cola se procesa igual, pero cada corrida '
+        + 'barre la colección entera hasta que se revisen a mano.';
+    }
   }
 
-  // Hay casos sin el campo: se lee completo para no saltearlos, y se les escribe
-  // el estado derivado con la misma función que usa la app.
-  const snap = await col.limit(TOPE_CASOS * 4).get();
-  const casos = snap.docs.map(d => ({ ...(d.data() as object), id: d.id } as CasoSF));
-
-  const arreglos = await reconciliar(snap.docs);
-
+  const casos = [...porId.values()]
+    .filter(c => statusTrasCierre(c.cierres, c.statusCaso, !!c.asignacion?.analistaId) !== 'CERRADO');
   return {
-    casos: casos.filter(c => statusTrasCierre(c.cierres, c.statusCaso, !!c.asignacion?.analistaId) !== 'CERRADO')
-      .slice(0, TOPE_CASOS),
-    lecturas: snap.size + 2,
-    modo: `lectura completa · ${arreglos.sinCampo} sin statusCaso, ${arreglos.desfasados} desfasados`,
+    casos,
+    lecturas,
+    modo: ['consulta acotada', ...partes.filter(Boolean)].join(' · '),
+    aviso,
   };
 }
 
@@ -359,24 +405,28 @@ async function leerCasosAbiertos(): Promise<{ casos: CasoSF[]; lecturas: number;
 //
 // Solo se corrige HACIA CERRADO. Nunca al revés: bajar un status podría devolver a
 // la cola un caso que alguien cerró a mano.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function reconciliar(docs: any[]): Promise<{ sinCampo: number; desfasados: number }> {
-  let batch = db().batch(), enBatch = 0, sinCampo = 0, desfasados = 0;
+//
+// `update` y no `set(merge)`, de a uno: si el caso se borró entre la lectura y
+// esta escritura, `update` falla con NOT_FOUND y se saltea. `set(merge)` lo
+// habría RECREADO con un solo campo (ver `escribirEnCaso`). Y no en batch: un
+// batch es atómico, y un caso borrado tumbaría la corrección de todos.
+async function reconciliar(docs: DocumentSnapshot[]): Promise<{ sinCampo: number; desfasados: number }> {
+  let sinCampo = 0, desfasados = 0;
+  const cambios: Array<{ d: DocumentSnapshot; nuevo: string }> = [];
   for (const d of docs) {
-    const data = d.data() as Record<string, unknown> & CasoSF;
+    const data = (d.data() ?? {}) as Record<string, unknown> & CasoSF;
     const guardado = typeof data.statusCaso === 'string' ? data.statusCaso : '';
     const real = statusTrasCierre(data.cierres, guardado || undefined, !!data.asignacion?.analistaId);
 
     let nuevo: string | null = null;
     if (!guardado) { nuevo = statusDeCaso({ ...(data as object), id: d.id } as CasoSF); sinCampo++; }
     else if (guardado !== 'CERRADO' && real === 'CERRADO') { nuevo = 'CERRADO'; desfasados++; }
-    if (!nuevo) continue;
-
-    batch.set(d.ref, { statusCaso: nuevo }, { merge: true });
-    enBatch++;
-    if (enBatch >= 400) { await batch.commit(); batch = db().batch(); enBatch = 0; }
+    if (nuevo) cambios.push({ d, nuevo });
   }
-  if (enBatch > 0) await batch.commit();
+  for (let i = 0; i < cambios.length; i += 50) {
+    await Promise.all(cambios.slice(i, i + 50).map(({ d, nuevo }) =>
+      d.ref.update({ statusCaso: nuevo }).catch(e => { if (!esNoExiste(e)) throw e; })));
+  }
   return { sinCampo, desfasados };
 }
 
@@ -392,7 +442,7 @@ async function correrBackfill(): Promise<Record<string, unknown>> {
     const data = d.data() as Record<string, unknown>;
     if (typeof data.statusCaso === 'string' && data.statusCaso) { yaTenian++; continue; }
     const derivado = statusDeCaso({ ...(data as object), id: d.id } as CasoSF);
-    batch.set(d.ref, { statusCaso: derivado }, { merge: true });
+    batch.update(d.ref, { statusCaso: derivado });
     escritos++; enBatch++;
     if (enBatch >= TOPE_BATCH) { await batch.commit(); batch = db().batch(); enBatch = 0; }
   }
@@ -414,10 +464,44 @@ async function correrBackfill(): Promise<Record<string, unknown>> {
 // screening con cualquier campo opcional vacío tira la escritura entera. Apareció
 // en la primera corrida real, con `screeningBeneficiario.mensaje` en undefined.
 const limpio = <T>(v: T): T => JSON.parse(JSON.stringify(v));
+
+// ── Escribir en un caso SIN resucitarlo ─────────────────────────────────────
+// `set(…, { merge: true })` CREA el documento si no existe. Si un analista borra
+// el caso en la Bandeja mientras una corrida lo tiene en memoria, la escritura
+// siguiente lo recrea con un solo campo: sin numeroCaso, sin asunto, sin
+// statusCaso. Pasó el 15-10-2026 a las 16:16 UTC con el `screeningBeneficiario`
+// de una remesa, y ese documento vació la cola autónoma durante 3,5 horas (ver
+// `leerCasosAbiertos`).
+//
+// Se mantiene la semántica de merge —el screening se fusiona como siempre—,
+// pero dentro de una transacción que primero comprueba que el caso exista.
+// Cuesta una lectura por escritura, y las escrituras son pocas por corrida.
+//
+// Un caso borrado NO es un error de la corrida: se saltea y se dice (ver el
+// `catch` por caso en `correr`).
+class CasoBorrado extends Error {
+  /** Canal que se alcanzó a cerrar antes de notar el borrado, si hubo. */
+  constructor(readonly caseId: string, readonly trasCierre?: string) {
+    super(`el caso ${caseId} se eliminó de la Bandeja durante la corrida`
+      + (trasCierre ? ` (después de cerrar ${trasCierre})` : ''));
+  }
+}
+
+const esNoExiste = (e: unknown): boolean =>
+  (e as { code?: number | string })?.code === 5 || /NOT_FOUND|No document to update/i.test(String((e as Error)?.message ?? e));
+
+async function escribirEnCaso(caseId: string, datos: Record<string, unknown>): Promise<void> {
+  const ref = db().collection(COLECCION).doc(caseId);
+  await db().runTransaction(async tx => {
+    if (!(await tx.get(ref)).exists) throw new CasoBorrado(caseId);
+    tx.set(ref, limpio(datos), { merge: true });
+  });
+}
+
 async function guardarScreening(caseId: string, screening: unknown): Promise<void> {
-  await db().collection(COLECCION).doc(caseId).set(limpio({
+  await escribirEnCaso(caseId, {
     screening: { ...(screening as object), schemaVersion: SCREENING_SCHEMA, screenedAt: new Date().toISOString() },
-  }), { merge: true });
+  });
 }
 
 // Además del canal, se escribe `statusCaso`. Antes solo se escribía `cierres` y el
@@ -435,13 +519,16 @@ async function guardarCierre(
   ok: boolean,
   tipologia: string,
   detalle?: string,
+  en: string = new Date().toISOString(),
 ): Promise<void> {
   const ref = db().collection(COLECCION).doc(caseId);
   await db().runTransaction(async tx => {
-    const prev = ((await tx.get(ref)).data() ?? {}) as Record<string, unknown>;
+    const snap = await tx.get(ref);
+    if (!snap.exists) throw new CasoBorrado(caseId, ok ? canal : undefined);
+    const prev = (snap.data() ?? {}) as Record<string, unknown>;
     const cierres = {
       ...((prev.cierres ?? {}) as Record<string, unknown>),
-      [canal]: { ok, tipologia, en: new Date().toISOString(), detalle: detalle ?? null, por: 'flujo-autonomo' },
+      [canal]: { ok, tipologia, en, detalle: detalle ?? null, por: 'flujo-autonomo' },
     };
     // `statusTrasCierre`, NO `statusDeCaso`: acá los canales tienen que mandar
     // sobre el valor guardado. Con `statusDeCaso` el status quedaba como estaba y
@@ -454,6 +541,88 @@ async function guardarCierre(
     );
     tx.set(ref, limpio({ cierres, statusCaso: status, actualizadoEn: new Date().toISOString() }), { merge: true });
   });
+}
+
+// ── Espejo en Redshift (colas_trabajo) ──────────────────────────────────────
+// Hasta el 15-10-2026 este Lambda cerraba casos SOLO en Firestore: no llamaba al
+// logger, así que sus ~7.000 cierres no estaban en `colas_trabajo.cierre`, y el
+// respaldo diario —la otra vía— llevaba desde el 06-09 sin correr. Ahora cada
+// cierre ok se manda en vivo, igual que lo hace el motor del navegador, con
+// `automatico = true` y el actor del sistema.
+//
+// La clave del cierre usa el MISMO `en` que se guardó en Firestore: el respaldo
+// diario arma `cierre_id` desde `cierres.<canal>.en`, así que si este envío
+// falla (cluster pausado de noche o el fin de semana) el respaldo escribe
+// exactamente la misma fila después, y si no falló, la pisa sin duplicarla.
+// Ese respaldo ES el reintento: acá no hay localStorage donde guardar pendientes.
+//
+// Nunca frena un cierre: se espera con tope y cualquier falla se cuenta y sigue.
+let espejo = { escritas: 0, fallidas: 0 };
+
+async function espejar(p: Promise<ResultadoEnvio>): Promise<void> {
+  try {
+    const r = await conTope(p, 15000, 'espejo en Redshift');
+    espejo.escritas += r.escritas;
+    espejo.fallidas += r.fallidas;
+  } catch {
+    espejo.fallidas++;
+  }
+}
+
+/**
+ * Guarda el cierre del canal en el caso y, si salió bien, lo espeja en Redshift.
+ *
+ * Si el caso se borró en el medio, el cierre en Salesforce o Admin YA ocurrió:
+ * se espeja igual (pasó y tiene que quedar registrado) y recién después se
+ * avisa que el caso no existe.
+ */
+async function registrarCierre(
+  caso: CasoSF,
+  cola: 'ofac' | 'remesa',
+  canal: 'sf' | 'admin',
+  ok: boolean,
+  tipologia: string,
+  detalle: string | undefined,
+  extra: { statusEnviado?: string; ofacFlag?: boolean; lastStep?: boolean } = {},
+): Promise<void> {
+  const en = new Date().toISOString();
+  let borrado: CasoBorrado | null = null;
+  try {
+    await guardarCierre(caso.id, canal, ok, tipologia, detalle, en);
+  } catch (e) {
+    if (!(e instanceof CasoBorrado)) throw e;
+    borrado = e;
+  }
+  if (ok) {
+    await espejar(logCierre(caso, cola, {
+      canal: canal === 'sf' ? 'SF' : 'ADMIN', ok: true, automatico: true, tipologia, en, ...extra,
+    }, ACTOR_SISTEMA));
+  }
+  if (borrado) throw borrado;
+}
+
+/**
+ * Evento CIERRE_AUTOMATICO en la auditoría del caso, con su espejo en Redshift.
+ * Misma forma que el que escribe el motor del navegador (`registrarAuditoria`
+ * en caseAuditService, que no corre acá porque usa el SDK web).
+ *
+ * `add` en la subcolección NO crea el documento padre: un caso borrado no
+ * resucita por esto.
+ */
+async function auditarCierreAutomatico(caseId: string, metadata: Record<string, unknown>): Promise<void> {
+  const evento = {
+    tipo: 'CIERRE_AUTOMATICO', actorId: ACTOR_SISTEMA.uid, actorTipo: 'SYSTEM',
+    correlationId: caseId, versionCaso: 1,
+    metadata: { ...metadata, origen: 'lens-flujo-autonomo' },
+    eventId: crypto.randomUUID(), numeroCaso: caseId, timestamp: new Date().toISOString(),
+  };
+  try {
+    await db().collection(COLECCION).doc(caseId).collection('auditoria').add(limpio(evento));
+  } catch (e) {
+    console.log('AUDITORIA ' + JSON.stringify({ caseId, error: (e as Error).message }));
+    return;
+  }
+  await espejar(logEvento(evento));
 }
 
 // LATIDO. Un documento ÚNICO que se sobreescribe en cada invocación, corra o no.
@@ -519,6 +688,7 @@ async function procesar(caso: CasoSF, cfg: FlujoOfacConfig): Promise<ResultadoCa
       screening = (await screenCaso(caso)) as unknown as Record<string, unknown>;
       await guardarScreening(caso.id, screening);
     } catch (e) {
+      if (e instanceof CasoBorrado) throw e;
       // Un fallo del proveedor NO es "sin coincidencias": el caso queda como
       // estaba y se reintenta en la corrida siguiente.
       return { ...base, accion: 'error', motivo: `screening: ${(e as Error).message}` };
@@ -556,9 +726,12 @@ async function procesar(caso: CasoSF, cfg: FlujoOfacConfig): Promise<ResultadoCa
             out.sf = r.ok ? 'ok' : 'error';
             if (!r.ok) out.motivo = r.errors?.join('; ') ?? `HTTP ${r.status ?? 0}`;
             await marcarEnvioSF(caso.id, firma, !!r.ok, out.motivo);
-            await guardarCierre(caso.id, 'sf', !!r.ok, ev.tipologia, out.motivo);
+            await registrarCierre(caso, 'ofac', 'sf', !!r.ok, ev.tipologia, out.motivo);
           }
-        } catch (e) { out.sf = 'error'; out.motivo = (e as Error).message; }
+        } catch (e) {
+          if (e instanceof CasoBorrado) throw e;
+          out.sf = 'error'; out.motivo = (e as Error).message;
+        }
       }
     }
   }
@@ -587,9 +760,13 @@ async function procesar(caso: CasoSF, cfg: FlujoOfacConfig): Promise<ResultadoCa
           if (!r.ok) out.motivo = out.motivo ?? r.error ?? 'Admin rechazó el cierre';
           // El resumen del paso 2 va al caso: sin él no se veía desde Lens si
           // se había creado el bloqueo propio.
-          await guardarCierre(caso.id, 'admin', !!r.ok, ev.tipologia,
-            [resumenAdmin(r), r.ok ? null : out.motivo].filter(Boolean).join(' · ') || undefined);
-        } catch (e) { out.admin = 'error'; out.motivo = out.motivo ?? (e as Error).message; }
+          await registrarCierre(caso, 'ofac', 'admin', !!r.ok, ev.tipologia,
+            [resumenAdmin(r), r.ok ? null : out.motivo].filter(Boolean).join(' · ') || undefined,
+            { statusEnviado: tipo.status, ofacFlag: ofacFlagDe(tipo), lastStep: tipo.lastStepDefault });
+        } catch (e) {
+          if (e instanceof CasoBorrado) throw e;
+          out.admin = 'error'; out.motivo = out.motivo ?? (e as Error).message;
+        }
       }
     }
   }
@@ -606,6 +783,16 @@ async function procesar(caso: CasoSF, cfg: FlujoOfacConfig): Promise<ResultadoCa
   // Ningún canal pedido: el flujo está configurado para no cerrar nada. No es
   // un cierre ni un error — se registra como retenido con su motivo.
   if (canales.length === 0) { out.accion = 'retenido'; out.motivo = 'sin canales de cierre habilitados'; }
+
+  // Traza en la auditoría del caso, como la deja el motor del navegador: con
+  // ella el respaldo diario y la ficha distinguen un cierre automático de uno
+  // manual.
+  if (canales.length > 0) {
+    await auditarCierreAutomatico(caso.id, {
+      cola: 'ofac', tipologia: ev.tipologia, decision: (screening as { decision?: string } | undefined)?.decision ?? null,
+      sf: out.sf, admin: out.admin, detalle: out.motivo ?? null,
+    });
+  }
 
   return out;
 }
@@ -650,7 +837,9 @@ async function reservarEnvioSF(caseId: string, payload: unknown): Promise<string
   const firma = hashCorto(`${caseId}|${JSON.stringify(payload)}`);
   const ref = db().collection(COLECCION).doc(caseId);
   return db().runTransaction(async tx => {
-    const prev = ((await tx.get(ref)).data() ?? {}).respuestaSalesforce as
+    const snap = await tx.get(ref);
+    if (!snap.exists) throw new CasoBorrado(caseId);
+    const prev = (snap.data() ?? {}).respuestaSalesforce as
       { estado?: string; idempotencyKey?: string; intentos?: number; ultimoIntentoEn?: string } | undefined;
     // ENVIANDO VENCE. Si una corrida murió entre reservar y enviar —timeout, OOM,
     // el Lambda cortado— el caso quedaba en ENVIANDO para siempre y NUNCA volvía a
@@ -676,14 +865,22 @@ async function reservarEnvioSF(caseId: string, payload: unknown): Promise<string
   });
 }
 
+// Si el caso se borró después de enviar, no hay dónde marcar el envío y no
+// importa: es la guarda de idempotencia de un caso que ya no está. Se sigue,
+// para que `registrarCierre` espeje el cierre —que en Salesforce sí ocurrió— y
+// recién ahí avise del borrado.
 async function marcarEnvioSF(caseId: string, firma: string, ok: boolean, error?: string): Promise<void> {
-  await db().collection(COLECCION).doc(caseId).set(limpio({
-    respuestaSalesforce: {
-      estado: ok ? 'ENVIADA' : 'ERROR', idempotencyKey: firma,
-      completadoEn: ok ? new Date().toISOString() : null,
-      codigoError: error ?? null,
-    },
-  }), { merge: true });
+  try {
+    await escribirEnCaso(caseId, {
+      respuestaSalesforce: {
+        estado: ok ? 'ENVIADA' : 'ERROR', idempotencyKey: firma,
+        completadoEn: ok ? new Date().toISOString() : null,
+        codigoError: error ?? null,
+      },
+    });
+  } catch (e) {
+    if (!(e instanceof CasoBorrado)) throw e;
+  }
 }
 
 // ── El cron, prendido y apagado desde la app ────────────────────────────────
@@ -871,10 +1068,11 @@ async function procesarRemesa(
         tipoDniCliente: tipoDniDelCliente(caso as never),
         samePersonActivo: cfg.samePerson === true,
       })) as unknown as Record<string, unknown>;
-      await db().collection(COLECCION).doc(caso.id).set(limpio({
+      await escribirEnCaso(caso.id, {
         screeningBeneficiario: { ...screening, schemaVersion: SCREENING_SCHEMA, screenedAt: new Date().toISOString() },
-      }), { merge: true });
+      });
     } catch (e) {
+      if (e instanceof CasoBorrado) throw e;
       return { ...base, accion: 'error', motivo: `screening beneficiario: ${(e as Error).message}` };
     }
   }
@@ -909,8 +1107,12 @@ async function procesarRemesa(
         } as never);
         out.admin = r.ok ? 'ok' : 'error';
         if (!r.ok) out.motivo = r.error ?? 'Admin rechazó la liberación';
-        await guardarCierre(caso.id, 'admin', !!r.ok, ev.tipologia, out.motivo ?? porWhitelist);
-      } catch (e) { out.admin = 'error'; out.motivo = (e as Error).message; }
+        await registrarCierre(caso, 'remesa', 'admin', !!r.ok, ev.tipologia, out.motivo ?? porWhitelist,
+          { statusEnviado: tipo.statusDB });
+      } catch (e) {
+        if (e instanceof CasoBorrado) throw e;
+        out.admin = 'error'; out.motivo = (e as Error).message;
+      }
     }
   }
 
@@ -948,9 +1150,12 @@ async function procesarRemesa(
           out.sf = r.ok ? 'ok' : 'error';
           if (!r.ok) out.motivo = out.motivo ?? (r.errors?.join('; ') ?? `HTTP ${r.status ?? 0}`);
           await marcarEnvioSF(caso.id, firma, !!r.ok, out.motivo);
-          await guardarCierre(caso.id, 'sf', !!r.ok, ev.tipologia, out.motivo ?? porWhitelist);
+          await registrarCierre(caso, 'remesa', 'sf', !!r.ok, ev.tipologia, out.motivo ?? porWhitelist);
         }
-      } catch (e) { out.sf = 'error'; out.motivo = out.motivo ?? (e as Error).message; }
+      } catch (e) {
+        if (e instanceof CasoBorrado) throw e;
+        out.sf = 'error'; out.motivo = out.motivo ?? (e as Error).message;
+      }
     }
   }
 
@@ -959,6 +1164,35 @@ async function procesarRemesa(
   const algunoOk = canales.some(c => c === 'ok' || c === 'ya_cerrado');
   out.accion = canales.length === 0 ? 'retenido' : algunoOk ? 'cerrado' : 'error';
   if (canales.length === 0) out.motivo = 'sin canales de cierre habilitados';
+
+  // Espejo de la liberación, igual que el motor del navegador: la tabla
+  // `liberacion_remesa` guarda la transacción, el monto y la evidencia del
+  // screening que la respaldó.
+  if (canales.length > 0) {
+    const tx = extraerRemesa(caso.asunto);
+    await espejar(logLiberacionRemesa(caso, {
+      transaccionId: tx || null, tipologia: tipo.id, automatico: true,
+      adminOk: out.admin === 'ok' || out.admin === 'ya_cerrado',
+      sfOk: out.sf === 'ok' || out.sf === 'ya_cerrado',
+      estadoNuevo: out.admin === 'ok' ? tipo.statusDB : null,
+      requestedBy: 'flujo-autonomo', detalleError: out.motivo ?? null,
+    }, fila as never, screening as never, ACTOR_SISTEMA));
+    // La traza en la auditoría, SOLO por whitelist —mismo criterio que el
+    // navegador—: una remesa liberada sin consultar a nadie, por una excepción
+    // cargada a mano, tiene que decir quién la cargó.
+    if (ev.whitelist) {
+      const w = ev.whitelist;
+      await auditarCierreAutomatico(caso.id, {
+        cola: 'remesa', tipologia: tipo.id, transaccion: tx || null,
+        sf: out.sf, admin: out.admin, detalle: out.motivo ?? null,
+        whitelist: {
+          por: w.por, valor: w.valor, motivo: w.entrada.motivo,
+          referencia: w.entrada.referencia || null,
+          agregadoPor: w.entrada.agregadoPor, agregadoEn: w.entrada.agregadoEn || null,
+        },
+      });
+    }
+  }
   return out;
 }
 
@@ -1065,6 +1299,19 @@ export async function handler(evento?: unknown, contexto?: ContextoLambda): Prom
   }
 }
 
+// Lo que queda de un caso cuyo procesamiento lanzó. Un caso BORRADO en la
+// Bandeja mientras la corrida lo tenía en memoria no es un error de la corrida:
+// se saltea y se dice. Si alcanzó a cerrarse un canal antes de notarlo, cuenta
+// como cerrado —el cierre en Salesforce o Admin ocurrió— y el motivo lo aclara.
+function resultadoDeExcepcion(c: CasoSF, e: unknown): ResultadoCaso {
+  const base = { caseId: c.id, numeroCaso: c.numeroCaso };
+  if (e instanceof CasoBorrado) {
+    console.log('CASO_ELIMINADO ' + JSON.stringify({ caseId: c.id, trasCierre: e.trasCierre ?? null }));
+    return { ...base, accion: e.trasCierre ? 'cerrado' : 'retenido', motivo: 'caso_eliminado_durante_la_corrida' };
+  }
+  return { ...base, accion: 'error', motivo: (e as Error).message };
+}
+
 async function correr(
   arranque: number,
   restante: () => number,
@@ -1076,6 +1323,7 @@ async function correr(
   // dejaría de significar algo. (El CACHÉ de la lista sí conviene que sobreviva:
   // se invalida solo cuando cambia `actualizadoEn`.)
   wlLecturas = 0;
+  espejo = { escritas: 0, fallidas: 0 };
   // Lo que cuesta llegar hasta acá y que `leerCasosAbiertos` no cuenta: el
   // candado, la config, la cabecera de la whitelist y el sondeo. Se suma para
   // que el resumen diga la verdad sobre lo que costó la corrida.
@@ -1152,7 +1400,8 @@ async function correr(
   const cfgDe = (c: ConfigNormalizada | null) => (c ?? normalizarFlujoConfig(undefined)).cfg;
 
   const log: string[] = [];
-  const { casos: abiertos, lecturas, modo } = await leerCasosAbiertos();
+  const { casos: abiertos, lecturas, modo, aviso } = await leerCasosAbiertos();
+  if (aviso) log.push(aviso);
   // El ASUNTO manda en qué cola va cada caso y las colas no se mezclan: misma
   // regla que la app, misma función.
   const casos = abiertos.filter(c => clasificarCola(c.asunto) === 'ofac');
@@ -1178,9 +1427,7 @@ async function correr(
 
     const lote = casos.slice(i, i + LOTE);
     const hechos = await Promise.all(lote.map(c =>
-      procesar(c, cfgDe(conf).ofac).catch(e => ({
-        caseId: c.id, numeroCaso: c.numeroCaso, accion: 'error' as const, motivo: (e as Error).message,
-      }))));
+      procesar(c, cfgDe(conf).ofac).catch(e => resultadoDeExcepcion(c, e))));
     resultados.push(...hechos);
   }
 
@@ -1226,9 +1473,8 @@ async function correr(
 
       const lote = aProcesar.slice(i, i + LOTE);
       const hechos = await Promise.all(lote.map(c =>
-        procesarRemesa(c, filas[extraerRemesa(c.asunto)], cfgDe(conf).remesa, baseCaida, wl).catch(e => ({
-          caseId: c.id, numeroCaso: c.numeroCaso, accion: 'error' as const, motivo: (e as Error).message,
-        }))));
+        procesarRemesa(c, filas[extraerRemesa(c.asunto)], cfgDe(conf).remesa, baseCaida, wl)
+          .catch(e => resultadoDeExcepcion(c, e))));
       resultadosRemesa.push(...hechos);
     }
   }
@@ -1289,6 +1535,9 @@ async function correr(
         }, {}),
       detalle: resultadosRemesa,
     },
+    // Lo que se mandó a Redshift (colas_trabajo) en vivo. Las fallidas no se
+    // pierden: el respaldo diario las reescribe desde Firestore con la misma clave.
+    espejoRedshift: espejo,
     cortadoPorTiempo,
     apagadoEnVuelo,
     // Vacío = el doc de config estaba completo. Con algo adentro, esos campos se
