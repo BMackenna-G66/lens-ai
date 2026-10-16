@@ -48,6 +48,10 @@ function sembrar() {
   store.set(`${C}/90000010`, ofac('90000010'));
   store.set(`${C}/90000011`, ofac('90000011'));     // se borra a mitad de la corrida
   store.set(`${C}/90000014`, ofac('90000014'));     // Salesforce y Admin lo rechazan
+  store.set(`${C}/90000015`, {                      // remesa: Salesforce y Admin la rechazan
+    numeroCaso: '90000015', asunto: 'DETIENE TX 777002', pais: 'Chile', statusCaso: 'ABIERTO',
+    screeningBeneficiario: { schemaVersion: 3, estado: 'ok', flujo: 'CL', samePerson: true },
+  });
   store.set(`${C}/90000012`, {
     numeroCaso: '90000012', asunto: 'DETIENE TX 777001', pais: 'Chile', statusCaso: 'ABIERTO',
     screeningBeneficiario: { schemaVersion: 3, estado: 'ok', flujo: 'CL', samePerson: true },
@@ -75,13 +79,16 @@ globalThis.fetch = async (url, init = {}) => {
   if (String(url).endsWith('/salesforce/case-update')) {
     // El analista borra el caso 90000011 en la Bandeja justo mientras se cierra.
     if (body.CaseNumber === '90000011') store.delete(`${C}/90000011`);
-    if (body.CaseNumber === '90000014') return json({ success: false, errors: ['FIELD_CUSTOM_VALIDATION_EXCEPTION'] });
+    if (body.CaseNumber === '90000014' || body.CaseNumber === '90000015') return json({ success: false, errors: ['FIELD_CUSTOM_VALIDATION_EXCEPTION'] });
     return json({ success: true });
   }
   if (String(url).endsWith('/admin/customer-status') && body.customerIds?.[0] === '555014') return json({ ok: false, error: 'rechazado' }, 422);
   if (String(url).endsWith('/admin/customer-status')) return json({ ok: true, results: [{ customerId: body.customerIds?.[0], ok: true, steps: {} }] });
+  if (String(url).endsWith('/admin/transaction-status') && body.transactionIds?.includes('777002')) return json({ ok: false, error: 'rechazada' }, 422);
   if (String(url).endsWith('/admin/transaction-status')) return json({ ok: true, results: [{ transactionId: '777001', ok: true }] });
-  if (String(url).includes('/remesas/search')) return json({ rows: [{ transaction_id: 777001, beneficiary_name: 'Beneficiaria Prueba', amount_usd: 100 }] });
+  if (String(url).includes('/remesas/search')) return json({ rows: [
+    { transaction_id: 777001, beneficiary_name: 'Beneficiaria Prueba', amount_usd: 100 },
+    { transaction_id: 777002, beneficiary_name: 'Beneficiario Prueba', amount_usd: 250 }] });
   throw new Error(`fetch no esperado: ${url}`);
 };
 
@@ -97,7 +104,7 @@ const prueba = (nombre, fn) => { fn(); ok++; console.log('  ✓', nombre); };
 console.log('Cola con un documento huérfano:');
 prueba('la cola NO sale vacía: ve los 4 OFAC y la remesa', () => {
   assert.equal(r.casosEnCola, 4, JSON.stringify({ modo: r.modoLectura, avisos: r.avisos }));
-  assert.equal(r.remesa.enCola, 1);
+  assert.equal(r.remesa.enCola, 2);
 });
 prueba('un caso de verdad sin statusCaso se cura, entra a la cola y se procesa', () => {
   assert.ok(r.detalle.some(x => x.caseId === '90000013' && x.accion === 'cerrado'));
@@ -168,6 +175,11 @@ prueba('con los dos canales fallando NO se escribe CIERRE_AUTOMATICO (288 por d�
   assert.equal(r.detalle.find(x => x.caseId === '90000014').accion, 'error');
   assert.equal([...store.keys()].filter(k => k.startsWith(`${C}/90000014/auditoria/`)).length, 0);
   assert.ok(!logs.some(l => l.tabla === 'cierre' && l.datos.numero_caso === '90000014'));
+});
+prueba('remesa con los dos canales fallando: SIN fila de liberación (el dashboard la sumaría como plata liberada)', () => {
+  assert.equal(r.remesa.detalle.find(x => x.caseId === '90000015').accion, 'error');
+  assert.ok(!logs.some(l => l.tabla === 'liberacion_remesa' && l.datos.numero_caso === '90000015'));
+  assert.ok(!logs.some(l => l.tabla === 'cierre' && l.datos.numero_caso === '90000015'));
 });
 prueba('el resumen cuenta el espejo', () => {
   assert.ok(r.espejoRedshift.escritas > 0);

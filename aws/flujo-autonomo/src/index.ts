@@ -1180,10 +1180,18 @@ async function procesarRemesa(
   out.accion = canales.length === 0 ? 'retenido' : algunoOk ? 'cerrado' : 'error';
   if (canales.length === 0) out.motivo = 'sin canales de cierre habilitados';
 
-  // Espejo de la liberación, igual que el motor del navegador: la tabla
-  // `liberacion_remesa` guarda la transacción, el monto y la evidencia del
-  // screening que la respaldó.
-  if (canales.length > 0) {
+  // Espejo de la liberación: la tabla `liberacion_remesa` guarda la
+  // transacción, el monto y la evidencia del screening que la respaldó.
+  //
+  // SOLO si en esta corrida algún canal cerró bien. Cada intento lleva su propio
+  // `en` —clave nueva, fila nueva—, y `v_liberacion_remesa_diaria` cuenta filas
+  // y suma `monto_usd`: una remesa que sigue fallando cada 5 minutos aparecería
+  // como hasta 288 liberaciones por día de una plata que nunca se soltó.
+  //
+  // Límite conocido, igual que en el navegador: si Admin sale ok y Salesforce
+  // falla, y Salesforce sale ok en una corrida posterior, quedan 2 filas para la
+  // misma remesa.
+  if (out.sf === 'ok' || out.admin === 'ok') {
     const tx = extraerRemesa(caso.asunto);
     await espejar(logLiberacionRemesa(caso, {
       transaccionId: tx || null, tipologia: tipo.id, automatico: true,
@@ -1194,9 +1202,8 @@ async function procesarRemesa(
     }, fila as never, screening as never, ACTOR_SISTEMA));
     // La traza en la auditoría, SOLO por whitelist —mismo criterio que el
     // navegador—: una remesa liberada sin consultar a nadie, por una excepción
-    // cargada a mano, tiene que decir quién la cargó. Y solo con algún canal ok,
-    // por lo mismo que en OFAC.
-    if (ev.whitelist && (out.sf === 'ok' || out.admin === 'ok')) {
+    // cargada a mano, tiene que decir quién la cargó.
+    if (ev.whitelist) {
       const w = ev.whitelist;
       await auditarCierreAutomatico(caso.id, {
         cola: 'remesa', tipologia: tipo.id, transaccion: tx || null,
