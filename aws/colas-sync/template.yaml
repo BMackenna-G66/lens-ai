@@ -34,12 +34,25 @@ Parameters:
     Description: >
       UTC. Default 12:30 UTC = 08:30 hora Chile: después de que el cluster se
       reanuda (08:00 UTC) y antes de que se pause (22:30 UTC).
+  EmailAlerta:
+    Type: String
+    Default: ''
+    Description: >
+      Correo que recibe la alarma cuando el respaldo falla. Se pasa en el deploy
+      (no se guarda en el repo). AWS manda un correo de confirmación: hasta que
+      se confirme, la alarma suena pero no llega a nadie.
+
+Conditions:
+  ConCorreo: !Not [!Equals [!Ref EmailAlerta, '']]
 
 Globals:
   Function:
     Runtime: python3.12
-    Timeout: 600
-    MemorySize: 512
+    # 15-10-2026: 600 s / 512 MB no alcanzaban para leer todo de una vez y el job
+    # murió el 06-09 sin que nadie se enterara. El código ahora es incremental y
+    # escribe por tandas; esto es margen, no la solución.
+    Timeout: 900
+    MemorySize: 1024
     Architectures: [arm64]
 
 Resources:
@@ -81,6 +94,73 @@ Resources:
             Schedule: !Ref Horario
             Name: colas-sync-diario
             Description: Sincroniza la Bandeja de Casos con Redshift todas las mañanas.
+
+  # ── Alarma ─────────────────────────────────────────────────────────────────
+  # El job murió 39 días sin que nadie se enterara. Dos señales:
+  #   · Errors ≥ 1: cualquier corrida que termina en excepción. El código NO lanza
+  #     por una pausa normal del cluster (noche o fin de semana), sí cuando la
+  #     pausa pasa de 4 días o la corrida no alcanza a recuperar el atraso.
+  #   · Ninguna invocación en 26 horas: el horario dejó de dispararlo (regla
+  #     deshabilitada, stack roto). Sin esto, "no corre" no da errores.
+  AlertaTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: colas-sync-diario-alerta
+      DisplayName: Lens - respaldo Redshift
+
+  AlertaCorreo:
+    Type: AWS::SNS::Subscription
+    Condition: ConCorreo
+    Properties:
+      TopicArn: !Ref AlertaTopic
+      Protocol: email
+      Endpoint: !Ref EmailAlerta
+
+  AlarmaFalla:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: colas-sync-diario-falla
+      AlarmDescription: >
+        El respaldo diario Firestore → Redshift (colas_trabajo) terminó en error.
+        Ver el log /aws/lambda/colas-trabajo-sync-diario y el documento
+        config/colasSyncDiario de Firestore.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ColasSyncFunction
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertaTopic]
+      OKActions: [!Ref AlertaTopic]
+
+  AlarmaSinCorrer:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: colas-sync-diario-sin-correr
+      AlarmDescription: >
+        El respaldo diario Firestore → Redshift no se ejecutó en las últimas 26 h.
+      Namespace: AWS/Lambda
+      MetricName: Invocations
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ColasSyncFunction
+      Statistic: Sum
+      # De a 1 hora y no un período de 1 día: el bucket del día no tiene datos
+      # hasta la corrida de las 12:30 UTC, y con missing = breaching la alarma
+      # habría sonado todas las mañanas. Así suena recién cuando pasan 26 horas
+      # seguidas sin ninguna invocación (el horario es cada 24).
+      Period: 3600
+      EvaluationPeriods: 26
+      DatapointsToAlarm: 26
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref AlertaTopic]
 
 Outputs:
   FunctionName:
