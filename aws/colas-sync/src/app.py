@@ -42,9 +42,10 @@ Lambda lens-flujo-autonomo en cada cierre) o si el caso tiene un evento
 evento, y el Lambda no lo escribía: sus ~7.000 cierres habrían quedado con
 `automatico` en NULL.
 
-Y un cierre que YA está en Redshift por el camino en vivo con otra clave (la app
-usa la hora del log, no la del cierre) no se vuelve a insertar: ver
-`_sql_insertar_cierres`.
+Los cierres NUNCA se borran desde acá (ver `_sql_insertar_cierres`): la fila que
+manda el camino en vivo trae columnas que este job no conoce —el status enviado
+a Admin, el flag OFAC, el last step— y un DELETE + INSERT las perdería. El job
+solo inserta los cierres que faltan y completa `automatico` donde está en NULL.
 """
 
 import base64
@@ -273,8 +274,13 @@ def _caso_de_evento(nombre: str) -> str:
     return partes[-3] if len(partes) >= 3 else ""
 
 
-def _filas_de_caso(doc: dict, auto_por_evento: bool = False) -> dict:
-    """Filas de caso, screening y cierre de UN caso. Puro."""
+def _filas_de_caso(doc: dict, auto_por_evento=frozenset()) -> dict:
+    """Filas de caso, screening y cierre de UN caso. Puro.
+
+    `auto_por_evento`: los canales ('sf', 'admin') que un evento CIERRE_AUTOMATICO
+    del caso dice que cerró bien. Por CANAL y no por caso: si el flujo cerró
+    Admin y después un analista cerró Salesforce a mano, el de Salesforce no es
+    automático."""
     f = {k: _val(v) for k, v in (doc.get("fields") or {}).items()}
     cid = doc["name"].split("/")[-1]
     datos = f.get("datos") or {}
@@ -317,7 +323,7 @@ def _filas_de_caso(doc: dict, auto_por_evento: bool = False) -> dict:
         c = (f.get("cierres") or {}).get(canal) or {}
         if c.get("ok") is not True:
             continue
-        auto = c.get("por") == POR_FLUJO or auto_por_evento
+        auto = c.get("por") == POR_FLUJO or canal in auto_por_evento
         en = _ts(c.get("en")) or _ts(f.get("recibidoEn")) or "1970-01-01 00:00:00"
         out["cierre"].append({
             "cierre_id": f"{numero}|{canal.upper()}|{en}", "numero_caso": numero,
@@ -417,16 +423,19 @@ def _sql_insertar(tabla: str, lote: list) -> str:
 
 
 def _sql_insertar_cierres(lote: list) -> str:
-    """INSERT de cierres que NO duplica los que ya entraron en vivo.
+    """INSERT de los cierres que FALTAN. Nunca borra ni pisa.
 
-    El camino en vivo de la app arma `cierre_id` con la hora del LOG, y este job
-    con la hora del CIERRE (`cierres.<canal>.en`): son el mismo cierre con dos
-    claves. El DELETE por clave no los junta, así que el INSERT se saltea los
-    cierres que ya tienen una fila ok para el mismo caso y canal.
+    Una fila de cierre puede haber entrado por el camino en vivo, y esa trae
+    columnas que este job no tiene (status enviado, flag OFAC, PEP, risk level,
+    last step, HTTP, detalle). Un DELETE + INSERT por clave las perdería: con la
+    clave igual en los dos caminos (la del flujo autónomo), pasaría todas las
+    mañanas sobre todo lo cerrado el día anterior. Por eso para `cierre` no hay
+    DELETE: si ya hay una fila ok para el mismo caso y canal —venga de donde
+    venga y con la clave que tenga— no se inserta nada.
 
-    Los del flujo autónomo usan la MISMA clave en vivo y acá (ver
-    `logCierreAutonomo` en el Lambda): el DELETE previo los borra y entran de
-    nuevo, así que se pisan en vez de saltearse.
+    Eso además resuelve la otra mitad: la app arma `cierre_id` con la hora del
+    LOG y este job con la del CIERRE (`cierres.<canal>.en`). Son el mismo cierre
+    con dos claves, y por caso + canal no se duplica.
 
     Límite conocido: un caso que se cerró, se reabrió y se volvió a cerrar por
     el mismo canal conserva solo el primer cierre en Redshift."""
@@ -438,6 +447,28 @@ def _sql_insertar_cierres(lote: list) -> str:
     return (f"INSERT INTO {SCHEMA}.cierre ({nombres}) SELECT {nombres} FROM ({selects}) v "
             f"WHERE NOT EXISTS (SELECT 1 FROM {SCHEMA}.cierre c WHERE c.numero_caso = v.numero_caso "
             f"AND c.canal = v.canal AND c.resultado_ok = TRUE)")
+
+
+def _sql_marcar_automaticos(lote: list) -> str | None:
+    """Completa `automatico` en filas que ya estaban, SOLO donde está en NULL.
+
+    Son las que escribió la versión anterior de este job sin saber si el cierre
+    era automático. Las del camino en vivo traen TRUE o FALSE y no se tocan; las
+    columnas que no son de autoría tampoco."""
+    ids = [r["cierre_id"] for r in lote if r.get("automatico") is True]
+    if not ids:
+        return None
+    claves = ", ".join(_lit(i, "") for i in ids)
+    return (f"UPDATE {SCHEMA}.cierre SET automatico = TRUE, actor_id = '{ACTOR_SISTEMA[0]}', "
+            f"actor_nombre = '{ACTOR_SISTEMA[1]}', actor_tipo = 'SYSTEM' "
+            f"WHERE cierre_id IN ({claves}) AND automatico IS NULL")
+
+
+def _sentencias(tabla: str, lote: list) -> list:
+    """Lo que se ejecuta por lote, en orden."""
+    if tabla == "cierre":
+        return [x for x in (_sql_insertar_cierres(lote), _sql_marcar_automaticos(lote)) if x]
+    return [_sql_borrar(tabla, lote), _sql_insertar(tabla, lote)]
 
 
 def _es_cluster_no_disponible(e: Exception) -> bool:
@@ -476,15 +507,17 @@ def _ejecutar(client, sql: str, intentos: int = 6):
 
 
 def _escribir(client, filas: dict) -> dict:
-    """DELETE + INSERT por lote, varios lotes en paralelo. Devuelve filas por tabla."""
+    """Las sentencias de cada lote en orden, varios lotes en paralelo. Devuelve
+    filas por tabla (las procesadas, no las insertadas: un cierre que ya estaba
+    cuenta aunque el NOT EXISTS lo saltee)."""
     tareas = []
     for tabla in TABLAS:
         for lote in _trozos(tabla, filas.get(tabla) or []):
-            tareas.append((tabla, len(lote), _sql_borrar(tabla, lote), _sql_de(tabla, lote)))
+            tareas.append((tabla, len(lote), _sentencias(tabla, lote)))
 
     def correr(t):
-        _ejecutar(client, t[2])
-        _ejecutar(client, t[3])
+        for sql in t[2]:
+            _ejecutar(client, sql)
         return t[0], t[1]
 
     resumen = {}
@@ -559,12 +592,18 @@ def lambda_handler(event, context):
     try:
         # 1) Eventos. Primero, porque de ellos sale qué casos tienen un
         #    CIERRE_AUTOMATICO, que hace falta para marcar los cierres.
-        con_auto, nuevos = set(), []
+        con_auto, nuevos = {}, []
         for ev in _eventos(tok):
             e = ev.get("fields") or {}
             if _val(e.get("tipo")) == "CIERRE_AUTOMATICO":
-                con_auto.add(_caso_de_evento(ev["name"]))
-            ts = _parse_iso(_val(e.get("timestamp")))
+                meta = _val(e.get("metadata")) or {}
+                ok = {c for c in ("sf", "admin") if meta.get(c) == "ok"}
+                if ok:
+                    con_auto.setdefault(_caso_de_evento(ev["name"]), set()).update(ok)
+            # La marca usa la hora del SERVIDOR (`createTime`), no `timestamp`,
+            # que pone el reloj del navegador: un evento escrito tarde (pestaña
+            # dormida, reloj atrasado) quedaría detrás de la marca y no entraría.
+            ts = _parse_iso(ev.get("createTime")) or _parse_iso(_val(e.get("timestamp")))
             if ts is None or ts >= desde_eventos:
                 nuevos.append((ts or ahora, ev))
         nuevos.sort(key=lambda x: x[0])
@@ -597,7 +636,7 @@ def lambda_handler(event, context):
                 filas = {"caso": [], "screening": [], "cierre": []}
                 for doc in _traer_casos(tok, [n for _, n in tanda]):
                     cid = doc["name"].split("/")[-1]
-                    for t, rows in _filas_de_caso(doc, cid in con_auto).items():
+                    for t, rows in _filas_de_caso(doc, frozenset(con_auto.get(cid, ()))).items():
                         filas[t].extend(rows)
                 for t, n in _escribir(client, filas).items():
                     resumen[t] += n

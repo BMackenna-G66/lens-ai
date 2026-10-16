@@ -37,9 +37,12 @@ def _doc_caso(numero, cierres=None, **extra):
     return {"name": f"projects/p/databases/(default)/documents/casos_sf/{numero}", "fields": campos}
 
 
-def _evento(numero, eid, tipo, ts):
+def _evento(numero, eid, tipo, ts, metadata=None, creado=None):
+    campos = {"eventId": _s(eid), "tipo": _s(tipo), "timestamp": _s(ts)}
+    if metadata:
+        campos["metadata"] = {"mapValue": {"fields": {k: _s(v) for k, v in metadata.items()}}}
     return {"name": f"projects/p/databases/(default)/documents/casos_sf/{numero}/auditoria/{eid}",
-            "fields": {"eventId": _s(eid), "tipo": _s(tipo), "timestamp": _s(ts)}}
+            "createTime": creado or ts, "fields": campos}
 
 
 class FakeRedshift:
@@ -96,10 +99,13 @@ def test_cierre_manual_queda_sin_actor_inventado():
     assert c["automatico"] is None and c["actor_id"] is None
 
 
-def test_evento_cierre_automatico_tambien_marca():
-    doc = _doc_caso("00000003", {"sf": {"ok": True, "en": "2026-10-01T10:00:00Z"}})
-    (c,) = app._filas_de_caso(doc, auto_por_evento=True)["cierre"]
-    assert c["automatico"] is True
+def test_evento_cierre_automatico_marca_solo_el_canal_que_cerro():
+    # El flujo cerró Salesforce; Admin lo cerró después un analista a mano.
+    doc = _doc_caso("00000003", {"sf": {"ok": True, "en": "2026-10-01T10:00:00Z"},
+                                 "admin": {"ok": True, "en": "2026-10-02T10:00:00Z"}})
+    filas = {c["canal"]: c for c in app._filas_de_caso(doc, frozenset({"sf"}))["cierre"]}
+    assert filas["SF"]["automatico"] is True
+    assert filas["ADMIN"]["automatico"] is None and filas["ADMIN"]["actor_id"] is None
 
 
 def test_cierre_fallido_no_se_espeja():
@@ -119,6 +125,26 @@ def test_lit_tipado_castea_los_null():
     assert app._lit(None, "ts", tipado=True) == "NULL::TIMESTAMP"
     assert app._lit("a'b", "", tipado=True) == "'a''b'::VARCHAR"
     assert app._lit(None, "bool") == "NULL"
+
+
+def test_cierres_nunca_se_borran_ni_se_pisan():
+    # BLOQUEANTE de la auditoría: el Lambda manda en vivo la fila con
+    # status_enviado, ofac_flag, last_step… y la MISMA clave que arma el job. Un
+    # DELETE + INSERT por clave las perdía todas las mañanas.
+    doc = _doc_caso("00000011", {"admin": {"ok": True, "en": "2026-10-15T16:16:00.123Z", "por": "flujo-autonomo"}})
+    lote = app._filas_de_caso(doc)["cierre"]
+    sqls = app._sentencias("cierre", lote)
+    assert not any(x.lstrip().upper().startswith("DELETE") for x in sqls)
+    insert, update = sqls
+    assert "WHERE NOT EXISTS" in insert
+    # El UPDATE solo completa la autoría donde no se sabía, y no toca otra columna.
+    assert update.endswith("AND automatico IS NULL")
+    assert "status_enviado" not in update and "ofac_flag" not in update
+
+
+def test_las_otras_tablas_siguen_siendo_delete_mas_insert():
+    sqls = app._sentencias("caso", [{"numero_caso": "00000012"}])
+    assert sqls[0].startswith("DELETE FROM colas_trabajo.caso") and sqls[1].startswith("INSERT INTO colas_trabajo.caso")
 
 
 def test_insert_de_cierres_no_duplica_los_que_entraron_en_vivo():
@@ -174,12 +200,16 @@ def test_corrida_incremental_solo_procesa_lo_que_cambio_y_mueve_la_marca(monkeyp
         estado={"marcaCasos": _hace(days=1), "marcaEventos": _hace(days=1), "ultimaOkEn": _hace(days=1)},
         casos=[(viejo, _hace(days=9)), (nuevo, _hace(hours=2))],
         eventos=[_evento("00000010", "ev-viejo", "NOTA", _hace(days=9)),
-                 _evento("00000011", "ev-nuevo", "CIERRE_AUTOMATICO", _hace(hours=2))])
+                 _evento("00000011", "ev-nuevo", "CIERRE_AUTOMATICO", _hace(hours=2), {"admin": "ok"}),
+                 # Reloj del navegador atrasado 3 días, pero escrito hace 1 hora:
+                 # entra por `createTime`.
+                 _evento("00000010", "ev-tarde", "NOTA", _hace(days=3), creado=_hace(hours=1))])
     r = app.lambda_handler({}, Ctx(800))
-    assert r["ok"] and r["escritas"]["caso"] == 1 and r["escritas"]["evento_auditoria"] == 1
+    assert r["ok"] and r["escritas"]["caso"] == 1 and r["escritas"]["evento_auditoria"] == 2
     todo = "\n".join(rs.sql)
-    assert "00000011" in todo and "00000010" not in todo
-    assert "ev-nuevo" in todo and "ev-viejo" not in todo
+    assert "INSERT INTO colas_trabajo.caso" in todo and "'00000010', '00000010'" not in todo
+    assert "ev-nuevo" in todo and "ev-tarde" in todo and "ev-viejo" not in todo
+    assert not any(x.startswith("DELETE FROM colas_trabajo.cierre") for x in rs.sql)
     final = guardados[-1]
     assert final["ultimoResultado"] == "ok" and final["marcaCasos"] == final["ultimaOkEn"]
 

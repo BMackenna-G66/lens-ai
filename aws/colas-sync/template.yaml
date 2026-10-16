@@ -100,7 +100,7 @@ Resources:
   #   · Errors ≥ 1: cualquier corrida que termina en excepción. El código NO lanza
   #     por una pausa normal del cluster (noche o fin de semana), sí cuando la
   #     pausa pasa de 4 días o la corrida no alcanza a recuperar el atraso.
-  #   · Invocations < 1 en un día: el horario dejó de dispararlo (regla
+  #   · Ninguna invocación en 26 horas: el horario dejó de dispararlo (regla
   #     deshabilitada, stack roto). Sin esto, "no corre" no da errores.
   AlertaTopic:
     Type: AWS::SNS::Topic
@@ -143,15 +143,20 @@ Resources:
     Properties:
       AlarmName: colas-sync-diario-sin-correr
       AlarmDescription: >
-        El respaldo diario Firestore → Redshift no se ejecutó en las últimas 24 h.
+        El respaldo diario Firestore → Redshift no se ejecutó en las últimas 26 h.
       Namespace: AWS/Lambda
       MetricName: Invocations
       Dimensions:
         - Name: FunctionName
           Value: !Ref ColasSyncFunction
       Statistic: Sum
-      Period: 86400
-      EvaluationPeriods: 1
+      # De a 1 hora y no un período de 1 día: el bucket del día no tiene datos
+      # hasta la corrida de las 12:30 UTC, y con missing = breaching la alarma
+      # habría sonado todas las mañanas. Así suena recién cuando pasan 26 horas
+      # seguidas sin ninguna invocación (el horario es cada 24).
+      Period: 3600
+      EvaluationPeriods: 26
+      DatapointsToAlarm: 26
       Threshold: 1
       ComparisonOperator: LessThanThreshold
       TreatMissingData: breaching

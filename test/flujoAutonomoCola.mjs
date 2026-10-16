@@ -47,10 +47,13 @@ function sembrar() {
   });
   store.set(`${C}/90000010`, ofac('90000010'));
   store.set(`${C}/90000011`, ofac('90000011'));     // se borra a mitad de la corrida
+  store.set(`${C}/90000014`, ofac('90000014'));     // Salesforce y Admin lo rechazan
   store.set(`${C}/90000012`, {
     numeroCaso: '90000012', asunto: 'DETIENE TX 777001', pais: 'Chile', statusCaso: 'ABIERTO',
     screeningBeneficiario: { schemaVersion: 3, estado: 'ok', flujo: 'CL', samePerson: true },
   });
+  // Un estado que no es ninguno de los tres: se avisa y no se pisa.
+  store.set(`${C}/10000005`, { ...store.get(`${C}/10000005`), statusCaso: 'ARCHIVADO' });
   // Un caso importado SIN statusCaso (el import de la app no lo escribe): se cura.
   store.set(`${C}/90000013`, { ...ofac('90000013'), statusCaso: undefined });
   store.set('config/flujoAutomatico', {
@@ -72,8 +75,10 @@ globalThis.fetch = async (url, init = {}) => {
   if (String(url).endsWith('/salesforce/case-update')) {
     // El analista borra el caso 90000011 en la Bandeja justo mientras se cierra.
     if (body.CaseNumber === '90000011') store.delete(`${C}/90000011`);
+    if (body.CaseNumber === '90000014') return json({ success: false, errors: ['FIELD_CUSTOM_VALIDATION_EXCEPTION'] });
     return json({ success: true });
   }
+  if (String(url).endsWith('/admin/customer-status') && body.customerIds?.[0] === '555014') return json({ ok: false, error: 'rechazado' }, 422);
   if (String(url).endsWith('/admin/customer-status')) return json({ ok: true, results: [{ customerId: body.customerIds?.[0], ok: true, steps: {} }] });
   if (String(url).endsWith('/admin/transaction-status')) return json({ ok: true, results: [{ transactionId: '777001', ok: true }] });
   if (String(url).includes('/remesas/search')) return json({ rows: [{ transaction_id: 777001, beneficiary_name: 'Beneficiaria Prueba', amount_usd: 100 }] });
@@ -90,13 +95,17 @@ let ok = 0;
 const prueba = (nombre, fn) => { fn(); ok++; console.log('  ✓', nombre); };
 
 console.log('Cola con un documento huérfano:');
-prueba('la cola NO sale vacía: ve los 3 OFAC y la remesa', () => {
-  assert.equal(r.casosEnCola, 3, JSON.stringify({ modo: r.modoLectura, avisos: r.avisos }));
+prueba('la cola NO sale vacía: ve los 4 OFAC y la remesa', () => {
+  assert.equal(r.casosEnCola, 4, JSON.stringify({ modo: r.modoLectura, avisos: r.avisos }));
   assert.equal(r.remesa.enCola, 1);
 });
 prueba('un caso de verdad sin statusCaso se cura, entra a la cola y se procesa', () => {
   assert.ok(r.detalle.some(x => x.caseId === '90000013' && x.accion === 'cerrado'));
   assert.equal(store.get(`${C}/90000013`).statusCaso, 'CERRADO');
+});
+prueba('un statusCaso fuera de los tres estados se avisa y no se pisa', () => {
+  assert.ok(r.avisos.some(a => /fuera de ABIERTO\/GESTIONANDO\/CERRADO \(ARCHIVADO\)/.test(a)), JSON.stringify(r.avisos));
+  assert.equal(store.get(`${C}/10000005`).statusCaso, 'ARCHIVADO');
 });
 prueba('el huérfano se avisa y no se toca', () => {
   assert.ok(r.avisos.some(a => /NI datos del caso/.test(a)), JSON.stringify(r.avisos));
@@ -109,7 +118,7 @@ prueba('no cuenta como error: cerrado (el update a Salesforce ocurrió) con moti
   const d = r.detalle.find(x => x.caseId === '90000011');
   assert.equal(d.accion, 'cerrado');
   assert.equal(d.motivo, 'caso_eliminado_durante_la_corrida');
-  assert.equal(r.errores, 0);
+  assert.equal(r.errores, 1);   // el único error es 90000014, rechazado de verdad
 });
 prueba('el cierre en Salesforce que sí ocurrió queda espejado', () => {
   assert.ok(logs.some(l => l.tabla === 'cierre' && l.datos.numero_caso === '90000011' && l.datos.canal === 'SF'));
@@ -152,6 +161,14 @@ prueba('la remesa: cierre ADMIN espejado y liberación registrada', () => {
   assert.equal(lib.datos.transaccion_id, '777001');
   assert.equal(lib.datos.automatico, true);
 });
+prueba('un caso borrado no deja evento CIERRE_AUTOMATICO', () => {
+  assert.equal([...store.keys()].filter(k => k.startsWith(`${C}/90000011/auditoria/`)).length, 0);
+});
+prueba('con los dos canales fallando NO se escribe CIERRE_AUTOMATICO (288 por día cada 5 min)', () => {
+  assert.equal(r.detalle.find(x => x.caseId === '90000014').accion, 'error');
+  assert.equal([...store.keys()].filter(k => k.startsWith(`${C}/90000014/auditoria/`)).length, 0);
+  assert.ok(!logs.some(l => l.tabla === 'cierre' && l.datos.numero_caso === '90000014'));
+});
 prueba('el resumen cuenta el espejo', () => {
   assert.ok(r.espejoRedshift.escritas > 0);
   assert.equal(r.espejoRedshift.fallidas, 0);
@@ -162,6 +179,7 @@ console.log('Espejo caído:');
   sembrar();
   store.delete(`${C}/90000001`);                    // sin huérfano esta vez
   store.delete(`${C}/90000013`);                    // ni casos sin statusCaso
+  store.set(`${C}/10000005`, { ...store.get(`${C}/10000005`), statusCaso: 'CERRADO' });
   const fetchBueno = globalThis.fetch;
   globalThis.fetch = async (url, init) => String(url).endsWith('/colas/log')
     ? new Response(JSON.stringify({ error: 'Redshift endpoint is not available' }), { status: 502 })
@@ -170,7 +188,7 @@ console.log('Espejo caído:');
   globalThis.fetch = fetchBueno;
   prueba('el cierre igual se hace y queda en Firestore', () => {
     assert.equal(store.get(`${C}/90000010`).cierres.admin.ok, true);
-    assert.equal(r2.errores, 0);
+    assert.equal(r2.errores, 1);   // 90000014, igual que arriba: el espejo no suma errores
   });
   prueba('las fallidas se cuentan (el respaldo diario las reescribe)', () => {
     assert.ok(r2.espejoRedshift.fallidas > 0);

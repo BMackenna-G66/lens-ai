@@ -361,12 +361,17 @@ async function leerCasosAbiertos(): Promise<{ casos: CasoSF[]; lecturas: number;
       if (ultimo) q = q.startAfter(ultimo);
       const pag = await q.get();
       lecturas += pag.size;
-      sin.push(...pag.docs.filter(d => typeof d.data().statusCaso !== 'string'));
+      // El MISMO criterio que el conteo (`in ESTADOS`): si no, un string fuera de
+      // los tres estados dispararía el barrido en cada corrida sin encontrar nada.
+      sin.push(...pag.docs.filter(d => !ESTADOS.includes(d.data().statusCaso as string)));
       if (pag.size < 1000) break;
       ultimo = pag.docs[pag.docs.length - 1];
     }
     const huerfanos = sin.filter(d => esHuerfano(d.data() ?? {}));
-    const aCurar = sin.filter(d => !esHuerfano(d.data() ?? {}));
+    // Un estado que no es ninguno de los tres (legado, typo) NO se pisa: no se
+    // sabe qué quiso decir quien lo escribió. Se avisa.
+    const invalidos = sin.filter(d => !esHuerfano(d.data() ?? {}) && typeof d.data()?.statusCaso === 'string');
+    const aCurar = sin.filter(d => !esHuerfano(d.data() ?? {}) && typeof d.data()?.statusCaso !== 'string');
     // El barrido trajo tres campos: para curar y procesar hace falta el caso entero.
     const enteros = aCurar.length ? (await db().getAll(...aCurar.map(d => d.ref))).filter(d => d.exists) : [];
     lecturas += enteros.length;
@@ -375,10 +380,12 @@ async function leerCasosAbiertos(): Promise<{ casos: CasoSF[]; lecturas: number;
       if (!porId.has(d.id)) porId.set(d.id, { ...(d.data() as object), id: d.id } as CasoSF);
     }
     partes.push(`barrido: ${curados.sinCampo} sin statusCaso curado(s)`);
-    if (huerfanos.length) {
-      aviso = `${huerfanos.length} documento(s) en ${COLECCION} sin statusCaso NI datos del caso `
-        + '(no se curan: no hay de qué derivar el estado). La cola se procesa igual, pero cada corrida '
-        + 'barre la colección entera hasta que se revisen a mano.';
+    if (huerfanos.length || invalidos.length) {
+      aviso = [
+        huerfanos.length ? `${huerfanos.length} documento(s) en ${COLECCION} sin statusCaso NI datos del caso (no hay de qué derivar el estado)` : '',
+        invalidos.length ? `${invalidos.length} con un statusCaso fuera de ABIERTO/GESTIONANDO/CERRADO (${[...new Set(invalidos.map(d => String(d.data()?.statusCaso)))].slice(0, 3).join(', ')})` : '',
+      ].filter(Boolean).join(' · ')
+        + '. No se tocan. La cola se procesa igual, pero cada corrida barre la colección entera hasta que se revisen a mano.';
     }
   }
 
@@ -432,6 +439,10 @@ async function reconciliar(docs: DocumentSnapshot[]): Promise<{ sinCampo: number
 
 // Curar TODOS los documentos de una, sin esperar a que lo haga una corrida. Es una
 // herramienta, no un requisito: la corrida se cura sola.
+//
+// Va en batch y con `update`: un caso borrado entre la lectura y el commit hace
+// fallar su batch ENTERO (NOT_FOUND) y no recrea nada. Es de uso manual: si
+// pasa, se vuelve a correr.
 async function correrBackfill(): Promise<Record<string, unknown>> {
   const snap = await db().collection(COLECCION).limit(5000).get();
   let escritos = 0, yaTenian = 0;
@@ -784,10 +795,14 @@ async function procesar(caso: CasoSF, cfg: FlujoOfacConfig): Promise<ResultadoCa
   // un cierre ni un error — se registra como retenido con su motivo.
   if (canales.length === 0) { out.accion = 'retenido'; out.motivo = 'sin canales de cierre habilitados'; }
 
-  // Traza en la auditoría del caso, como la deja el motor del navegador: con
-  // ella el respaldo diario y la ficha distinguen un cierre automático de uno
-  // manual.
-  if (canales.length > 0) {
+  // Traza en la auditoría del caso: con ella el respaldo diario y la ficha
+  // distinguen un cierre automático de uno manual.
+  //
+  // SOLO si en esta corrida algún canal cerró bien. El motor del navegador la
+  // escribe siempre, pero corre cuando hay una pestaña abierta; esto corre cada
+  // 5 minutos, y un caso que sigue fallando en Admin sumaría un evento por
+  // corrida —hasta 288 por día— en su auditoría y en Redshift.
+  if (out.sf === 'ok' || out.admin === 'ok') {
     await auditarCierreAutomatico(caso.id, {
       cola: 'ofac', tipologia: ev.tipologia, decision: (screening as { decision?: string } | undefined)?.decision ?? null,
       sf: out.sf, admin: out.admin, detalle: out.motivo ?? null,
@@ -1179,8 +1194,9 @@ async function procesarRemesa(
     }, fila as never, screening as never, ACTOR_SISTEMA));
     // La traza en la auditoría, SOLO por whitelist —mismo criterio que el
     // navegador—: una remesa liberada sin consultar a nadie, por una excepción
-    // cargada a mano, tiene que decir quién la cargó.
-    if (ev.whitelist) {
+    // cargada a mano, tiene que decir quién la cargó. Y solo con algún canal ok,
+    // por lo mismo que en OFAC.
+    if (ev.whitelist && (out.sf === 'ok' || out.admin === 'ok')) {
       const w = ev.whitelist;
       await auditarCierreAutomatico(caso.id, {
         cola: 'remesa', tipologia: tipo.id, transaccion: tx || null,
