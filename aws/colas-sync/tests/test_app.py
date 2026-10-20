@@ -194,6 +194,65 @@ def test_fila_que_no_entra_sola_se_recorta_y_no_tumba_la_corrida(monkeypatch):
     assert len(app._sql_de("evento_auditoria", lote).encode()) <= 3000
 
 
+def test_nunca_dos_escrituras_a_la_vez_sobre_la_misma_tabla(monkeypatch):
+    # Con 4 lotes de cierres en paralelo, Redshift los serializaba con bloqueos:
+    # 78 s por INSERT, todo espera. Un escritor por tabla; en paralelo, solo tablas distintas.
+    import threading
+    import time as _t
+    monkeypatch.setattr(app, "MAX_SQL_BYTES", 3000)
+    activos, maximo, por_id, candado = {}, {}, {}, threading.Lock()
+
+    class Lento:
+        def execute_statement(self, **kw):
+            tabla = kw["Sql"].split("colas_trabajo.")[1].split()[0]
+            with candado:
+                activos[tabla] = activos.get(tabla, 0) + 1
+                maximo[tabla] = max(maximo.get(tabla, 0), activos[tabla])
+                por_id[str(len(por_id))] = tabla
+                return {"Id": str(len(por_id) - 1)}
+
+        def describe_statement(self, Id):
+            _t.sleep(0.01)
+            with candado:
+                activos[por_id[Id]] -= 1
+            return {"Status": "FINISHED"}
+
+    docs = [_doc_caso(f"000003{i:02d}", {"sf": {"ok": True, "en": "2026-10-01T10:00:00Z", "por": "flujo-autonomo"},
+                                         "admin": {"ok": True, "en": "2026-10-01T10:00:01Z", "por": "flujo-autonomo"}})
+            for i in range(40)]
+    filas = {"caso": [], "screening": [], "cierre": []}
+    for d in docs:
+        for t, rows in app._filas_de_caso(d).items():
+            filas[t].extend(rows)
+    r = app._escribir(Lento(), filas)
+    assert r == {"caso": 40, "cierre": 80}
+    assert maximo["cierre"] == 1 and maximo["caso"] == 1
+
+
+def test_el_freno_deja_lugar_para_una_tanda_entera(monkeypatch):
+    # Con 60 s fijos de margen, una tanda de 3,5 min arrancó con margen y terminó
+    # en el timeout duro de Lambda. Ahora el margen suma 1,5 veces la tanda más lenta.
+    monkeypatch.setattr(app, "CASOS_POR_TANDA", 1)
+    reloj = {"t": 0.0}
+    casos = [(_doc_caso(f"0000040{i}"), _hace(hours=9 - i)) for i in range(6)]
+    guardados, _ = _preparar(monkeypatch, estado={"marcaCasos": _hace(days=1), "marcaEventos": _hace(days=1)},
+                             casos=casos)
+
+    def escribir_lento(client, filas):
+        reloj["t"] += 200          # cada tanda tarda 200 s
+        return {}
+    monkeypatch.setattr(app, "_escribir", escribir_lento)
+    monkeypatch.setattr(app.time, "time", lambda: reloj["t"])
+    ctx = types.SimpleNamespace(get_remaining_time_in_millis=lambda: (900 - reloj["t"]) * 1000)
+    try:
+        app.lambda_handler({}, ctx)
+    except RuntimeError as e:
+        assert "sin tiempo" in str(e)
+    # 900 s: tandas en t=0, 200 y 400; la cuarta (t=600, quedan 300 < 60 + 1,5×200) ya no arranca.
+    assert reloj["t"] == 600
+    assert guardados[-1]["ultimoResultado"] == "incompleta"
+
+
 # ── Corrida ───────────────────────────────────────────────────────────────────
 AHORA = datetime.now(timezone.utc)
 
