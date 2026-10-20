@@ -120,6 +120,16 @@ def test_documento_huerfano_no_es_un_caso():
 
 
 # ── SQL ───────────────────────────────────────────────────────────────────────
+def test_las_barras_invertidas_se_duplican():
+    # Redshift interpreta la barra dentro de un literal: 'C:\temp' llega con un
+    # TAB. Tumbó el backfill del 20-10-2026 con un JSON que traía comillas.
+    assert app._lit("C:\\temp", "") == "'C:\\\\temp'"
+    assert app._lit("o'brien\\x", "", tipado=True) == "'o''brien\\\\x'::VARCHAR"
+    j = app._lit({"detalle": 'dijo "hola"\nchau'}, "json")
+    # json.dumps escribe \" y \n; tienen que llegar a Redshift como \\" y \\n.
+    assert j == 'JSON_PARSE(\'{"detalle": "dijo \\\\"hola\\\\"\\\\nchau"}\')'
+
+
 def test_lit_tipado_castea_los_null():
     assert app._lit(None, "bool", tipado=True) == "NULL::BOOLEAN"
     assert app._lit(None, "ts", tipado=True) == "NULL::TIMESTAMP"

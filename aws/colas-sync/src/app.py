@@ -351,8 +351,20 @@ def _fila_evento(ev: dict) -> dict | None:
 _CAST = {"bool": "BOOLEAN", "int": "INTEGER", "ts": "TIMESTAMP", "json": "SUPER", "": "VARCHAR"}
 
 
+def _esc(s: str) -> str:
+    """Escapa un texto para meterlo entre comillas simples en Redshift.
+
+    Las comillas simples se duplican, y las BARRAS INVERTIDAS también: Redshift
+    las interpreta dentro de un literal (`'C:\\temp'` llega como «C:» + tab +
+    «emp»). En un JSON eso lo rompe: `json.dumps` escribe `\\"` y `\\n`, Redshift
+    se come la barra y `JSON_PARSE` recibe comillas sueltas o un salto de línea
+    crudo. Tumbó el backfill del 20-10-2026 en la primera tanda de eventos con
+    una comilla en la metadata."""
+    return s.replace("\\", "\\\\").replace("'", "''")
+
+
 def _lit(v, tipo: str, tipado: bool = False) -> str:
-    """Valor → literal SQL. Las comillas simples se duplican (escape estándar).
+    """Valor → literal SQL, escapado con `_esc`.
 
     `tipado` castea también los NULL: hace falta en un SELECT ... UNION ALL,
     donde un NULL suelto no tiene tipo y Redshift lo resolvería como texto."""
@@ -367,8 +379,8 @@ def _lit(v, tipo: str, tipado: bool = False) -> str:
             return f"NULL::{_CAST[tipo]}" if tipado else "NULL"
     if tipo == "json":
         txt = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
-        return "JSON_PARSE('" + txt.replace("'", "''") + "')"
-    s = str(v).replace("'", "''")
+        return "JSON_PARSE('" + _esc(txt) + "')"
+    s = _esc(str(v))
     if tipo == "ts":
         return f"'{s}'::TIMESTAMP"
     return f"'{s}'::VARCHAR" if tipado else f"'{s}'"
