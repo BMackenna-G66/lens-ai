@@ -83,12 +83,11 @@ DIAS_TOLERANCIA = int(os.environ.get("DIAS_TOLERANCIA", "4"))
 # La Data API acepta hasta 100 KB por statement: se arma por TAMAÑO, no por
 # cantidad de filas (un evento con metadata pesa diez veces lo que un caso).
 MAX_SQL_BYTES = int(os.environ.get("MAX_SQL_BYTES", "60000"))
-# Statements en paralelo. La cuota es de 500 ACTIVOS por cuenta y la comparten
-# el logger y quien consulte; cada hilo espera el suyo antes de lanzar otro.
-CONCURRENCIA = int(os.environ.get("CONCURRENCIA", "4"))
+# El paralelismo es ENTRE TABLAS, nunca dentro de una: ver `_escribir`.
 CASOS_POR_TANDA = int(os.environ.get("CASOS_POR_TANDA", "400"))
 EVENTOS_POR_TANDA = int(os.environ.get("EVENTOS_POR_TANDA", "1500"))
-# Lo que se deja libre al final para guardar el estado y salir prolijo.
+# Lo que se deja libre al final para guardar el estado y salir prolijo, además
+# de una tanda y media de las más lentas medidas en la corrida.
 RESERVA_S = int(os.environ.get("RESERVA_S", "60"))
 
 # Tablas destino: (clave natural, {columna: tipo}). Mismo contrato que el logger.
@@ -519,24 +518,35 @@ def _ejecutar(client, sql: str, intentos: int = 6):
 
 
 def _escribir(client, filas: dict) -> dict:
-    """Las sentencias de cada lote en orden, varios lotes en paralelo. Devuelve
-    filas por tabla (las procesadas, no las insertadas: un cierre que ya estaba
-    cuenta aunque el NOT EXISTS lo saltee)."""
-    tareas = []
+    """Escribe por tabla: UN hilo por tabla, sus lotes en serie. Devuelve filas
+    por tabla (las procesadas, no las insertadas: un cierre que ya estaba cuenta
+    aunque el NOT EXISTS lo saltee).
+
+    Un solo escritor por tabla, a propósito. Redshift serializa las escrituras
+    sobre una misma tabla con bloqueos, y el INSERT de cierres además LEE la
+    tabla (el NOT EXISTS). Con 4 lotes de cierres en paralelo, el backfill del
+    20-10-2026 midió 78 s de promedio por INSERT, con 0 s de ejecución: todo era
+    espera. Cada tanda de casos tardaba 3,5 min, y el logger en vivo esperó
+    hasta 116 s su DELETE sobre `cierre`. En paralelo solo van tablas distintas,
+    que no se bloquean entre sí."""
+    por_tabla = {}
     for tabla in TABLAS:
-        for lote in _trozos(tabla, filas.get(tabla) or []):
-            tareas.append((tabla, len(lote), _sentencias(tabla, lote)))
+        lotes = _trozos(tabla, filas.get(tabla) or [])
+        if lotes:
+            por_tabla[tabla] = lotes
 
-    def correr(t):
-        for sql in t[2]:
-            _ejecutar(client, sql)
-        return t[0], t[1]
+    def correr(tabla):
+        n = 0
+        for lote in por_tabla[tabla]:
+            for sql in _sentencias(tabla, lote):
+                _ejecutar(client, sql)
+            n += len(lote)
+        return tabla, n
 
-    resumen = {}
-    with ThreadPoolExecutor(max_workers=CONCURRENCIA) as ex:
-        for tabla, n in ex.map(correr, tareas):
-            resumen[tabla] = resumen.get(tabla, 0) + n
-    return resumen
+    if not por_tabla:
+        return {}
+    with ThreadPoolExecutor(max_workers=len(por_tabla)) as ex:
+        return dict(ex.map(correr, list(por_tabla)))
 
 
 # ── Corrida ──────────────────────────────────────────────────────────────────
@@ -591,6 +601,10 @@ def lambda_handler(event, context):
     desde_eventos = _desde(estado, "marcaEventos", ahora)
     resumen = {"caso": 0, "cierre": 0, "screening": 0, "evento_auditoria": 0}
     pendiente = None
+    # La tanda más lenta hasta ahora. El freno se revisa ENTRE tandas, así que el
+    # margen tiene que alcanzar para una tanda entera: con 60 s fijos, una tanda
+    # de 3,5 min arrancó con margen y terminó en el timeout duro de Lambda.
+    lenta = {"s": 0.0}
 
     def guardar(resultado: str, error: str | None = None):
         if resultado == "ok":
@@ -622,12 +636,14 @@ def lambda_handler(event, context):
         logger.info("eventos a escribir: %s (desde %s)", len(nuevos), _iso(desde_eventos))
 
         for i in range(0, len(nuevos), EVENTOS_POR_TANDA):
-            if restante() < RESERVA_S:
+            if restante() < RESERVA_S + 1.5 * lenta["s"]:
                 pendiente = f"eventos: faltan {len(nuevos) - i}"
                 break
+            t0 = time.time()
             tanda = nuevos[i:i + EVENTOS_POR_TANDA]
             filas = [f for f in (_fila_evento(ev) for _, ev in tanda) if f]
             r = _escribir(client, {"evento_auditoria": filas})
+            lenta["s"] = max(lenta["s"], time.time() - t0)
             resumen["evento_auditoria"] += r.get("evento_auditoria", 0)
             # La marca avanza tanda por tanda: si la corrida se corta, la que
             # viene arranca desde acá y no desde el principio.
@@ -641,9 +657,10 @@ def lambda_handler(event, context):
             logger.info("casos en Firestore: %s · cambiados desde %s: %s",
                         len(cab), _iso(desde_casos), len(cambiados))
             for i in range(0, len(cambiados), CASOS_POR_TANDA):
-                if restante() < RESERVA_S:
+                if restante() < RESERVA_S + 1.5 * lenta["s"]:
                     pendiente = f"casos: faltan {len(cambiados) - i}"
                     break
+                t0 = time.time()
                 tanda = cambiados[i:i + CASOS_POR_TANDA]
                 filas = {"caso": [], "screening": [], "cierre": []}
                 for doc in _traer_casos(tok, [n for _, n in tanda]):
@@ -652,6 +669,7 @@ def lambda_handler(event, context):
                         filas[t].extend(rows)
                 for t, n in _escribir(client, filas).items():
                     resumen[t] += n
+                lenta["s"] = max(lenta["s"], time.time() - t0)
                 estado["marcaCasos"] = _iso(tanda[-1][0])
                 guardar("en_curso")
     except ClusterNoDisponible as e:
