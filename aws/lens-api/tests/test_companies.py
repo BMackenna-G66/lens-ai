@@ -581,12 +581,27 @@ def test_un_representante_sin_tipo_de_persona_no_cuenta(s3_falso):
     assert correr([PRINCIPAL], s3_falso, socios=sin_tipo)["status"] == corridas.FAILED
 
 
-def test_sin_rut_la_corrida_queda_incompleta_no_fallida(s3_falso):
-    """El RUT es ESPERADO: si falta, INCOMPLETE — el usuario lo completa en el
-    formulario — y no FAILED, que le quemaría un intento."""
-    reg = correr([PRINCIPAL], s3_falso, analizar=analizar_con(**{"RUT de la sociedad": None}))
+def test_en_colombia_sin_nit_la_corrida_queda_incompleta_no_fallida(s3_falso):
+    """En Colombia el NIT es ESPERADO: si falta, INCOMPLETE —el usuario lo
+    completa en el formulario— y no FAILED, que le quemaría un intento."""
+    reg = correr([PRINCIPAL], s3_falso, pais="colombia", analizar=analizar_con(**{"RUT de la sociedad": None}))
     assert reg["status"] == corridas.INCOMPLETE
     assert any("identificador tributario" in a["message"] for a in reg["warnings"])
+
+
+def test_en_chile_sin_rut_y_con_lo_demas_la_corrida_queda_completa(s3_falso):
+    """Contrato v3.1: Onboarding ya no envía el e-RUT (lo trae el scraper del
+    SII) y la escritura de constitución no trae el RUT, que el SII asigna
+    después. Esperarlo dejaba INCOMPLETE a todas las corridas de Chile."""
+    reg = correr([PRINCIPAL], s3_falso, pais="chile", analizar=analizar_con(**{"RUT de la sociedad": None}))
+    assert reg["status"] == corridas.COMPLETED
+    assert not any(a.get("field") == "taxId" for a in reg["warnings"])
+
+
+def test_en_chile_si_la_escritura_trae_el_rut_se_informa(s3_falso):
+    reg = correr([PRINCIPAL], s3_falso, pais="chile")
+    assert reg["status"] == corridas.COMPLETED
+    assert pedir_resultado()[1]["company"]["taxId"] == "77.111.222-1"
 
 
 @pytest.mark.parametrize("campo,pista", [
@@ -2228,12 +2243,15 @@ def test_aj07_cada_aviso_trae_su_campo_y_la_persona(s3_falso):
     assert any(a["field"] == "constitutionDate" for a in avisos)
 
 
-def test_aj07_en_mexico_no_se_espera_el_identificador_tributario(s3_falso):
-    """§10: el identificador tributario solo es esperado en Chile y Colombia."""
-    correr([PRINCIPAL], s3_falso, pais="mexico", analizar=analizar_con(**{"RUT de la sociedad": None}))
-    assert not any(a["field"] == "taxId" for a in consultar()[1]["warnings"])
+def test_aj07_el_identificador_tributario_solo_se_espera_en_colombia(s3_falso):
+    """§10 (v3.1): el identificador tributario solo es esperado en Colombia. En
+    Chile dejó de serlo cuando Onboarding dejó de enviar el e-RUT."""
+    for pais in ("mexico", "chile"):
+        corridas._reiniciar_memoria()
+        correr([PRINCIPAL], s3_falso, pais=pais, analizar=analizar_con(**{"RUT de la sociedad": None}))
+        assert not any(a["field"] == "taxId" for a in consultar()[1]["warnings"]), pais
     corridas._reiniciar_memoria()
-    correr([PRINCIPAL], s3_falso, pais="chile", analizar=analizar_con(**{"RUT de la sociedad": None}))
+    correr([PRINCIPAL], s3_falso, pais="colombia", analizar=analizar_con(**{"RUT de la sociedad": None}))
     assert any(a["field"] == "taxId" for a in consultar()[1]["warnings"])
 
 
