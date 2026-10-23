@@ -36,7 +36,9 @@ import { enStandby } from '../services/flujoDecision';
 import { ponerStandbyVarios, quitarStandbyVarios, standbyDisponible } from '../services/casoStandby';
 import type { WhitelistClientes } from '../services/whitelistClientesService';
 // La extracción de la TX del asunto es compartida con el flujo desatendido.
-import { extraerRemesa, clasificarCola } from '../services/flujoDecision';
+import { extraerRemesa, clasificarCola, paisCodigo } from '../services/flujoDecision';
+import { usePjudCaso, AreaAnalisisCausa, BotonAnalizarCaso, LimitePjud } from './AnalisisCausaIA';
+import { rucDe } from '../services/pjudScraper';
 import { CATEGORIAS_SENSIBLES } from '../services/delitosSensibles';
 import type { FlujoConfig } from '../services/flujoAutomaticoService';
 import { evaluarCasoAuto, motivosRetencion, retenidoPorDelito } from '../services/flujoAutomaticoEngine';
@@ -1778,6 +1780,12 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
   // Chile → Regcheq (solo DNI) + motor de decisión. Colombia queda pendiente
   // (Inspektor). Se procesa cada caso apenas cae, incrementalmente.
   const [screenMap, setScreenMap] = useState<Record<string, ScreeningState>>({});
+
+  // Scraper de PJUD (ver AnalisisCausaIA): solo la cola OFAC de Chile y solo si
+  // el perfil trae alguna causa con RUC, que es lo único que el scraper busca.
+  const pjudActivo = activeQueue === 'ofac' && !!sel && paisCodigo(sel.pais ?? '') === 'CL'
+    && (screenMap[sel.id]?.coincidencias ?? []).some(c => !!rucDe(c.detalle));
+  const pjud = usePjudCaso(sel?.id ?? null, pjudActivo);
 
   // Aplica un resultado al estado y lo PERSISTE en Firestore (salvo errores, que se
   // reintentan la próxima vez). Compartido entre analistas y sobrevive recargas.
@@ -4168,6 +4176,8 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                                 <CoincidenciasAgrupadas co={co} />
                               </>
                             )}
+                          {/* Debajo de la tabla de causas (§4.2 del contrato con el scraper). */}
+                          <LimitePjud><AreaAnalisisCausa lectura={pjud} /></LimitePjud>
                           <OtrasListas listas={sc.otrasListas} />
                         </>
                       );
@@ -4205,10 +4215,14 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                         sin_conclusion: 'la conclusión del screening no se automatiza',
                       };
                       return (
-                        <p className={`text-[11px] mt-3 pt-3 border-t border-indigo-200 dark:border-indigo-800/50 ${duro ? 'text-red-700 dark:text-red-400 font-semibold' : 'text-slate-500 dark:text-slate-400'}`}>
-                          {duro ? '🛑 ' : '⏸️ '}No se cierra solo: {texto[ev.motivo ?? ''] ?? ev.motivo}
-                          {ev.categorias?.length ? ` (${ev.categorias.join(', ')})` : ''}.
-                        </p>
+                        <div className="flex items-start justify-between gap-3 mt-3 pt-3 border-t border-indigo-200 dark:border-indigo-800/50">
+                          <p className={`text-[11px] ${duro ? 'text-red-700 dark:text-red-400 font-semibold' : 'text-slate-500 dark:text-slate-400'}`}>
+                            {duro ? '🛑 ' : '⏸️ '}No se cierra solo: {texto[ev.motivo ?? ''] ?? ev.motivo}
+                            {ev.categorias?.length ? ` (${ev.categorias.join(', ')})` : ''}.
+                          </p>
+                          {/* «Analizar caso» abre la pantalla del scraper (§4.3). */}
+                          <LimitePjud><BotonAnalizarCaso caseId={sel.id} lectura={pjud} /></LimitePjud>
+                        </div>
                       );
                     })()}
                   </div>

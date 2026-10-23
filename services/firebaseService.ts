@@ -95,4 +95,15 @@ export function onAuthStateChanged(callback: (user: User | null) => void): () =>
   return firebaseOnAuthStateChanged(fb.auth, callback);
 }
 
+/**
+ * El ID token de la sesión actual, para las rutas del Worker que verifican quién
+ * llama (hoy, `/pjud/*`). `null` sin sesión. El SDK lo renueva solo cuando vence.
+ */
+export async function getIdTokenActual(): Promise<string | null> {
+  const fb = getFirebase();
+  const u = fb?.auth.currentUser;
+  if (!u) return null;
+  try { return await u.getIdToken(); } catch { return null; }
+}
+
 export type { User };

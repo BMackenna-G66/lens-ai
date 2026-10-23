@@ -22,7 +22,7 @@
 import { EventBridgeClient, EnableRuleCommand, DisableRuleCommand, DescribeRuleCommand }
   from '@aws-sdk/client-eventbridge';
 import { initializeApp, cert, type App } from 'firebase-admin/app';
-import { getFirestore, FieldPath, type Firestore, type DocumentSnapshot } from 'firebase-admin/firestore';
+import { getFirestore, FieldPath, FieldValue, type Firestore, type DocumentSnapshot } from 'firebase-admin/firestore';
 
 import { screenCaso, esScreenable } from '../../../services/casosCriminalService';
 import { evaluarCasoAuto, statusDeCaso, statusTrasCierre, normalizarFlujoConfig } from '../../../services/flujoDecision';
@@ -44,6 +44,8 @@ import type { WhitelistClientes } from '../../../services/whitelistClientes';
 import type { CasoSF } from '../../../services/casosService';
 import { logCierre, logEvento, logLiberacionRemesa, ACTOR_SISTEMA } from '../../../services/colasLogService';
 import type { ResultadoEnvio } from '../../../services/colasLogService';
+import { armarCasoScraper } from '../../../services/pjudScraper';
+import { paisCodigo } from '../../../services/flujoDecision';
 
 // ── Configuración de la corrida ─────────────────────────────────────────────
 const COLECCION = process.env.FIRESTORE_COLLECTION || 'casos_sf';
@@ -84,8 +86,13 @@ function db(): Firestore {
 async function leerConfig(): Promise<ConfigNormalizada | null> {
   const [col, id] = CONFIG_DOC.split('/');
   const snap = await db().collection(col).doc(id).get();
-  if (!snap.exists) return null;      // sin doc = nunca se configuró = apagado
-  return normalizarFlujoConfig(snap.data() as Record<string, unknown>);
+  if (!snap.exists) { pjudCrudo = undefined; return null; }  // sin doc = nunca se configuró = apagado
+  const data = snap.data() as Record<string, unknown>;
+  // El switch de PJUD viaja en el MISMO documento y se toma de esta misma
+  // lectura: con el switch apagado la corrida no lee nada más que hoy. No pasa
+  // por `normalizarFlujoConfig`, que no lo conoce ni lo reporta como faltante.
+  pjudCrudo = data.pjud;
+  return normalizarFlujoConfig(data);
 }
 
 // ── Whitelist de clientes ───────────────────────────────────────────────────
@@ -709,6 +716,11 @@ async function procesar(caso: CasoSF, cfg: FlujoOfacConfig): Promise<ResultadoCa
   // 2. Decisión. La misma función que corre en el navegador.
   const ev = evaluarCasoAuto(caso, screening as never, cfg);
   if (!ev.automatizable || !ev.tipologia) {
+    // Solo se ANOTA, para encolarlo en el scraper de PJUD al final de la
+    // corrida (ver `encolarPjud`). No cambia la acción ni el motivo del caso.
+    if (ev.motivo !== 'ya_cerrado' && paisCodigo(caso.pais ?? '') === 'CL') {
+      retenidosPjud.set(caso.id, { caso, screening, motivo: ev.motivo, categorias: ev.categorias });
+    }
     return { ...base, accion: 'retenido', motivo: ev.motivo };
   }
 
@@ -1335,6 +1347,149 @@ function resultadoDeExcepcion(c: CasoSF, e: unknown): ResultadoCaso {
   return { ...base, accion: 'error', motivo: (e as Error).message };
 }
 
+// ── Scraper de PJUD ─────────────────────────────────────────────────────────
+// Contrato «Integración Scraper PJUD ↔ LENS» (Bautista, oct-2026), §4.1 y §4.4.
+// Lens y el scraper se hablan por Firestore: `scraper_casos/{caseId}` (el caso
+// y su resultado) y `scraper_jobs/{jobId}` (la cola). Viven en una base APARTE
+// (`pjud` por defecto): las reglas de la base de Lens dejan leer todo a
+// cualquier usuario logueado, y estas colecciones traen análisis penales.
+//
+// El switch está en config/flujoAutomatico, bloque `pjud`:
+//   { enabled: boolean, database?: string }
+// Ausente o con `enabled` distinto de true = apagado. Si la base no existe, las
+// escrituras fallan y se cuentan como errores: falla cerrado, nunca escribe
+// datos penales en la base de Lens por descuido.
+const MARGEN_PJUD_MS = 60_000;       // lo que tiene que quedar del presupuesto para intentarlo
+const MAX_ENCOLAR_POR_CORRIDA = 50;  // casos NUEVOS por corrida; los que ya estaban no cuentan
+// Casos abiertos en el scraper que se revisan por corrida. Alto a propósito: con
+// un tope chico y sin orden, la consulta devolvería siempre los mismos y el
+// resto no se revisaría nunca —sus PDFs no se borrarían, que es la condición 3
+// de legal—. Si se llega al tope, el resumen lo avisa.
+const MAX_BARRER_POR_CORRIDA = 500;
+
+interface ResumenPjud {
+  encolados: number; yaEstaban: number; sinRuc: number; borrados: number; errores: number; salteado: string[];
+}
+
+let pjudCrudo: unknown;
+const retenidosPjud = new Map<string, {
+  caso: CasoSF; screening: unknown; motivo?: string; categorias?: string[];
+}>();
+
+function switchPjud(): { enabled: boolean; database: string } {
+  const p = (pjudCrudo ?? {}) as { enabled?: unknown; database?: unknown };
+  const database = typeof p.database === 'string' && p.database.trim() ? p.database.trim() : 'pjud';
+  return { enabled: p.enabled === true, database };
+}
+
+function dbPjud(nombre: string): Firestore {
+  db();   // inicializa la app
+  return nombre === '(default)' ? getFirestore(app!) : getFirestore(app!, nombre);
+}
+
+/**
+ * §4.1: cada caso retenido de Chile con al menos una causa con RUC entra a la
+ * cola, UNA sola vez: el job automático tiene id fijo (`auto-{caseId}`) y se
+ * crea solo si no existe. Volver a correr lo decide un analista desde el
+ * scraper.
+ *
+ * Primero se averigua, con UNA lectura múltiple, cuáles ya están, y el tope
+ * cuenta solo los nuevos. Si contara también los que ya estaban, con más de 50
+ * retenidos abiertos los mismos 50 llenarían el cupo en cada corrida y el resto
+ * no se encolaría nunca.
+ */
+async function encolarPjud(base: string, r: ResumenPjud, restante: () => number): Promise<void> {
+  const fs = dbPjud(base);
+  const candidatos: Array<{ caseId: string; caso: NonNullable<ReturnType<typeof armarCasoScraper>> }> = [];
+  for (const [caseId, x] of retenidosPjud) {
+    const sc = (x.screening ?? {}) as { coincidencias?: unknown[] };
+    const caso = armarCasoScraper(caseId, x.caso.datos as Record<string, unknown> | undefined,
+      (sc.coincidencias ?? []) as never, x.motivo, x.categorias);
+    if (caso) candidatos.push({ caseId, caso }); else r.sinRuc++;
+  }
+  if (!candidatos.length) return;
+
+  const jobs = candidatos.map(c => fs.collection('scraper_jobs').doc(`auto-${c.caseId}`));
+  const existentes = await fs.getAll(...jobs);
+  const nuevos = candidatos.map((c, i) => ({ ...c, job: jobs[i] })).filter((_, i) => !existentes[i].exists);
+  r.yaEstaban += candidatos.length - nuevos.length;
+
+  for (let i = 0; i < nuevos.length; i++) {
+    if (i >= MAX_ENCOLAR_POR_CORRIDA || restante() <= MARGEN_PJUD_MS / 2) {
+      r.salteado.push(`encolar: ${nuevos.length - i} para la próxima corrida`);
+      break;
+    }
+    const { caseId, caso, job } = nuevos[i];
+    try {
+      // El caso y su job juntos. `create` hace fallar el batch entero si el job
+      // ya existe, así que el caso tampoco se reescribe.
+      const b = fs.batch();
+      b.set(fs.collection('scraper_casos').doc(caseId), {
+        ...caso,
+        creado: FieldValue.serverTimestamp(),
+        en_proceso: { tipo: 'caso_completo', estado: 'en_cola', job_id: `auto-${caseId}` },
+        // Explícito: el barrido de §4.4 busca `resuelto_en == null`, y Firestore
+        // no encuentra un campo que no existe.
+        resuelto_en: null,
+      }, { merge: true });
+      b.create(job, {
+        tipo: 'caso_completo', case_id: caseId, origen: 'flujo_automatico',
+        prioridad: 5, estado: 'pendiente', creado: FieldValue.serverTimestamp(), intentos: 0,
+      });
+      await b.commit();
+      r.encolados++;
+    } catch (e) {
+      if ((e as { code?: number }).code === 6) { r.yaEstaban++; continue; }   // ALREADY_EXISTS
+      r.errores++;
+      // Sin RUT, RUC ni nombre: solo el caso (identificador interno) y el error.
+      console.log('PJUD_ENCOLAR ' + JSON.stringify({ caseId, error: (e as Error).message?.slice(0, 200) }));
+    }
+  }
+}
+
+/**
+ * §4.4, en un solo lugar y del lado del servidor: un caso de `scraper_casos`
+ * que en Lens ya está CERRADO, o que se borró, recibe su job `borrar` (id fijo,
+ * create-only) y queda con `resuelto_en`. Cubre los cierres manuales, los
+ * automáticos y los borrados sin tocar el flujo de cierre de la SPA.
+ */
+async function barrerResueltosPjud(base: string, r: ResumenPjud, restante: () => number): Promise<void> {
+  const fs = dbPjud(base);
+  const abiertos = await fs.collection('scraper_casos').where('resuelto_en', '==', null)
+    .limit(MAX_BARRER_POR_CORRIDA).get();
+  if (abiertos.empty) return;
+  if (abiertos.size >= MAX_BARRER_POR_CORRIDA) {
+    r.salteado.push(`barrer: ${MAX_BARRER_POR_CORRIDA} casos abiertos en el scraper, el tope; puede haber más sin revisar`);
+  }
+  const enLens = await db().getAll(...abiertos.docs.map(d => db().collection(COLECCION).doc(d.id)));
+  for (let i = 0; i < abiertos.docs.length; i++) {
+    if (restante() <= MARGEN_PJUD_MS / 2) { r.salteado.push('barrer: tope'); break; }
+    const caso = enLens[i];
+    const d = (caso.data() ?? {}) as Record<string, unknown> & CasoSF;
+    const cerrado = !caso.exists
+      || statusTrasCierre(d.cierres, d.statusCaso as string | undefined, !!d.asignacion?.analistaId) === 'CERRADO';
+    if (!cerrado) continue;
+    const caseId = abiertos.docs[i].id;
+    try {
+      const jobRef = fs.collection('scraper_jobs').doc(`borrar-${caseId}`);
+      await fs.runTransaction(async t => {
+        const ya = (await t.get(jobRef)).exists;
+        if (!ya) {
+          t.create(jobRef, {
+            tipo: 'borrar', case_id: caseId, origen: 'lens:caso_resuelto',
+            prioridad: 3, estado: 'pendiente', creado: FieldValue.serverTimestamp(), intentos: 0,
+          });
+        }
+        t.update(abiertos.docs[i].ref, { resuelto_en: FieldValue.serverTimestamp() });
+      });
+      r.borrados++;
+    } catch (e) {
+      r.errores++;
+      console.log('PJUD_BARRER ' + JSON.stringify({ caseId, error: (e as Error).message?.slice(0, 200) }));
+    }
+  }
+}
+
 async function correr(
   arranque: number,
   restante: () => number,
@@ -1347,6 +1502,9 @@ async function correr(
   // se invalida solo cuando cambia `actualizadoEn`.)
   wlLecturas = 0;
   espejo = { escritas: 0, fallidas: 0 };
+  // Por invocación, igual que `espejo`: en un Lambda tibio, un caso anotado en
+  // la corrida anterior puede haberse cerrado entre medio.
+  retenidosPjud.clear();
   // Lo que cuesta llegar hasta acá y que `leerCasosAbiertos` no cuenta: el
   // candado, la config, la cabecera de la whitelist y el sondeo. Se suma para
   // que el resumen diga la verdad sobre lo que costó la corrida.
@@ -1502,6 +1660,24 @@ async function correr(
     }
   }
 
+  // ── PJUD: al FINAL, después de cerrar o retener todo ─────────────────────
+  // Detrás de un switch, apagado por defecto. Nada de esto puede cambiar lo que
+  // pasó con un caso ni hacer fallar la corrida: cada paso tiene su try/catch y
+  // su propio presupuesto, y lo que falla se cuenta.
+  const swPjud = switchPjud();
+  let pjud: ResumenPjud | null = null;
+  if (swPjud.enabled) {
+    pjud = { encolados: 0, yaEstaban: 0, sinRuc: 0, borrados: 0, errores: 0, salteado: [] };
+    if (restante() > MARGEN_PJUD_MS) {
+      try { await encolarPjud(swPjud.database, pjud, restante); }
+      catch (e) { pjud.errores++; console.log('PJUD_ENCOLAR ' + JSON.stringify({ error: (e as Error).message?.slice(0, 200) })); }
+    } else pjud.salteado.push('encolar: sin tiempo');
+    if (restante() > MARGEN_PJUD_MS) {
+      try { await barrerResueltosPjud(swPjud.database, pjud, restante); }
+      catch (e) { pjud.errores++; console.log('PJUD_BARRER ' + JSON.stringify({ error: (e as Error).message?.slice(0, 200) })); }
+    } else pjud.salteado.push('barrer: sin tiempo');
+  }
+
   const contar = (rs: ResultadoCaso[]) => (a: ResultadoCaso['accion']) => rs.filter(r => r.accion === a).length;
   const cuenta = contar(resultados);
   const cuentaR = contar(resultadosRemesa);
@@ -1561,6 +1737,8 @@ async function correr(
     // Lo que se mandó a Redshift (colas_trabajo) en vivo. Las fallidas no se
     // pierden: el respaldo diario las reescribe desde Firestore con la misma clave.
     espejoRedshift: espejo,
+    // Solo con el switch prendido: apagado, el resumen es idéntico al de antes.
+    ...(pjud ? { pjud } : {}),
     cortadoPorTiempo,
     apagadoEnVuelo,
     // Vacío = el doc de config estaba completo. Con algo adentro, esos campos se

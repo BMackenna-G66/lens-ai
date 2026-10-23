@@ -1,0 +1,56 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  lens-pjud-lector: lee scraper_casos/{id} (base Firestore `pjud`) para la ficha
+  de la Bandeja, a través del Worker. Solo lectura, con máscara de campos.
+  Stack independiente.
+
+Parameters:
+  FirebaseSaB64:
+    Type: String
+    NoEcho: true
+    Description: Service account de Firebase (JSON) en base64.
+  LectorSecret:
+    Type: String
+    NoEcho: true
+    Description: >
+      Secreto que manda el Worker en el header x-pjud-lector. Es el mismo valor
+      que el secreto PJUD_LECTOR_SECRET del Worker, y no lo tiene nadie más.
+  FirestoreProject:
+    Type: String
+    Default: lens-ai-9da63
+  FirestoreDatabase:
+    Type: String
+    Default: pjud
+    Description: La base Firestore aparte de PJUD (reglas deny-all para clientes).
+
+Resources:
+  PjudLectorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: lens-pjud-lector
+      Runtime: python3.12
+      Architectures: [arm64]
+      Handler: app.lambda_handler
+      CodeUri: src/
+      MemorySize: 256
+      Timeout: 10
+      # Lo usa la ficha mientras alguien la tiene abierta: pocas lecturas, y un
+      # tope para que un error del lado del navegador no se vuelva un gasto.
+      ReservedConcurrentExecutions: 5
+      Description: Lee scraper_casos/{id} para la ficha de la Bandeja (vía Worker).
+      Environment:
+        Variables:
+          FIREBASE_SA_JSON: !Ref FirebaseSaB64
+          LECTOR_SECRET: !Ref LectorSecret
+          FIRESTORE_PROJECT: !Ref FirestoreProject
+          FIRESTORE_DATABASE: !Ref FirestoreDatabase
+      FunctionUrlConfig:
+        # El control es el secreto: la URL solo la conoce el Worker.
+        AuthType: NONE
+
+Outputs:
+  FunctionUrl:
+    Value: !GetAtt PjudLectorFunctionUrl.FunctionUrl
+  LogGroup:
+    Value: !Sub '/aws/lambda/${PjudLectorFunction}'
