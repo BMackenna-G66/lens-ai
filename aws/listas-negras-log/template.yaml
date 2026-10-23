@@ -1,0 +1,172 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  lens-listas-negras-log: el registro de cada cambio a las listas negras de
+  Compliance de Admin G66. DynamoDB es el registro durable (el Worker escribe
+  ANTES de llamar a Admin); Redshift (schema listas_negras) es el espejo, que
+  escribe un horario mientras el cluster está arriba. Stack independiente: no
+  comparte función, URL, secreto ni rol con ningún otro.
+
+Parameters:
+  ApiSecretValue:
+    Type: String
+    NoEcho: true
+    Description: Secreto propio del header x-api-secret. Lo tiene solo el Worker (LISTAS_LOG_SECRET).
+  RedshiftCluster:
+    Type: String
+    Default: compliance-redshift-cluster
+  RedshiftDatabase:
+    Type: String
+    Default: dev
+  RedshiftDbUser:
+    Type: String
+    Default: awsuser
+  RedshiftSchema:
+    Type: String
+    Default: listas_negras
+  Horario:
+    Type: String
+    # Cada 10 minutos, de lunes a viernes, mientras el cluster está arriba
+    # (08:00 a 22:30 UTC). Lo que se escriba con el cluster pausado queda en
+    # DynamoDB y entra en la primera corrida del día hábil siguiente.
+    Default: 'cron(0/10 8-22 ? * MON-FRI *)'
+  EmailAlerta:
+    Type: String
+    Default: ''
+    Description: Correo que recibe la alarma. Se pasa en el deploy; AWS manda un correo de confirmación.
+
+Conditions:
+  ConCorreo: !Not [!Equals [!Ref EmailAlerta, '']]
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 300
+    MemorySize: 256
+    Architectures: [arm64]
+
+Resources:
+  # El registro durable. Retain: borrar el stack no puede borrar el registro.
+  LogTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: lens-listas-negras-log
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: cambio_id
+          AttributeType: S
+        - AttributeName: pendiente
+          AttributeType: S
+        - AttributeName: ocurrido_en
+          AttributeType: S
+      KeySchema:
+        - AttributeName: cambio_id
+          KeyType: HASH
+      # Índice ralo: solo los ítems con `pendiente` están en él. El espejo lo
+      # recorre y al terminar quita el atributo.
+      GlobalSecondaryIndexes:
+        - IndexName: pendientes
+          KeySchema:
+            - AttributeName: pendiente
+              KeyType: HASH
+            - AttributeName: ocurrido_en
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  LogFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: lens-listas-negras-log
+      Handler: app.lambda_handler
+      CodeUri: src/
+      Description: Registra los cambios a las listas negras de Admin G66 y los espeja en Redshift.
+      Environment:
+        Variables:
+          API_SECRET: !Ref ApiSecretValue
+          TABLA: !Ref LogTable
+          REDSHIFT_CLUSTER: !Ref RedshiftCluster
+          REDSHIFT_DATABASE: !Ref RedshiftDatabase
+          REDSHIFT_DB_USER: !Ref RedshiftDbUser
+          REDSHIFT_SCHEMA: !Ref RedshiftSchema
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:PutItem, dynamodb:GetItem, dynamodb:UpdateItem, dynamodb:BatchWriteItem, dynamodb:Query]
+              Resource:
+                - !GetAtt LogTable.Arn
+                - !Sub '${LogTable.Arn}/index/pendientes'
+            - Effect: Allow
+              Action: redshift-data:BatchExecuteStatement
+              Resource: !Sub 'arn:aws:redshift:${AWS::Region}:${AWS::AccountId}:cluster:${RedshiftCluster}'
+            # DescribeStatement no admite scope por ARN.
+            - Effect: Allow
+              Action: redshift-data:DescribeStatement
+              Resource: '*'
+            - Effect: Allow
+              Action: redshift:GetClusterCredentials
+              Resource:
+                - !Sub 'arn:aws:redshift:${AWS::Region}:${AWS::AccountId}:dbuser:${RedshiftCluster}/${RedshiftDbUser}'
+                - !Sub 'arn:aws:redshift:${AWS::Region}:${AWS::AccountId}:dbname:${RedshiftCluster}/${RedshiftDatabase}'
+      Events:
+        Espejo:
+          Type: Schedule
+          Properties:
+            Schedule: !Ref Horario
+            Name: lens-listas-negras-espejo
+            Description: Espeja en Redshift los cambios de listas negras que están en DynamoDB.
+      # La protección es el header x-api-secret, que valida el handler (sin API
+      # Gateway: ver la memoria de permisos de compliance-admin).
+      FunctionUrlConfig:
+        AuthType: NONE
+
+  AlertaTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: lens-listas-negras-log-alerta
+      DisplayName: Lens - registro de listas negras
+
+  AlertaCorreo:
+    Type: AWS::SNS::Subscription
+    Condition: ConCorreo
+    Properties:
+      TopicArn: !Ref AlertaTopic
+      Protocol: email
+      Endpoint: !Ref EmailAlerta
+
+  # El código NO lanza por una pausa del cluster; sí cuando hay eventos sin
+  # espejar de hace más de 4 días o cuando el espejo falla por otra cosa.
+  AlarmaFalla:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: lens-listas-negras-log-falla
+      AlarmDescription: >
+        El espejo del registro de listas negras (DynamoDB → Redshift) falló. Los
+        eventos siguen en DynamoDB lens-listas-negras-log. Ver el log
+        /aws/lambda/lens-listas-negras-log.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref LogFunction
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertaTopic]
+      OKActions: [!Ref AlertaTopic]
+
+Outputs:
+  EndpointUrl:
+    Description: URL del registro (va como secret LISTAS_LOG_URL del Worker, nunca en el frontend).
+    Value: !GetAtt LogFunctionUrl.FunctionUrl
+  FunctionName:
+    Value: !Ref LogFunction
+  Tabla:
+    Value: !Ref LogTable

@@ -5,6 +5,8 @@ import autoTable from 'jspdf-autotable';
 import { DEFAULT_CATALOG } from '../services/defaultCatalogData';
 import { normalizeDelito } from '../services/criminalDataProcessor';
 import { InspektorColombia } from './InspektorColombia';
+import { ListasNegrasAdmin } from './ListasNegrasAdmin';
+import { useAuth } from '../context/AuthContext';
 import { evaluateValidationRules, ValidationAlert, SEVERITY_META } from '../services/validationRules';
 import { Lens360Tributaria } from '../types/lens360';
 import {
@@ -14,7 +16,8 @@ import {
 } from '../services/regcheqPeru';
 import { archivoDesdeWorkbook, confirmarEnvio, type CargaCriminal } from '../services/envioCriminal';
 
-type CountryMode = null | 'chile' | 'colombia' | 'global' | 'peru';
+// 'listas': el módulo Listas negras abierto desde el selector, sin país.
+type CountryMode = null | 'chile' | 'colombia' | 'global' | 'peru' | 'listas';
 
 // ─── Config ────────────────────────────────────────────────────────────────────
 const API_BASE = 'https://external-api.regcheq.com';
@@ -71,7 +74,7 @@ const COL_LABELS: Record<string, string> = {
 };
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
-type Tab         = 'individual' | 'masivo' | 'lista';
+type Tab         = 'individual' | 'masivo' | 'lista' | 'negras';
 type PersonType  = 'natural' | 'legal';
 
 interface ListaEntry {
@@ -1480,6 +1483,10 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode, onEn
   const dark = darkMode !== undefined ? darkMode : localDark;
   const [countryMode, setCountryMode] = useState<CountryMode>(null);
   const [tab, setTab] = useState<Tab>('individual');
+  // Listas negras: Líder siempre; el resto, solo con el módulo habilitado
+  // (ausente = no). El Worker lo vuelve a verificar del lado del servidor.
+  const { role, userProfile } = useAuth();
+  const puedeListasNegras = role === 'Lider' || userProfile?.modules?.listasNegras === true;
 
   useEffect(() => {
     // Keep local preference in sync for standalone use
@@ -2045,6 +2052,28 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode, onEn
     return <InspektorColombia onBack={() => setCountryMode(null)} dark={dark} onEnviarACriminal={onEnviarACriminal} />;
   }
 
+  // ── Listas negras, abiertas desde el selector ───────────────────────────────
+  if (countryMode === 'listas' && puedeListasNegras) {
+    return (
+      <div className={`min-h-screen ${bg} ${textMain} transition-colors`}>
+        <nav className={`sticky top-0 z-50 backdrop-blur border-b px-6 py-3 flex items-center gap-3 ${navBg}`}>
+          <button onClick={() => setCountryMode(null)} className={`flex items-center gap-2 text-xs font-semibold transition-colors ${textMuted} hover:text-indigo-400`}>
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+            </svg>
+            Países
+          </button>
+          <div className={`h-4 w-px ${dark ? 'bg-slate-700' : 'bg-violet-200'}`} />
+          <span className="text-sm font-black">⛔ Listas negras</span>
+          <span className={`text-xs font-medium ${textMuted}`}>Admin G66 · Compliance</span>
+        </nav>
+        <div className="max-w-4xl mx-auto px-6 py-8">
+          <ListasNegrasAdmin dark={dark} />
+        </div>
+      </div>
+    );
+  }
+
   // ── Country selector landing ────────────────────────────────────────────────
   if (!countryMode) {
     return (
@@ -2137,6 +2166,24 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode, onEn
                 Regcheq — PEP Perú y sus familiares, funcionarios públicos, OFAC, ONU, GAFI y Screening Global. Por DNI.
               </p>
             </button>
+
+            {/* Listas negras de Admin G66: no dependen del país */}
+            {puedeListasNegras && (
+              <button
+                onClick={() => setCountryMode('listas')}
+                className={`group rounded-3xl p-8 text-left transition-all duration-300 border hover:shadow-2xl active:scale-[0.98] ${
+                  dark
+                    ? 'bg-slate-800/60 border-slate-700/50 hover:border-rose-500/40 hover:bg-rose-950/20 hover:shadow-rose-950/30'
+                    : 'bg-white border-violet-200 hover:border-rose-400 hover:shadow-rose-100/50'
+                }`}
+              >
+                <div className="text-5xl mb-4">⛔</div>
+                <h3 className={`text-xl font-black mb-2 ${dark ? 'text-white' : 'text-slate-900'}`}>Listas negras</h3>
+                <p className={`text-sm leading-relaxed ${dark ? 'text-slate-400' : 'text-slate-500'}`}>
+                  Admin G66 — Alta y edición masiva de las listas negras de DNI, dominios de correo y cuentas bancarias.
+                </p>
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -2161,8 +2208,9 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode, onEn
         <span className={`text-xs font-medium ${textMuted}`}>Regcheq · AML / KYC</span>
 
         <div className={`flex gap-1 rounded-xl p-1 ml-2 ${dark ? 'bg-slate-800/60' : 'bg-violet-100/70'}`}>
-          {(countryMode === 'global' || countryMode === 'peru' ? (['individual','masivo'] as Tab[]) : (['individual','masivo','lista'] as Tab[])).map(t => {
-            const labels: Record<Tab,string> = { individual:'🔍 Individual', masivo:'📊 Masivo', lista:'📋 Lista de Interés' };
+          {[...(countryMode === 'global' || countryMode === 'peru' ? (['individual','masivo'] as Tab[]) : (['individual','masivo','lista'] as Tab[])),
+            ...(puedeListasNegras ? (['negras'] as Tab[]) : [])].map(t => {
+            const labels: Record<Tab,string> = { individual:'🔍 Individual', masivo:'📊 Masivo', lista:'📋 Lista de Interés', negras:'⛔ Listas negras' };
             return (
               <button
                 key={t}
@@ -2497,6 +2545,9 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode, onEn
             )}
           </div>
         )}
+
+        {/* ─── TAB: LISTAS NEGRAS (Admin G66) ────────────────────────────── */}
+        {tab === 'negras' && puedeListasNegras && <ListasNegrasAdmin dark={dark} />}
 
         {/* ─── TAB: LISTA DE INTERÉS ─────────────────────────────────────── */}
         {tab === 'lista' && (

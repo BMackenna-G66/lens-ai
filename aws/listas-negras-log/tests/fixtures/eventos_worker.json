@@ -1,0 +1,118 @@
+[
+ {
+  "accion": "intento",
+  "cambioId": "cambio-1",
+  "ejecucionId": "ej-prueba",
+  "lista": "CUENTA",
+  "operacion": "CREAR",
+  "flujo": "lens.regcheq.listas_negras.carga",
+  "servicio": "/admin/listas-negras/cuenta",
+  "actor": {
+   "email": "analista@global66.com",
+   "nombre": "Analista Prueba",
+   "uid": "uid-analista"
+  },
+  "registro": {
+   "countryCode": "CO",
+   "accountNumber": "3000 0000 01",
+   "accountType": "Electronic",
+   "enable": true,
+   "reason": "Prueba"
+  },
+  "meta": {
+   "estadoAnterior": null,
+   "reasonAnterior": null,
+   "valor": null
+  }
+ },
+ {
+  "accion": "resultado",
+  "cambioId": "cambio-1",
+  "ok": true,
+  "httpStatus": 200,
+  "respuesta": {
+   "id": 44
+  },
+  "actor": {
+   "email": "analista@global66.com",
+   "nombre": "Analista Prueba",
+   "uid": "uid-analista"
+  },
+  "error": null
+ },
+ {
+  "accion": "intento",
+  "cambioId": "cambio-2",
+  "ejecucionId": "ej-prueba",
+  "lista": "CUENTA",
+  "operacion": "EDITAR",
+  "flujo": "lens.regcheq.listas_negras.edicion",
+  "servicio": "/admin/listas-negras/cuenta",
+  "actor": {
+   "email": "analista@global66.com",
+   "nombre": "Analista Prueba",
+   "uid": "uid-analista"
+  },
+  "registro": {
+   "id": 44,
+   "countryCode": "CO",
+   "accountNumber": "3000000001",
+   "accountType": "Electronic",
+   "enable": false,
+   "reason": "Prueba"
+  },
+  "meta": {
+   "estadoAnterior": true,
+   "reasonAnterior": "Prueba",
+   "valor": null
+  }
+ },
+ {
+  "accion": "resultado",
+  "cambioId": "cambio-2",
+  "ok": true,
+  "httpStatus": 200,
+  "respuesta": {},
+  "actor": {
+   "email": "analista@global66.com",
+   "nombre": "Analista Prueba",
+   "uid": "uid-analista"
+  },
+  "error": null
+ },
+ {
+  "accion": "sin_operacion",
+  "ejecucionId": "ej-prueba",
+  "lista": "CUENTA",
+  "flujo": "lens.regcheq.listas_negras.carga",
+  "servicio": "/admin/listas-negras/cuenta/sin-operacion",
+  "actor": {
+   "email": "analista@global66.com",
+   "nombre": "Analista Prueba",
+   "uid": "uid-analista"
+  },
+  "filas": [
+   {
+    "valor": "3000000001",
+    "countryCode": "CO",
+    "resultado": "OMITIDO_YA_EXISTE_ACTIVO",
+    "cambioId": "cambio-3"
+   }
+  ]
+ },
+ {
+  "accion": "ids",
+  "lista": "CUENTA",
+  "actor": {
+   "email": "analista@global66.com",
+   "nombre": "Analista Prueba",
+   "uid": "uid-analista"
+  },
+  "ids": [
+   {
+    "cambioId": "cambio-1",
+    "adminId": 44
+   }
+  ]
+ }
+]
