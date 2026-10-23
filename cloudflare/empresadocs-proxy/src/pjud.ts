@@ -52,7 +52,7 @@ const b64url = (s: string): Uint8Array => {
 };
 const json = (s: string): Record<string, unknown> => JSON.parse(new TextDecoder().decode(b64url(s)));
 
-export type Verificacion = { ok: true; email: string } | { ok: false; motivo: string };
+export type Verificacion = { ok: true; email: string; uid: string; nombre: string } | { ok: false; motivo: string };
 
 /** Verifica un ID token de Firebase de Lens. No lanza: devuelve el motivo. */
 export async function verificarIdToken(token: string, proyecto = PROYECTO_DEFAULT): Promise<Verificacion> {
@@ -88,7 +88,7 @@ export async function verificarIdToken(token: string, proyecto = PROYECTO_DEFAUL
   const email = typeof pl.email === 'string' ? pl.email.toLowerCase() : '';
   if (pl.email_verified !== true) return { ok: false, motivo: 'email sin verificar' };
   if (!email.endsWith(DOMINIO)) return { ok: false, motivo: 'dominio no autorizado' };
-  return { ok: true, email };
+  return { ok: true, email, uid: String(pl.sub), nombre: typeof pl.name === 'string' ? pl.name.slice(0, 256) : '' };
 }
 
 const responder = (cuerpo: unknown, status: number, cors: Record<string, string>): Response =>

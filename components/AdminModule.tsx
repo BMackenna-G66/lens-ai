@@ -25,9 +25,11 @@ type AdminTab = 'users' | 'invitations' | 'flujos' | 'system';
 // Para sumar un módulo nuevo: agregarlo acá y a ModulePermissions
 // (services/firestoreService) — la tabla y los toggles se generan solos.
 // El launcher tiene que respetarlo: si no lo mira, el toggle no hace nada.
-type ModuleKey = 'compliance' | 'criminal' | 'generalDashboard' | 'regcheq' | 'lens360' | 'casos' | 'kyb';
+type ModuleKey = 'compliance' | 'criminal' | 'generalDashboard' | 'regcheq' | 'lens360' | 'casos' | 'kyb' | 'listasNegras';
 
-const MODULOS: { key: ModuleKey; label: string }[] = [
+// `porDefecto`: cómo se lee un módulo AUSENTE en el perfil. Todos los
+// históricos arrancan habilitados; `listasNegras` no (escribe en Admin G66).
+const MODULOS: { key: ModuleKey; label: string; porDefecto?: boolean }[] = [
   { key: 'compliance',       label: 'Compliance' },
   { key: 'criminal',         label: 'Perfiles Crim.' },
   { key: 'generalDashboard', label: 'Dashboard Gral.' },
@@ -35,12 +37,17 @@ const MODULOS: { key: ModuleKey; label: string }[] = [
   { key: 'lens360',          label: 'Vista 360°' },
   { key: 'casos',            label: 'Bandeja de Casos' },
   { key: 'kyb',              label: 'Cola KYB' },
+  { key: 'listasNegras',     label: 'Listas negras', porDefecto: false },
 ];
+
+const habilitado = (modules: UserProfile['modules'] | undefined, m: { key: ModuleKey; porDefecto?: boolean }) =>
+  modules?.[m.key] ?? (m.porDefecto ?? true);
 
 // Default cuando el usuario no tiene el objeto `modules` guardado: todo habilitado
 // (mismo criterio que el launcher, que usa `?? true`).
 const MODULOS_DEFAULT: UserProfile['modules'] = {
   compliance: true, criminal: true, generalDashboard: true, regcheq: true, lens360: true, casos: true, kyb: true,
+  listasNegras: false,
 };
 
 // ─── Toggle switch ────────────────────────────────────────────────────────────
@@ -85,8 +92,9 @@ const UsersTab: React.FC<{ currentUid: string }> = ({ currentUid }) => {
   };
 
   const handleModuleToggle = async (uid: string, key: ModuleKey, currentModules: UserProfile['modules']) => {
-    // `?? true` porque un módulo ausente se considera habilitado.
-    const newModules = { ...currentModules, [key]: !(currentModules?.[key] ?? true) };
+    // Un módulo ausente vale su `porDefecto` (habilitado, salvo Listas negras).
+    const m = MODULOS.find(x => x.key === key)!;
+    const newModules = { ...currentModules, [key]: !habilitado(currentModules, m) };
     setSaving(s => ({ ...s, [`${uid}-${key}`]: true }));
     await updateUserProfile(uid, { modules: newModules });
     setUsers(prev => prev.map(u => u.uid === uid ? { ...u, modules: newModules } : u));
@@ -167,7 +175,7 @@ const UsersTab: React.FC<{ currentUid: string }> = ({ currentUid }) => {
                 {MODULOS.map(m => (
                   <td key={m.key} className="py-3 px-4">
                     <Toggle
-                      checked={user.modules?.[m.key] ?? true}
+                      checked={habilitado(user.modules, m)}
                       onChange={() => handleModuleToggle(user.uid, m.key, user.modules ?? MODULOS_DEFAULT)}
                       disabled={!!saving[`${user.uid}-${m.key}`]}
                     />

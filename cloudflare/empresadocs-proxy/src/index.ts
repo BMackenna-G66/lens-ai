@@ -18,6 +18,7 @@
  */
 
 import { manejarPjud } from './pjud';
+import { esRutaListasNegras, manejarListasNegras } from './listasNegras';
 
 // El contexto de ejecución de Cloudflare. Se declara acá y no se importa de
 // `@cloudflare/workers-types` porque el tsconfig de la app también compila este
@@ -438,16 +439,27 @@ export default {
     const origin = request.headers.get('Origin') || '';
     const cors = corsHeaders(origin);
 
-    if (request.method === 'OPTIONS') return new Response(null, { headers: cors });
-
     const url = new URL(request.url);
 
+    // /admin/listas-negras/* edita con PUT: su preflight lo admite. El de las
+    // demás rutas no cambia.
+    if (request.method === 'OPTIONS' && esRutaListasNegras(url.pathname)) {
+      return new Response(null, { headers: { ...cors, 'Access-Control-Allow-Methods': 'GET, POST, PUT, OPTIONS' } });
+    }
+    if (request.method === 'OPTIONS') return new Response(null, { headers: cors });
+
     // ── /pjud/* · scraper de PJUD ───────────────────────────────────────────
-    // La ÚNICA ruta que verifica el ID token de Firebase del analista: devuelve
-    // análisis penales de clientes. Solo atiende rutas que empiezan con /pjud/;
+    // Verifica el ID token de Firebase del analista, igual que
+    // /admin/listas-negras/*: devuelve análisis penales de clientes. Solo atiende rutas que empiezan con /pjud/;
     // el resto sigue de largo sin cambios. Ver pjud.ts.
     const pjud = await manejarPjud(request, url, env, cors, fetchTimeout);
     if (pjud) return pjud;
+
+    // ── /admin/listas-negras/* · listas negras de Compliance de Admin G66 ────
+    // Con ID token de Lens y el módulo `listasNegras` habilitado. Solo atiende
+    // rutas que empiezan con /admin/listas-negras/; ver listasNegras.ts.
+    const listasNegras = await manejarListasNegras(request, url, env, cors, fetchTimeout);
+    if (listasNegras) return listasNegras;
 
     // ── Regcheq situación tributaria: POST /regcheq/sii  body {fichaId, rut} ─────
     if (url.pathname === '/regcheq/sii') {

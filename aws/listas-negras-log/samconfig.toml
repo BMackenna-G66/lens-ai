@@ -1,0 +1,12 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "lens-listas-negras-log"
+resolve_s3 = true
+s3_prefix = "lens-listas-negras-log"
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+profile = "compliance-admin"
+# Los secretos NO se guardan acá: se pasan en cada deploy con
+#   --parameter-overrides "ApiSecretValue=... EmailAlerta=..."

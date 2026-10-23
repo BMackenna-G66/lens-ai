@@ -33,6 +33,10 @@ export interface ModulePermissions {
   // `?? true`), así que los usuarios viejos no pierden acceso al sumar uno nuevo.
   casos?: boolean;   // Bandeja de Casos
   kyb?: boolean;     // Cola KYB (empresas / B2B)
+  // La excepción: ausente = DESHABILITADO. Escribe listas negras de Compliance
+  // en Admin G66 (producción) y no puede quedar abierto a todos por defecto.
+  // El Worker lo vuelve a verificar del lado del servidor. Líder siempre lo ve.
+  listasNegras?: boolean;
 }
 
 export interface UserProfile {
