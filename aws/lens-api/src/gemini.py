@@ -512,6 +512,14 @@ def extraer_campos(texto: str, contexto_pais: str, limite: float | None = None) 
 # 8 de 8, cero JSON roto, salida estable en ~640 tokens. Si alguien vuelve a
 # anidar el esquema, vuelve el problema.
 
+#: Lo que el modelo lee como instrucción del campo `nationalityDeclared`.
+NACIONALIDAD_DECLARADA = (
+    "Solo informa; no cambia cómo se llena countryOfOrigin. true si el documento escribe la "
+    "nacionalidad de esta persona natural con esas palabras (por ejemplo «de nacionalidad "
+    "colombiana», «chileno», «estadounidense»). false si no la escribe, aunque el país se pueda "
+    "deducir de otra cosa, y en personas jurídicas."
+)
+
 _PERSONA_PLANA = {
     "type": "OBJECT",
     "properties": {
@@ -522,6 +530,19 @@ _PERSONA_PLANA = {
         "shareholderId": {"type": "STRING"},
         "identificationType": {"type": "STRING"},
         "countryOfOrigin": {"type": "STRING"},
+        # `nationalityCode` de `shareholders[]` (contrato v3.2), que pide «solo
+        # si el documento la declara». `countryOfOrigin` solo no alcanza: el
+        # prompt de la SPA lo define como «país de la persona o de constitución
+        # de la jurídica», y el modelo lo deduce. Este booleano dice si salió de
+        # una nacionalidad escrita.
+        #
+        # Es un booleano y no un campo `nationality` aparte por una medición:
+        # con un campo de texto, el modelo MOVÍA la nacionalidad ahí y dejaba
+        # `countryOfOrigin` vacío —Colombia y Venezuela pasaron de 8/8 a 1/8 y
+        # 0/8—, y eso cambiaba EP-6. El prompt no se toca —lo comparte la SPA—,
+        # así que la instrucción va en la descripción. Ver
+        # `tests/medir_nacionalidad_real.py`.
+        "nationalityDeclared": {"type": "BOOLEAN", "nullable": True, "description": NACIONALIDAD_DECLARADA},
         "ownershipPercentage": {"type": "NUMBER", "nullable": True},
         "isPEP": {"type": "BOOLEAN", "nullable": True},
         "position": {"type": "STRING"},

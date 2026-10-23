@@ -163,7 +163,32 @@ Un límite de monto por sobre el cual se exigen dos firmas, **sí**.
 | `identificationNumber` | string \| null | Sí | **Tal como figura**, no solo dígitos | `"1.020.304-5"` |
 | `role` | string \| null | Sí | *Representante Legal* (cargo), hasta 60 caracteres; las abreviaturas del RUT de la DIAN se escriben enteras | `"Gerente General"` |
 
-### 2.3 `shareholders[]` — EP-3 y EP-6
+### 2.3 `shareholders[]` — EP-3
+
+Los dueños **directos** que listan los documentos del lote, consolidados: la
+misma persona en la escritura y en la composición accionaria sale una vez. La
+cadena societaria no entra. Con el estilo de `legalRepresentatives`, no el de
+EP-6. Va siempre: `[]` si no hay nadie.
+
+| Campo | Tipo | Oblig. | Origen | Ejemplo |
+|---|---|---|---|---|
+| `fullName` | string \| null | Sí | **Texto original sin reordenar** | `"RAMOS INVENTADO JUAN"` |
+| `name` | string \| null | Sí | Partición; razón social en personas jurídicas | `"JUAN"` |
+| `lastName` | string \| null | Sí | Partición; `null` en personas jurídicas | `"RAMOS INVENTADO"` |
+| `personType` | string \| null | Sí | `NATURAL` o `LEGAL`; `null` con `PERSON_TYPE_UNDETERMINED`, sin omitir a la persona | `"NATURAL"` |
+| `identificationType` | string | Sí | El vocabulario de EP-4 (`PASS`, no «Pasaporte») más `NIT`, `RUC`, `INE`, `CUIT`, `CUIL`, `CPF`, `CNPJ`, `EIN`, `Tax ID` y `VAT Number` | `"CC"` |
+| `identificationNumber` | string | Sí | **Tal como figura**, con puntos, guion y letras | `"99.000.001"` |
+| `ownershipPercentage` | number \| null | Sí | Declarado, de 0 a 100 y hasta 2 decimales; **no se estima ni se ajusta a 100** | `40` |
+| `nationalityCode` | string \| null | Sí | ISO-2, **solo si el documento declara la nacionalidad** | `"CO"` |
+| `documentCountryCode` | string \| null | Sí | ISO-2 del país que emite el documento, solo cuando el tipo lo dice sin ambigüedad (CC, CE, NIT → CO; RUT → CL; RFC, CURP, INE → MX; CUIT, CUIL → AR; CPF, CNPJ → BR). `null` en DNI y pasaporte | `"CO"` |
+
+> **Quién entra.** Solo quien tiene nombre, `identificationType` e
+> `identificationNumber`. Al que le falta alguno se lo omite con
+> `EXPECTED_DATA_MISSING`, que dice cuál en `field`. Si el lote trae la
+> composición accionaria y no queda nadie, `EXPECTED_DATA_MISSING` con
+> `field: "shareholders"`: la corrida queda `INCOMPLETE`, nunca `FAILED`.
+
+### 2.4 `businessShareholders` — EP-6
 
 | Campo | Tipo | Oblig. | Origen | Ejemplo |
 |---|---|---|---|---|

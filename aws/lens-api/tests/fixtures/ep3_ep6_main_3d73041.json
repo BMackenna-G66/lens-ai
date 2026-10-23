@@ -1,0 +1,147 @@
+{
+  "ep3": {
+    "company": {
+      "legalName": "COMERCIAL DE PRUEBA S.A.S.",
+      "taxId": "999.000.001-1",
+      "taxIdType": "NIT",
+      "constitutionDate": null,
+      "legalForm": "S.A.S.",
+      "address": {
+        "street": null,
+        "apt": null,
+        "city": null,
+        "state": null
+      },
+      "activity": null,
+      "jointAdministration": null
+    },
+    "legalRepresentatives": [
+      {
+        "fullName": "FICTICIA SOTO ANA PRUEBA",
+        "name": "ANA PRUEBA",
+        "lastName": "FICTICIA SOTO",
+        "personType": "NATURAL",
+        "identificationType": "CC",
+        "identificationNumber": "99.000.009",
+        "role": "Representante legal"
+      }
+    ],
+    "fields": [
+      {
+        "field": "Razón Social",
+        "value": "COMERCIAL DE PRUEBA S.A.S."
+      },
+      {
+        "field": "RUT de la sociedad",
+        "value": "999.000.001-1"
+      }
+    ],
+    "documents": [
+      {
+        "objectKey": "prod/990000003/documents_company/company_deeds_document_1791500000000.PDF",
+        "fileName": null,
+        "documentType": "company_deeds_document",
+        "ok": true,
+        "pagesTotal": null,
+        "pagesRead": null
+      },
+      {
+        "objectKey": "prod/990000003/documents_company/company_shareholders_document_1791500000001.PDF",
+        "fileName": null,
+        "documentType": "company_shareholders_document",
+        "ok": true,
+        "pagesTotal": null,
+        "pagesRead": null
+      }
+    ],
+    "country": "colombia",
+    "countryCode": "CO"
+  },
+  "ep6": {
+    "businessName": "COMERCIAL DE PRUEBA S.A.S.",
+    "businessId": "999.000.001-1",
+    "directOwnership": [
+      {
+        "personType": "NATURAL",
+        "shareholderName": "RAMOS INVENTADO JUAN PRUEBA",
+        "shareholderId": "99000001",
+        "countryOfOrigin": "Colombia",
+        "countryOfOriginCode": "CO",
+        "identificationType": "CC",
+        "lastName": "RAMOS INVENTADO",
+        "name": "JUAN PRUEBA",
+        "ownershipPercentage": 40,
+        "indirectShareholders": [],
+        "isPEP": null
+      },
+      {
+        "personType": "NATURAL",
+        "shareholderName": "TESTFIELD THOMAS EDWARD",
+        "shareholderId": "X9876543",
+        "countryOfOrigin": null,
+        "countryOfOriginCode": null,
+        "identificationType": "Pasaporte",
+        "lastName": "TESTFIELD",
+        "name": "THOMAS EDWARD",
+        "ownershipPercentage": 20,
+        "indirectShareholders": [],
+        "isPEP": null
+      },
+      {
+        "personType": "NATURAL",
+        "shareholderName": "PRUEBA WAK LUIS",
+        "shareholderId": "99000003",
+        "countryOfOrigin": null,
+        "countryOfOriginCode": null,
+        "identificationType": "CC",
+        "lastName": "PRUEBA WAK",
+        "name": "LUIS",
+        "ownershipPercentage": 10,
+        "indirectShareholders": [],
+        "isPEP": null
+      },
+      {
+        "personType": null,
+        "shareholderName": "PRUEBA DUDOSA",
+        "shareholderId": "88000001",
+        "countryOfOrigin": null,
+        "countryOfOriginCode": null,
+        "identificationType": "RUT",
+        "lastName": "DUDOSA",
+        "name": "PRUEBA",
+        "ownershipPercentage": 10,
+        "indirectShareholders": [],
+        "isPEP": null
+      }
+    ],
+    "indirectShareholders": [
+      {
+        "personType": "LEGAL",
+        "shareholderName": "INVERSIONES AURORA DE PRUEBA S.A.S.",
+        "shareholderId": "9999990035",
+        "countryOfOrigin": "Colombia",
+        "countryOfOriginCode": "CO",
+        "identificationType": "NIT",
+        "lastName": null,
+        "name": "INVERSIONES AURORA DE PRUEBA S.A.S.",
+        "ownershipPercentage": 20,
+        "indirectShareholders": [
+          {
+            "personType": "NATURAL",
+            "shareholderName": "SEGUNDO NIVEL PEDRO CADENA",
+            "shareholderId": "99000077",
+            "countryOfOrigin": "Colombia",
+            "countryOfOriginCode": "CO",
+            "identificationType": "CC",
+            "lastName": "SEGUNDO NIVEL",
+            "name": "PEDRO CADENA",
+            "ownershipPercentage": 100,
+            "indirectShareholders": [],
+            "isPEP": null
+          }
+        ],
+        "isPEP": false
+      }
+    ]
+  }
+}

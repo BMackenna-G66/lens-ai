@@ -1298,8 +1298,9 @@ def test_el_schema_version_es_el_del_esquema_no_el_del_documento():
     """Es la versión de la FORMA de las respuestas, no la del documento: decir
     `1.2` —la versión de la especificación— le haría creer al consumidor que el
     formato cambió cuando no cambió. Sí cambió con el contrato v3 (14-10-2026):
-    `field` y `subject`, `countryOfOriginCode`, `countryCode`, `personType` null."""
-    assert co.SCHEMA_VERSION == "1.1.0"
+    `field` y `subject`, `countryOfOriginCode`, `countryCode`, `personType` null.
+    Y con el v3.2 (23-10-2026): `shareholders[]` en EP-3."""
+    assert co.SCHEMA_VERSION == "1.2.0"
 
 
 def test_una_corrida_de_antes_del_v3_se_sirve_con_la_version_de_hoy(s3_falso):
@@ -1309,8 +1310,8 @@ def test_una_corrida_de_antes_del_v3_se_sirve_con_la_version_de_hoy(s3_falso):
     co.procesar({"ambiente": "prod", "companyId": "ACME-1", "analysisId": "a1",
                  "country": "chile", "documents": [PRINCIPAL]},
                 analizar=analizar_falso, extraer_socios=socios_falsos, leer_identidad=identidad_falsa)
-    assert pedir_resultado()[1]["schemaVersion"] == "1.1.0"
-    assert consultar()[1]["schemaVersion"] == "1.1.0"
+    assert pedir_resultado()[1]["schemaVersion"] == "1.2.0"
+    assert consultar()[1]["schemaVersion"] == "1.2.0"
 
 
 def test_ep3_trae_el_country_de_la_corrida(s3_falso):

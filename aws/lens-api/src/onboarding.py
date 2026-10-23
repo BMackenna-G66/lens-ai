@@ -991,11 +991,17 @@ TIPO_POR_PAIS: dict[str, tuple[str, str]] = {
 def tipo_identificacion(
     valor: Any, *, endpoint: str, pais: Any = "", tipo_persona_: str | None = None,
 ) -> str | None:
-    """El tipo de documento con el vocabulario de `endpoint` (`"EP-4"`/`"EP-6"`).
+    """El tipo de documento con el vocabulario de `endpoint` (`"EP-4"`, `"EP-6"`
+    o `"shareholders"`).
 
     Primero **traduce** lo que el documento declaró —el prompt ya pide
     `identificationType`, así que normalmente viene— y si no vino, lo **deriva**
     del país y del tipo de persona, que es lo que describen §6.8 y §6.10.
+
+    `"shareholders"` es el `shareholders[]` de EP-3 (contrato v3.2): la forma
+    de EP-4 —`PASS`, no «Pasaporte»—, más los identificadores de persona
+    jurídica que EP-4 no tiene (`NIT`, `RUC`…). Un accionista puede ser una
+    sociedad; un representante, en la práctica, no.
 
     `None` cuando no alcanza para saberlo, incluido el caso de un tipo que
     existe pero **no en ese endpoint**: emitir un valor que el consumidor no
@@ -1013,6 +1019,8 @@ def tipo_identificacion(
 
     if par is None:
         return None
+    if endpoint == "shareholders":
+        return par[0] or par[1]
     return par[0] if endpoint == "EP-4" else par[1]
 
 
@@ -1205,6 +1213,118 @@ def representante(p: dict, avisos: Avisos | None = None) -> dict | None:
             id_tal_cual(p.get("shareholderId") or p.get("identificationNumber")), "identificationNumber"),
         "role": tope(cargo_legible(p.get("position") or p.get("role")), "role", TOPE_CARGO),
     }
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# shareholders[] de EP-3 — contrato v3.2 (pedido de Onboarding, 23-10-2026)
+# ══════════════════════════════════════════════════════════════════════════
+# Onboarding precarga la declaración de beneficiarios finales con los
+# accionistas, y su front lee EP-3 de una vez y filtra por nodo. Por eso el
+# nodo va en EP-3 y con el estilo de `legalRepresentatives`, no de EP-6:
+# `fullName` e `identificationNumber` tal como figuran, y `PASS`, no
+# «Pasaporte». EP-6 sigue igual.
+
+#: El país que emite cada tipo de documento, solo donde el tipo lo dice sin
+#: ambigüedad. DNI y PASS no están: un DNI puede ser de Perú, de Argentina o de
+#: España, y un pasaporte, de cualquier país.
+PAIS_DEL_DOCUMENTO: dict[str, str] = {
+    "CC": "CO", "CE": "CO", "NIT": "CO",
+    "RUT": "CL",
+    "RFC": "MX", "CURP": "MX", "INE": "MX",
+    "CUIT": "AR", "CUIL": "AR",
+    "CPF": "BR", "CNPJ": "BR",
+}
+
+
+def porcentaje_accionista(valor: Any, avisos: Avisos | None = None,
+                          subject: str | None = None) -> int | float | None:
+    """El porcentaje de `shareholders[]`: de 0 a 100 y con hasta 2 decimales.
+
+    Como el de EP-6, no se estima ni se ajusta para que la suma dé 100. Uno
+    fuera de rango no es un porcentaje: va en `null` con su aviso, porque
+    mandarlo como viene dejaría que la declaración lo guarde.
+    """
+    n = porcentaje(valor)
+    if n is None:
+        return None
+    if not 0 <= n <= 100:
+        if avisos is not None:
+            avisos.agregar(
+                AVISO_DATO_FALTANTE,
+                f"El porcentaje de participación de {subject or 'un accionista'} ({n}) está "
+                "fuera de 0 a 100; se envía vacío.",
+                field="shareholder.ownershipPercentage", subject=subject)
+        return None
+    n = round(float(n), 2)
+    return int(n) if n.is_integer() else n
+
+
+def accionista(p: dict, avisos: Avisos | None = None) -> dict:
+    """Un accionista de `shareholders[]` con sus nueve campos.
+
+    Con las reglas de `representante()` —nombre e identificador tal como
+    figuran— salvo dos: un accionista sin tipo de persona NO se omite (va en
+    `null` con su aviso, como en EP-6), y el vocabulario de
+    `identificationType` suma los documentos de persona jurídica.
+
+    Acá no se decide si entra al nodo: eso lo hace `falta_para_incluir`.
+
+    `nationalityCode` es el `countryOfOrigin` SOLO si el modelo marcó
+    `nationalityDeclared`: que el documento escribe la nacionalidad. Solo,
+    `countryOfOrigin` no distingue lo declarado de lo deducido, y el contrato
+    pide «no se infiere».
+    """
+    ruta = "shareholder"
+    tipo = _tipo_o_aviso(p, avisos, ruta, omite=False)
+    quien = _sujeto(p)
+
+    def tope(valor: Any, campo: str) -> str | None:
+        return recortar(valor, TOPE_TEXTO, f"{ruta}.{campo}", avisos, quien)
+
+    pais_crudo = str(p.get("countryOfOrigin") or "")
+    name, last_name = nombre_y_apellido(p, tipo, pais_crudo, avisos, ruta)
+    tipo_id = tipo_identificacion(
+        p.get("identificationType"), endpoint="shareholders", pais=pais_crudo, tipo_persona_=tipo)
+    # Si no está en el catálogo, `pais_anexo_a` deja el aviso y devuelve None.
+    # Una sociedad no tiene nacionalidad en este nodo: su `countryOfOrigin` es
+    # el país de constitución.
+    declarada = p.get("nationalityDeclared") is True and tipo != "LEGAL"
+    nacionalidad = pais_anexo_a(pais_crudo if declarada else None,
+                                avisos, field=f"{ruta}.nationalityCode", subject=quien)
+    return {
+        "fullName": tope(p.get("shareholderName") or p.get("fullName"), "fullName"),
+        "name": tope(name, "name"),
+        "lastName": tope(last_name, "lastName"),
+        "personType": tipo,
+        "identificationType": tipo_id,
+        "identificationNumber": tope(
+            id_tal_cual(p.get("shareholderId") or p.get("identificationNumber")), "identificationNumber"),
+        "ownershipPercentage": porcentaje_accionista(p.get("ownershipPercentage"), avisos, quien),
+        "nationalityCode": codigo_pais(nacionalidad),
+        "documentCountryCode": PAIS_DEL_DOCUMENTO.get(tipo_id or ""),
+    }
+
+
+def clave_de_nombre(nombre: Any) -> tuple[str, ...]:
+    """El nombre para reconocer a la misma persona escrita en otro orden:
+    «RAMÍREZ ECHEVERRI JUAN» y «Juan Ramírez Echeverri» dan la misma clave."""
+    return tuple(sorted(re.sub(r"[^a-z0-9\s]", " ", _sin_tildes(str(nombre or ""))).split()))
+
+
+def falta_para_incluir(a: dict) -> str | None:
+    """El `field` del dato mínimo que le falta al accionista, o `None` si entra.
+
+    Uno solo, el más de fondo: sin nombre no se sabe de quién es lo demás, y
+    sin número un tipo de documento no identifica a nadie. «Un problema, un
+    aviso».
+    """
+    if not (a.get("name") or a.get("fullName")):
+        return "shareholder.name"
+    if not a.get("identificationNumber"):
+        return "shareholder.identificationNumber"
+    if not a.get("identificationType"):
+        return "shareholder.identificationType"
+    return None
 
 
 # El identificador tributario de la EMPRESA (§6.9). Es un tercer vocabulario,
