@@ -31,7 +31,9 @@ const LOG = 'https://log.prueba/';
 const COLAS = 'https://colas.prueba/';
 const ENV = {
   G66_ADMIN_REFRESH_TOKEN: 'refresh-de-prueba', LISTAS_LOG_URL: LOG, LISTAS_LOG_SECRET: 'secreto-log',
-  COLAS_LOGGER_URL: COLAS, COLAS_LOGGER_SECRET: 'secreto-colas', LISTA_NEGRA_SISTEMA_SECRET: 'secreto-sistema',
+  COLAS_LOGGER_URL: COLAS, COLAS_LOGGER_SECRET: 'secreto-colas',
+  // Como en producción: el actor de sistema se acredita con el secreto de /flujo/correr.
+  FLUJO_TRIGGER_SECRET: 'secreto-sistema',
 };
 const ORIGEN = 'https://bmackenna-g66.github.io';
 const MOTIVO = 'Matriz de delitos y matriz de riesgo flujo cola de trabajo';
@@ -125,13 +127,13 @@ const CIERRE = {
 const entrada = (x = {}) => ({ customerId: '4000001', dni: '11111111-1', countryCode: 'CL', numeroCaso: '09000001',
   casoId: '09000001', idInternoUsuario: '4000001', tipologia: 'fully_blocked', ...x });
 
-const cerrar = async (cuerpo, { token, sistema, w = worker } = {}) => {
+const cerrar = async (cuerpo, { token, sistema, w = worker, env = ENV } = {}) => {
   const r = await w.fetch(new Request('https://w.prueba/admin/customer-status', {
     method: 'POST',
     headers: { Origin: ORIGEN, 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}),
                ...(sistema ? { 'x-lens-sistema': sistema } : {}) },
     body: JSON.stringify(cuerpo),
-  }), ENV, CTX);
+  }), env, CTX);
   return { status: r.status, cuerpo: await r.json() };
 };
 const paso6 = c => c.cuerpo.results[0].steps.listaNegraDni;
@@ -260,12 +262,27 @@ await prueba('colas_trabajo: la fila de lista_negra_dni, con el DNI como clave',
     ['09000001', '09000001', '4000001', '111111111', 'CL', 'fully_blocked', 'AGREGADO']);
   assert.deepEqual([d.actor_email, d.automatico, d.flujo], ['analista@global66.com', false, 'colas_trabajo.ofac.bloqueado.manual']);
 });
-await prueba('el flujo automático se acredita con su secreto: actor de sistema', async () => {
+await prueba('el flujo automático se acredita con el secreto de /flujo/correr: actor de sistema', async () => {
   const c = await cerrar({ ...CIERRE, listaNegraDni: entrada() }, { sistema: 'secreto-sistema' });
   assert.equal(paso6(c).resultado, 'AGREGADO');
   assert.equal(registro[0].flujo, 'colas_trabajo.ofac.bloqueado.automatico');
   assert.equal(registro[0].actor.email, 'sistema:lens-flujo-autonomo');
   assert.equal(colas[0].datos.automatico, true);
+});
+await prueba('con un secreto propio, ese manda y el de /flujo/correr ya no acredita', async () => {
+  const env = { ...ENV, LISTA_NEGRA_SISTEMA_SECRET: 'secreto-propio' };
+  const viejo = await cerrar({ ...CIERRE, listaNegraDni: entrada() }, { sistema: 'secreto-sistema', env });
+  assert.deepEqual(paso6(viejo), { omitido: 'sin_actor_verificado' });
+  assert.equal(admin.length + registro.length + colas.length, 0);
+  const propio = await cerrar({ ...CIERRE, listaNegraDni: entrada() }, { sistema: 'secreto-propio', env });
+  assert.equal(paso6(propio).resultado, 'AGREGADO');
+  assert.equal(registro[0].actor.email, 'sistema:lens-flujo-autonomo');
+});
+await prueba('sin ningún secreto configurado, nadie se acredita como sistema', async () => {
+  const env = { ...ENV, FLUJO_TRIGGER_SECRET: undefined };
+  const c = await cerrar({ ...CIERRE, listaNegraDni: entrada() }, { sistema: 'secreto-sistema', env });
+  assert.equal(c.cuerpo.ok, true);
+  assert.deepEqual(paso6(c), { omitido: 'sin_actor_verificado' });
 });
 
 console.log('El tope de tiempo:');

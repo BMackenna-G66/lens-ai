@@ -63,7 +63,12 @@ export interface EnvListasNegras {
   COLAS_LOGGER_URL?: string;
   COLAS_LOGGER_SECRET?: string;
   // Lo manda el Lambda del flujo automático en `x-lens-sistema`: es su actor.
+  // Sin él vale el secreto que el Lambda y el Worker ya comparten para
+  // /flujo/correr (`TRIGGER_SECRET` allá): así el deploy del Lambda sigue siendo
+  // solo de código, sin reescribir sus variables. Separarlos después es poner
+  // este secreto aquí y `LISTA_NEGRA_SISTEMA_SECRET` en el Lambda.
   LISTA_NEGRA_SISTEMA_SECRET?: string;
+  FLUJO_TRIGGER_SECRET?: string;
 }
 
 type FetchTimeout = (u: string, i: RequestInit, ms: number) => Promise<Response>;
@@ -517,7 +522,8 @@ export async function pasoSeisCustomerStatus(
   let actor: Actor | null = null;
   let origen: OrigenBloqueado = 'manual';
   const sistema = request.headers.get('x-lens-sistema') || '';
-  if (sistema && env.LISTA_NEGRA_SISTEMA_SECRET && iguales(sistema, env.LISTA_NEGRA_SISTEMA_SECRET)) {
+  const esperado = env.LISTA_NEGRA_SISTEMA_SECRET || env.FLUJO_TRIGGER_SECRET || '';
+  if (sistema && esperado && iguales(sistema, esperado)) {
     actor = ACTOR_SISTEMA;
     origen = 'automatico';
   } else {

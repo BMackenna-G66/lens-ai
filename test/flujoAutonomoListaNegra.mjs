@@ -18,7 +18,8 @@ import assert from 'node:assert/strict';
 
 process.env.EMPRESADOCS_PROXY_URL = 'https://proxy.prueba';
 process.env.FIREBASE_SA_JSON = Buffer.from('{"project_id":"prueba"}').toString('base64');
-process.env.LISTA_NEGRA_SISTEMA_SECRET = 'secreto-sistema';
+// El secreto que ya comparte con el Worker (/flujo/correr): no hay variable nueva.
+process.env.TRIGGER_SECRET = 'secreto-sistema';
 
 const store = (globalThis.__FAKE_FS ??= new Map());
 const C = 'casos_sf';
@@ -67,7 +68,7 @@ const bloqueado = pedidos.find(p => p.body.customerIds[0] === '555021');
 const liberado = pedidos.find(p => p.body.customerIds[0] === '555022');
 
 console.log('El pedido a /admin/customer-status:');
-prueba('el «Bloqueado» lleva la entrada del paso 6 y el secreto de sistema', () => {
+prueba('el «Bloqueado» lleva la entrada del paso 6 y el secreto de /flujo/correr', () => {
   assert.ok(bloqueado, 'no se cerró el caso Bloqueado');
   assert.deepEqual(bloqueado.body.listaNegraDni, {
     customerId: '555021', dni: '11.111.111-1', countryCode: 'CL', numeroCaso: '90000021', casoId: '90000021',

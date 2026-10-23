@@ -795,8 +795,10 @@ async function procesar(caso: CasoSF, cfg: FlujoOfacConfig): Promise<ResultadoCa
       else {
         const cc = /colombia|^co$/i.test(caso.pais ?? '') ? 'CO' : 'CL';
         // Un «Bloqueado» de la cola OFAC agrega al cliente a la lista negra de
-        // DNI (paso 6 del Worker). El Lambda se acredita con su propio secreto:
-        // sin él, el Worker no corre el paso 6 y lo dice; el cierre no cambia.
+        // DNI (paso 6 del Worker). El Lambda se acredita con el secreto que ya
+        // comparte con el Worker (`TRIGGER_SECRET`, el de /flujo/correr), salvo
+        // que tenga uno propio: sin secreto, el Worker no corre el paso 6 y lo
+        // dice; el cierre no cambia.
         const entradaLN = esBloqueadoOfac(clasificarCola(caso.asunto), ev.tipologia)
           ? entradaDeCaso(caso as never, ev.tipologia, paisCodigo) : null;
         try {
@@ -809,7 +811,7 @@ async function procesar(caso: CasoSF, cfg: FlujoOfacConfig): Promise<ResultadoCa
             pepEnabled: tipo.pepValue !== undefined, pepValue: !!tipo.pepValue,
             pepProvider: PEP_PROVIDER_DEFAULT, pepCountryCode: cc, pepPosition: null,
             riskEnabled: !!tipo.riskLevel, riskLevel: tipo.riskLevel || undefined,
-          } as never, entradaLN ? { sistema: process.env.LISTA_NEGRA_SISTEMA_SECRET || null } : {});
+          } as never, entradaLN ? { sistema: process.env.LISTA_NEGRA_SISTEMA_SECRET || process.env.TRIGGER_SECRET || null } : {});
           out.admin = r.ok ? 'ok' : 'error';
           if (entradaLN) {
             await auditarListaNegra(caso.id, (r.results[0]?.steps as Record<string, unknown> | undefined)?.listaNegraDni as ResultadoPaso6 | undefined, entradaLN);
