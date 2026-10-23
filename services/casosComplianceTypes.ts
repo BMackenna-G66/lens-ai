@@ -152,7 +152,10 @@ export type TipoEventoAuditoria =
   // Son dos eventos y no uno con un booleano para que poner y levantar el freno
   // se puedan contar y filtrar por separado en la auditoría.
   | 'STANDBY_PUESTO'
-  | 'STANDBY_QUITADO';
+  | 'STANDBY_QUITADO'
+  // Un «Bloqueado» de la cola OFAC que pasó por la lista negra de DNI de Admin
+  // (paso 6 del cierre o carga de históricos). Sin el DNI: lo trae el caso.
+  | 'LISTA_NEGRA_DNI';
 
 export interface EventoAuditoriaCaso {
   eventId: string;

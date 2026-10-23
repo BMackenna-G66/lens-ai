@@ -59,3 +59,4 @@ test/regcheqPeru.bundle.mjs
 test/pc/
 cloudflare/empresadocs-proxy/test/tipos.mjs
 test/listasNegras.bundle.mjs
+test/listaNegraDni.bundle.mjs

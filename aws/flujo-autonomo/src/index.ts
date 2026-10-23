@@ -46,6 +46,7 @@ import { logCierre, logEvento, logLiberacionRemesa, ACTOR_SISTEMA } from '../../
 import type { ResultadoEnvio } from '../../../services/colasLogService';
 import { armarCasoScraper } from '../../../services/pjudScraper';
 import { paisCodigo } from '../../../services/flujoDecision';
+import { entradaDeCaso, esBloqueadoOfac, metadataAuditoria, type EntradaListaNegraDni, type ResultadoPaso6 } from '../../../services/listaNegraDni';
 
 // ── Configuración de la corrida ─────────────────────────────────────────────
 const COLECCION = process.env.FIRESTORE_COLLECTION || 'casos_sf';
@@ -643,6 +644,30 @@ async function auditarCierreAutomatico(caseId: string, metadata: Record<string, 
   await espejar(logEvento(evento));
 }
 
+/**
+ * Evento LISTA_NEGRA_DNI en la auditoría del caso, con su espejo en Redshift:
+ * el paso 6 del cierre. Sin el DNI —la auditoría no guarda DNI—; el respaldo
+ * diario lo saca del caso para `colas_trabajo.lista_negra_dni`. Si el paso 6
+ * no llegó a un resultado (no corrió o siguió después de responder), no hay
+ * evento: lo que pasó en Admin queda igual en el registro del Worker.
+ */
+async function auditarListaNegra(caseId: string, paso: ResultadoPaso6 | undefined, e: EntradaListaNegraDni): Promise<void> {
+  const metadata = metadataAuditoria(paso, e);
+  if (!metadata) return;
+  const evento = {
+    tipo: 'LISTA_NEGRA_DNI', actorId: ACTOR_SISTEMA.uid, actorTipo: 'SYSTEM',
+    correlationId: caseId, versionCaso: 1, metadata: { ...metadata, origen: 'lens-flujo-autonomo' },
+    eventId: crypto.randomUUID(), numeroCaso: caseId, timestamp: new Date().toISOString(),
+  };
+  try {
+    await db().collection(COLECCION).doc(caseId).collection('auditoria').add(limpio(evento));
+  } catch (err) {
+    console.log('AUDITORIA ' + JSON.stringify({ caseId, error: (err as Error).message }));
+    return;
+  }
+  await espejar(logEvento(evento));
+}
+
 // LATIDO. Un documento ÚNICO que se sobreescribe en cada invocación, corra o no.
 //
 // Hace falta porque una invocación que no procesa —flujo apagado, candado tomado—
@@ -769,8 +794,14 @@ async function procesar(caso: CasoSF, cfg: FlujoOfacConfig): Promise<ResultadoCa
       if (!tipo) { out.admin = 'error'; out.motivo = out.motivo ?? `tipología Admin desconocida: ${ev.tipologia}`; }
       else {
         const cc = /colombia|^co$/i.test(caso.pais ?? '') ? 'CO' : 'CL';
+        // Un «Bloqueado» de la cola OFAC agrega al cliente a la lista negra de
+        // DNI (paso 6 del Worker). El Lambda se acredita con su propio secreto:
+        // sin él, el Worker no corre el paso 6 y lo dice; el cierre no cambia.
+        const entradaLN = esBloqueadoOfac(clasificarCola(caso.asunto), ev.tipologia)
+          ? entradaDeCaso(caso as never, ev.tipologia, paisCodigo) : null;
         try {
           const r = await enviarCierreAdmin({
+            ...(entradaLN ? { listaNegraDni: entradaLN } : {}),
             cola: clasificarCola(caso.asunto),
             customerIds: [customerId], status: tipo.status, comment: tipo.comment, observation: tipo.observation,
             agent: ADMIN_ASSIGNEE_DEFAULT, ofacFlag: ofacFlagDe(tipo), ofacProvider: 'REGCHECK',
@@ -778,8 +809,11 @@ async function procesar(caso: CasoSF, cfg: FlujoOfacConfig): Promise<ResultadoCa
             pepEnabled: tipo.pepValue !== undefined, pepValue: !!tipo.pepValue,
             pepProvider: PEP_PROVIDER_DEFAULT, pepCountryCode: cc, pepPosition: null,
             riskEnabled: !!tipo.riskLevel, riskLevel: tipo.riskLevel || undefined,
-          } as never);
+          } as never, entradaLN ? { sistema: process.env.LISTA_NEGRA_SISTEMA_SECRET || null } : {});
           out.admin = r.ok ? 'ok' : 'error';
+          if (entradaLN) {
+            await auditarListaNegra(caso.id, (r.results[0]?.steps as Record<string, unknown> | undefined)?.listaNegraDni as ResultadoPaso6 | undefined, entradaLN);
+          }
           if (!r.ok) out.motivo = out.motivo ?? r.error ?? 'Admin rechazó el cierre';
           // El resumen del paso 2 va al caso: sin él no se veía desde Lens si
           // se había creado el bloqueo propio.

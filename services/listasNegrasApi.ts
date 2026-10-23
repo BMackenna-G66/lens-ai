@@ -99,3 +99,7 @@ export async function completarIds(lista: Lista, ids: { cambioId: string; adminI
   }
   return true;
 }
+
+/** Un «Bloqueado» histórico de la cola OFAC: la misma lógica del paso 6 del cierre. Solo Líder. */
+export const cargarBloqueado = (entrada: Record<string, string>) =>
+  llamar('dni/bloqueado', { method: 'POST', body: JSON.stringify(entrada) });

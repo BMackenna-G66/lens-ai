@@ -1,0 +1,139 @@
+[
+ {
+  "accion": "intento",
+  "cambioId": "id-1",
+  "ejecucionId": "id-2",
+  "lista": "DNI",
+  "operacion": "CREAR",
+  "flujo": "colas_trabajo.ofac.bloqueado.manual",
+  "servicio": "/admin/customer-status",
+  "actor": {
+   "email": "analista@global66.com",
+   "nombre": "Analista Prueba",
+   "uid": "uid-analista"
+  },
+  "registro": {
+   "dni": "11.111.111-1",
+   "countryCode": "CL",
+   "countryName": "Chile",
+   "reason": "Matriz de delitos y matriz de riesgo flujo cola de trabajo"
+  },
+  "meta": {
+   "estadoAnterior": null,
+   "reasonAnterior": null,
+   "valor": "11.111.111-1"
+  },
+  "origen": {
+   "numeroCaso": "09000001",
+   "casoId": "09000001"
+  }
+ },
+ {
+  "accion": "resultado",
+  "cambioId": "id-1",
+  "ok": true,
+  "httpStatus": 200,
+  "respuesta": {
+   "ok": true
+  },
+  "actor": {
+   "email": "analista@global66.com",
+   "nombre": "Analista Prueba",
+   "uid": "uid-analista"
+  },
+  "error": null
+ },
+ {
+  "accion": "intento",
+  "cambioId": "id-3",
+  "ejecucionId": "id-4",
+  "lista": "DNI",
+  "operacion": "EDITAR",
+  "flujo": "colas_trabajo.ofac.bloqueado.automatico",
+  "servicio": "/admin/customer-status",
+  "actor": {
+   "email": "sistema:lens-flujo-autonomo",
+   "nombre": "Flujo automático OFAC",
+   "uid": "lens-flujo-autonomo"
+  },
+  "registro": {
+   "dni": "22.333.444-0",
+   "countryCode": "CL",
+   "status": true
+  },
+  "meta": {
+   "estadoAnterior": false,
+   "reasonAnterior": "anterior",
+   "valor": "22.333.444-0"
+  },
+  "origen": {
+   "numeroCaso": "09000003",
+   "casoId": "09000003"
+  }
+ },
+ {
+  "accion": "resultado",
+  "cambioId": "id-3",
+  "ok": true,
+  "httpStatus": 200,
+  "respuesta": {
+   "ok": true
+  },
+  "actor": {
+   "email": "sistema:lens-flujo-autonomo",
+   "nombre": "Flujo automático OFAC",
+   "uid": "lens-flujo-autonomo"
+  },
+  "error": null
+ },
+ {
+  "accion": "sin_operacion",
+  "ejecucionId": "id-5",
+  "lista": "DNI",
+  "flujo": "colas_trabajo.ofac.bloqueado.manual",
+  "servicio": "/admin/customer-status",
+  "actor": {
+   "email": "analista@global66.com",
+   "nombre": "Analista Prueba",
+   "uid": "uid-analista"
+  },
+  "operacion": "CREAR",
+  "filas": [
+   {
+    "cambioId": "id-6",
+    "valor": "12.345.678-5",
+    "countryCode": "CL",
+    "resultado": "OMITIDO_YA_EXISTE_ACTIVO",
+    "estadoAnterior": true,
+    "error": null,
+    "numeroCaso": "09000004",
+    "casoId": "09000004"
+   }
+  ]
+ },
+ {
+  "accion": "sin_operacion",
+  "ejecucionId": "id-7",
+  "lista": "DNI",
+  "flujo": "colas_trabajo.ofac.bloqueado.manual",
+  "servicio": "/admin/customer-status",
+  "actor": {
+   "email": "analista@global66.com",
+   "nombre": "Analista Prueba",
+   "uid": "uid-analista"
+  },
+  "operacion": "CREAR",
+  "filas": [
+   {
+    "cambioId": "id-8",
+    "valor": null,
+    "countryCode": "CL",
+    "resultado": "ERROR",
+    "estadoAnterior": null,
+    "error": "El caso no tiene DNI.",
+    "numeroCaso": "09000005",
+    "casoId": "09000005"
+   }
+  ]
+ }
+]

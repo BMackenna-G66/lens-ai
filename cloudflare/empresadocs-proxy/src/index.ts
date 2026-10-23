@@ -18,7 +18,7 @@
  */
 
 import { manejarPjud } from './pjud';
-import { esRutaListasNegras, manejarListasNegras } from './listasNegras';
+import { esRutaListasNegras, manejarListasNegras, pasoSeisCustomerStatus } from './listasNegras';
 
 // El contexto de ejecución de Cloudflare. Se declara acá y no se importa de
 // `@cloudflare/workers-types` porque el tsconfig de la app también compila este
@@ -56,6 +56,12 @@ interface Env {
   PJUD_LECTOR_URL?: string;
   PJUD_LECTOR_SECRET?: string;
   FIREBASE_PROJECT_ID?: string;
+  // ── Listas negras (ver listasNegras.ts) ─────────────────────────────────
+  LISTAS_LOG_URL?: string;
+  LISTAS_LOG_SECRET?: string;
+  // El secreto con el que el Lambda del flujo automático se acredita para el
+  // paso 6 de /admin/customer-status (`x-lens-sistema`).
+  LISTA_NEGRA_SISTEMA_SECRET?: string;
 }
 
 const ALLOWED_ORIGINS = [
@@ -834,6 +840,9 @@ export default {
         // De qué cola es el caso que se cierra (`clasificarCola`): 'ofac',
         // 'otros'… Decide si el cierre puede resolver bloqueos OFAC.
         cola?: string;
+        // OPCIONAL. Un «Bloqueado» de la cola OFAC agrega al cliente a la lista
+        // negra de DNI (paso 6). Ausente = exactamente el comportamiento de antes.
+        listaNegraDni?: unknown;
       };
       try { body = await request.json(); } catch { return jsonError('Body JSON inválido', 400, cors); }
 
@@ -955,6 +964,14 @@ export default {
           steps.lastStep = { omitido: `el cliente quedó en ${estadoFinal}, que no requiere last-step` };
         }
         results.push({ customerId: id, ok, steps });
+      }
+
+      // PASO 6 — lista negra de DNI, solo para un «Bloqueado» de la cola OFAC.
+      // Va en `steps.listaNegraDni`, nunca cambia el `ok` del cierre y tiene su
+      // propio tope de tiempo: lo que no termina sigue después de responder.
+      if (body.listaNegraDni !== undefined) {
+        try { await pasoSeisCustomerStatus(request, env, ctx, body, results, fetchTimeout); }
+        catch { /* el paso 6 nunca toca el cierre */ }
       }
 
       return new Response(JSON.stringify({ ok: results.every(r => r.ok), results }),

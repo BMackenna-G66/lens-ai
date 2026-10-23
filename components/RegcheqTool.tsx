@@ -2068,7 +2068,7 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode, onEn
           <span className={`text-xs font-medium ${textMuted}`}>Admin G66 · Compliance</span>
         </nav>
         <div className="max-w-4xl mx-auto px-6 py-8">
-          <ListasNegrasAdmin dark={dark} />
+          <ListasNegrasAdmin dark={dark} esLider={role === 'Lider'} />
         </div>
       </div>
     );
@@ -2547,7 +2547,7 @@ export const RegcheqTool: React.FC<RegcheqToolProps> = ({ onBack, darkMode, onEn
         )}
 
         {/* ─── TAB: LISTAS NEGRAS (Admin G66) ────────────────────────────── */}
-        {tab === 'negras' && puedeListasNegras && <ListasNegrasAdmin dark={dark} />}
+        {tab === 'negras' && puedeListasNegras && <ListasNegrasAdmin dark={dark} esLider={role === 'Lider'} />}
 
         {/* ─── TAB: LISTA DE INTERÉS ─────────────────────────────────────── */}
         {tab === 'lista' && (

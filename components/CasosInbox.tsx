@@ -49,6 +49,9 @@ import { TIPOS_CIERRE, camposDeCierre } from '../services/cierreTipos';
 import { TIPOS_CIERRE_ADMIN, OFAC_PROVIDERS, ADMIN_ASSIGNEE_DEFAULT, ADMIN_STATUS_OPTIONS, ADMIN_COMMENT_OPTIONS, RISK_LEVELS, PEP_PROVIDER_DEFAULT, ofacFlagDe } from '../services/cierreAdminTipos';
 import { enviarCierreAdmin, adminCierreDisponible, AdminCierreResult, resumenAdmin } from '../services/adminCierreService';
 import { registrarAuditoria, leerAuditoria } from '../services/caseAuditService';
+import { getIdTokenActual } from '../services/firebaseService';
+import { entradaDeCaso, esBloqueadoOfac, metadataAuditoria, resumenPaso6,
+         type EntradaListaNegraDni, type ResultadoPaso6 } from '../services/listaNegraDni';
 import { logCierre, logHistorial, logConfigFlujo, logScreening, sincronizarAnalistas, filasBackfillCaso, enviarLote, reintentarPendientes, pendientesEnBuffer, logLiberacionRemesa } from '../services/colasLogService';
 import { getAllUsers } from '../services/firestoreService';
 import type { InvestigacionCaso } from '../services/casosComplianceTypes';
@@ -903,6 +906,14 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
         // sola cola, y la regla OFAC del Worker depende de ella.
         const colas = new Set(ids.flatMap(id => (casosPorCustomer.get(id) ?? [])
           .map(caseId => clasificarCola(seleccionados.find(x => x.id === caseId)?.asunto))));
+        // Un «Bloqueado» de la cola OFAC agrega a cada cliente a la lista negra
+        // de DNI (paso 6 del Worker), con el ID token del analista.
+        const entradasLN: EntradaListaNegraDni[] = esBloqueadoOfac(colas.size === 1 ? [...colas][0] : 'mixta', tipo.id)
+          ? ids.flatMap(cid => {
+              const c = seleccionados.find(x => x.id === (casosPorCustomer.get(cid) ?? [])[0]);
+              return c ? [{ ...entradaDeCaso(c, tipo.id, paisCodigo), customerId: cid }] : [];
+            })
+          : [];
         const r = await enviarCierreAdmin({
           customerIds: ids, status: tipo.status, comment: tipo.comment, observation: tipo.observation,
           agent: ADMIN_ASSIGNEE_DEFAULT, ofacFlag: ofacFlagDe(tipo), ofacProvider: 'REGCHECK',
@@ -915,7 +926,14 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
           pepEnabled: tipo.pepValue !== undefined,
           pepValue: !!tipo.pepValue, pepProvider: PEP_PROVIDER_DEFAULT, pepCountryCode: cc, pepPosition: null,
           riskEnabled: !!tipo.riskLevel, riskLevel: tipo.riskLevel || undefined,
-        });
+          ...(entradasLN.length ? { listaNegraDni: entradasLN } : {}),
+        }, entradasLN.length ? { idToken: await getIdTokenActual() } : {});
+        for (const e of entradasLN) {
+          const paso = r.results.find(x => x.customerId === e.customerId)?.steps?.listaNegraDni as ResultadoPaso6 | undefined;
+          const meta = metadataAuditoria(paso, e);
+          if (meta) registrarAuditoria(e.casoId, { tipo: 'LISTA_NEGRA_DNI', actorId: actor?.uid ?? 'system',
+            actorTipo: actor ? 'USER' : 'SYSTEM', correlationId: e.casoId, versionCaso: 1, metadata: meta }).catch(() => {});
+        }
         for (const res of r.results) {
           if (res.ok) {
             ok++;
@@ -1325,7 +1343,12 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
     if (!ids.length) { setAdminResult({ ok: false, results: [], error: 'Falta el customerId.' }); return; }
     setAdminSending(true); setAdminResult(null);
     try {
+      // Un «Bloqueado» de la cola OFAC agrega al cliente a la lista negra de DNI
+      // (paso 6 del Worker). El ID token es para que el Worker sepa quién fue.
+      const entradaLN = esBloqueadoOfac(clasificarCola(sel.asunto), adminTipoSel)
+        ? entradaDeCaso(sel, adminTipoSel, paisCodigo) : null;
       const r = await enviarCierreAdmin({
+        ...(entradaLN ? { listaNegraDni: entradaLN } : {}),
         cola: clasificarCola(sel.asunto),
         customerIds: ids, status: adminForm.status, comment: adminForm.comment,
         observation: adminForm.observation, agent: adminForm.agent,
@@ -1334,8 +1357,14 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
         pepEnabled: adminForm.pepEnabled, pepValue: adminForm.pepValue,
         pepProvider: PEP_PROVIDER_DEFAULT, pepCountryCode: adminForm.countryCode, pepPosition: null,
         riskEnabled: !!adminForm.riskLevel, riskLevel: adminForm.riskLevel || undefined,
-      });
+      }, entradaLN ? { idToken: await getIdTokenActual() } : {});
       setAdminResult(r);
+      if (entradaLN) {
+        const paso = (r.results.find(x => x.customerId === entradaLN.customerId) ?? r.results[0])?.steps?.listaNegraDni as ResultadoPaso6 | undefined;
+        const meta = metadataAuditoria(paso, entradaLN);
+        if (meta) registrarAuditoria(sel.id, { tipo: 'LISTA_NEGRA_DNI', actorId: actor?.uid ?? 'system',
+          actorTipo: actor ? 'USER' : 'SYSTEM', correlationId: sel.id, versionCaso: 1, metadata: meta }).catch(() => {});
+      }
       // Status del caso: marca el canal Admin. Si SF también quedó OK → CERRADO.
       if (r.ok) {
         await registrarCierreCanal(sel.id, 'admin', { ok: true, tipologia: adminTipoSel || null, detalle: resumenAdmin(r) }, actor ?? undefined).catch(() => {});
@@ -4611,6 +4640,10 @@ export const CasosInbox: React.FC<CasosInboxProps> = ({ onBack, darkMode, onTogg
                               <p className="font-semibold">Cliente {r.customerId}: {r.ok ? 'OK' : 'falló'}</p>
                               {Object.keys(r.steps).length === 0 && <p className="ml-2 opacity-80">sin pasos</p>}
                               {Object.entries(r.steps).map(([k, v]) => {
+                                if (k === 'listaNegraDni') {
+                                  const linea = resumenPaso6(v as ResultadoPaso6);
+                                  return linea ? <div key={k} className="ml-2 mt-0.5">⛔ {linea}</div> : null;
+                                }
                                 const step = v as { ok?: boolean; status?: number; data?: unknown };
                                 const detalle = step.data == null ? '' : (typeof step.data === 'string' ? step.data : JSON.stringify(step.data));
                                 return (

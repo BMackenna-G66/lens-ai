@@ -46,6 +46,11 @@
 // Sin DNI, cuentas ni dominios: método, lista y status, nada más.
 
 import { verificarIdToken } from './pjud';
+import { extractList, loadCountries } from '../../../services/listasNegras';
+import {
+  claveDni, decidirDni, esBloqueadoOfac, FLUJOS_BLOQUEADO, MOTIVO_BLOQUEADO, resultadoColas, TIPOLOGIA_BLOQUEADO,
+  type DecisionDni, type EntradaListaNegraDni, type OrigenBloqueado, type RegistroDni, type ResultadoColas,
+} from '../../../services/listaNegraDni';
 
 export interface EnvListasNegras {
   G66_ADMIN_REFRESH_TOKEN?: string;
@@ -53,6 +58,12 @@ export interface EnvListasNegras {
   // Function URL de lens-listas-negras-log y su secreto. El navegador no los ve.
   LISTAS_LOG_URL?: string;
   LISTAS_LOG_SECRET?: string;
+  // El logger de colas (colas_trabajo): la fila de `lista_negra_dni` la escribe
+  // el Worker, con el actor verificado.
+  COLAS_LOGGER_URL?: string;
+  COLAS_LOGGER_SECRET?: string;
+  // Lo manda el Lambda del flujo automático en `x-lens-sistema`: es su actor.
+  LISTA_NEGRA_SISTEMA_SECRET?: string;
 }
 
 type FetchTimeout = (u: string, i: RequestInit, ms: number) => Promise<Response>;
@@ -102,14 +113,21 @@ export const esRutaListasNegras = (path: string): boolean => path.startsWith(PRE
 // ── Estado del isolate ──────────────────────────────────────────────────────
 let tokenAdmin: { token: string; vence: number } | null = null;
 let refrescando: Promise<string> | null = null;
-const permisos = new Map<string, { ok: boolean; vence: number }>();
+const permisos = new Map<string, { ok: boolean; lider: boolean; vence: number }>();
 let dormir = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
+// La lista de DNI y el catálogo de países, para el paso 6 y los históricos.
+let cacheDni: { recs: RegistroDni[]; vence: number } | null = null;
+let cachePaises: { mapa: Record<string, string>; vence: number } | null = null;
+let esperaPaso6Ms = 12_000;
 
 /** Solo para los tests. */
-export function _reiniciarListasNegras(opciones: { sinEsperas?: boolean } = {}): void {
+export function _reiniciarListasNegras(opciones: { sinEsperas?: boolean; esperaPaso6Ms?: number } = {}): void {
   tokenAdmin = null;
   refrescando = null;
   permisos.clear();
+  cacheDni = null;
+  cachePaises = null;
+  esperaPaso6Ms = opciones.esperaPaso6Ms ?? 12_000;
   dormir = opciones.sinEsperas ? async () => {} : (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 }
 
@@ -192,20 +210,27 @@ async function llamarAdmin(
  * Líder siempre; si no, `modules.listasNegras === true`. Ausente = no. Un
  * usuario desactivado, no. Se guarda un minuto por usuario.
  */
-async function tienePermiso(uid: string, idToken: string, proyecto: string, fetchTimeout: FetchTimeout): Promise<boolean> {
+async function tienePermiso(uid: string, idToken: string, proyecto: string,
+                            fetchTimeout: FetchTimeout): Promise<{ ok: boolean; lider: boolean }> {
   const guardado = permisos.get(uid);
-  if (guardado && Date.now() < guardado.vence) return guardado.ok;
+  if (guardado && Date.now() < guardado.vence) return guardado;
   const url = `https://firestore.googleapis.com/v1/projects/${proyecto}/databases/(default)/documents/users/${encodeURIComponent(uid)}`;
   const r = await fetchTimeout(url, { headers: { Authorization: `Bearer ${idToken}` } }, 10000);
-  if (r.status === 404) { permisos.set(uid, { ok: false, vence: Date.now() + PERMISO_MS }); return false; }
+  if (r.status === 404) {
+    const no = { ok: false, lider: false, vence: Date.now() + PERMISO_MS };
+    permisos.set(uid, no);
+    return no;
+  }
   if (!r.ok) throw new Error(`perfil HTTP ${r.status}`);
   const doc = await r.json() as { fields?: Record<string, { stringValue?: string; booleanValue?: boolean;
     mapValue?: { fields?: Record<string, { booleanValue?: boolean }> } }> };
   const f = doc.fields ?? {};
-  const ok = f.disabled?.booleanValue !== true
-    && (f.role?.stringValue === 'Lider' || f.modules?.mapValue?.fields?.listasNegras?.booleanValue === true);
-  permisos.set(uid, { ok, vence: Date.now() + PERMISO_MS });
-  return ok;
+  const activo = f.disabled?.booleanValue !== true;
+  const lider = activo && f.role?.stringValue === 'Lider';
+  const ok = lider || (activo && f.modules?.mapValue?.fields?.listasNegras?.booleanValue === true);
+  const p = { ok, lider, vence: Date.now() + PERMISO_MS };
+  permisos.set(uid, p);
+  return p;
 }
 
 type Plano = Record<string, string | number | boolean | null>;
@@ -253,13 +278,297 @@ async function registrar(env: EnvListasNegras, fetchTimeout: FetchTimeout, event
   } catch { return false; }
 }
 
+export interface Actor { email: string; nombre: string; uid: string }
+
+/** El actor del flujo automático: lo acredita el secreto `x-lens-sistema`. */
+export const ACTOR_SISTEMA: Actor = { email: 'sistema:lens-flujo-autonomo', nombre: 'Flujo automático OFAC', uid: 'lens-flujo-autonomo' };
+
+export interface ResultadoEscritura {
+  cambioId: string;
+  status: number;
+  datos: unknown;
+  error: string | null;
+  /** `no_disponible`: no se pudo registrar, así que NO se llamó a Admin. */
+  registro: 'ok' | 'sin_resultado' | 'no_disponible';
+}
+
+/**
+ * Una escritura en Admin, con su registro: el intento ANTES (si no se puede
+ * registrar, no se escribe) y el resultado después. La usan la ruta del módulo
+ * y el paso 6 de /admin/customer-status.
+ */
+async function escribirConRegistro(env: EnvListasNegras, fetchTimeout: FetchTimeout, w: {
+  lista: string; metodo: 'POST' | 'PUT'; registro: Plano; ejecucionId: string;
+  meta: { estadoAnterior?: unknown; reasonAnterior?: unknown; valor?: unknown };
+  actor: Actor; flujo: string; servicio: string; origen?: { numeroCaso: string; casoId: string };
+}): Promise<ResultadoEscritura> {
+  const cambioId = crypto.randomUUID();
+  const intento = await registrar(env, fetchTimeout, {
+    accion: 'intento', cambioId, ejecucionId: w.ejecucionId, lista: w.lista.toUpperCase(),
+    operacion: w.metodo === 'POST' ? 'CREAR' : 'EDITAR', flujo: w.flujo, servicio: w.servicio, actor: w.actor,
+    registro: w.registro,
+    meta: { estadoAnterior: w.meta.estadoAnterior ?? null, reasonAnterior: w.meta.reasonAnterior ?? null,
+            valor: w.meta.valor ?? null },
+    ...(w.origen ? { origen: w.origen } : {}),
+  });
+  if (!intento) {
+    return { cambioId, status: 503, datos: null, registro: 'no_disponible',
+             error: 'No se pudo registrar el cambio, así que no se hizo. Reintentá en unos minutos.' };
+  }
+  let status = 0;
+  let datos: unknown = null;
+  let error: string | null = null;
+  try {
+    const a = await llamarAdmin(env, fetchTimeout, w.metodo, RUTAS[w.lista], JSON.stringify(w.registro));
+    status = a.status;
+    datos = a.datos;
+  } catch (e) {
+    status = e instanceof ErrorAdmin ? e.status : 502;
+    error = e instanceof Error ? e.message : 'no se pudo llamar a Admin';
+  }
+  const ok = status >= 200 && status < 300;
+  if (!ok && !error) error = `HTTP ${status}`;
+  const ev = { accion: 'resultado', cambioId, ok, httpStatus: status, respuesta: datos, actor: w.actor, error: ok ? null : error };
+  const cerrado = await registrar(env, fetchTimeout, ev) || await registrar(env, fetchTimeout, ev);
+  console.log(`listas-negras ${w.metodo} ${w.lista} → ${status}${cerrado ? '' : ' (resultado sin registrar)'}`);
+  return { cambioId, status, datos, error, registro: cerrado ? 'ok' : 'sin_resultado' };
+}
+
+// ── OFAC Bloqueado → lista negra de DNI ─────────────────────────────────────
+// Todo cierre «Bloqueado» (`fully_blocked`) de la cola OFAC agrega al cliente
+// a la lista negra de DNI de Admin (decisión de Benjamín, 23-10-2026). Corre
+// como paso 6 de /admin/customer-status —después de los cinco de siempre, sin
+// tocar su `ok`— y en la carga de históricos del módulo.
+//
+// Se registra en los dos esquemas, cada uno con lo suyo: `listas_negras` (el
+// cambio en Admin, por el logger de #211) y `colas_trabajo.lista_negra_dni`
+// (lo que pasó en la cola, por el logger de colas). Los dos con el actor
+// verificado acá: el ID token del analista o el secreto del flujo automático.
+
+const LISTA_MS = 60_000;
+const PAISES_MS = 3_600_000;
+
+async function listaDni(env: EnvListasNegras, fetchTimeout: FetchTimeout): Promise<RegistroDni[]> {
+  if (cacheDni && Date.now() < cacheDni.vence) return cacheDni.recs;
+  const r = await llamarAdmin(env, fetchTimeout, 'GET', RUTAS.dni);
+  if (r.status !== 200) throw new Error(`la lista de DNI respondió HTTP ${r.status}`);
+  const recs = extractList(r.datos).filter(x => x && typeof x === 'object');
+  cacheDni = { recs, vence: Date.now() + LISTA_MS };
+  return recs;
+}
+
+async function paises(env: EnvListasNegras, fetchTimeout: FetchTimeout): Promise<Record<string, string>> {
+  if (cachePaises && Date.now() < cachePaises.vence) return cachePaises.mapa;
+  const r = await llamarAdmin(env, fetchTimeout, 'GET', RUTA_PAISES);
+  if (r.status !== 200) throw new Error(`el catálogo de países respondió HTTP ${r.status}`);
+  cachePaises = { mapa: loadCountries(r.datos), vence: Date.now() + PAISES_MS };
+  return cachePaises.mapa;
+}
+
+/** La fila de `colas_trabajo.lista_negra_dni`. Si falla, la recupera el respaldo diario. */
+async function registrarColas(env: EnvListasNegras, fetchTimeout: FetchTimeout, datos: Record<string, unknown>): Promise<boolean> {
+  const destino = (env.COLAS_LOGGER_URL || '').replace(/\/$/, '');
+  if (!destino || !env.COLAS_LOGGER_SECRET) return false;
+  try {
+    const limpio = Object.fromEntries(Object.entries(datos).filter(([, v]) => v !== null && v !== undefined && v !== ''));
+    const r = await fetchTimeout(destino, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-secret': env.COLAS_LOGGER_SECRET },
+      body: JSON.stringify({ eventos: [{ tabla: 'lista_negra_dni', datos: limpio }] }),
+    }, 8000);
+    return r.ok;
+  } catch { return false; }
+}
+
+export interface ResultadoListaNegraDni {
+  resultado: ResultadoColas;
+  cambioId: string;
+  flujo: string;
+  countryCode: string;
+  tipologia: string;
+  actor: Actor;
+  automatico: boolean;
+  ocurridoEn: string;
+  /** El registro en `listas_negras`: `no_disponible` = no se registró y no se tocó Admin. */
+  registro: 'ok' | 'sin_resultado' | 'no_disponible';
+  /** La fila de `colas_trabajo`: si no entró, la recupera el respaldo diario. */
+  colas: boolean;
+  detalle?: string;
+  httpStatus?: number;
+}
+
+const recorte = (v: unknown, tope: number) => String(v ?? '').trim().slice(0, tope);
+
+/** Una entrada, con solo lo que se usa y con topes. */
+function entradaLimpia(e: Partial<EntradaListaNegraDni> & { ejecucionId?: unknown }): EntradaListaNegraDni & { ejecucionId: string } {
+  const ej = recorte(e.ejecucionId, 64);
+  return {
+    customerId: recorte(e.customerId, 32), dni: recorte(e.dni, 64), countryCode: recorte(e.countryCode, 2).toUpperCase(),
+    numeroCaso: recorte(e.numeroCaso, 20), casoId: recorte(e.casoId, 64), idInternoUsuario: recorte(e.idInternoUsuario, 32),
+    tipologia: recorte(e.tipologia, 40), ejecucionId: EJECUCION.test(ej) ? ej : crypto.randomUUID(),
+  };
+}
+
+/** Agrega (o reactiva) un DNI en la lista negra, con su registro en los dos esquemas. No lanza. */
+export async function pasoListaNegraDni(
+  env: EnvListasNegras, fetchTimeout: FetchTimeout, e: EntradaListaNegraDni & { ejecucionId: string },
+  actor: Actor, origen: OrigenBloqueado, servicio: string,
+): Promise<ResultadoListaNegraDni> {
+  const flujo = FLUJOS_BLOQUEADO[origen];
+  const ocurridoEn = new Date().toISOString();
+  const origenCaso = { numeroCaso: e.numeroCaso, casoId: e.casoId };
+  let decision: DecisionDni;
+  try {
+    decision = decidirDni(e.dni, e.countryCode, await listaDni(env, fetchTimeout));
+  } catch (err) {
+    decision = { accion: 'error', motivo: `No se pudo leer la lista de DNI de Admin (${err instanceof Error ? err.message : 'error'}).` };
+  }
+  let countryName = '';
+  if (decision.accion === 'agregar') {
+    try { countryName = (await paises(env, fetchTimeout))[e.countryCode] || ''; } catch { /* abajo */ }
+    if (!countryName) decision = { accion: 'error', motivo: `No se encontró el countryName de ${e.countryCode} en Admin.` };
+  }
+
+  let cambioId: string;
+  let resultadoListas: string;
+  let registro: ResultadoListaNegraDni['registro'];
+  let detalle: string | undefined;
+  let httpStatus: number | undefined;
+  if (decision.accion === 'agregar' || decision.accion === 'reactivar') {
+    const agregar = decision.accion === 'agregar';
+    const rec = decision.accion === 'reactivar' ? decision.registro : null;
+    const w = await escribirConRegistro(env, fetchTimeout, {
+      lista: 'dni', metodo: agregar ? 'POST' : 'PUT', ejecucionId: e.ejecucionId, actor, flujo, servicio, origen: origenCaso,
+      // El PUT de DNI no cambia la razón: queda la que tenía.
+      registro: agregar
+        ? { dni: (decision as { dniAdmin: string }).dniAdmin, countryCode: e.countryCode, countryName, reason: MOTIVO_BLOQUEADO }
+        : { dni: String(rec!.dni), countryCode: String(rec!.countryCode), status: true },
+      meta: agregar ? { valor: (decision as { dniAdmin: string }).dniAdmin }
+        : { estadoAnterior: false, reasonAnterior: rec!.reason ?? null, valor: String(rec!.dni) },
+    });
+    cambioId = w.cambioId;
+    registro = w.registro;
+    httpStatus = w.status;
+    const ok = w.status >= 200 && w.status < 300;
+    resultadoListas = ok ? (agregar ? 'CREADO' : 'ACTIVADO') : 'ERROR';
+    if (!ok) detalle = w.error ?? `HTTP ${w.status}`;
+    // La lista guardada se pone al día: un segundo cierre del mismo cliente
+    // dentro del minuto lo ve activo y no lo vuelve a agregar.
+    if (ok && cacheDni) {
+      if (rec) rec.blacklistStatus = true;
+      else cacheDni.recs.push({ dni: (decision as { dniAdmin: string }).dniAdmin, countryCode: e.countryCode, blacklistStatus: true });
+    }
+  } else {
+    // Sin operación en Admin: ya estaba activo, o no se puede agregar.
+    cambioId = crypto.randomUUID();
+    const ya = decision.accion === 'ya_activo';
+    resultadoListas = ya ? 'OMITIDO_YA_EXISTE_ACTIVO' : 'ERROR';
+    if (!ya) detalle = (decision as { motivo: string }).motivo;
+    const valor = ya ? String((decision as { registro: RegistroDni }).registro.dni ?? '') : e.dni;
+    const ok = await registrar(env, fetchTimeout, {
+      accion: 'sin_operacion', ejecucionId: e.ejecucionId, lista: 'DNI', flujo, servicio, actor, operacion: 'CREAR',
+      filas: [{ cambioId, valor: valor || null, countryCode: e.countryCode || null, resultado: resultadoListas,
+                estadoAnterior: ya ? true : null, error: detalle ?? null, ...origenCaso }],
+    });
+    registro = ok ? 'ok' : 'no_disponible';
+  }
+
+  const resultado = resultadoColas(resultadoListas);
+  const colas = await registrarColas(env, fetchTimeout, {
+    cambio_id: cambioId, numero_caso: e.numeroCaso, caso_id: e.casoId,
+    id_interno_usuario: /^\d+$/.test(e.idInternoUsuario) ? e.idInternoUsuario : null,
+    dni: claveDni(e.dni) || null, country_code: e.countryCode || null, tipologia: e.tipologia || null,
+    resultado, detalle: detalle ?? null, flujo, automatico: origen === 'automatico',
+    actor_email: actor.email, actor_nombre: actor.nombre || null, actor_uid: actor.uid || null, ocurrido_en: ocurridoEn,
+  });
+  console.log(`listas-negras bloqueado ${origen} → ${resultado}${colas ? '' : ' (colas sin registrar)'}`);
+  return { resultado, cambioId, flujo, countryCode: e.countryCode, tipologia: e.tipologia, actor,
+           automatico: origen === 'automatico', ocurridoEn, registro, colas,
+           ...(detalle ? { detalle } : {}), ...(httpStatus ? { httpStatus } : {}) };
+}
+
+/** Comparación de secretos sin cortocircuito. */
+function iguales(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let d = 0;
+  for (let i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return d === 0;
+}
+
+type ResultadoCliente = { customerId: string; ok: boolean; steps: Record<string, unknown> };
+
+/**
+ * El paso 6 de /admin/customer-status. Solo corre si el pedido trae
+ * `listaNegraDni`, es de la cola OFAC con tipología `fully_blocked`, el cierre
+ * en Admin quedó ok y el actor está verificado. Escribe en `steps.listaNegraDni`
+ * y NUNCA cambia el `ok` del cierre. Lo que no termina en `esperaPaso6Ms` sigue
+ * después de responder (`waitUntil`) y queda en el registro. No lanza.
+ */
+export async function pasoSeisCustomerStatus(
+  request: Request, env: EnvListasNegras, ctx: { waitUntil(p: Promise<unknown>): void },
+  body: { cola?: string; listaNegraDni?: unknown }, results: ResultadoCliente[], fetchTimeout: FetchTimeout,
+): Promise<void> {
+  const crudo = body.listaNegraDni;
+  const entradas = (Array.isArray(crudo) ? crudo : [crudo]).filter((x): x is Record<string, unknown> =>
+    !!x && typeof x === 'object' && !Array.isArray(x)).slice(0, 200);
+  if (!entradas.length) return;
+
+  // El actor: el flujo automático por su secreto, o el analista por su ID token.
+  let actor: Actor | null = null;
+  let origen: OrigenBloqueado = 'manual';
+  const sistema = request.headers.get('x-lens-sistema') || '';
+  if (sistema && env.LISTA_NEGRA_SISTEMA_SECRET && iguales(sistema, env.LISTA_NEGRA_SISTEMA_SECRET)) {
+    actor = ACTOR_SISTEMA;
+    origen = 'automatico';
+  } else {
+    const auth = request.headers.get('Authorization') || '';
+    const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+    if (token) {
+      const v = await verificarIdToken(token, env.FIREBASE_PROJECT_ID || PROYECTO_DEFAULT);
+      if (v.ok) actor = { email: v.email, nombre: v.nombre, uid: v.uid };
+    }
+  }
+
+  const pendientes: Array<[EntradaListaNegraDni & { ejecucionId: string }, ResultadoCliente]> = [];
+  for (const crudaE of entradas) {
+    const e = entradaLimpia(crudaE as Partial<EntradaListaNegraDni>);
+    const r = results.find(x => x.customerId === e.customerId)
+      ?? (entradas.length === 1 && results.length === 1 ? results[0] : undefined);
+    if (!r) continue;
+    if (!esBloqueadoOfac(body.cola, e.tipologia)) { r.steps.listaNegraDni = { omitido: 'no es un cierre Bloqueado de la cola OFAC' }; continue; }
+    if (!r.ok) { r.steps.listaNegraDni = { omitido: 'el cierre en Admin no quedó ok' }; continue; }
+    if (!actor) { r.steps.listaNegraDni = { omitido: 'sin_actor_verificado' }; continue; }
+    pendientes.push([e, r]);
+  }
+  if (!pendientes.length || !actor) return;
+
+  const quien = actor;
+  const trabajo = (async () => {
+    for (const [e, r] of pendientes) {
+      try {
+        r.steps.listaNegraDni = await pasoListaNegraDni(env, fetchTimeout, e, quien, origen, '/admin/customer-status');
+      } catch (err) {
+        r.steps.listaNegraDni = { resultado: 'ERROR', detalle: err instanceof Error ? err.message : 'error' };
+      }
+    }
+  })();
+  let vencido = false;
+  await Promise.race([trabajo, new Promise<void>(res => setTimeout(() => { vencido = true; res(); }, esperaPaso6Ms))]);
+  if (vencido) {
+    for (const [, r] of pendientes) {
+      if (!r.steps.listaNegraDni) r.steps.listaNegraDni = { en_curso: true, detalle: 'Siguió después de responder: el resultado queda en el registro.' };
+    }
+    ctx.waitUntil(trabajo);
+  }
+}
+
 /** Atiende /admin/listas-negras/*. Devuelve null si la ruta no es de acá. */
 export async function manejarListasNegras(
   request: Request, url: URL, env: EnvListasNegras, cors: Record<string, string>, fetchTimeout: FetchTimeout,
 ): Promise<Response | null> {
   if (!esRutaListasNegras(url.pathname)) return null;
-  const m = url.pathname.slice(PREFIJO.length).match(/^(?:(paises)|(dni|dominio|cuenta)(?:\/(sin-operacion|ids))?)$/);
-  if (!m) return responder({ error: 'Ruta no encontrada' }, 404, cors);
+  const m = url.pathname.slice(PREFIJO.length).match(/^(?:(paises)|(dni|dominio|cuenta)(?:\/(sin-operacion|ids|bloqueado))?)$/);
+  if (!m || (m[3] === 'bloqueado' && m[2] !== 'dni')) return responder({ error: 'Ruta no encontrada' }, 404, cors);
   const lista = m[1] || m[2];
   const sub = m[3] || '';
   const metodo = request.method;
@@ -274,8 +583,13 @@ export async function manejarListasNegras(
   const v = await verificarIdToken(idToken, proyecto);
   if (!v.ok) return responder({ error: 'no autorizado', motivo: v.motivo }, 401, cors);
   try {
-    if (!(await tienePermiso(v.uid, idToken, proyecto, fetchTimeout))) {
+    const permiso = await tienePermiso(v.uid, idToken, proyecto, fetchTimeout);
+    if (!permiso.ok) {
       return responder({ error: 'sin permiso', motivo: 'el módulo Listas negras no está habilitado para tu usuario' }, 403, cors);
+    }
+    // La carga de «Bloqueados» históricos es solo para Líder.
+    if (sub === 'bloqueado' && !permiso.lider) {
+      return responder({ error: 'sin permiso', motivo: 'la carga de históricos es solo para Líder' }, 403, cors);
     }
   } catch {
     // No se pudo leer el perfil: se niega, no se adivina.
@@ -297,13 +611,27 @@ export async function manejarListasNegras(
   }
 
   const LISTA = lista.toUpperCase();
-  const texto = await request.text();
+  const cuerpoTexto = await request.text();
+
+  // 3a · Un «Bloqueado» histórico de la cola OFAC, con la misma lógica del paso 6.
+  if (sub === 'bloqueado') {
+    if (cuerpoTexto.length > MAX_CUERPO) return responder({ error: 'cuerpo demasiado grande' }, 413, cors);
+    let c: unknown;
+    try { c = JSON.parse(cuerpoTexto); } catch { return responder({ error: 'body JSON inválido' }, 400, cors); }
+    const p = objetoPlano(c, ['ejecucionId', 'customerId', 'dni', 'countryCode', 'numeroCaso', 'casoId', 'idInternoUsuario', 'tipologia'], 'bloqueado');
+    if (typeof p === 'string') return responder({ error: 'cuerpo inválido', motivo: p }, 400, cors);
+    if (p.tipologia !== TIPOLOGIA_BLOQUEADO || !p.numeroCaso || !p.casoId) {
+      return responder({ error: 'cuerpo inválido', motivo: 'se espera un caso con tipología fully_blocked' }, 400, cors);
+    }
+    const r = await pasoListaNegraDni(env, fetchTimeout, entradaLimpia(p as Partial<EntradaListaNegraDni>), actor, 'historico', url.pathname);
+    return responder({ ...r, actor: v.email }, r.registro === 'no_disponible' ? 503 : 200, cors);
+  }
 
   // 3 · Lo que no pasa por Admin: filas omitidas y ids completados. Solo al registro.
   if (sub) {
-    if (texto.length > MAX_CUERPO_LOTE) return responder({ error: 'cuerpo demasiado grande' }, 413, cors);
+    if (cuerpoTexto.length > MAX_CUERPO_LOTE) return responder({ error: 'cuerpo demasiado grande' }, 413, cors);
     let c: { ejecucionId?: unknown; modo?: unknown; filas?: unknown; ids?: unknown };
-    try { c = JSON.parse(texto); } catch { return responder({ error: 'body JSON inválido' }, 400, cors); }
+    try { c = JSON.parse(cuerpoTexto); } catch { return responder({ error: 'body JSON inválido' }, 400, cors); }
     let evento: Record<string, unknown>;
     if (sub === 'sin-operacion') {
       if (!c || !EJECUCION.test(String(c.ejecucionId ?? '')) || !['carga', 'edicion'].includes(String(c.modo))
@@ -338,38 +666,17 @@ export async function manejarListasNegras(
   }
 
   // 4 · Escritura: registro ANTES de Admin, o no se escribe.
-  const r = cuerpoValido(texto, CAMPOS[lista][metodo as 'POST' | 'PUT']);
+  const r = cuerpoValido(cuerpoTexto, CAMPOS[lista][metodo as 'POST' | 'PUT']);
   if (!r.ok) return responder({ error: 'cuerpo inválido', motivo: r.motivo }, 400, cors);
-  const cambioId = crypto.randomUUID();
-  const intento = await registrar(env, fetchTimeout, {
-    accion: 'intento', cambioId, ejecucionId: r.meta.ejecucionId, lista: LISTA,
-    operacion: metodo === 'POST' ? 'CREAR' : 'EDITAR', flujo: FLUJO[metodo], servicio: url.pathname, actor,
-    registro: r.registro,
-    meta: { estadoAnterior: r.meta.estadoAnterior ?? null, reasonAnterior: r.meta.reasonAnterior ?? null,
-            valor: r.meta.valor ?? null },
+  const w = await escribirConRegistro(env, fetchTimeout, {
+    lista, metodo: metodo as 'POST' | 'PUT', registro: r.registro, ejecucionId: String(r.meta.ejecucionId),
+    meta: r.meta, actor, flujo: FLUJO[metodo], servicio: url.pathname,
   });
-  if (!intento) {
+  if (w.registro === 'no_disponible') {
     console.log(`listas-negras ${metodo} ${lista} → sin registro, no se llamó a Admin`);
-    return responder({ actor: v.email, error: 'No se pudo registrar el cambio, así que no se hizo. Reintentá en unos minutos.',
-                       registro: 'no_disponible' }, 503, cors);
+    return responder({ actor: v.email, error: w.error, registro: 'no_disponible' }, 503, cors);
   }
-
-  let status = 0;
-  let datos: unknown = null;
-  let error: string | null = null;
-  try {
-    const a = await llamarAdmin(env, fetchTimeout, metodo, RUTAS[lista], JSON.stringify(r.registro));
-    status = a.status;
-    datos = a.datos;
-  } catch (e) {
-    status = e instanceof ErrorAdmin ? e.status : 502;
-    error = e instanceof Error ? e.message : 'no se pudo llamar a Admin';
-  }
-  const ok = status >= 200 && status < 300;
-  const evResultado = { accion: 'resultado', cambioId, ok, httpStatus: status, respuesta: datos, actor,
-                        error: ok ? null : (error || `HTTP ${status}`) };
-  const cerrado = await registrar(env, fetchTimeout, evResultado) || await registrar(env, fetchTimeout, evResultado);
-  console.log(`listas-negras ${metodo} ${lista} → ${status}${cerrado ? '' : ' (resultado sin registrar)'}`);
-  return responder({ actor: v.email, cambioId, status, datos, ...(error ? { error } : {}),
-                     registro: cerrado ? 'ok' : 'sin_resultado' }, ok ? status : (status || 502), cors);
+  const ok = w.status >= 200 && w.status < 300;
+  return responder({ actor: v.email, cambioId: w.cambioId, status: w.status, datos: w.datos,
+                     ...(ok ? {} : { error: w.error }), registro: w.registro }, ok ? w.status : (w.status || 502), cors);
 }

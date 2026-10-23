@@ -114,6 +114,19 @@ TABLAS = {
             "actor_id": "", "actor_nombre": "", "actor_tipo": "", "ocurrido_en": "ts",
         },
     },
+    # Los «Bloqueado» de la cola OFAC que entran a la lista negra de DNI de
+    # Admin (23-10-2026). La escribe el Worker —paso 6 de
+    # /admin/customer-status y la carga de históricos—, con el actor
+    # verificado; `cambio_id` es el del registro de listas_negras.cambio.
+    "lista_negra_dni": {
+        "pk": ["cambio_id"],
+        "cols": {
+            "cambio_id": "", "numero_caso": "", "caso_id": "", "id_interno_usuario": "int",
+            "dni": "", "country_code": "", "tipologia": "", "resultado": "", "detalle": "",
+            "flujo": "", "automatico": "bool", "actor_email": "", "actor_nombre": "", "actor_uid": "",
+            "ocurrido_en": "ts",
+        },
+    },
     "kyb_empresa": {
         "pk": ["company_id"],
         "cols": {

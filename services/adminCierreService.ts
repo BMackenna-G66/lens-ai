@@ -7,6 +7,7 @@
 // explícitamente antes de llamar acá.
 
 import { sanitizarTexto } from './textSanitizer';
+import type { EntradaListaNegraDni } from './listaNegraDni';
 
 const PROXY = (process.env.EMPRESADOCS_PROXY_URL || '').replace(/\/$/, '');
 
@@ -34,13 +35,19 @@ export interface AdminCierrePayload {
   // La cola del caso que se cierra (`clasificarCola`). Solo un cierre de la cola
   // OFAC resuelve bloqueos OFAC: un «Liberar» de otra cola los deja vigentes.
   cola?: string;
+  // OPCIONAL. Un «Bloqueado» de la cola OFAC agrega al cliente a la lista negra
+  // de DNI (paso 6 del Worker). Uno por cliente; en un masivo, un arreglo.
+  listaNegraDni?: EntradaListaNegraDni | EntradaListaNegraDni[];
 }
+
+/** Quién pide el paso 6: el ID token del analista o el secreto del flujo automático. */
+export interface CredencialPaso6 { idToken?: string | null; sistema?: string | null }
 
 export interface AdminStepResult { ok: boolean; status: number; data: unknown; }
 export interface AdminCustomerResult { customerId: string; ok: boolean; steps: Record<string, AdminStepResult>; }
 export interface AdminCierreResult { ok: boolean; results: AdminCustomerResult[]; error?: string; }
 
-export async function enviarCierreAdmin(payload: AdminCierrePayload): Promise<AdminCierreResult> {
+export async function enviarCierreAdmin(payload: AdminCierrePayload, credencial: CredencialPaso6 = {}): Promise<AdminCierreResult> {
   if (!PROXY) throw new Error('Proxy no configurado (EMPRESADOCS_PROXY_URL).');
   if (!payload.customerIds.length) throw new Error('Falta el customerId.');
 
@@ -50,7 +57,12 @@ export async function enviarCierreAdmin(payload: AdminCierrePayload): Promise<Ad
 
   const res = await fetch(`${PROXY}/admin/customer-status`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    // La credencial solo sirve para el paso 6; el resto del cierre no la mira.
+    headers: {
+      'Content-Type': 'application/json',
+      ...(credencial.idToken ? { Authorization: `Bearer ${credencial.idToken}` } : {}),
+      ...(credencial.sistema ? { 'x-lens-sistema': credencial.sistema } : {}),
+    },
     body: JSON.stringify(limpio),
   });
   const text = await res.text();

@@ -1,0 +1,78 @@
+[
+ {
+  "tabla": "lista_negra_dni",
+  "datos": {
+   "cambio_id": "id-1",
+   "numero_caso": "09000001",
+   "caso_id": "09000001",
+   "id_interno_usuario": "4000001",
+   "dni": "111111111",
+   "country_code": "CL",
+   "tipologia": "fully_blocked",
+   "resultado": "AGREGADO",
+   "flujo": "colas_trabajo.ofac.bloqueado.manual",
+   "automatico": false,
+   "actor_email": "analista@global66.com",
+   "actor_nombre": "Analista Prueba",
+   "actor_uid": "uid-analista",
+   "ocurrido_en": "2026-10-23T18:00:00.000Z"
+  }
+ },
+ {
+  "tabla": "lista_negra_dni",
+  "datos": {
+   "cambio_id": "id-3",
+   "numero_caso": "09000003",
+   "caso_id": "09000003",
+   "id_interno_usuario": "4000001",
+   "dni": "223334440",
+   "country_code": "CL",
+   "tipologia": "fully_blocked",
+   "resultado": "ACTIVADO",
+   "flujo": "colas_trabajo.ofac.bloqueado.automatico",
+   "automatico": true,
+   "actor_email": "sistema:lens-flujo-autonomo",
+   "actor_nombre": "Flujo automático OFAC",
+   "actor_uid": "lens-flujo-autonomo",
+   "ocurrido_en": "2026-10-23T18:00:00.000Z"
+  }
+ },
+ {
+  "tabla": "lista_negra_dni",
+  "datos": {
+   "cambio_id": "id-6",
+   "numero_caso": "09000004",
+   "caso_id": "09000004",
+   "id_interno_usuario": "4000001",
+   "dni": "123456785",
+   "country_code": "CL",
+   "tipologia": "fully_blocked",
+   "resultado": "YA_ACTIVO",
+   "flujo": "colas_trabajo.ofac.bloqueado.manual",
+   "automatico": false,
+   "actor_email": "analista@global66.com",
+   "actor_nombre": "Analista Prueba",
+   "actor_uid": "uid-analista",
+   "ocurrido_en": "2026-10-23T18:00:00.000Z"
+  }
+ },
+ {
+  "tabla": "lista_negra_dni",
+  "datos": {
+   "cambio_id": "id-8",
+   "numero_caso": "09000005",
+   "caso_id": "09000005",
+   "id_interno_usuario": "4000001",
+   "country_code": "CL",
+   "tipologia": "fully_blocked",
+   "resultado": "ERROR",
+   "detalle": "El caso no tiene DNI.",
+   "flujo": "colas_trabajo.ofac.bloqueado.manual",
+   "automatico": false,
+   "actor_email": "analista@global66.com",
+   "actor_nombre": "Analista Prueba",
+   "actor_uid": "uid-analista",
+   "ocurrido_en": "2026-10-23T18:00:00.000Z"
+  }
+ }
+]

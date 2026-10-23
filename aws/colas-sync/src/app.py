@@ -50,6 +50,7 @@ solo inserta los cierres que faltan y completa `automatico` donde está en NULL.
 
 import base64
 import json
+import re
 import logging
 import os
 import time
@@ -107,6 +108,12 @@ TABLAS = {
         "event_id": "", "numero_caso": "", "tipo": "", "actor_id": "", "actor_tipo": "",
         "ocurrido_en": "ts", "correlation_id": "", "version_caso": "int",
         "cambios": "json", "metadata": "json"}),
+    # Los «Bloqueado» de la cola OFAC que entran a la lista negra de DNI. En
+    # vivo la escribe el Worker; acá se recupera del evento LISTA_NEGRA_DNI.
+    "lista_negra_dni": ("cambio_id", {
+        "cambio_id": "", "numero_caso": "", "caso_id": "", "id_interno_usuario": "int", "dni": "",
+        "country_code": "", "tipologia": "", "resultado": "", "detalle": "", "flujo": "",
+        "automatico": "bool", "actor_email": "", "actor_nombre": "", "actor_uid": "", "ocurrido_en": "ts"}),
 }
 
 POR_FLUJO = "flujo-autonomo"
@@ -344,6 +351,38 @@ def _fila_evento(ev: dict) -> dict | None:
         "actor_tipo": e.get("actorTipo"), "ocurrido_en": _ts(e.get("timestamp")),
         "correlation_id": e.get("correlationId"), "version_caso": e.get("versionCaso"),
         "cambios": e.get("cambios"), "metadata": e.get("metadata")}
+
+
+def _clave_dni(v) -> str | None:
+    """Como `claveDni` de services/listaNegraDni.ts: solo letras y dígitos, en
+    mayúsculas. Es la misma forma en que la guarda el Worker en vivo."""
+    k = re.sub(r"[^0-9A-Za-z]", "", str(v or "")).upper()
+    return k or None
+
+
+def _fila_lista_negra(ev: dict, caso: dict | None) -> dict | None:
+    """La fila de `lista_negra_dni` de un evento LISTA_NEGRA_DNI.
+
+    El evento NO trae el DNI —la auditoría del caso no guarda DNI—: sale del
+    caso. Si el caso ya no está, no se sabe el DNI y la fila NO se escribe: la
+    del Worker queda como estaba, en vez de pisarla con el DNI vacío. Todas las
+    demás columnas salen del evento, así que el DELETE+INSERT por `cambio_id`
+    no borra nada que el respaldo no conozca (la lección de #205)."""
+    e = {k: _val(v) for k, v in (ev.get("fields") or {}).items()}
+    m = e.get("metadata") or {}
+    if e.get("tipo") != "LISTA_NEGRA_DNI" or not m.get("cambioId") or caso is None:
+        return None
+    datos = _val((caso.get("fields") or {}).get("datos")) or {}
+    idi = str(m.get("idInternoUsuario") or "").strip()
+    return {
+        "cambio_id": m["cambioId"], "numero_caso": e.get("numeroCaso") or _caso_de_evento(ev["name"]),
+        "caso_id": m.get("casoId"), "id_interno_usuario": idi if idi.isdigit() else None,
+        "dni": _clave_dni(datos.get("Número de DNI")), "country_code": m.get("countryCode"),
+        "tipologia": m.get("tipologia"), "resultado": m.get("resultado"), "detalle": m.get("detalle"),
+        "flujo": m.get("flujo"), "automatico": m.get("automatico"), "actor_email": m.get("actorEmail"),
+        "actor_nombre": m.get("actorNombre"), "actor_uid": m.get("actorUid"),
+        "ocurrido_en": _ts(m.get("ocurridoEn")) or _ts(e.get("timestamp")),
+    }
 
 
 # ── Redshift ─────────────────────────────────────────────────────────────────
@@ -599,7 +638,7 @@ def lambda_handler(event, context):
 
     desde_casos = _desde(estado, "marcaCasos", ahora)
     desde_eventos = _desde(estado, "marcaEventos", ahora)
-    resumen = {"caso": 0, "cierre": 0, "screening": 0, "evento_auditoria": 0}
+    resumen = {"caso": 0, "cierre": 0, "screening": 0, "evento_auditoria": 0, "lista_negra_dni": 0}
     pendiente = None
     # La tanda más lenta hasta ahora. El freno se revisa ENTRE tandas, así que el
     # margen tiene que alcanzar para una tanda entera: con 60 s fijos, una tanda
@@ -642,9 +681,14 @@ def lambda_handler(event, context):
             t0 = time.time()
             tanda = nuevos[i:i + EVENTOS_POR_TANDA]
             filas = [f for f in (_fila_evento(ev) for _, ev in tanda) if f]
-            r = _escribir(client, {"evento_auditoria": filas})
+            # LISTA_NEGRA_DNI: el DNI sale del caso, que se trae acá. Son pocos.
+            ln = [ev for _, ev in tanda if _val((ev.get("fields") or {}).get("tipo")) == "LISTA_NEGRA_DNI"]
+            casos_ln = {d["name"]: d for d in _traer_casos(tok, sorted({ev["name"].rsplit("/auditoria/", 1)[0] for ev in ln}))} if ln else {}
+            filas_ln = [f for f in (_fila_lista_negra(ev, casos_ln.get(ev["name"].rsplit("/auditoria/", 1)[0])) for ev in ln) if f]
+            r = _escribir(client, {"evento_auditoria": filas, "lista_negra_dni": filas_ln})
             lenta["s"] = max(lenta["s"], time.time() - t0)
             resumen["evento_auditoria"] += r.get("evento_auditoria", 0)
+            resumen["lista_negra_dni"] += r.get("lista_negra_dni", 0)
             # La marca avanza tanda por tanda: si la corrida se corta, la que
             # viene arranca desde acá y no desde el principio.
             estado["marcaEventos"] = _iso(tanda[-1][0])
