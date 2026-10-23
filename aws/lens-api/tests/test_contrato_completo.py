@@ -63,6 +63,21 @@ CAMPOS_EP6 = (
     "isPEP",
 )
 
+#: Contrato v3.2 — `shareholders[]` de EP-3, nueve campos por accionista. El
+#: estilo de EP-4 —`fullName`, `identificationNumber` tal como figura—, no el
+#: de EP-6, a pedido de Onboarding (23-10-2026).
+CAMPOS_SHAREHOLDERS_EP3 = (
+    "fullName",
+    "name",
+    "lastName",
+    "personType",
+    "identificationType",
+    "identificationNumber",
+    "ownershipPercentage",
+    "nationalityCode",
+    "documentCountryCode",
+)
+
 #: §6.9 — EP-5, el bloque `company`. Es TAMBIÉN el de EP-3: la especificación
 #: dice literal «`company`: mismo contenido que EP-5».
 #:
@@ -87,6 +102,10 @@ CAMPOS_EMPRESA = (
 VOCAB_EP4 = {"RUT", "CC", "DNI", "CE", "PASS", "PPT", "CV", "CP", "DRIVERS", "RFC", "CURP"}
 VOCAB_EP6 = {"RUT", "RUC", "DNI", "CC", "CE", "NIT", "RFC", "CURP", "INE",
              "CUIT", "CUIL", "CPF", "CNPJ", "Pasaporte", "Tax ID", "EIN", "VAT Number"}
+#: v3.2 — el de `shareholders[]` en EP-3: el de EP-4, más los documentos de
+#: persona jurídica que EP-4 no tiene.
+VOCAB_SHAREHOLDERS_EP3 = VOCAB_EP4 | {"NIT", "RUC", "INE", "CUIT", "CUIL", "CPF", "CNPJ",
+                                      "Tax ID", "EIN", "VAT Number"}
 
 
 # ── Entradas de ejemplo, con TODO lo que la extracción puede dar ────────────
@@ -148,6 +167,20 @@ def test_ep6_no_entrega_campos_de_mas(entrada):
     r = ob.persona(entrada, ob.Avisos())
     sobran = [c for c in r if c not in CAMPOS_EP6]
     assert not sobran, f"EP-6 no define estos campos: {sobran}"
+
+
+@pytest.mark.parametrize("entrada", [_accionista_natural, _accionista_juridico])
+def test_el_accionista_de_ep3_entrega_los_nueve_campos_y_nada_mas(entrada):
+    a = ob.accionista(entrada(), ob.Avisos())
+    assert set(a) == set(CAMPOS_SHAREHOLDERS_EP3), sorted(set(a) ^ set(CAMPOS_SHAREHOLDERS_EP3))
+
+
+def test_el_accionista_de_ep3_usa_su_vocabulario():
+    for crudo in ("CC", "cédula", "NIT", "RUC", "pasaporte", "Passport", "RUT", "RFC", "CURP",
+                  "INE", "CUIT", "CPF", "CNPJ", "EIN", "Tax ID", "VAT Number", "CE", "DNI"):
+        tipo = ob.tipo_identificacion(crudo, endpoint="shareholders")
+        assert tipo in VOCAB_SHAREHOLDERS_EP3, f"{crudo} → {tipo}"
+    assert ob.tipo_identificacion("pasaporte", endpoint="shareholders") == "PASS"
 
 
 def test_ep4_entrega_los_siete_campos():
@@ -526,7 +559,7 @@ CAMPOS_EP1 = ("companyId", "analysisId", "status", "startedAt", "schemaVersion")
 
 #: §6.7 — EP-3, el resultado completo.
 CAMPOS_EP3 = ("companyId", "analysisId", "status", "country", "countryCode", "fields", "company",
-              "legalRepresentatives", "documents", "warnings", "schemaVersion")
+              "legalRepresentatives", "shareholders", "documents", "warnings", "schemaVersion")
 
 #: §6.8 a §6.10 — las tres vistas. Mismo sobre, distinto bloque.
 SOBRES_SECCION = {

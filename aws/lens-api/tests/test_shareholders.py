@@ -72,6 +72,19 @@ def test_la_pasada_1_pide_representantes_y_duenos():
     assert gemini.ESQUEMA_CADENA["required"] == ["members"]
 
 
+def test_la_nacionalidad_declarada_es_un_booleano_opcional_con_su_instruccion():
+    """Contrato v3.2. Un booleano y no un país aparte: con un campo de texto el
+    modelo vaciaba `countryOfOrigin`, y eso cambiaba EP-6. La instrucción viaja
+    en la descripción, porque el prompt lo comparte la SPA y no se toca."""
+    for esquema in (gemini.ESQUEMA_SHAREHOLDERS["properties"]["owners"]["items"],
+                    gemini.ESQUEMA_CADENA["properties"]["members"]["items"]):
+        assert "nationality" not in esquema["properties"]
+        campo = esquema["properties"]["nationalityDeclared"]
+        assert campo["type"] == "BOOLEAN" and campo["nullable"] is True
+        assert "nationalityDeclared" not in esquema["required"]
+        assert "no cambia cómo se llena countryOfOrigin" in campo["description"]
+
+
 def test_persontype_esta_restringido_por_enumeracion():
     """Es lo que impide que el modelo invente un tercer tipo de persona."""
     props = gemini.ESQUEMA_SHAREHOLDERS["properties"]["owners"]["items"]["properties"]

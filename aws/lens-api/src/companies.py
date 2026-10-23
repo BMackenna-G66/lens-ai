@@ -75,7 +75,9 @@ RUTA_SECCION = re.compile(r"^/v1/companies/([^/]+)/analysis/(legal-representativ
 #: traen `field` y `subject`, EP-6 trae `countryOfOriginCode` y `personType`
 #: puede ir en `null`, y EP-3 trae `countryCode`. §15 del contrato: cambia
 #: cuando cambia la forma de las respuestas.
-SCHEMA_VERSION = os.environ.get("SCHEMA_VERSION", "1.1.0")
+#:
+#: `1.2.0` desde el v3.2 (23-10-2026): EP-3 trae `shareholders[]`.
+SCHEMA_VERSION = os.environ.get("SCHEMA_VERSION", "1.2.0")
 
 #: Tope de documentos por petición. La v1.2 bajó el lote a 2; es su propio tope
 #: y no el de `/v1/analisis` (12), que sigue como estaba.
@@ -887,7 +889,7 @@ def procesar(carga: dict, *, analizar: Callable, extraer_socios: Callable | None
     ficha["timingsMs"] = tiempos
     log.info("corrida %s · tiempos por etapa (ms): %s", analysis_id, json.dumps(tiempos))
     cuerpo, avisos_forma = _serializar(company_id, {"result": ficha, "country": pais})
-    avisos_forma = avisos_forma + _accionistas({"result": ficha})[2]
+    avisos_forma = avisos_forma + _sin_repetir_ep6(avisos_forma, _accionistas({"result": ficha})[2])
     avisos += avisos_forma
 
     faltan_requeridos, faltan_esperados = evaluar(cuerpo, pais)
@@ -1259,6 +1261,7 @@ def _serializar(company_id: str, u: dict) -> tuple[dict, list[dict]]:
         "schemaVersion": SCHEMA_VERSION,
         "company": empresa,
         "legalRepresentatives": representantes,
+        "shareholders": accionistas_ep3(ficha, avisos, u.get("country") or ficha.get("detectedCountry") or ""),
         "fields": ficha.get("fields") or [],
         "documents": [{k: d.get(k) for k in CLAVES_DOCUMENTO}
                       for d in (ficha.get("documents") or [])],
@@ -1272,6 +1275,128 @@ def resultado_de(company_id: str, u: dict) -> dict:
     cuerpo, _ = _serializar(company_id, u)
     cuerpo["warnings"] = normalizar_avisos(u.get("warnings") or [])
     return cuerpo
+
+
+#: El documento de composición accionaria: el complementario de Colombia
+#: (contrato v3.1, §8.3).
+TIPO_COMPOSICION = "COMPANY_SHAREHOLDERS_DOCUMENT"
+
+
+def accionistas_ep3(ficha: dict, avisos: onboarding.Avisos, pais: Any = "") -> list[dict]:
+    """`shareholders[]` de EP-3 (contrato v3.2), con sus avisos. Puro.
+
+    ── Quiénes entran ─────────────────────────────────────────────────────────
+    Los dueños DIRECTOS: las personas de `directOwnership` y las sociedades de
+    la raíz de `indirectShareholders`, que es donde las deja
+    `_clasificar_personas`. La cadena que cada sociedad tiene detrás queda
+    fuera: Onboarding no la pidió todavía.
+
+    La lectura de personas es UNA sobre todos los documentos vivos, así que la
+    misma persona puede venir dos veces —de la escritura y de la composición—.
+    Se consolida por número de documento, quedándose con el registro más
+    completo. Uno sin número que tiene el mismo nombre que uno incluido es esa
+    persona: no se avisa como omitida.
+
+    ── Quiénes se omiten ──────────────────────────────────────────────────────
+    El que no tiene nombre, número o tipo de documento, con un
+    `EXPECTED_DATA_MISSING` que dice cuál le falta. El `objectKey` es el
+    documento del que salió si se sabe —había uno solo vivo—; si no, la
+    composición accionaria del lote.
+
+    ── Composición sin nadie (§4.2 del pedido) ────────────────────────────────
+    Si el lote trae `company_shareholders_document` y el nodo queda vacío, un
+    `EXPECTED_DATA_MISSING` con `field: "shareholders"`, también si ese
+    documento falló. Es un aviso y no un FAILED a pedido de Onboarding: un
+    FAILED pierde a los representantes y a la empresa, y ellos deciden de su
+    lado qué bloquea.
+
+    `pais` es el declarado de la corrida: con él se confirma el país del
+    documento de identidad (`onboarding.pais_del_documento`).
+    """
+    documentos = ficha.get("documents") or []
+    composicion = next((d for d in documentos
+                        if str(d.get("documentType") or "").strip().upper() == TIPO_COMPOSICION), None)
+    vivos = [d for d in documentos if d.get("ok")]
+    origen = (vivos[0] if len(vivos) == 1 else composicion or {}).get("objectKey")
+
+    # Cada uno con sus propios avisos: los de un duplicado descartado no salen.
+    candidatos = []
+    for p in (ficha.get("directOwnership") or []) + (ficha.get("indirectShareholders") or []):
+        propios = onboarding.Avisos()
+        candidatos.append((onboarding.accionista(p, propios, pais), propios.items))
+
+    def numero(a: dict) -> str:
+        return re.sub(r"[^0-9A-Z]", "", str(a.get("identificationNumber") or "").upper())
+
+    def completo(a: dict) -> int:
+        return sum(v is not None for v in a.values())
+
+    mejor: dict[str, int] = {}
+    for i, (a, _) in enumerate(candidatos):
+        n = numero(a)
+        if n and (n not in mejor or completo(a) > completo(candidatos[mejor[n]][0])):
+            mejor[n] = i
+    elegidos = [(a, items) for i, (a, items) in enumerate(candidatos)
+                if not numero(a) or mejor[numero(a)] == i]
+
+    incluidos: list[dict] = []
+    nombres_incluidos = {onboarding.clave_de_nombre(a.get("fullName") or a.get("name"))
+                         for a, _ in elegidos if not onboarding.falta_para_incluir(a)}
+    nombres_omitidos: set[tuple] = set()
+    for a, items in elegidos:
+        falta = onboarding.falta_para_incluir(a)
+        quien = a.get("fullName") or a.get("name")
+        if falta and not numero(a) and quien:
+            nombre = onboarding.clave_de_nombre(quien)
+            if nombre in nombres_incluidos or nombre in nombres_omitidos:
+                continue
+            nombres_omitidos.add(nombre)
+        avisos.items.extend(items)
+        if not falta:
+            incluidos.append(a)
+            continue
+        if falta == "shareholder.name":
+            doc = a.get("identificationNumber")
+            mensaje = "Falta el nombre de un accionista" + (f" con documento {doc}" if doc else "") + "."
+        elif falta == "shareholder.identificationNumber":
+            mensaje = f"Falta el documento de identidad de: {quien}."
+        else:
+            mensaje = f"Falta el tipo de documento de identidad de: {quien}."
+        avisos.agregar(onboarding.AVISO_DATO_FALTANTE, mensaje, field=falta,
+                       subject=quien if falta != "shareholder.name" else None, objectKey=origen)
+
+    if composicion is not None and not incluidos:
+        avisos.agregar(onboarding.AVISO_DATO_FALTANTE,
+                       "La composición accionaria no trae ningún accionista con nombre y "
+                       "documento de identidad.",
+                       field="shareholders", objectKey=composicion.get("objectKey"))
+    return incluidos
+
+
+#: El mismo dato de un accionista, nombrado en EP-6 y en `shareholders[]`.
+_MISMO_DATO_EP6 = {
+    "shareholder.countryOfOrigin": "shareholder.nationalityCode",
+    "shareholder.shareholderName": "shareholder.fullName",
+}
+
+
+def _sin_repetir_ep6(del_ep3: list[dict], del_ep6: list[dict]) -> list[dict]:
+    """Los avisos de EP-6 que `shareholders[]` no dio ya. Un problema, un aviso.
+
+    Las dos vistas serializan a los mismos dueños y avisarían dos veces lo
+    mismo: el país fuera del catálogo como `shareholder.countryOfOrigin` y
+    como `shareholder.nationalityCode`, o el tipo de persona que no se pudo
+    determinar. Se queda el de `shareholders[]`, que es el nodo que usa
+    Onboarding. Lo que es solo de EP-6 —la cadena, el `countryOfOrigin` que no
+    se declaró como nacionalidad— sigue.
+    """
+    def firma(a: dict) -> tuple:
+        campo = a.get("field")
+        return (a.get("reason"), _MISMO_DATO_EP6.get(campo, campo), a.get("subject"),
+                a.get("valor") or a.get("original"))
+
+    dados = {firma(a) for a in del_ep3}
+    return [a for a in del_ep6 if firma(a) not in dados]
 
 
 def normalizar_avisos(avisos: list[dict]) -> list[dict]:
