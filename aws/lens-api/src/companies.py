@@ -83,12 +83,19 @@ MAX_DOCUMENTOS_LOTE = int(os.environ.get("MAX_DOCUMENTOS_LOTE", "2"))
 
 #: Los `documentType` que cuentan como documento PRINCIPAL, separados por coma.
 #:
-#: El vocabulario SÍ está especificado —§5.2 lo fija en tres— y el principal es
-#: la escritura:
+#: El vocabulario lo fija la pantalla de carga de Onboarding (contrato v3.1,
+#: §8.2): dos espacios en todos los países, y el principal es siempre el mismo:
 #:
-#:     company_deeds_document         escritura, siempre        ← PRINCIPAL
-#:     company_shareholders_document  composición, Colombia     complementario
-#:     company_id_document            identidad fiscal, Chile   complementario
+#:     company_deeds_document          escritura (en Colombia también el
+#:                                     certificado de Cámara de Comercio)  ← PRINCIPAL
+#:     company_shareholders_document   composición, Colombia (obligatorio)  complementario
+#:     company_complementary_document  el resto de los países (opcional)    complementario
+#:
+#: `company_id_document` (el e-RUT de Chile) y
+#: `company_trade_chamber_sedpe_document` se siguen aceptando por
+#: compatibilidad, pero Onboarding ya no los envía: el RUT de Chile lo trae el
+#: scraper del SII, y el certificado colombiano llega como
+#: `company_deeds_document`.
 #:
 #: Este default arrancó vacío —«todos principales»— por elegir el lado
 #: conservador sin tener la especificación a mano. Con el dato, el lado
@@ -1324,10 +1331,16 @@ def evaluar(cuerpo: dict, pais: Any) -> tuple[list[str], list[tuple[str, str]]]:
     representantes: una corrida sin ningún representante salía COMPLETED, y
     para Onboarding eso es una empresa sin nadie que pueda operarla.
 
-    **Esperados**: documento y cargo de los representantes, RUT de la sociedad,
-    forma legal, fecha de constitución y domicilio. En Colombia, el NIT con su
-    dígito verificador. En el resto de los orígenes el identificador tributario
-    puede no existir, así que ahí no cuenta.
+    **Esperados**: documento y cargo de los representantes, forma legal, fecha
+    de constitución y domicilio. El identificador tributario solo en Colombia:
+    el NIT con su dígito verificador.
+
+    En Chile el RUT dejó de ser esperado (contrato v3.1, 22-10-2026). Onboarding
+    ya no envía el e-RUT: el RUT lo trae el scraper del SII, y una escritura de
+    constitución no lo trae porque el SII lo asigna después. Seguir esperándolo
+    dejaría INCOMPLETE a todas las corridas de Chile solo por eso. Si la
+    escritura trae el RUT, se informa igual. En el resto de los orígenes el
+    identificador tributario puede no existir.
     """
     empresa = cuerpo.get("company") or {}
     reps = cuerpo.get("legalRepresentatives") or []
@@ -1342,10 +1355,10 @@ def evaluar(cuerpo: dict, pais: Any) -> tuple[list[str], list[tuple[str, str]]]:
     # `(field, message, subject)`. Uno por persona, no uno con todos los
     # nombres: Onboarding le dice al usuario qué dato falta y de quién (AJ-07).
     esperados: list[tuple[str, str, str | None]] = []
-    if p in ("chile", "colombia"):
+    if p == "colombia":
         if not empresa.get("taxId"):
             esperados.append(("taxId", "El documento no trae el identificador tributario de la sociedad.", None))
-        elif p == "colombia" and not _nit_con_dv(empresa.get("taxId")):
+        elif not _nit_con_dv(empresa.get("taxId")):
             esperados.append(("taxId", "El NIT de la sociedad viene sin dígito verificador.", None))
     if not empresa.get("legalForm"):
         esperados.append(("legalForm", "No se pudo determinar la forma legal de la sociedad.", None))
