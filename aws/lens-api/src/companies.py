@@ -1261,7 +1261,7 @@ def _serializar(company_id: str, u: dict) -> tuple[dict, list[dict]]:
         "schemaVersion": SCHEMA_VERSION,
         "company": empresa,
         "legalRepresentatives": representantes,
-        "shareholders": accionistas_ep3(ficha, avisos),
+        "shareholders": accionistas_ep3(ficha, avisos, u.get("country") or ficha.get("detectedCountry") or ""),
         "fields": ficha.get("fields") or [],
         "documents": [{k: d.get(k) for k in CLAVES_DOCUMENTO}
                       for d in (ficha.get("documents") or [])],
@@ -1282,7 +1282,7 @@ def resultado_de(company_id: str, u: dict) -> dict:
 TIPO_COMPOSICION = "COMPANY_SHAREHOLDERS_DOCUMENT"
 
 
-def accionistas_ep3(ficha: dict, avisos: onboarding.Avisos) -> list[dict]:
+def accionistas_ep3(ficha: dict, avisos: onboarding.Avisos, pais: Any = "") -> list[dict]:
     """`shareholders[]` de EP-3 (contrato v3.2), con sus avisos. Puro.
 
     ── Quiénes entran ─────────────────────────────────────────────────────────
@@ -1309,6 +1309,9 @@ def accionistas_ep3(ficha: dict, avisos: onboarding.Avisos) -> list[dict]:
     documento falló. Es un aviso y no un FAILED a pedido de Onboarding: un
     FAILED pierde a los representantes y a la empresa, y ellos deciden de su
     lado qué bloquea.
+
+    `pais` es el declarado de la corrida: con él se confirma el país del
+    documento de identidad (`onboarding.pais_del_documento`).
     """
     documentos = ficha.get("documents") or []
     composicion = next((d for d in documentos
@@ -1320,7 +1323,7 @@ def accionistas_ep3(ficha: dict, avisos: onboarding.Avisos) -> list[dict]:
     candidatos = []
     for p in (ficha.get("directOwnership") or []) + (ficha.get("indirectShareholders") or []):
         propios = onboarding.Avisos()
-        candidatos.append((onboarding.accionista(p, propios), propios.items))
+        candidatos.append((onboarding.accionista(p, propios, pais), propios.items))
 
     def numero(a: dict) -> str:
         return re.sub(r"[^0-9A-Z]", "", str(a.get("identificationNumber") or "").upper())

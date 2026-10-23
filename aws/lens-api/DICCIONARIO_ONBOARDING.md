@@ -180,7 +180,7 @@ EP-6. Va siempre: `[]` si no hay nadie.
 | `identificationNumber` | string | Sí | **Tal como figura**, con puntos, guion y letras | `"99.000.001"` |
 | `ownershipPercentage` | number \| null | Sí | Declarado, de 0 a 100 y hasta 2 decimales; **no se estima ni se ajusta a 100** | `40` |
 | `nationalityCode` | string \| null | Sí | ISO-2, **solo si el documento declara la nacionalidad** | `"CO"` |
-| `documentCountryCode` | string \| null | Sí | ISO-2 del país que emite el documento, solo cuando el tipo lo dice sin ambigüedad (CC, CE, NIT → CO; RUT → CL; RFC, CURP, INE → MX; CUIT, CUIL → AR; CPF, CNPJ → BR). `null` en DNI y pasaporte | `"CO"` |
+| `documentCountryCode` | string \| null | Sí | ISO-2 del país que emite el documento. El tipo propone un país (CC, CE, NIT → CO; RUT → CL; RFC, CURP, INE → MX; CUIT, CUIL → AR; CPF, CNPJ → BR) y se envía solo si coincide con el de la corrida o con el de la persona; si no, `null`. `null` siempre en DNI y pasaporte | `"CO"` |
 
 > **Quién entra.** Solo quien tiene nombre, `identificationType` e
 > `identificationNumber`. Al que le falta alguno se lo omite con

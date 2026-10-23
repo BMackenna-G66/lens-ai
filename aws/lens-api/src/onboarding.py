@@ -1224,9 +1224,9 @@ def representante(p: dict, avisos: Avisos | None = None) -> dict | None:
 # `fullName` e `identificationNumber` tal como figuran, y `PASS`, no
 # «Pasaporte». EP-6 sigue igual.
 
-#: El país que emite cada tipo de documento, solo donde el tipo lo dice sin
-#: ambigüedad. DNI y PASS no están: un DNI puede ser de Perú, de Argentina o de
-#: España, y un pasaporte, de cualquier país.
+#: El país que CANDIDATEA cada tipo de documento. DNI y PASS no están: un DNI
+#: puede ser de Perú, de Argentina o de España, y un pasaporte, de cualquier
+#: país. Los demás tampoco bastan solos —ver `pais_del_documento`—.
 PAIS_DEL_DOCUMENTO: dict[str, str] = {
     "CC": "CO", "CE": "CO", "NIT": "CO",
     "RUT": "CL",
@@ -1259,7 +1259,24 @@ def porcentaje_accionista(valor: Any, avisos: Avisos | None = None,
     return int(n) if n.is_integer() else n
 
 
-def accionista(p: dict, avisos: Avisos | None = None) -> dict:
+def pais_del_documento(tipo_id: str | None, *paises: Any) -> str | None:
+    """El ISO-2 del país que emitió el documento, o `None`.
+
+    El tipo solo CANDIDATEA un país, y se usa nada más si coincide con alguno de
+    `paises` —el de la corrida o el `countryOfOrigin` de la persona—. Ninguno de
+    estos tipos es exclusivo de un país de la región: hay RUT en Uruguay, NIT en
+    Bolivia y Guatemala, CC en Ecuador y carné de extranjería (CE) en Perú. En
+    una declaración de beneficiarios finales un país equivocado es peor que
+    vacío, y el pedido dice «null si no se puede determinar».
+
+    La cédula de un accionista de una empresa colombiana sigue saliendo `CO`,
+    que es el caso de Onboarding; un RUT en una corrida de Uruguay, `None`.
+    """
+    candidato = PAIS_DEL_DOCUMENTO.get(tipo_id or "")
+    return candidato if candidato and candidato in {codigo_pais(x) for x in paises} else None
+
+
+def accionista(p: dict, avisos: Avisos | None = None, pais_corrida: Any = "") -> dict:
     """Un accionista de `shareholders[]` con sus nueve campos.
 
     Con las reglas de `representante()` —nombre e identificador tal como
@@ -1268,6 +1285,8 @@ def accionista(p: dict, avisos: Avisos | None = None) -> dict:
     `identificationType` suma los documentos de persona jurídica.
 
     Acá no se decide si entra al nodo: eso lo hace `falta_para_incluir`.
+    `pais_corrida` es el país declarado de la corrida: lo usa
+    `documentCountryCode`.
 
     `nationalityCode` es el `countryOfOrigin` SOLO si el modelo marcó
     `nationalityDeclared`: que el documento escribe la nacionalidad. Solo,
@@ -1301,7 +1320,7 @@ def accionista(p: dict, avisos: Avisos | None = None) -> dict:
             id_tal_cual(p.get("shareholderId") or p.get("identificationNumber")), "identificationNumber"),
         "ownershipPercentage": porcentaje_accionista(p.get("ownershipPercentage"), avisos, quien),
         "nationalityCode": codigo_pais(nacionalidad),
-        "documentCountryCode": PAIS_DEL_DOCUMENTO.get(tipo_id or ""),
+        "documentCountryCode": pais_del_documento(tipo_id, pais_corrida, pais_crudo),
     }
 
 

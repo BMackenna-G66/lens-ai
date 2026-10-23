@@ -94,11 +94,11 @@ def ficha(personas=None, documentos=None, reps=None) -> dict:
     }
 
 
-def servir(f: dict, warnings=()) -> dict:
+def servir(f: dict, warnings=(), pais="CO") -> dict:
     """EP-3 sobre una corrida guardada con esa ficha."""
     return co.resultado_de("990000003", {
         "companyId": "990000003", "analysisId": "a1", "status": "INCOMPLETE",
-        "country": "CO", "warnings": list(warnings), "result": f,
+        "country": pais, "warnings": list(warnings), "result": f,
     })
 
 
@@ -152,11 +152,29 @@ def test_el_tipo_de_persona_que_no_se_sabe_va_en_null_y_no_se_omite():
         "shareholder.personType"]
 
 
-@pytest.mark.parametrize("tipo,pais", [("Pasaporte", None), ("DNI", None), ("CC", "CO"),
-                                       ("NIT", "CO"), ("RUT", "CL"), ("RFC", "MX"), ("CURP", "MX")])
-def test_el_pais_del_documento_solo_sale_del_tipo_si_es_inequivoco(tipo, pais):
-    f = ficha({"directOwnership": [natural("LUIS", "PRUEBA DOC", "AB-123456", tipo=tipo, pais="")]})
-    assert servir(f)["shareholders"][0]["documentCountryCode"] == pais
+@pytest.mark.parametrize("tipo,corrida,persona,esperado", [
+    # El caso de Onboarding: la cédula de un accionista de una empresa colombiana.
+    ("CC", "CO", "", "CO"),
+    ("NIT", "CO", "", "CO"),
+    ("CE", "CO", "Venezuela", "CO"),
+    ("RUT", "CL", "", "CL"),
+    ("RFC", "MX", "", "MX"),
+    # El país de la persona también confirma: un chileno en una empresa colombiana.
+    ("RUT", "CO", "Chile", "CL"),
+    # Ninguno de estos tipos es exclusivo de un país: sin confirmación, null.
+    ("RUT", "UY", "", None),          # el RUT de Uruguay
+    ("CC", "EC", "", None),           # la cédula de Ecuador
+    ("CE", "PE", "", None),           # el carné de extranjería de Perú
+    ("NIT", "BO", "", None),          # el NIT de Bolivia
+    ("RUT", "CO", "", None),
+    # Sin candidato: el pasaporte y el DNI pueden ser de cualquier país.
+    ("Pasaporte", "CO", "Colombia", None),
+    ("DNI", "PE", "Perú", None),
+])
+def test_el_pais_del_documento_solo_sale_si_el_de_la_corrida_o_el_de_la_persona_lo_confirman(
+        tipo, corrida, persona, esperado):
+    f = ficha({"directOwnership": [natural("LUIS", "PRUEBA DOC", "AB-123456", tipo=tipo, pais=persona)]})
+    assert servir(f, pais=corrida)["shareholders"][0]["documentCountryCode"] == esperado
 
 
 def test_el_numero_va_tal_como_figura():
