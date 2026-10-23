@@ -53,6 +53,7 @@ test/decision.mjs
 test/pjud.bundle.mjs
 test/flujoAutonomo.bundle.mjs
 test/flujoAutonomoMain.bundle.mjs
+test/flujoConfigPayloads.bundle.mjs
 test/rw/
 test/regcheqPeru.bundle.mjs
 test/pc/

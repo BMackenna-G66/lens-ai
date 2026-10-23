@@ -90,7 +90,16 @@ const hacerDb = (prefijo) => ({
     return {
       set: (r, d, o) => ops.push(() => escribir(r.path, d, o)),
       update: (r, d) => ops.push(() => { if (!store.has(r.path)) throw noExiste(); escribir(r.path, d, { merge: true }); }),
-      commit: async () => { for (const op of ops) op(); },
+      create: (r, d) => ops.push(() => {
+        if (store.has(r.path)) throw Object.assign(new Error('6 ALREADY_EXISTS: Document already exists'), { code: 6 });
+        escribir(r.path, d);
+      }),
+      // Atómico como en Firestore: si una operación falla, no se aplica ninguna.
+      commit: async () => {
+        for (const op of ops) if (op.chequeo) op.chequeo();
+        const copia = new Map(store);
+        try { for (const op of ops) op(); } catch (e) { store.clear(); for (const [k, v] of copia) store.set(k, v); throw e; }
+      },
     };
   },
   async runTransaction(fn) {

@@ -9,7 +9,7 @@
 // Las conclusiones de revisión (Revisión manual/prioritaria/…) NO se automatizan:
 // quedan para el analista.
 
-import { doc, onSnapshot, setDoc, Firestore } from 'firebase/firestore';
+import { doc, getDoc, onSnapshot, setDoc, Firestore } from 'firebase/firestore';
 import { getDb } from './firebaseService';
 import type { Actor } from './caseWorkflowService';
 
@@ -37,6 +37,7 @@ export { FLUJO_CONFIG_DEFAULT, normalizarFlujoConfig } from './flujoDecision';
 export type { FlujoConfig, ConfigNormalizada } from './flujoDecision';
 
 import { FLUJO_CONFIG_DEFAULT, normalizarFlujoConfig } from './flujoDecision';
+import { payloadFlujoConfig, payloadSwitchPjud, type ActorConfig } from './flujoConfigPayloads';
 import type { FlujoConfig } from './flujoDecision';
 
 export const flujoConfigDisponible = (): boolean => !!getDb();
@@ -66,12 +67,33 @@ export function subscribeFlujoConfig(
 export async function guardarFlujoConfig(cfg: FlujoConfig, actor?: Actor): Promise<void> {
   const db = getDb() as Firestore | null;
   if (!db) throw new Error('Firestore no está configurado en esta instancia.');
-  await setDoc(doc(db, FLUJO_COLLECTION, FLUJO_DOC), {
-    ofac: cfg.ofac,
-    remesa: cfg.remesa,
-    actualizadoEn: new Date().toISOString(),
-    actualizadoPor: actor?.nombre ?? 'system',
-  }, { merge: true });
+  // Solo `ofac` y `remesa`: el switch de PJUD vive en el mismo documento y lo
+  // escribe Administración (ver flujoConfigPayloads).
+  await setDoc(doc(db, FLUJO_COLLECTION, FLUJO_DOC), payloadFlujoConfig(cfg, actor), { merge: true });
 }
 
+// ── Switch del scraper de PJUD (Administración, solo Líderes) ───────────────
+// `config/flujoAutomatico.pjud.enabled`. Lo lee el Lambda lens-flujo-autonomo
+// al empezar cada corrida, así que el cambio entra en la siguiente (a lo sumo
+// en 5 minutos). Ausente = apagado.
+export interface EstadoSwitchPjud { enabled: boolean; actualizadoPor: string | null; actualizadoEn: string | null }
 
+export async function leerSwitchPjud(): Promise<EstadoSwitchPjud> {
+  const db = getDb() as Firestore | null;
+  if (!db) throw new Error('Firestore no está configurado en esta instancia.');
+  const snap = await getDoc(doc(db, FLUJO_COLLECTION, FLUJO_DOC));
+  const p = (snap.data()?.pjud ?? {}) as { enabled?: unknown; actualizadoPor?: unknown; actualizadoEn?: unknown };
+  return {
+    enabled: p.enabled === true,
+    actualizadoPor: typeof p.actualizadoPor === 'string' ? p.actualizadoPor : null,
+    actualizadoEn: typeof p.actualizadoEn === 'string' ? p.actualizadoEn : null,
+  };
+}
+
+export async function guardarSwitchPjud(enabled: boolean, actor?: ActorConfig): Promise<void> {
+  const db = getDb() as Firestore | null;
+  if (!db) throw new Error('Firestore no está configurado en esta instancia.');
+  // merge: solo `pjud.enabled`, `pjud.actualizadoPor` y `pjud.actualizadoEn`.
+  // `ofac`, `remesa` y `pjud.database` no se tocan.
+  await setDoc(doc(db, FLUJO_COLLECTION, FLUJO_DOC), payloadSwitchPjud(enabled, actor), { merge: true });
+}

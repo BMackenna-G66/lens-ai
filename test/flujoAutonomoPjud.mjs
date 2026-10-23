@@ -210,4 +210,38 @@ await prueba('cada caso se cierra o se retiene igual, la corrida no falla y el e
   assert.equal(r6.pjud.encolados, 0);
 });
 
+console.log('Volumen (sin inanición):');
+function sembrarMuchos(n) {
+  store.clear();
+  for (let i = 0; i < n; i++) {
+    const id = String(91000000 + i);
+    store.set(`${C}/${id}`, ofac(id, 'Chile', screening('Revisar', [causa('Tráfico ilícito de estupefacientes', `${1500000000 + i}-${i % 10}`)])));
+  }
+  store.set('config/flujoAutomatico', {
+    ofac: { enabled: true, paises: { CL: true }, cerrarSF: true, cerrarAdmin: true,
+            tipoLiberarNormal: 'liberar_normal', tipoLiberarUcr: 'liberar_ucr', tipoBloquear: 'fully_blocked' },
+    remesa: { enabled: false, paises: {}, cerrarSF: false, cerrarAdmin: false, tipoLiberar: 'liberar' },
+    pjud: { enabled: true },
+  });
+}
+const cuantos = pref => [...store.keys()].filter(k => k.startsWith(`@pjud/scraper_jobs/${pref}`)).length;
+await prueba('60 retenidos con RUC: 50 en la primera corrida y los 10 restantes en la segunda', async () => {
+  sembrarMuchos(60);
+  const a = await handler(MANUAL, {});
+  assert.equal(a.pjud.encolados, 50);
+  assert.ok(a.pjud.salteado.some(x => /10 para la próxima corrida/.test(x)), JSON.stringify(a.pjud.salteado));
+  const b = await handler(MANUAL, {});
+  assert.equal(b.pjud.encolados, 10);
+  assert.equal(b.pjud.yaEstaban, 50);
+  assert.equal(cuantos('auto-'), 60);
+});
+await prueba('60 resueltos: todos barridos en una corrida (tope 500), una sola vez', async () => {
+  for (let i = 0; i < 60; i++) store.get(`${C}/${91000000 + i}`).statusCaso = 'CERRADO';
+  const c = await handler(MANUAL, {});
+  assert.equal(c.pjud.borrados, 60);
+  assert.equal(cuantos('borrar-'), 60);
+  const d = await handler(MANUAL, {});
+  assert.equal(d.pjud.borrados, 0);
+});
+
 console.log(`\n${ok} pruebas OK`);

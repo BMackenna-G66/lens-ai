@@ -1360,7 +1360,12 @@ function resultadoDeExcepcion(c: CasoSF, e: unknown): ResultadoCaso {
 // escrituras fallan y se cuentan como errores: falla cerrado, nunca escribe
 // datos penales en la base de Lens por descuido.
 const MARGEN_PJUD_MS = 60_000;       // lo que tiene que quedar del presupuesto para intentarlo
-const MAX_PJUD_POR_CORRIDA = 50;     // encolados y barridos, cada uno
+const MAX_ENCOLAR_POR_CORRIDA = 50;  // casos NUEVOS por corrida; los que ya estaban no cuentan
+// Casos abiertos en el scraper que se revisan por corrida. Alto a propósito: con
+// un tope chico y sin orden, la consulta devolvería siempre los mismos y el
+// resto no se revisaría nunca —sus PDFs no se borrarían, que es la condición 3
+// de legal—. Si se llega al tope, el resumen lo avisa.
+const MAX_BARRER_POR_CORRIDA = 500;
 
 interface ResumenPjud {
   encolados: number; yaEstaban: number; sinRuc: number; borrados: number; errores: number; salteado: string[];
@@ -1387,37 +1392,54 @@ function dbPjud(nombre: string): Firestore {
  * cola, UNA sola vez: el job automático tiene id fijo (`auto-{caseId}`) y se
  * crea solo si no existe. Volver a correr lo decide un analista desde el
  * scraper.
+ *
+ * Primero se averigua, con UNA lectura múltiple, cuáles ya están, y el tope
+ * cuenta solo los nuevos. Si contara también los que ya estaban, con más de 50
+ * retenidos abiertos los mismos 50 llenarían el cupo en cada corrida y el resto
+ * no se encolaría nunca.
  */
 async function encolarPjud(base: string, r: ResumenPjud, restante: () => number): Promise<void> {
   const fs = dbPjud(base);
-  let n = 0;
+  const candidatos: Array<{ caseId: string; caso: NonNullable<ReturnType<typeof armarCasoScraper>> }> = [];
   for (const [caseId, x] of retenidosPjud) {
-    if (n >= MAX_PJUD_POR_CORRIDA || restante() <= MARGEN_PJUD_MS / 2) { r.salteado.push('encolar: tope'); break; }
     const sc = (x.screening ?? {}) as { coincidencias?: unknown[] };
     const caso = armarCasoScraper(caseId, x.caso.datos as Record<string, unknown> | undefined,
       (sc.coincidencias ?? []) as never, x.motivo, x.categorias);
-    if (!caso) { r.sinRuc++; continue; }
-    n++;
+    if (caso) candidatos.push({ caseId, caso }); else r.sinRuc++;
+  }
+  if (!candidatos.length) return;
+
+  const jobs = candidatos.map(c => fs.collection('scraper_jobs').doc(`auto-${c.caseId}`));
+  const existentes = await fs.getAll(...jobs);
+  const nuevos = candidatos.map((c, i) => ({ ...c, job: jobs[i] })).filter((_, i) => !existentes[i].exists);
+  r.yaEstaban += candidatos.length - nuevos.length;
+
+  for (let i = 0; i < nuevos.length; i++) {
+    if (i >= MAX_ENCOLAR_POR_CORRIDA || restante() <= MARGEN_PJUD_MS / 2) {
+      r.salteado.push(`encolar: ${nuevos.length - i} para la próxima corrida`);
+      break;
+    }
+    const { caseId, caso, job } = nuevos[i];
     try {
-      const jobRef = fs.collection('scraper_jobs').doc(`auto-${caseId}`);
-      const creado = await fs.runTransaction(async t => {
-        if ((await t.get(jobRef)).exists) return false;   // ya se encoló en una pasada anterior
-        t.set(fs.collection('scraper_casos').doc(caseId), {
-          ...caso,
-          creado: FieldValue.serverTimestamp(),
-          en_proceso: { tipo: 'caso_completo', estado: 'en_cola', job_id: `auto-${caseId}` },
-          // Explícito: el barrido de §4.4 busca `resuelto_en == null`, y Firestore
-          // no encuentra un campo que no existe.
-          resuelto_en: null,
-        }, { merge: true });
-        t.create(jobRef, {
-          tipo: 'caso_completo', case_id: caseId, origen: 'flujo_automatico',
-          prioridad: 5, estado: 'pendiente', creado: FieldValue.serverTimestamp(), intentos: 0,
-        });
-        return true;
+      // El caso y su job juntos. `create` hace fallar el batch entero si el job
+      // ya existe, así que el caso tampoco se reescribe.
+      const b = fs.batch();
+      b.set(fs.collection('scraper_casos').doc(caseId), {
+        ...caso,
+        creado: FieldValue.serverTimestamp(),
+        en_proceso: { tipo: 'caso_completo', estado: 'en_cola', job_id: `auto-${caseId}` },
+        // Explícito: el barrido de §4.4 busca `resuelto_en == null`, y Firestore
+        // no encuentra un campo que no existe.
+        resuelto_en: null,
+      }, { merge: true });
+      b.create(job, {
+        tipo: 'caso_completo', case_id: caseId, origen: 'flujo_automatico',
+        prioridad: 5, estado: 'pendiente', creado: FieldValue.serverTimestamp(), intentos: 0,
       });
-      if (creado) r.encolados++; else r.yaEstaban++;
+      await b.commit();
+      r.encolados++;
     } catch (e) {
+      if ((e as { code?: number }).code === 6) { r.yaEstaban++; continue; }   // ALREADY_EXISTS
       r.errores++;
       // Sin RUT, RUC ni nombre: solo el caso (identificador interno) y el error.
       console.log('PJUD_ENCOLAR ' + JSON.stringify({ caseId, error: (e as Error).message?.slice(0, 200) }));
@@ -1434,8 +1456,11 @@ async function encolarPjud(base: string, r: ResumenPjud, restante: () => number)
 async function barrerResueltosPjud(base: string, r: ResumenPjud, restante: () => number): Promise<void> {
   const fs = dbPjud(base);
   const abiertos = await fs.collection('scraper_casos').where('resuelto_en', '==', null)
-    .limit(MAX_PJUD_POR_CORRIDA).get();
+    .limit(MAX_BARRER_POR_CORRIDA).get();
   if (abiertos.empty) return;
+  if (abiertos.size >= MAX_BARRER_POR_CORRIDA) {
+    r.salteado.push(`barrer: ${MAX_BARRER_POR_CORRIDA} casos abiertos en el scraper, el tope; puede haber más sin revisar`);
+  }
   const enLens = await db().getAll(...abiertos.docs.map(d => db().collection(COLECCION).doc(d.id)));
   for (let i = 0; i < abiertos.docs.length; i++) {
     if (restante() <= MARGEN_PJUD_MS / 2) { r.salteado.push('barrer: tope'); break; }

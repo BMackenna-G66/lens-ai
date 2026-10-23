@@ -13,12 +13,13 @@ import {
 } from '../services/firestoreService';
 import { useAuth } from '../context/AuthContext';
 import { isFirebaseConfigured } from '../services/firebaseService';
+import { leerSwitchPjud, guardarSwitchPjud, type EstadoSwitchPjud } from '../services/flujoAutomaticoService';
 
 interface AdminModuleProps {
   onBack: () => void;
 }
 
-type AdminTab = 'users' | 'invitations' | 'system';
+type AdminTab = 'users' | 'invitations' | 'flujos' | 'system';
 
 // MANTENEDOR de los módulos que se pueden habilitar por usuario.
 // Para sumar un módulo nuevo: agregarlo acá y a ModulePermissions
@@ -346,6 +347,104 @@ const InvitationsTab: React.FC<{ currentUid: string; currentEmail: string }> = (
 };
 
 // ─── System Info Tab ──────────────────────────────────────────────────────────
+// ─── Flujos automáticos ──────────────────────────────────────────────────────
+// Switch global del scraper de PJUD: si el flujo automático encola los casos
+// retenidos de Chile con causas con RUC para que el scraper baje y analice la
+// documentación de PJUD. Escribe SOLO `config/flujoAutomatico.pjud.enabled`
+// (más quién y cuándo); el panel del flujo automático de la Bandeja no lo toca.
+const FlujosTab: React.FC<{ email: string; nombre: string }> = ({ email, nombre }) => {
+  const [estado, setEstado] = useState<EstadoSwitchPjud | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [confirmando, setConfirmando] = useState(false);
+  const [guardando, setGuardando] = useState(false);
+  const [aviso, setAviso] = useState<string | null>(null);
+
+  const cargar = useCallback(() => {
+    leerSwitchPjud().then(e => { setEstado(e); setError(null); })
+      .catch(e => setError(e instanceof Error ? e.message : String(e)));
+  }, []);
+  useEffect(() => { cargar(); }, [cargar]);
+
+  const cambiar = async () => {
+    if (!estado) return;
+    setGuardando(true);
+    setAviso(null);
+    try {
+      await guardarSwitchPjud(!estado.enabled, { email, nombre });
+      setAviso(!estado.enabled
+        ? 'Prendido. Entra en la corrida siguiente del flujo automático, a lo sumo en 5 minutos.'
+        : 'Apagado. Desde la corrida siguiente, a lo sumo en 5 minutos, no se encolan casos nuevos ni se piden borrados.');
+      setConfirmando(false);
+      cargar();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setGuardando(false);
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="bg-slate-800/60 rounded-xl border border-slate-700 p-5">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="min-w-0 max-w-xl">
+            <h3 className="text-sm font-semibold text-slate-200">Scraper de PJUD</h3>
+            <p className="text-xs text-slate-400 mt-1">
+              Cuando está prendido, el flujo automático manda al scraper los casos OFAC de Chile que deja para revisión y que
+              tienen causas con RUC. El scraper baja la documentación de PJUD y la analiza; el resultado aparece en la ficha,
+              en «Análisis de causa (IA)». Cuando un caso se cierra, se piden borrar sus documentos.
+            </p>
+          </div>
+          <div className="flex flex-col items-end gap-2">
+            {estado === null && !error && <span className="text-xs text-slate-500">Cargando…</span>}
+            {estado && (
+              <span className={`text-xs font-bold px-2.5 py-1 rounded-full border ${estado.enabled
+                ? 'text-emerald-300 border-emerald-700 bg-emerald-950/40' : 'text-slate-300 border-slate-600 bg-slate-900/40'}`}>
+                {estado.enabled ? 'Prendido' : 'Apagado'}
+              </span>
+            )}
+            {estado && !confirmando && (
+              <button
+                onClick={() => setConfirmando(true)}
+                className="text-xs font-semibold rounded-lg border border-slate-600 px-3 py-1.5 text-slate-200 hover:border-amber-500"
+              >
+                {estado.enabled ? 'Apagar' : 'Prender'}
+              </button>
+            )}
+          </div>
+        </div>
+        {estado?.actualizadoEn && (
+          <p className="text-[11px] text-slate-500 mt-3">
+            Último cambio: {new Date(estado.actualizadoEn).toLocaleString('es-CL')}{estado.actualizadoPor ? ` · ${estado.actualizadoPor}` : ''}
+          </p>
+        )}
+        {estado && confirmando && (
+          <div className="mt-4 rounded-lg border border-amber-700/60 bg-amber-950/30 p-3">
+            <p className="text-xs text-amber-200">
+              {estado.enabled
+                ? '¿Apagar el scraper de PJUD? Los casos ya encolados siguen su curso; no se encolan nuevos.'
+                : '¿Prender el scraper de PJUD? Los casos retenidos que hoy están abiertos se encolan en la primera corrida.'}
+              {' '}El cambio entra en la corrida siguiente del flujo automático, a lo sumo en 5 minutos.
+            </p>
+            <div className="flex gap-2 mt-2">
+              <button
+                onClick={cambiar}
+                disabled={guardando}
+                className="text-xs font-bold rounded-lg bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white px-3 py-1.5"
+              >
+                {guardando ? 'Guardando…' : estado.enabled ? 'Sí, apagar' : 'Sí, prender'}
+              </button>
+              <button onClick={() => setConfirmando(false)} className="text-xs text-slate-400 hover:text-slate-200 px-2">Cancelar</button>
+            </div>
+          </div>
+        )}
+        {aviso && <p className="text-xs text-emerald-300 mt-3">{aviso}</p>}
+        {error && <p className="text-xs text-red-400 mt-3">No se pudo leer o guardar el switch: {error}</p>}
+      </div>
+    </div>
+  );
+};
+
 const SystemTab: React.FC = () => {
   const [userCount, setUserCount] = useState<number | null>(null);
   const [eventCount, setEventCount] = useState<number | null>(null);
@@ -424,6 +523,7 @@ export const AdminModule: React.FC<AdminModuleProps> = ({ onBack }) => {
   const tabs: { key: AdminTab; label: string; icon: string }[] = [
     { key: 'users', label: 'Usuarios', icon: '👥' },
     { key: 'invitations', label: 'Invitaciones', icon: '✉️' },
+    { key: 'flujos', label: 'Flujos automáticos', icon: '🔁' },
     { key: 'system', label: 'Info del Sistema', icon: '⚙️' },
   ];
 
@@ -477,6 +577,7 @@ export const AdminModule: React.FC<AdminModuleProps> = ({ onBack }) => {
           {activeTab === 'invitations' && user && (
             <InvitationsTab currentUid={user.uid} currentEmail={user.email ?? ''} />
           )}
+          {activeTab === 'flujos' && user && <FlujosTab email={user.email ?? ''} nombre={user.displayName ?? ''} />}
           {activeTab === 'system' && <SystemTab />}
         </div>
       </div>
