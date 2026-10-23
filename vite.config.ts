@@ -13,6 +13,8 @@ export default defineConfig(({ mode }) => {
         'process.env.FIREBASE_PROJECT_ID': JSON.stringify(env.FIREBASE_PROJECT_ID || ''),
         'process.env.FIREBASE_APP_ID': JSON.stringify(env.FIREBASE_APP_ID || ''),
         'process.env.EMPRESADOCS_PROXY_URL': JSON.stringify(env.EMPRESADOCS_PROXY_URL || ''),
+        // Pantalla del scraper de PJUD (botón «Analizar caso»). Vacía = sin botón.
+        'process.env.PJUD_SCRAPER_URL': JSON.stringify(env.PJUD_SCRAPER_URL || ''),
       },
       resolve: {
         alias: {

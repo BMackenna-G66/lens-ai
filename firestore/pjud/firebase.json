@@ -1,0 +1,9 @@
+{
+  "firestore": [
+    {
+      "database": "pjud",
+      "rules": "pjud.rules",
+      "indexes": "pjud.indexes.json"
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "lens-pjud-lector"
+resolve_s3 = true
+s3_prefix = "lens-pjud-lector"
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = false
+profile = "compliance-admin"
+# Los dos secretos NO se guardan acá: se pasan en el deploy con
+#   --parameter-overrides "FirebaseSaB64=… LectorSecret=…"

@@ -43,6 +43,9 @@ jobs:
           FIREBASE_APP_ID: ${{ secrets.FIREBASE_APP_ID }}
           VITE_REGCHEQ_API_KEY: ${{ secrets.REGCHEQ_API_KEY }}
           EMPRESADOCS_PROXY_URL: ${{ secrets.EMPRESADOCS_PROXY_URL }}
+          # Pantalla del scraper de PJUD. Mientras no exista la variable, el
+          # botón «Analizar caso» no aparece.
+          PJUD_SCRAPER_URL: ${{ vars.PJUD_SCRAPER_URL }}
         run: npm run build
 
       - name: Setup Pages

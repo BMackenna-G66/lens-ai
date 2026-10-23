@@ -5,6 +5,20 @@
 //   · count() / where('in') / orderBy(documentId) / limit.
 export const store = (globalThis.__FAKE_FS ??= new Map());   // ruta → datos (compartido con el test)
 export const FieldPath = { documentId: () => '__id__' };
+export const FieldValue = { serverTimestamp: () => ({ __st: true }) };
+// Bases con nombre: sus documentos van en el mismo mapa con el prefijo `@nombre/`.
+// `globalThis.__FAKE_FS_FALLA` = nombre de una base cuyas operaciones fallan.
+const fallaSi = path => {
+  const b = globalThis.__FAKE_FS_FALLA;
+  if (b && path.startsWith(`@${b}/`)) throw Object.assign(new Error('14 UNAVAILABLE: base no disponible (simulado)'), { code: 14 });
+};
+const resolver = v => {
+  if (v && typeof v === 'object' && !Array.isArray(v)) {
+    if (v.__st === true) return new Date().toISOString();
+    return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, resolver(x)]));
+  }
+  return Array.isArray(v) ? v.map(resolver) : v;
+};
 
 const clonar = v => (v === undefined ? undefined : JSON.parse(JSON.stringify(v)));
 const esMapa = v => v && typeof v === 'object' && !Array.isArray(v);
@@ -25,14 +39,16 @@ class DocRef {
   constructor(path) { this.path = path; }
   get id() { return this.path.split('/').pop(); }
   collection(n) { return new Query(`${this.path}/${n}`); }
-  async get() { return new Snap(this, clonar(store.get(this.path))); }
+  async get() { fallaSi(this.path); return new Snap(this, clonar(store.get(this.path))); }
   async set(d, o) { escribir(this.path, d, o); }
   async update(d) { if (!store.has(this.path)) throw noExiste(); escribir(this.path, d, { merge: true }); }
   async delete() { store.delete(this.path); }
 }
 
 function escribir(path, d, o) {
-  store.set(path, o?.merge ? fusionar(store.get(path), clonar(d)) : clonar(d));
+  fallaSi(path);
+  const v = resolver(clonar(d));
+  store.set(path, o?.merge ? fusionar(store.get(path), v) : v);
 }
 
 class Query {
@@ -62,13 +78,13 @@ class Query {
     const recortar = d => (this.campos ? Object.fromEntries(this.campos.filter(c => d && c in d).map(c => [c, d[c]])) : d);
     return ids.map(id => new Snap(this.doc(id), clonar(recortar(store.get(pref + id)))));
   }
-  async get() { const docs = this._docs(); return { docs, size: docs.length, empty: docs.length === 0 }; }
+  async get() { fallaSi(this.path); const docs = this._docs(); return { docs, size: docs.length, empty: docs.length === 0 }; }
   count() { return { get: async () => ({ data: () => ({ count: this._docs().length }) }) }; }
   async add(d) { const ref = this.doc(`auto${Math.random().toString(36).slice(2, 10)}`); escribir(ref.path, d); return ref; }
 }
 
-const db = {
-  collection: n => new Query(n),
+const hacerDb = (prefijo) => ({
+  collection: n => new Query(prefijo + n),
   batch() {
     const ops = [];
     return {
@@ -83,12 +99,21 @@ const db = {
       get: r => r.get(),
       set: (r, d, o) => ops.push(() => escribir(r.path, d, o)),
       update: (r, d) => ops.push(() => { if (!store.has(r.path)) throw noExiste(); escribir(r.path, d, { merge: true }); }),
+      create: (r, d) => ops.push(() => {
+        if (store.has(r.path)) throw Object.assign(new Error('6 ALREADY_EXISTS: Document already exists'), { code: 6 });
+        escribir(r.path, d);
+      }),
     };
     const out = await fn(tx);
     for (const op of ops) op();
     return out;
   },
   getAll: (...refs) => Promise.all(refs.map(r => r.get())),
-};
+});
 
-export const getFirestore = () => db;
+const bases = new Map();
+export const getFirestore = (_app, nombre) => {
+  const prefijo = nombre && nombre !== '(default)' ? `@${nombre}/` : '';
+  if (!bases.has(prefijo)) bases.set(prefijo, hacerDb(prefijo));
+  return bases.get(prefijo);
+};

@@ -17,6 +17,8 @@
  *    este disparo; por eso se usa la interna con el token de sesión.
  */
 
+import { manejarPjud } from './pjud';
+
 // El contexto de ejecución de Cloudflare. Se declara acá y no se importa de
 // `@cloudflare/workers-types` porque el tsconfig de la app también compila este
 // archivo y ahí ese tipo no existe. Solo se usa `waitUntil`.
@@ -47,6 +49,12 @@ interface Env {
   // se niega a correr en vez de pegarle al ambiente equivocado.
   MODELO_ADMIN?: string;
   MS_CUSTOMER_BASE?: string;
+  // ── Scraper de PJUD (ver pjud.ts) ───────────────────────────────────────
+  // Function URL de lens-pjud-lector y el secreto que exige. El navegador
+  // nunca los ve.
+  PJUD_LECTOR_URL?: string;
+  PJUD_LECTOR_SECRET?: string;
+  FIREBASE_PROJECT_ID?: string;
 }
 
 const ALLOWED_ORIGINS = [
@@ -433,6 +441,13 @@ export default {
     if (request.method === 'OPTIONS') return new Response(null, { headers: cors });
 
     const url = new URL(request.url);
+
+    // ── /pjud/* · scraper de PJUD ───────────────────────────────────────────
+    // La ÚNICA ruta que verifica el ID token de Firebase del analista: devuelve
+    // análisis penales de clientes. Solo atiende rutas que empiezan con /pjud/;
+    // el resto sigue de largo sin cambios. Ver pjud.ts.
+    const pjud = await manejarPjud(request, url, env, cors, fetchTimeout);
+    if (pjud) return pjud;
 
     // ── Regcheq situación tributaria: POST /regcheq/sii  body {fichaId, rut} ─────
     if (url.pathname === '/regcheq/sii') {
