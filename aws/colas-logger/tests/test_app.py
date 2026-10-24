@@ -252,3 +252,30 @@ if __name__ == "__main__":
                 print(f"✗ {nombre}: {e}")
     print("ALL OK" if not fallos else f"{fallos} FALLO(S)")
     sys.exit(1 if fallos else 0)
+
+
+
+# ── lista_negra_dni: lo que manda el Worker (contrato) ──────────────────────
+
+def test_las_filas_del_worker_entran_enteras_en_lista_negra_dni():
+    """`fixtures/lista_negra_dni.json` lo escribe el test del Worker
+    (cloudflare/empresadocs-proxy/test/listaNegraDni.mjs). El logger IGNORA en
+    silencio una columna que no conoce: por eso acá se exige que no sobre
+    ninguna, o un dato se perdería sin que nadie lo note."""
+    eventos = json.loads((Path(__file__).parent / "fixtures" / "lista_negra_dni.json").read_text())
+    spec = app.TABLAS["lista_negra_dni"]
+    assert {e["datos"]["resultado"] for e in eventos} == {"AGREGADO", "ACTIVADO", "YA_ACTIVO", "ERROR"}
+    for e in eventos:
+        assert e["tabla"] == "lista_negra_dni"
+        sobran = set(e["datos"]) - set(spec["cols"])
+        assert not sobran, f"columnas que el logger ignoraría: {sobran}"
+        delete_sql, del_vals, insert_sql, vals = app._sentencias("lista_negra_dni", e["datos"])
+        assert delete_sql.endswith("lista_negra_dni WHERE cambio_id = %s") and del_vals == [e["datos"]["cambio_id"]]
+        assert "dni" in insert_sql and len(vals) == insert_sql.count("%s")
+
+
+def test_el_ddl_de_lista_negra_dni_tiene_las_columnas_del_logger():
+    ddl = (Path(__file__).resolve().parents[3] / "redshift" / "colas_trabajo" / "006_lista_negra_dni.sql").read_text()
+    cuerpo = ddl.split("CREATE TABLE IF NOT EXISTS colas_trabajo.lista_negra_dni (")[1].split("PRIMARY KEY")[0]
+    cols = [ln.strip().split()[0] for ln in cuerpo.splitlines() if ln.strip() and not ln.strip().startswith("--")]
+    assert cols == list(app.TABLAS["lista_negra_dni"]["cols"]) + ["cargado_en"]

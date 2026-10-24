@@ -17,8 +17,13 @@ import {
   planificar, resultadoSinOperacion, type FilaLog, type Lista, type Modo, type PasoPlan, type RegistroAdmin,
 } from '../services/listasNegras';
 import {
-  completarIds, escribir, leerLista, leerPaises, mensajeDeError, registrarSinOperacion, type RespuestaWorker,
+  cargarBloqueado, completarIds, escribir, leerLista, leerPaises, mensajeDeError, registrarSinOperacion, type RespuestaWorker,
 } from '../services/listasNegrasApi';
+import { contarDecisiones, decidirDni, metadataAuditoria, type DecisionDni, type EntradaListaNegraDni,
+         type ResultadoPaso6 } from '../services/listaNegraDni';
+import { leerBloqueadosHistoricos } from '../services/bloqueadosHistoricos';
+import { registrarAuditoria } from '../services/caseAuditService';
+import { useAuth } from '../context/AuthContext';
 
 const PAUSA_MS = 250;   // como SLEEP_BETWEEN_REQUESTS de los scripts
 
@@ -28,7 +33,7 @@ const NOMBRE_LISTA: Record<Lista, string> = {
 
 type Ejecutado = { ok: boolean; status?: number; error?: string; respuesta?: unknown; cambioId?: string; registro?: string };
 
-interface Props { dark: boolean }
+interface Props { dark: boolean; esLider?: boolean }
 
 class LimiteListasNegras extends React.Component<{ children: React.ReactNode }, { error: string | null }> {
   state = { error: null as string | null };
@@ -46,7 +51,12 @@ class LimiteListasNegras extends React.Component<{ children: React.ReactNode }, 
 }
 
 export const ListasNegrasAdmin: React.FC<Props> = props => (
-  <LimiteListasNegras><Panel {...props} /></LimiteListasNegras>
+  <LimiteListasNegras>
+    <div className="space-y-8">
+      <Panel {...props} />
+      {props.esLider && <BloqueadosHistoricos dark={props.dark} />}
+    </div>
+  </LimiteListasNegras>
 );
 
 const dormir = (ms: number) => new Promise(r => setTimeout(r, ms));
@@ -388,6 +398,173 @@ const Panel: React.FC<Props> = ({ dark }) => {
           </div>
           {filtrados.length > 300 && <p className={`text-xs ${muted}`}>Se muestran 300 de {filtrados.length}: afiná la búsqueda.</p>}
         </div>
+      )}
+    </div>
+  );
+};
+
+// ── «Bloqueados» históricos de la cola OFAC (solo Líder) ────────────────────
+// Todo cierre «Bloqueado» de la cola OFAC entra a la lista negra de DNI
+// (decisión de Benjamín, 23-10-2026). Los nuevos entran solos, en el paso 6
+// del cierre; esto carga los del pasado y sirve de reconciliación: es
+// idempotente y levanta los que fallaron en el paso 6. Misma regla de oro:
+// primero la vista previa, y nada se escribe sin confirmar.
+
+const ACCION_TXT: Record<DecisionDni['accion'], string> = {
+  agregar: 'agregar', reactivar: 'reactivar', ya_activo: 'ya activo', error: 'error',
+};
+
+const BloqueadosHistoricos: React.FC<{ dark: boolean }> = ({ dark }) => {
+  const { userProfile } = useAuth();
+  const [filas, setFilas] = useState<EntradaListaNegraDni[] | null>(null);
+  const [decisiones, setDecisiones] = useState<DecisionDni[]>([]);
+  const [cargando, setCargando] = useState(false);
+  const [error, setError] = useState('');
+  const [aviso, setAviso] = useState('');
+  const [confirmando, setConfirmando] = useState(false);
+  const [enCurso, setEnCurso] = useState(false);
+  const [hechos, setHechos] = useState(0);
+  const [resultados, setResultados] = useState<Record<string, ResultadoPaso6 & { http: number }>>({});
+  const cortar = useRef(false);
+
+  const card = dark ? 'bg-slate-800/60 border-slate-700/50' : 'bg-white border-violet-200';
+  const muted = dark ? 'text-slate-400' : 'text-slate-500';
+  const btn = 'font-bold px-4 py-2 rounded-xl text-sm transition-all disabled:opacity-40 disabled:cursor-not-allowed';
+
+  async function preparar() {
+    setError(''); setAviso(''); setResultados({}); setConfirmando(false); setCargando(true);
+    try {
+      const f = await leerBloqueadosHistoricos();
+      const r = await leerLista('DNI');
+      if (r.http !== 200) { setError(`No se pudo leer la lista de DNI: ${mensajeDeError(r)}`); return; }
+      const recs = extractList(r.datos);
+      const p = await leerPaises();
+      const paises = p.http === 200 ? loadCountries(p.datos) : {};
+      setDecisiones(f.map(x => {
+        const d = decidirDni(x.dni, x.countryCode, recs);
+        return d.accion === 'agregar' && !paises[x.countryCode]
+          ? { accion: 'error', motivo: `No se encontró el countryName de ${x.countryCode} en Admin.` } : d;
+      }));
+      setFilas(f);
+    } catch (e) {
+      setError(`No se pudieron leer los casos: ${e instanceof Error ? e.message : String(e)}`);
+    } finally { setCargando(false); }
+  }
+
+  async function ejecutar() {
+    if (!filas) return;
+    setConfirmando(false); setError(''); setAviso(''); setEnCurso(true); setHechos(0); setResultados({});
+    cortar.current = false;
+    const ejecucionId = crypto.randomUUID();
+    const res: Record<string, ResultadoPaso6 & { http: number }> = {};
+    try {
+      for (const [i, f] of filas.entries()) {
+        if (cortar.current) { setAviso('Corrida cortada: los casos que faltaban no se enviaron. Se puede volver a correr.'); break; }
+        // El Worker vuelve a decidir contra la lista vigente: si algo cambió
+        // desde la vista previa, gana lo vigente, y nunca se duplica.
+        const r = await cargarBloqueado({ ejecucionId, ...f });
+        const paso = r as unknown as ResultadoPaso6;
+        res[f.casoId] = { ...paso, http: r.http };
+        setResultados({ ...res });
+        setHechos(i + 1);
+        const meta = metadataAuditoria(paso, f);
+        if (meta) {
+          registrarAuditoria(f.casoId, { tipo: 'LISTA_NEGRA_DNI', actorId: userProfile?.uid ?? 'system', actorTipo: 'USER',
+            correlationId: f.casoId, versionCaso: 1, metadata: meta }).catch(() => {});
+        }
+        if (r.http === 401 || r.http === 403 || r.registro === 'no_disponible') {
+          setError(`Se detuvo: ${mensajeDeError(r)} Los casos siguientes no se enviaron.`);
+          break;
+        }
+        await dormir(PAUSA_MS);
+      }
+    } finally { setEnCurso(false); }
+  }
+
+  const c = contarDecisiones(decisiones);
+  const enviados = Object.values(resultados);
+  const cuenta = (x: string) => enviados.filter(r => r.resultado === x).length;
+
+  return (
+    <div className={`border rounded-2xl p-5 space-y-4 ${card}`}>
+      <div>
+        <h3 className={`text-lg font-black ${dark ? 'text-white' : 'text-slate-800'}`}>Cargar «Bloqueados» históricos de la cola OFAC</h3>
+        <p className={`text-sm mt-1 ${muted}`}>
+          Los cierres «Bloqueado» de la cola OFAC de toda la historia, uno por cliente, a la lista negra de DNI con la razón
+          «Matriz de delitos y matriz de riesgo flujo cola de trabajo». Sirve también para reconciliar: lo que ya está activo
+          no se toca y lo inactivo se reactiva.
+        </p>
+      </div>
+      <button onClick={preparar} disabled={cargando || enCurso} className={`${btn} bg-indigo-600 hover:bg-indigo-500 text-white`}>
+        {cargando ? 'Leyendo casos…' : filas ? 'Volver a preparar' : 'Preparar vista previa'}
+      </button>
+      {error && <div className="bg-red-950/40 border border-red-800/50 rounded-xl px-4 py-3 text-sm text-red-300">{error}</div>}
+      {aviso && <div className="bg-amber-950/40 border border-amber-800/50 rounded-xl px-4 py-3 text-sm text-amber-300">{aviso}</div>}
+
+      {filas && (
+        <>
+          <div className="flex items-center gap-2 flex-wrap text-xs">
+            <span className="font-bold">{c.total} clientes:</span>
+            <span className="text-emerald-400">{c.agregar} a agregar</span>·
+            <span className="text-sky-400">{c.reactivar} a reactivar</span>·
+            <span className={muted}>{c.ya_activo} ya activos</span>·
+            <span className="text-red-400">{c.error} sin DNI, sin país o con error</span>
+          </div>
+          {!enCurso && !confirmando && !enviados.length && (
+            <button onClick={() => setConfirmando(true)} disabled={!c.total} className={`${btn} bg-red-600 hover:bg-red-500 text-white`}>
+              Cargar {c.agregar + c.reactivar} a la lista negra
+            </button>
+          )}
+          {confirmando && (
+            <div className="border border-red-700/60 bg-red-950/30 rounded-xl p-4 space-y-3 text-sm">
+              <p className="text-red-200">
+                Vas a agregar <strong>{c.agregar}</strong> y reactivar <strong>{c.reactivar}</strong> DNI en la lista negra de
+                DNI de <strong>producción</strong> (Admin G66). Los {c.ya_activo} ya activos y los {c.error} con error se registran
+                sin tocar Admin. Todo queda registrado con tu usuario y el flujo «histórico».
+              </p>
+              <div className="flex gap-2">
+                <button onClick={ejecutar} className={`${btn} bg-red-600 hover:bg-red-500 text-white`}>Sí, cargar</button>
+                <button onClick={() => setConfirmando(false)} className={`${btn} border ${dark ? 'border-slate-600 text-slate-300' : 'border-slate-300 text-slate-600'}`}>Cancelar</button>
+              </div>
+            </div>
+          )}
+          {enCurso && (
+            <div className="flex items-center gap-3 text-xs">
+              <span>{hechos} de {filas.length}</span>
+              <button onClick={() => { cortar.current = true; }} className={`${btn} border border-red-700 text-red-400`}>Cortar</button>
+            </div>
+          )}
+          {!!enviados.length && !enCurso && (
+            <p className="text-xs">
+              Resultado: {cuenta('AGREGADO')} agregados · {cuenta('ACTIVADO')} reactivados · {cuenta('YA_ACTIVO')} ya activos ·{' '}
+              {cuenta('ERROR')} con error
+            </p>
+          )}
+          <div className="overflow-x-auto max-h-96">
+            <table className="w-full text-xs">
+              <thead><tr className={muted}>{['Caso', 'Cliente', 'DNI', 'País', 'Vista previa', 'Resultado'].map(h =>
+                <th key={h} className="text-left px-2 py-2 text-[10px] uppercase tracking-widest">{h}</th>)}</tr></thead>
+              <tbody>
+                {filas.slice(0, 500).map((f, i) => {
+                  const d = decisiones[i];
+                  const r = resultados[f.casoId];
+                  return (
+                    <tr key={f.casoId} className={`border-t ${dark ? 'border-slate-800' : 'border-violet-100'}`}>
+                      <td className="px-2 py-1.5 font-mono">{f.numeroCaso}</td>
+                      <td className="px-2 py-1.5 font-mono">{f.idInternoUsuario || '—'}</td>
+                      <td className="px-2 py-1.5 font-mono">{f.dni || '—'}</td>
+                      <td className="px-2 py-1.5">{f.countryCode || '—'}</td>
+                      <td className={`px-2 py-1.5 ${d?.accion === 'error' ? 'text-red-400' : ''}`}
+                        title={d?.accion === 'error' ? d.motivo : ''}>{d ? ACCION_TXT[d.accion] : ''}</td>
+                      <td className="px-2 py-1.5" title={r?.detalle ?? ''}>{r ? (r.resultado ?? `HTTP ${r.http}`) : ''}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          {filas.length > 500 && <p className={`text-xs ${muted}`}>Se muestran 500 de {filas.length}; se procesan todos.</p>}
+        </>
       )}
     </div>
   );

@@ -129,9 +129,11 @@ def _parse_ts(s: str) -> datetime:
 
 
 def _actor(e: dict) -> dict:
+    """El actor que puso el Worker: un analista (@global66.com, del ID token
+    verificado) o un proceso (`sistema:…`, acreditado con su secreto)."""
     a = e.get("actor") or {}
     email = _texto(a.get("email"), 256)
-    if not email or not email.endswith("@global66.com"):
+    if not email or not (email.endswith("@global66.com") or re.match(r"^sistema:[a-z0-9-]{1,64}$", email)):
         raise ErrorEntrada("falta el actor (lo pone el Worker)")
     return {"actor_email": email, "actor_nombre": _texto(a.get("nombre"), 256),
             "actor_uid": _texto(a.get("uid"), 128)}
@@ -174,9 +176,12 @@ def evento_intento(e: dict) -> dict:
         nuevo = reg.get("enable") if isinstance(reg.get("enable"), bool) else True
     else:
         nuevo = _bool(reg.get("enable") if lista == "CUENTA" else reg.get("status"))
+    origen = e.get("origen") or {}
     return {
         **c,
         "cambio_id": cambio, "operacion": operacion,
+        # El caso de la cola que lo originó, si vino de una (OFAC Bloqueado).
+        "numero_caso": _texto(origen.get("numeroCaso"), 20), "caso_id": _texto(origen.get("casoId"), 64),
         "registro_id": registro_id(lista, valor, cc), "clave": valor[:512],
         "country_code": cc or None, "country_name": _texto(reg.get("countryName"), 128),
         "account_type": _texto(reg.get("accountType"), 32),
@@ -219,7 +224,9 @@ def eventos_sin_operacion(e: dict) -> list[dict]:
     filas = e.get("filas")
     if not isinstance(filas, list) or not 0 < len(filas) <= 500:
         raise ErrorEntrada("filas: entre 1 y 500")
-    operacion = "CREAR" if c["flujo"].endswith(".carga") else "EDITAR"
+    operacion = str(e.get("operacion") or "").upper()
+    if operacion not in OPERACIONES:
+        operacion = "CREAR" if c["flujo"].endswith(".carga") else "EDITAR"
     ahora = _ahora()
     salida = []
     for f in filas:
@@ -241,6 +248,7 @@ def eventos_sin_operacion(e: dict) -> list[dict]:
             "admin_id": _texto(f.get("adminId"), 64), "estado_anterior": _bool(f.get("estadoAnterior")),
             "estado_nuevo": _bool(f.get("estadoNuevo")), "reason_nueva": _texto(f.get("reason"), 1024),
             "error": _texto(f.get("error"), 2048), "ocurrido_en": ahora, "resultado_en": ahora,
+            "numero_caso": _texto(f.get("numeroCaso"), 20), "caso_id": _texto(f.get("casoId"), 64),
             "estado": "CERRADO", "pendiente": "S", "version": 1,
         })
     return salida
@@ -356,6 +364,8 @@ COLUMNAS_CAMBIO = (
     ("reason_nueva", ""), ("http_status", "int"), ("error", ""), ("body_enviado", "json"),
     ("respuesta", "json"), ("flujo", ""), ("servicio", ""), ("actor_email", ""), ("actor_nombre", ""),
     ("actor_uid", ""), ("ocurrido_en", "ts"), ("cargado_en", "ts"),
+    # 002: el caso de la cola que originó el cambio (OFAC Bloqueado).
+    ("numero_caso", ""), ("caso_id", ""),
 )
 
 

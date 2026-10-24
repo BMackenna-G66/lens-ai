@@ -468,8 +468,50 @@ def test_el_ddl_tiene_las_columnas_que_escribe_el_lambda():
         cuerpo = ddl.split(f"CREATE TABLE IF NOT EXISTS listas_negras.{tabla} (")[1].split("PRIMARY KEY")[0]
         return [ln.strip().split()[0] for ln in cuerpo.splitlines() if ln.strip() and not ln.strip().startswith("--")]
 
-    assert columnas("cambio") == [c for c, _ in app.COLUMNAS_CAMBIO]
+    agregadas = re.findall(r"ALTER TABLE listas_negras\.cambio ADD COLUMN (\w+)",
+                           (Path(__file__).resolve().parents[3] / "redshift" / "listas_negras" / "002_origen_caso.sql").read_text())
+    assert columnas("cambio") + agregadas == [c for c, _ in app.COLUMNAS_CAMBIO]
     assert columnas("registro") == list(COLUMNAS_REGISTRO)
     insert = app.sentencias_registro(["x"])[1]
     cols = re.search(r"INSERT INTO listas_negras\.registro \(([^)]*)\)", insert).group(1)
     assert [c.strip() for c in cols.split(",")] == list(COLUMNAS_REGISTRO)
+
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# OFAC Bloqueado → lista negra de DNI (el actor de sistema y el caso de origen)
+# ════════════════════════════════════════════════════════════════════════════
+
+SISTEMA = {"email": "sistema:lens-flujo-autonomo", "nombre": "Flujo automático OFAC", "uid": "lens-flujo-autonomo"}
+
+
+def test_el_actor_de_sistema_se_acepta_y_uno_inventado_no():
+    t = TablaFalsa()
+    assert intento(t, "c-1", actor=SISTEMA, flujo="colas_trabajo.ofac.bloqueado.automatico")[0] == 200
+    assert t.items["c-1"]["actor_email"] == "sistema:lens-flujo-autonomo"
+    for malo in ({"email": "sistema:"}, {"email": "Sistema:X"}, {"email": "sistema:a b"}):
+        assert intento(t, "c-2", actor=malo)[0] == 400
+
+
+def test_el_caso_de_origen_queda_en_el_intento_y_en_redshift():
+    t, r = TablaFalsa(), RedshiftFalso()
+    http(t, {"accion": "intento", "cambioId": "c-1", "ejecucionId": "ej-1", "lista": "DNI", "operacion": "CREAR",
+             "flujo": "colas_trabajo.ofac.bloqueado.manual", "servicio": "/admin/customer-status", "actor": ACTOR,
+             "registro": {"dni": "11.111.111-1", "countryCode": "CL", "countryName": "Chile", "reason": "Matriz"},
+             "meta": {"valor": "11.111.111-1"}, "origen": {"numeroCaso": "09000001", "casoId": "09000001"}})
+    resultado(t, "c-1")
+    assert (t.items["c-1"]["numero_caso"], t.items["c-1"]["caso_id"]) == ("09000001", "09000001")
+    app.espejar(t, r, AHORA)
+    c = r.foto()[0][0]
+    assert (c["numero_caso"], c["caso_id"], c["flujo"]) == ("09000001", "09000001", "colas_trabajo.ofac.bloqueado.manual")
+    assert r.foto()[1][0]["flujo_alta"] == "colas_trabajo.ofac.bloqueado.manual"
+
+
+def test_una_fila_sin_operacion_lleva_su_operacion_y_su_caso():
+    t = TablaFalsa()
+    http(t, {"accion": "sin_operacion", "ejecucionId": "ej-1", "lista": "DNI", "actor": SISTEMA, "operacion": "CREAR",
+             "flujo": "colas_trabajo.ofac.bloqueado.automatico",
+             "filas": [{"cambioId": "c-9", "valor": "12.345.678-5", "countryCode": "CL",
+                        "resultado": "OMITIDO_YA_EXISTE_ACTIVO", "numeroCaso": "09000002", "casoId": "09000002"}]})
+    it = t.items["c-9"]
+    assert (it["operacion"], it["numero_caso"], it["caso_id"]) == ("CREAR", "09000002", "09000002")

@@ -2,3 +2,4 @@ node_modules/
 test/worker.mjs
 test/tipos.mjs
 test/worker_ln.mjs
+test/worker_main.mjs

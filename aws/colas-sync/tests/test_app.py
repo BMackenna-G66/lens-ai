@@ -347,3 +347,53 @@ def test_estado_se_guarda_aunque_falle(monkeypatch):
 if __name__ == "__main__":   # permite correrlo sin pytest instalado
     import pytest
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+# ── lista_negra_dni: se recupera del evento LISTA_NEGRA_DNI ──────────────────
+META_LN = {"cambioId": "cambio-1", "casoId": "09000001", "idInternoUsuario": "4000001", "countryCode": "CL",
+           "tipologia": "fully_blocked", "resultado": "AGREGADO", "flujo": "colas_trabajo.ofac.bloqueado.manual",
+           "actorEmail": "analista@global66.com", "actorNombre": "Analista Prueba", "actorUid": "uid-1",
+           "ocurridoEn": "2026-10-23T18:00:00.000Z"}
+
+
+def _evento_ln(numero, eid, ts, meta=None, automatico=False):
+    ev = _evento(numero, eid, "LISTA_NEGRA_DNI", ts, meta if meta is not None else META_LN)
+    ev["fields"]["metadata"]["mapValue"]["fields"]["automatico"] = {"booleanValue": automatico}
+    return ev
+
+
+def _caso_con_dni(numero, dni):
+    return _doc_caso(numero, datos={"mapValue": {"fields": {"Número de DNI": _s(dni)}}})
+
+
+def test_la_fila_de_lista_negra_sale_del_evento_y_el_dni_del_caso():
+    f = app._fila_lista_negra(_evento_ln("09000001", "ev-1", "2026-10-23T18:00:01Z"), _caso_con_dni("09000001", "11.111.111-1"))
+    assert f == {"cambio_id": "cambio-1", "numero_caso": "09000001", "caso_id": "09000001", "id_interno_usuario": "4000001",
+                 "dni": "111111111", "country_code": "CL", "tipologia": "fully_blocked", "resultado": "AGREGADO",
+                 "detalle": None, "flujo": "colas_trabajo.ofac.bloqueado.manual", "automatico": False,
+                 "actor_email": "analista@global66.com", "actor_nombre": "Analista Prueba", "actor_uid": "uid-1",
+                 "ocurrido_en": app._ts("2026-10-23T18:00:00.000Z")}
+    # Las mismas columnas que escribe el Worker: el DELETE+INSERT no borra nada desconocido.
+    assert set(f) == set(app.TABLAS["lista_negra_dni"][1])
+
+
+def test_sin_caso_o_sin_cambio_no_se_pisa_la_fila_del_worker():
+    ev = _evento_ln("09000001", "ev-1", "2026-10-23T18:00:01Z")
+    assert app._fila_lista_negra(ev, None) is None
+    sin_cambio = _evento_ln("09000001", "ev-2", "2026-10-23T18:00:01Z", {k: v for k, v in META_LN.items() if k != "cambioId"})
+    assert app._fila_lista_negra(sin_cambio, _caso_con_dni("09000001", "1")) is None
+    assert app._fila_lista_negra(_evento("09000001", "ev-3", "NOTA", "2026-10-23T18:00:01Z"), _caso_con_dni("09000001", "1")) is None
+
+
+def test_la_corrida_escribe_lista_negra_dni_con_delete_mas_insert(monkeypatch):
+    caso = _caso_con_dni("09000001", "11.111.111-1")
+    guardados, rs = _preparar(monkeypatch, estado={"marcaCasos": _hace(days=1), "marcaEventos": _hace(days=1)},
+                              casos=[(caso, _hace(days=9))], eventos=[_evento_ln("09000001", "ev-ln", _hace(hours=1))])
+    r = app.lambda_handler({}, Ctx(800))
+    assert r["ok"] and r["escritas"]["lista_negra_dni"] == 1 and r["escritas"]["evento_auditoria"] == 1
+    sql = "\n".join(rs.sql)
+    assert "DELETE FROM colas_trabajo.lista_negra_dni WHERE cambio_id IN ('cambio-1')" in sql
+    assert "INSERT INTO colas_trabajo.lista_negra_dni" in sql and "'111111111'" in sql
+    # El evento de auditoría no lleva el DNI.
+    ev_sql = next(x for x in rs.sql if x.startswith("INSERT INTO colas_trabajo.evento_auditoria"))
+    assert "111111111" not in ev_sql and "11.111.111" not in ev_sql
