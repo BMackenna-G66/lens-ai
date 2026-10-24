@@ -82,6 +82,13 @@ prueba('un «Liberar» no lleva nada nuevo: el pedido de siempre', () => {
   assert.equal(liberado.headers['x-lens-sistema'], undefined);
 });
 
+console.log('El cierre:');
+prueba('el cierre del «Bloqueado» queda registrado en el caso, antes y aparte del paso 6', () => {
+  const doc = store.get(`${C}/90000021`);
+  assert.equal(doc.cierres?.admin?.ok, true, JSON.stringify(doc.cierres));
+  assert.equal(doc.cierres.admin.tipologia, 'fully_blocked');
+});
+
 console.log('La auditoría del caso:');
 const auditoria = [...store.entries()].filter(([k]) => k.startsWith(`${C}/90000021/auditoria/`)).map(([, v]) => v);
 const ev = auditoria.find(e => e.tipo === 'LISTA_NEGRA_DNI');

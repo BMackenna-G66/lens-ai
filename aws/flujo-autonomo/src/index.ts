@@ -813,15 +813,20 @@ async function procesar(caso: CasoSF, cfg: FlujoOfacConfig): Promise<ResultadoCa
             riskEnabled: !!tipo.riskLevel, riskLevel: tipo.riskLevel || undefined,
           } as never, entradaLN ? { sistema: process.env.LISTA_NEGRA_SISTEMA_SECRET || process.env.TRIGGER_SECRET || null } : {});
           out.admin = r.ok ? 'ok' : 'error';
-          if (entradaLN) {
-            await auditarListaNegra(caso.id, (r.results[0]?.steps as Record<string, unknown> | undefined)?.listaNegraDni as ResultadoPaso6 | undefined, entradaLN);
-          }
           if (!r.ok) out.motivo = out.motivo ?? r.error ?? 'Admin rechazó el cierre';
           // El resumen del paso 2 va al caso: sin él no se veía desde Lens si
           // se había creado el bloqueo propio.
           await registrarCierre(caso, 'ofac', 'admin', !!r.ok, ev.tipologia,
             [resumenAdmin(r), r.ok ? null : out.motivo].filter(Boolean).join(' · ') || undefined,
             { statusEnviado: tipo.status, ofacFlag: ofacFlagDe(tipo), lastStep: tipo.lastStepDefault });
+          // Después del cierre y aparte: la auditoría del paso 6 nunca lo toca.
+          if (entradaLN) {
+            try {
+              await auditarListaNegra(caso.id, (r.results[0]?.steps as Record<string, unknown> | undefined)?.listaNegraDni as ResultadoPaso6 | undefined, entradaLN);
+            } catch (err) {
+              console.log('LISTA_NEGRA_DNI ' + JSON.stringify({ caseId: caso.id, error: (err as Error).message }));
+            }
+          }
         } catch (e) {
           if (e instanceof CasoBorrado) throw e;
           out.admin = 'error'; out.motivo = out.motivo ?? (e as Error).message;
